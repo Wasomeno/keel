@@ -39,9 +39,7 @@ above copyright notice and this permission notice appear in all copies.
 
 ## Browser pane (macOS)
 
-The browser pane embeds the system WKWebView through [Wry](https://github.com/tauri-apps/wry) 0.56 (Apache-2.0 OR MIT), with `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-web-kit` and `block2` (MIT). No browser engine is bundled.
-
-The native clip view under gpui's overlay plane, and syncing its frame in `Window::on_present`, follow the approach of Zeron's `crates/ui/src/browser/macos.rs` (MIT, https://github.com/zeronsh/zeron). Keel's code is its own; no file is copied.
+The browser pane embeds the Chromium Embedded Framework (CEF, BSD 3-Clause license) via the `cef` crate (`cef = "156.2.0"`), along with native helpers (`keel-helper`) and `objc2` bindings for view hosting and presentation.
 
 
 ## Cormorant Garamond (`crates/ui/assets/fonts/hero-title.ttf`)

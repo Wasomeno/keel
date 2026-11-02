@@ -41,9 +41,9 @@ Download the latest pre-built application for macOS:
 
 ## Overview
 
-**Keel** is a local-first control plane for coding-agent CLIs. It is not an LLM model wrapper or another chat client; it is an operating environment for developer agents.
+**Keel** is a local-first control plane and native workspace for coding agents. It is not an LLM wrapper or web-based chat client; it is an operating environment for developer agents running directly on your Mac.
 
-One local engine owns and supervises child agent processes, normalizes disparate CLI protocols into a single `AgentEvent` stream, and persists conversation histories to durable [Loro CRDT](https://loro.dev) documents backed by SQLite. A native macOS GPUI window acts as an ultra-fast, responsive viewport onto that engine.
+One local engine owns and supervises child agent processes (a bundled agent runtime powered by a pinned [Pi](https://pi.dev) release with extensions for web access, subagents, and model providers), normalizes agent outputs into a structured `AgentEvent` stream, and persists conversation histories to durable [Loro CRDT](https://loro.dev) documents backed by SQLite. A native macOS GPUI window acts as an ultra-fast, responsive viewport onto that engine.
 
 - **Local-Only & Private:** No cloud account or external servers required. All session histories, transcripts, and workspaces stay strictly on your local machine.
 - **Process Supervision:** Manages the full agent lifecycle, process groups, watchdog timers, and signal escalation (`SIGTERM` / `SIGKILL`).
@@ -54,11 +54,12 @@ One local engine owns and supervises child agent processes, normalizes disparate
 
 ## Key Features
 
-- **Multi-Harness Architecture:** Native protocol drivers translate agent streams into unified events with deterministic turn-end detection, tool call normalization, and real-time streaming.
-- **Virtualized High-Performance Transcript:** Smooth scrolling with bottom stickiness, partial re-parse streaming markdown via `pulldown-cmark`, and background syntax highlighting.
+- **Unified Agent Runtime:** Runs a bundled agent engine (powered by a pinned Pi core) with native multi-provider sign-ins (Claude Pro/Max, OpenAI ChatGPT/Codex, GitHub Copilot, xAI, Command Code), extension UI, and subagent delegation.
+- **Virtualized High-Performance Transcript:** Smooth scrolling with bottom stickiness, partial re-parse streaming markdown via `pulldown-cmark`, and background syntax highlighting with `syntect`.
 - **Structured Tool Call Rendering:** Full tool inputs and outputs are preserved in host-local run journals, while concise summaries are stored in the CRDT document to maintain lightweight document sizes.
 - **Interactive Question & Approval System:** First-class permission panels and interactive choices (`UserInputQuestion`) mapped directly from agent approval flows.
-- **Embedded Browser Viewport:** Integrated macOS WKWebView pane via Wry for real-time web previews, file previews, and agent-driven browser navigation.
+- **Chromium Embedded Browser (CEF):** Integrated Chromium Embedded Framework viewport with dedicated helper processes (`keel-helper`) for live web previews and agent-driven browser automation via MCP.
+- **Native Diagrams & Terminal:** In-process Mermaid diagram rendering via `merman` and `resvg` (pure Rust, no Node.js runtime needed) and integrated terminal panels via `alacritty_terminal`.
 - **Flexible Deployment:** Run as a native macOS GUI application, in headless mode via CLI (`keel headless`), or as a background service (`launchd`).
 
 ---
@@ -70,7 +71,7 @@ Keel is architected around a clean separation between the engine supervisor and 
 ```
 ┌────────────────────────────────────────────────────────┐
 │                      Native GPUI                       │
-│     (Sidebar • Transcript • Composer • Browser Pane)   │
+│  (Sidebar • Transcript • Composer • CEF Browser Pane)  │
 └───────────────────────────┬────────────────────────────┘
                             │
                WebSocket / In-Process RPC
@@ -88,7 +89,7 @@ Keel is architected around a clean separation between the engine supervisor and 
 └───────────────────────────┬────────────────────────────┘
                             │ Stdio RPC
 ┌───────────────────────────▼────────────────────────────┐
-│                    Agent CLI Process                   │
+│      Bundled Agent Process (Pi Core + Packages)        │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -103,15 +104,15 @@ The repository is organized as a Rust workspace with strict dependency direction
 
 | Crate | Path | Description |
 |---|---|---|
-| `keel` | `apps/keel` | Main entry point; headed GPUI application, headless daemon, and CLI commands |
+| `keel` | `apps/keel` | Main application; headed GPUI window, helper binaries, headless engine, and CLI |
 | `keel-proto` | `crates/proto` | Protocol types, wire envelopes, agent events, and serialized models |
 | `keel-doc` | `crates/doc` | Loro 1.13 CRDT document structures for transcripts, meta, and registry |
-| `crates/store` | `crates/store` | Local SQLite snapshot persistence and document storage |
-| `keel-harness` | `crates/harness` | Agent driver implementations, process lifecycle, and stream normalization |
+| `keel-store` | `crates/store` | Local SQLite snapshot persistence and document storage |
+| `keel-harness` | `crates/harness` | Agent harness, process lifecycle, and provider authentication |
 | `keel-engine` | `crates/engine` | Process supervisor, command drain, journal writer, and recovery handlers |
 | `keel-rpc` | `crates/rpc` | Authenticated IPC WebSocket server/client and length-prefixed duplex codec |
 | `keel-theme` | `crates/theme` | Semantic design tokens, light and dark themes, and appearance palettes |
-| `keel-ui` | `crates/ui` | GPUI elements: virtualized transcript, markdown renderer, tabs, composer, and browser pane |
+| `keel-ui` | `crates/ui` | GPUI elements: virtualized transcript, markdown renderer, tabs, composer, terminal, and CEF browser pane |
 
 ---
 
