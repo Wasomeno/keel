@@ -11,7 +11,6 @@ pub mod choices;
 pub mod compare;
 pub mod composer;
 pub mod diagram;
-#[cfg(debug_assertions)]
 pub mod dev_control;
 pub mod dotify;
 pub mod file_changes;

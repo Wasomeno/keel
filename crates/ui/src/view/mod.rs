@@ -1,7 +1,6 @@
 //! The Keel window: state and behavior here, rendering split by region.
 
 mod composer_view;
-#[cfg(debug_assertions)]
 mod dev;
 mod keyboard;
 mod main_pane;
