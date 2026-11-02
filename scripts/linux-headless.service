@@ -1,0 +1,16 @@
+[Unit]
+Description=Keel Engine (headless)
+Documentation=https://github.com/zeronsh/keel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/keel headless
+Restart=on-failure
+RestartSec=3
+Environment=KEEL_DATA_DIR=%h/.local/share/keel
+Environment=KEEL_SUPERVISED=systemd
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

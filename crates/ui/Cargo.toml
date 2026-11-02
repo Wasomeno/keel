@@ -1,0 +1,44 @@
+[package]
+name = "keel-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui_tokio.workspace = true
+gpui-base.workspace = true
+keel-proto.workspace = true
+keel-rpc.workspace = true
+keel-theme.workspace = true
+# Local UTC offset for Dotify times (tm_gmtoff).
+libc.workspace = true
+pulldown-cmark.workspace = true
+# `mermaid` fences: Mermaid's own layout as SVG, no JS runtime (Zed uses it too).
+merman = { version = "0.9", default-features = false, features = ["all-diagrams", "svg"] }
+# Rasterizes those SVGs at their drawn size (the version gpui already builds).
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
+serde.workspace = true
+serde_json.workspace = true
+# Terminal panel: grid + escape-sequence parsing (DESIGN L5).
+alacritty_terminal = "0.26"
+base64.workspace = true
+# Imported backgrounds and thumbnails (gpui already builds image with these).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico"] }
+# Code highlighting: parsing only (no themes); pure-Rust regex, no C.
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+tokio.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+uuid.workspace = true
+cef.workspace = true
+url.workspace = true
+rustls.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSKeyValueObserving", "NSString", "NSURL", "NSGeometry", "NSData", "NSDictionary", "NSError", "NSBundle", "NSURLRequest", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSEvent", "NSColor", "NSResponder", "NSWindow", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSApplication", "NSDockTile", "NSSound", "NSOpenPanel", "NSSavePanel", "NSPanel"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationSettings"] }
+block2 = "0.6"

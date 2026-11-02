@@ -1,0 +1,14 @@
+# `cargo run` signs Keel before launching it (see scripts/dev-sign.sh).
+[target.'cfg(target_os = "macos")']
+runner = "scripts/dev-sign.sh"
+
+[env]
+CXXFLAGS = "-I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
+CEF_PATH = { value = ".cef/cef_macos_aarch64", relative = true }
+
+# The two builds to use. Cargo picks features per command, so `test -p
+# keel-ui` alone, `check`, or `--workspace` each rebuild gpui and friends
+# under new hashes (gigabytes each). These share one set of artifacts.
+[alias]
+app = "run -p keel"
+t = "test -p keel -p keel-ui -p keel-engine"

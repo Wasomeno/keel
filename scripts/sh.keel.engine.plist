@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>sh.keel.engine</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{KEEL_BINARY}}</string>
+        <string>headless</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>KEEL_DATA_DIR</key>
+        <string>{{KEEL_DATA_DIR}}</string>
+        <key>PATH</key>
+        <string>{{PATH}}</string>
+        <key>KEEL_SUPERVISED</key>
+        <string>launchd</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{{LOG_PATH}}</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_PATH}}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Respawn only on a crash or non-zero exit. A clean stop (SIGTERM) and
+         "another engine already holds engine.lock" both exit 0 under
+         KEEL_SUPERVISED, so neither turns into a respawn loop. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

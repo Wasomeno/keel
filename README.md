@@ -1,0 +1,170 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/Keel-alt.png">
+    <img src="assets/Keel.png" alt="Keel Logo" width="160" height="160" />
+  </picture>
+</p>
+
+<h1 align="center">Keel</h1>
+
+<p align="center">
+  <strong>Local-first control plane and native workspace for coding-agent CLIs.</strong>
+</p>
+
+<p align="center">
+  <a href="#overview">Overview</a> •
+  <a href="#key-features">Key Features</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#workspace-crates">Workspace Crates</a> •
+  <a href="#getting-started">Getting Started</a> •
+  <a href="#development">Development</a> •
+  <a href="#license">License</a>
+</p>
+
+---
+
+## Overview
+
+**Keel** is a local-first control plane for coding-agent CLIs. It is not an LLM model wrapper or another chat client; it is an operating environment for developer agents.
+
+One local engine owns and supervises child agent processes, normalizes disparate CLI protocols into a single `AgentEvent` stream, and persists conversation histories to durable [Loro CRDT](https://loro.dev) documents backed by SQLite. A native macOS GPUI window acts as an ultra-fast, responsive viewport onto that engine.
+
+- **Local-Only & Private:** No cloud account or external servers required. All session histories, transcripts, and workspaces stay strictly on your local machine.
+- **Process Supervision:** Manages the full agent lifecycle, process groups, watchdog timers, and signal escalation (`SIGTERM` / `SIGKILL`).
+- **Durable Command Plane:** User inputs, steer commands, interruptions, and questions are appended to an append-only CRDT log, ensuring state resilience across restarts and crashes.
+- **Native Performance:** Built in Rust using GPUI with a virtualized transcript, streaming markdown, and minimal resource usage.
+
+---
+
+## Key Features
+
+- **Multi-Harness Architecture:** Native protocol drivers translate agent streams into unified events with deterministic turn-end detection, tool call normalization, and real-time streaming.
+- **Virtualized High-Performance Transcript:** Smooth scrolling with bottom stickiness, partial re-parse streaming markdown via `pulldown-cmark`, and background syntax highlighting.
+- **Structured Tool Call Rendering:** Full tool inputs and outputs are preserved in host-local run journals, while concise summaries are stored in the CRDT document to maintain lightweight document sizes.
+- **Interactive Question & Approval System:** First-class permission panels and interactive choices (`UserInputQuestion`) mapped directly from agent approval flows.
+- **Embedded Browser Viewport:** Integrated macOS WKWebView pane via Wry for real-time web previews, file previews, and agent-driven browser navigation.
+- **Flexible Deployment:** Run as a native macOS GUI application, in headless mode via CLI (`keel headless`), or as a background service (`launchd`).
+
+---
+
+## Architecture
+
+Keel is architected around a clean separation between the engine supervisor and viewports:
+
+```
+┌────────────────────────────────────────────────────────┐
+│                      Native GPUI                       │
+│     (Sidebar • Transcript • Composer • Browser Pane)   │
+└───────────────────────────┬────────────────────────────┘
+                            │
+               WebSocket / In-Process RPC
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│                      Keel Engine                       │
+│ ┌────────────────────────────────────────────────────┐ │
+│ │ Supervisor • Watchdog • Run Journal • Doc Host     │ │
+│ └─────────────────────────┬──────────────────────────┘ │
+│                           │                            │
+│ ┌─────────────────────────▼──────────────────────────┐ │
+│ │      Loro CRDT Documents (Session & Registry)      │ │
+│ │         SQLite Snapshots (Profiles / Local)        │ │
+│ └────────────────────────────────────────────────────┘ │
+└───────────────────────────┬────────────────────────────┘
+                            │ Stdio RPC
+┌───────────────────────────▼────────────────────────────┐
+│                    Agent CLI Process                   │
+└────────────────────────────────────────────────────────┘
+```
+
+- **Single-Instance Safety:** Uses file locking (`engine.lock`) before opening SQLite databases, guaranteeing safe concurrent processes.
+- **RPC Layer:** Viewports connect via local authenticated WebSocket (`ws://127.0.0.1:47821`) or an in-memory duplex channel.
+
+---
+
+## Workspace Crates
+
+The repository is organized as a Rust workspace with strict dependency directions:
+
+| Crate | Path | Description |
+|---|---|---|
+| `keel` | `apps/keel` | Main entry point; headed GPUI application, headless daemon, and CLI commands |
+| `keel-proto` | `crates/proto` | Protocol types, wire envelopes, agent events, and serialized models |
+| `keel-doc` | `crates/doc` | Loro 1.13 CRDT document structures for transcripts, meta, and registry |
+| `crates/store` | `crates/store` | Local SQLite snapshot persistence and document storage |
+| `keel-harness` | `crates/harness` | Agent driver implementations, process lifecycle, and stream normalization |
+| `keel-engine` | `crates/engine` | Process supervisor, command drain, journal writer, and recovery handlers |
+| `keel-rpc` | `crates/rpc` | Authenticated IPC WebSocket server/client and length-prefixed duplex codec |
+| `keel-theme` | `crates/theme` | Semantic design tokens, light and dark themes, and appearance palettes |
+| `keel-ui` | `crates/ui` | GPUI elements: virtualized transcript, markdown renderer, tabs, composer, and browser pane |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **macOS** (Apple Silicon or Intel)
+- **Rust Toolchain**: Rust 2024 edition (defined in `rust-toolchain.toml`)
+- **Xcode Command Line Tools**
+
+### Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/Wasomeno/keel.git
+cd keel
+
+# Build in debug mode
+cargo build -p keel
+
+# Run Keel
+cargo run -p keel
+```
+
+### Running as a macOS App Bundle
+
+To enable native macOS notification banners and URL scheme routing (`keel://`), bundle Keel into a release application:
+
+```bash
+# Build optimized release binary (~30 MB)
+cargo build --release -p keel
+
+# Bundle and ad-hoc sign into ~/Applications/Keel.app
+scripts/bundle-mac.sh
+
+# Run the app
+open ~/Applications/Keel.app
+```
+
+---
+
+## Development
+
+```bash
+# Run tests across core crates
+cargo test -p keel -p keel-ui -p keel-engine
+
+# Run headless engine
+cargo run -p keel -- headless
+
+# Inspect running engine status
+cargo run -p keel -- status
+```
+
+See [docs/dev-run.md](docs/dev-run.md) for day-to-day development workflows, LaunchAgent configurations, and debugging hooks.
+
+---
+
+## Documentation
+
+- [DESIGN.md](DESIGN.md) — Comprehensive design specification and architectural rationale.
+- [docs/dev-run.md](docs/dev-run.md) — Daily development runbook, LaunchAgent setup, and logging.
+- [docs/trace-codeblock-spec.md](docs/trace-codeblock-spec.md) — Codeblock rendering specification.
+- [THIRD_PARTY.md](THIRD_PARTY.md) — Third-party licenses and acknowledgments.
+- [assets/brand/USAGE.md](assets/brand/USAGE.md) — Brand guidelines and mark specifications.
+
+---
+
+## License
+
+This project is licensed under the Apache License 2.0. See [THIRD_PARTY.md](THIRD_PARTY.md) for third-party component licenses.

@@ -1,0 +1,361 @@
+//! Keel's own harness: a pinned Pi, bundled with the app, at Pi's defaults.
+//!
+//! [`crate::PiHarness::keel`] is the Pi driver with [`PiProfile::keel`]. It
+//! runs the Pi that ships beside the Keel binary (see `scripts/fetch-pi.sh`),
+//! never one the user installed, and points it at Keel's own Pi folder
+//! ([`set_pi_agent_dir`]): sign-in, settings and packages there are Keel's,
+//! apart from the user's `~/.pi`.
+//!
+//! Keel's additions go in [`KeelProfile`], the one place for them:
+//! - a system prompt: set `system_prompt` (passed as `--append-system-prompt`);
+//! - extensions and tools: drop `.ts`/`.js` Pi extension files into
+//!   `{data_dir}/harnesses/keel/extensions/`, or list built-in ones in
+//!   `extensions`. Each loads with `--extension`;
+//! - Pi packages: folders bundled in `pi-packages/` beside the Pi folder are
+//!   registered in Keel's Pi settings (Command Code's provider ships there).
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use keel_proto::HarnessId;
+
+/// Folder under Keel's data dir that belongs to the Keel harness.
+pub const KEEL_HARNESS_DIR: &str = "harnesses/keel";
+
+/// The Pi release Keel bundles. `scripts/fetch-pi.sh` downloads this one.
+pub const PI_VERSION: &str = "1.3.0";
+
+static PI_AGENT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keel's own Pi folder, `{data_dir}/harnesses/keel/agent`. Every Pi process
+/// Keel starts gets it as `PI_CODING_AGENT_DIR`. Set once, at engine start.
+pub fn set_pi_agent_dir(data_dir: &Path) {
+    let dir = KeelProfile::home(data_dir).join("agent");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = PI_AGENT_DIR.set(dir);
+}
+
+/// The folder [`set_pi_agent_dir`] set; `None` in tests that never set it.
+pub fn pi_agent_dir() -> Option<&'static Path> {
+    PI_AGENT_DIR.get().map(PathBuf::as_path)
+}
+
+/// Keel's sign-in, as a Pi extension: `/keel-login <provider>` runs Pi's own
+/// OAuth login (`ModelRuntime::login`) and reports each step as a
+/// `{"type":"keel_login",...}` line on stdout, which Pi's RPC mode moves to
+/// stderr (see `PiHarness::sign_in`). Questions are answered the
+/// way a headless app can: a method picker takes Pi's default (the browser
+/// login), a blank text answer means github.com, and a pasted code is never
+/// needed because the browser's callback finishes the login.
+const LOGIN_EXTENSION: &str = r#"// Written by Keel; rewritten on each sign-in.
+export default function (pi: any) {
+  pi.registerCommand("keel-login", {
+    description: "Sign in to a provider for Keel",
+    handler: async (args: string, ctx: any) => {
+      const say = (line: object) => process.stdout.write(JSON.stringify({ type: "keel_login", ...line }) + "\n");
+      const never = (signal?: AbortSignal) =>
+        new Promise<string>((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      const [provider, deviceId] = args.trim().split(/\s+/);
+      try {
+        await ctx.modelRegistry.runtime.login(provider, "oauth", {
+          notify: (event: object) => say({ event }),
+          prompt: async (request: any) => {
+            if (request.type === "select") return request.options[0].id;
+            if (request.type === "text") return "";
+            if (request.type !== "manual_code") say({ event: { type: "progress", message: request.message } });
+            return never(request.signal);
+          },
+        }, { getDeviceId: () => deviceId });
+        say({ done: true });
+      } catch (error: any) {
+        say({ error: String(error?.message ?? error) });
+      }
+    },
+  });
+}
+"#;
+
+/// This install's device id, which some sign-ins send (ChatGPT for the
+/// `openai` provider). Kept as `deviceId` in `{agent}/settings.json`, the
+/// field Pi's own `/login` uses, and created on first use.
+pub(crate) fn device_id(agent: &Path) -> String {
+    let path = agent.join("settings.json");
+    let mut settings: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(id) = settings["deviceId"].as_str().filter(|id| uuid::Uuid::parse_str(id).is_ok()) {
+        return id.to_string();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    settings["deviceId"] = serde_json::json!(id);
+    let _ = std::fs::create_dir_all(agent);
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default());
+    id
+}
+
+/// [`LOGIN_EXTENSION`] on disk beside Keel's Pi folder (the temp dir when
+/// none is set), rewritten only when it changed.
+pub(crate) fn login_extension() -> std::io::Result<PathBuf> {
+    let dir = pi_agent_dir().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+    let path = dir.join("keel-login.ts");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(LOGIN_EXTENSION) {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, LOGIN_EXTENSION)?;
+    }
+    Ok(path)
+}
+
+/// Register each folder in `pi-packages/` beside the bundled Pi (`exe` is
+/// `<root>/pi/pi`) in `{agent}/settings.json` `packages`, and drop entries
+/// for bundled folders that are gone (an older app location). Other
+/// entries and settings are left alone.
+pub(crate) fn register_bundled_packages(exe: &Path, agent: &Path) {
+    let Some(bundle) = exe.parent().and_then(Path::parent).map(|root| root.join("pi-packages")) else {
+        return;
+    };
+    let mut want: Vec<String> = std::fs::read_dir(&bundle)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    want.sort();
+    let path = agent.join("settings.json");
+    let mut settings: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let have: Vec<String> = settings["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let stale = |p: &String| p.contains("/pi-packages/") && !Path::new(p).is_dir();
+    let mut next: Vec<String> = have.iter().filter(|p| !stale(p)).cloned().collect();
+    for p in want {
+        if !next.contains(&p) {
+            next.push(p);
+        }
+    }
+    if next != have {
+        settings["packages"] = serde_json::json!(next);
+        let _ = std::fs::create_dir_all(agent);
+        let _ = std::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default());
+    }
+}
+
+/// What sets the Keel harness apart from a plain Pi run.
+#[derive(Debug, Clone)]
+pub struct PiProfile {
+    pub id: HarnessId,
+    pub display_name: &'static str,
+    pub description: &'static str,
+    /// Prefix of the per-chat files Keel generates for a run.
+    pub tag: &'static str,
+    /// Keel's own layer over Pi.
+    pub keel: Option<KeelProfile>,
+}
+
+impl PiProfile {
+    pub fn keel() -> Self {
+        Self {
+            id: HarnessId::Keel,
+            display_name: "Keel",
+            description: "Keel's own agent, built on a bundled Pi.",
+            tag: "keel",
+            keel: Some(KeelProfile::default()),
+        }
+    }
+}
+
+/// Default system prompt additions for Keel's agent.
+pub const KEEL_SYSTEM_PROMPT: &str = "You are a problem-solving companion. Be plain and concise: use clear, simple words, short direct sentences, active voice, and avoid unnecessary filler. When a skill matches the task or the user's language, read it before you reply.";
+
+/// Keel's system prompt, extensions and tools on top of Pi.
+#[derive(Debug, Clone)]
+pub struct KeelProfile {
+    /// Appended to Pi's system prompt. `None`: Pi's own prompt, unchanged.
+    pub system_prompt: Option<String>,
+    /// Extra Pi extensions (file paths or `builtin:<name>`), before the
+    /// ones found in the extensions folder.
+    pub extensions: Vec<String>,
+}
+
+impl Default for KeelProfile {
+    fn default() -> Self {
+        Self {
+            system_prompt: Some(KEEL_SYSTEM_PROMPT.to_string()),
+            extensions: Vec::new(),
+        }
+    }
+}
+
+impl KeelProfile {
+    /// `{data_dir}/harnesses/keel`.
+    pub fn home(data_dir: &Path) -> PathBuf {
+        data_dir.join(KEEL_HARNESS_DIR)
+    }
+
+    /// Pi session files for Keel chats, apart from Pi's own `~/.pi` sessions.
+    pub fn sessions_dir(data_dir: &Path) -> PathBuf {
+        Self::home(data_dir).join("sessions")
+    }
+
+    /// Pi extension files that every Keel run loads (empty for now).
+    pub fn extensions_dir(data_dir: &Path) -> PathBuf {
+        Self::home(data_dir).join("extensions")
+    }
+
+    /// Extra `pi` arguments for a run. `data_dir` is Keel's data folder
+    /// (the parent of `browser.sock`); without one the run uses Pi's
+    /// session folder and loads no folder extensions.
+    pub fn run_args(&self, data_dir: Option<&Path>) -> Vec<OsString> {
+        let mut args: Vec<OsString> = Vec::new();
+        if let Some(dir) = data_dir {
+            let sessions = Self::sessions_dir(dir);
+            let _ = std::fs::create_dir_all(&sessions);
+            let _ = std::fs::create_dir_all(Self::extensions_dir(dir));
+            args.push("--session-dir".into());
+            args.push(sessions.into());
+        }
+        if let Some(prompt) = self.system_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+            args.push("--append-system-prompt".into());
+            args.push(prompt.into());
+        }
+        let mut extensions: Vec<OsString> = self.extensions.iter().map(OsString::from).collect();
+        if let Some(dir) = data_dir {
+            extensions.extend(folder_extensions(&Self::extensions_dir(dir)).into_iter().map(OsString::from));
+        }
+        for ext in extensions {
+            args.push("--extension".into());
+            args.push(ext);
+        }
+        args
+    }
+}
+
+/// `.ts` and `.js` files directly in `dir`, by name.
+fn folder_extensions(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.is_file() && matches!(path.extension().and_then(|e| e.to_str()), Some("ts" | "js")))
+        .collect();
+    found.sort();
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("keel-profile-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn default_profile_moves_the_session_folder_and_sets_prompt() {
+        let data = tmp("default");
+        let args = KeelProfile::default().run_args(Some(&data));
+        let sessions = data.join("harnesses/keel/sessions");
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--session-dir"),
+                sessions.clone().into(),
+                OsString::from("--append-system-prompt"),
+                OsString::from(KEEL_SYSTEM_PROMPT),
+            ]
+        );
+        assert!(sessions.is_dir() && data.join("harnesses/keel/extensions").is_dir());
+        assert_eq!(
+            KeelProfile::default().run_args(None),
+            vec![
+                OsString::from("--append-system-prompt"),
+                OsString::from(KEEL_SYSTEM_PROMPT),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn default_prompt_does_not_force_a_language() {
+        assert!(!KEEL_SYSTEM_PROMPT.contains("English"), "{KEEL_SYSTEM_PROMPT}");
+        assert!(KEEL_SYSTEM_PROMPT.contains("concise"), "{KEEL_SYSTEM_PROMPT}");
+    }
+
+    #[test]
+    fn device_id_is_created_once_and_kept() {
+        let agent = tmp("device");
+        std::fs::write(agent.join("settings.json"), r#"{"packages":["a"]}"#).unwrap();
+        let first = device_id(&agent);
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+        assert_eq!(device_id(&agent), first);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
+        assert_eq!((v["deviceId"].as_str(), &v["packages"]), (Some(first.as_str()), &serde_json::json!(["a"])));
+        let _ = std::fs::remove_dir_all(&agent);
+    }
+
+    #[test]
+    fn fetch_script_pins_the_same_pi() {
+        let script = include_str!("../../../scripts/fetch-pi.sh");
+        assert!(script.contains(&format!("PI_VERSION={PI_VERSION}\n")), "scripts/fetch-pi.sh and PI_VERSION disagree");
+    }
+
+    #[test]
+    fn bundled_packages_are_registered_once_and_stale_ones_dropped() {
+        let root = tmp("packages");
+        let exe = root.join("pi/pi");
+        let pkg = root.join("pi-packages/pi-commandcode-provider");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let agent = root.join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        let gone = "/old/Keel.app/Contents/Resources/pi-packages/x";
+        std::fs::write(agent.join("settings.json"), format!(r#"{{"theme":"dark","packages":["npm:a","{gone}"]}}"#)).unwrap();
+        register_bundled_packages(&exe, &agent);
+        register_bundled_packages(&exe, &agent);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["packages"], serde_json::json!(["npm:a", pkg.to_string_lossy()]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prompt_and_folder_extensions_are_the_hook() {
+        let data = tmp("hook");
+        let ext = KeelProfile::extensions_dir(&data);
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("b.ts"), "").unwrap();
+        std::fs::write(ext.join("a.js"), "").unwrap();
+        std::fs::write(ext.join("notes.md"), "").unwrap();
+        let profile = KeelProfile { system_prompt: Some("Be brief.".into()), extensions: vec!["builtin:x".into()] };
+        let args: Vec<String> = profile.run_args(Some(&data)).into_iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let tail = &args[2..];
+        assert_eq!(
+            tail,
+            [
+                "--append-system-prompt".to_string(),
+                "Be brief.".into(),
+                "--extension".into(),
+                "builtin:x".into(),
+                "--extension".into(),
+                ext.join("a.js").to_string_lossy().into_owned(),
+                "--extension".into(),
+                ext.join("b.ts").to_string_lossy().into_owned(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}

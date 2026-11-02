@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><title>Keel ref test</title>
+<style>.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)} .card{cursor:pointer;padding:4px}</style>
+</head><body>
+<header><a href="#home">Home</a> <button id="login">Log in</button></header>
+<nav aria-label="Primary"><a href="#a">Flights</a> <a href="#b">Hotels</a></nav>
+<main>
+  <h1>Book a trip</h1>
+  <form id="f" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'submitted ' + document.getElementById('from').value;">
+    <label for="from">From</label><input id="from" value="Jakarta">
+    <label>To <input id="to" placeholder="City"></label>
+    <input type="password" id="pw" value="secret">
+    <select id="cls"><option>Economy</option><option value="biz">Business</option><option>First</option></select>
+    <label><input type="checkbox" id="rt" class="sr"> Round trip</label>
+    <input type="file" id="file">
+    <button id="go" type="submit">Search</button>
+    <button disabled>Disabled one</button>
+  </form>
+  <div id="list"></div>
+  <div class="card" id="card" onclick="document.getElementById('out').textContent='card'"><span>Open card</span></div>
+  <div style="display:none"><button>Hidden</button></div>
+  <p id="out"></p>
+  <my-widget id="w"></my-widget>
+  <iframe id="fr" title="Inner" srcdoc="<button id=ib onclick=&quot;this.textContent='Inner clicked'&quot;>Inner button</button><input id=it>"></iframe>
+</main>
+<footer><a href="#t">Terms</a></footer>
+<script>
+  var count = 0;
+  document.getElementById('login').addEventListener('click', function(){ count++; this.textContent = 'Log in (' + count + ')'; });
+  customElements.define('my-widget', class extends HTMLElement {
+    constructor(){ super(); var r = this.attachShadow({mode:'open'}); r.innerHTML = '<button id="sb">Shadow button</button>'; r.getElementById('sb').onclick = function(){ document.getElementById('out').textContent = 'shadow'; }; }
+  });
+  window.addRows = function(n){ var l = document.getElementById('list'); for (var i = 0; i < n; i++) { var b = document.createElement('button'); b.textContent = 'Row ' + i; l.prepend(b); } };
+  window.removeLogin = function(){ var b = document.getElementById('login'); b.remove(); };
+  window.addEventListener('keydown', function(e){ if (e.key === 'Escape') document.getElementById('out').textContent = 'escaped'; });
+  setTimeout(function(){ document.title = 'Keel ref test'; }, 0);
+</script>
+</body></html>

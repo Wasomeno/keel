@@ -1,0 +1,87 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/keel",
+    "crates/doc",
+    "crates/engine",
+    "crates/harness",
+    "crates/proto",
+    "crates/rpc",
+    "crates/store",
+    "crates/theme",
+    "crates/ui",
+]
+
+[workspace.package]
+version = "0.2.1"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+keel-doc = { path = "crates/doc" }
+keel-engine = { path = "crates/engine" }
+keel-harness = { path = "crates/harness" }
+keel-proto = { path = "crates/proto" }
+keel-rpc = { path = "crates/rpc" }
+keel-store = { path = "crates/store" }
+keel-theme = { path = "crates/theme" }
+keel-ui = { path = "crates/ui" }
+
+async-trait = "0.1"
+
+# Pinned pair from DESIGN.md. Do not bump these revs in the scaffold.
+gpui = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d", features = [
+    "wayland",
+    "x11",
+    "font-kit",
+    "runtime_shaders",
+] }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "4764fd002ab5894ec9413511d01d37481b2129ab" }
+
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+libc = "0.2"
+mimalloc = { version = "0.1", features = ["v2"] }
+notify = "7"
+sha2 = "0.10"
+base64 = "0.22"
+tokio = { version = "1", features = ["full"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+loro = "1.13"
+pulldown-cmark = "0.12"
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+cef = { version = "156.2.0", default-features = false, features = ["build-util"] }
+url = "2"
+
+[profile.release]
+# One codegen unit lets LLVM inline across the whole crate; thin LTO across
+# crates. Slower to build, for the daily-driver binary (see docs/dev-run.md).
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+# Keel's own crates too: full DWARF made keel-ui alone a 220 MB rlib, and
+# every test binary carried it. Backtraces still name file and line.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+# Line tables keep backtraces readable; full DWARF for gpui/objc2 cost
+# gigabytes of rlibs and object files and slowed every link.
+debug = "line-tables-only"
+
+[patch."https://github.com/zed-industries/font-kit"]
+zed-font-kit = { path = "patches/font-kit" }
+
