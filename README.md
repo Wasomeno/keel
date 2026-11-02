@@ -13,6 +13,7 @@
 
 <p align="center">
   <a href="#overview">Overview</a> •
+  <a href="#downloads">Downloads</a> •
   <a href="#key-features">Key Features</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#workspace-crates">Workspace Crates</a> •
@@ -20,6 +21,21 @@
   <a href="#development">Development</a> •
   <a href="#license">License</a>
 </p>
+
+---
+
+## Downloads
+
+Download the latest pre-built application for macOS:
+
+| Platform | Format | Download |
+|---|---|---|
+| **macOS** (Apple Silicon / arm64) | DMG Installer | [**Keel-0.2.1-macos-arm64.dmg**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.dmg) |
+| **macOS** (Apple Silicon / arm64) | App Archive (ZIP) | [**Keel-0.2.1-macos-arm64.zip**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.zip) |
+
+*See all assets on the [Releases page](https://github.com/Wasomeno/keel/releases).*
+
+> **Note on First Launch:** Because this build is ad-hoc signed, right-click `Keel.app` in `/Applications` and choose **Open**, then click **Open** on the macOS security prompt.
 
 ---
 
