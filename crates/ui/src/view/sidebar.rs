@@ -159,26 +159,17 @@ impl KeelWindow {
             .children(self.render_selection_bar(t, cx))
     }
 
-    /// Top row: room for the traffic lights, then collapse and new chat.
-    fn render_sidebar_titlebar(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Top row: room for the traffic lights, stationary collapse button, and window drag.
+    fn render_sidebar_titlebar(&mut self, _t: Tokens, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .h(HEADER_HEIGHT)
             .flex_none()
-            .pl(self.traffic_lights_inset())
+            .pl(self.traffic_lights_inset() + zpx(26.))
             .pr_2()
             .flex()
             .flex_row()
             .items_center()
-            .gap_0p5()
             .child(drag_region("sidebar-drag"))
-            .child(icon_button("collapse-sidebar-btn", Icon::SidebarClose, t).on_click(cx.listener(
-                |this, _: &ClickEvent, _, cx| {
-                    this.toggle_sidebar(cx);
-                },
-            )))
-            .child(icon_button("new-session-btn", Icon::Plus, t).on_click(cx.listener(
-                |this, _: &ClickEvent, _, cx| this.create_new_session(None, cx),
-            )))
     }
 
     /// A thin grab strip on the right edge; the drag itself is tracked on the root.

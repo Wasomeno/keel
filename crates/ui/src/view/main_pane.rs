@@ -324,6 +324,7 @@ impl Render for KeelWindow {
             .children(self.render_files_panel(t, window, cx))
             .children(self.render_terminal_panel(t, t == keel_theme::Tokens::dark(), window, cx))
             // Last children: paint over the content.
+            .children(self.render_sidebar_trigger(t, cx))
             .children(self.render_sidebar_peek(t, cx))
             .children(self.render_zoom_toast(t))
             .children(self.render_notice(t, cx))
@@ -461,7 +462,97 @@ impl KeelWindow {
                 .overflow_hidden()
                 .w(px(width * open))
                 .opacity(opacity.max(0.001))
-                .child(div().absolute().top_0().left(px(-16. * (1.0 - open))).w(px(width)).h_full().child(self.render_sidebar(t, cx)))
+                .child(div().absolute().top_0().left_0().w(px(width)).h_full().child(self.render_sidebar(t, cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// Stationary sidebar trigger button pinned adjacent to the macOS traffic lights.
+    /// Follows Emil Kowalski craft principles:
+    /// - Stationary anchor: 0px mouse travel across toggle states.
+    /// - Continuous morph: smooth crossfade and micro-rotation between `SidebarOpen` and `SidebarClose`.
+    /// - Elevation transition: high-contrast floating card over desktop wallpapers when collapsed,
+    ///   smoothly dissolving into an integrated sidebar titlebar action when expanded.
+    /// - Active tactile feedback: crisp scale / press feedback on click.
+    pub(super) fn render_sidebar_trigger(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.settings_open || self.browser.expanded {
+            return None;
+        }
+        let open = if self.sidebar_toggling() {
+            self.sidebar_open_now()
+        } else if self.state.ui_settings.sidebar_collapsed {
+            0.0
+        } else {
+            1.0
+        };
+
+        let top_inset = (HEADER_HEIGHT - zpx(26.)) / 2.;
+        let tooltip_text = if open > 0.5 { "Collapse sidebar (⌘B)" } else { "Expand sidebar (⌘B)" };
+
+        // Subtle micro-rotation on the chevrons during the morph (Emil Kowalski craft principle)
+        let open_rot = -std::f32::consts::PI * (12.0 / 180.0) * open;
+        let close_rot = std::f32::consts::PI * (12.0 / 180.0) * (1.0 - open);
+
+        let open_icon = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity((1.0 - open).max(0.0))
+            .child(
+                Icon::SidebarOpen
+                    .el(zpx(15.))
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(open_rot))),
+            );
+
+        let close_icon = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(open.max(0.0))
+            .child(
+                Icon::SidebarClose
+                    .el(zpx(15.))
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(close_rot))),
+            );
+
+        Some(
+            div()
+                .id("sidebar-toggle-btn")
+                .absolute()
+                .top(top_inset)
+                .left(self.traffic_lights_inset())
+                .size(zpx(26.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(RADIUS_MD)
+                // When collapsed: high-contrast floating card backing over wallpapers.
+                // As the sidebar expands under it: smoothly dissolves into the sidebar background.
+                .bg(c(t.floating).opacity((1.0 - open).clamp(0.0, 1.0)))
+                .border_1()
+                .border_color(c(t.border).opacity((1.0 - 0.5 * open).clamp(0.0, 1.0)))
+                .when(open < 0.95, |d| {
+                    d.shadow(vec![gpui::BoxShadow {
+                        color: c(t.shadow).opacity(1.0 - open),
+                        offset: gpui::point(zpx(0.), zpx(1.5)),
+                        blur_radius: zpx(6.),
+                        spread_radius: zpx(0.),
+                        inset: false,
+                    }])
+                })
+                .text_color(c(t.text))
+                .cursor_pointer()
+                .hover(|s| s.bg(c(t.surface)).text_color(c(t.text)))
+                .active(|s| s.bg(c(t.selected)).opacity(0.85))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_sidebar(cx)))
+                .tooltip(move |_, cx| cx.new(|_| crate::view::dotify_ui::Tip::new(tooltip_text, t)).into())
+                .tooltip_show_delay(crate::view::tooltip::delay())
+                .child(div().relative().size_full().child(open_icon).child(close_icon))
                 .into_any_element(),
         )
     }
@@ -681,42 +772,24 @@ impl KeelWindow {
     /// clock in / clock out. That stays off through the exit, when
     /// `settings_open` is already false.
     fn render_header(&mut self, t: Tokens, hero: bool, _entering: bool, bare: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapsed = self.state.ui_settings.sidebar_collapsed;
-        // The peek is painted last (over the content), and its drop shadow
-        // bleeds ~12px up over this pill, dimming the toggle and its hover as
-        // the panel slides in and out. While it's up, the pill paints after it
-        // instead. (Not over an expanded browser, which covers the header.)
-        let peeking = collapsed && (self.sidebar_peek || self.peek_closing);
-        let lift_pill = peeking && !self.browser.expanded && !self.browser_expanding();
-        let pill = div()
-            .flex_none()
-            .p(zpx(3.))
-            .flex()
-            .flex_row()
-            .gap_0p5()
-            .rounded(zpx(10.))
-            .bg(c(t.floating & 0xFFFF_FF00 | 0xB3))
-            .border_1()
-            .border_color(c(t.border))
-            // Open, the sidebar has its own collapse button; this one only
-            // shows (and peeks on hover) while it's collapsed.
-            .when(collapsed, |d| {
-                d.child(
-                    icon_button("header-sidebar-btn", Icon::SidebarOpen, t)
-                        // Stays lit while its panel is open, so moving
-                        // onto the panel doesn't read as a dropped hover.
-                        .when(self.sidebar_peek, |b| b.bg(c(t.selected)).text_color(c(t.text)))
-                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.peek_hover(*hovered, cx)))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_sidebar(cx))),
-                )
-            });
-        // The session timer rides beside the pill, lifted with it.
+        let open = if self.sidebar_toggling() {
+            self.sidebar_open_now()
+        } else if self.state.ui_settings.sidebar_collapsed {
+            0.0
+        } else {
+            1.0
+        };
+        // The session timer rides beside the sidebar toggle.
         let timer = (!bare)
             .then(|| self.render_timer_header(t, cx))
-            .flatten()
-            .map(|el| if lift_pill { gpui::deferred(el).into_any_element() } else { el });
+            .flatten();
         // The session's merge request, after its title (nothing when none).
         let mr_chip = if hero { None } else { self.render_mr_chip(t, cx) };
+        // Left padding smoothly interpolates from clearing the stationary toggle button (collapsed)
+        // to tight margin (expanded), coordinating with the sliding main pane.
+        let collapsed_pl = f32::from(self.traffic_lights_inset() + zpx(26.) + zpx(6.));
+        let expanded_pl = f32::from(zpx(6.));
+        let left_pad = (1.0 - open) * collapsed_pl + open * expanded_pl;
         div()
             .h(HEADER_HEIGHT)
             .flex_none()
@@ -724,12 +797,10 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .pr_2()
-            // Corner-tight, like the traffic lights it sits beside (or replaces in fullscreen).
-            .pl(if collapsed { self.traffic_lights_inset() } else { zpx(6.) })
-            // Only the collapsed sidebar's toggle lives in the pill.
-            .when(collapsed, |d| d.child(if lift_pill { gpui::deferred(pill).into_any_element() } else { pill.into_any_element() }))
+            .gap_1()
+            .pl(px(left_pad))
             .children(timer)
-            .children(mr_chip.map(|chip| div().pl_3().child(chip)))
+            .children(mr_chip.map(|chip| div().pl_2().child(chip)))
             .child(drag_region("header-drag"))
             .when(!hero && !self.browser.open, |d| {
                 let background = self.browser_in_background();

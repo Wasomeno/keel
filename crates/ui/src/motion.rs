@@ -18,9 +18,9 @@ pub const SLOW: Duration = Duration::from_millis(200);
 /// long travel needs a little longer to read as motion, not a jump.
 pub const SPATIAL: Duration = Duration::from_millis(420);
 /// The docked sidebar opening and closing, both on [`glide_curve`]: the same
-/// feel each way, the close a touch quicker.
-pub const SHEET_OPEN: Duration = Duration::from_millis(360);
-pub const SHEET_CLOSE: Duration = Duration::from_millis(300);
+/// feel each way, the close a touch quicker (<250ms for responsive navigation).
+pub const SHEET_OPEN: Duration = Duration::from_millis(240);
+pub const SHEET_CLOSE: Duration = Duration::from_millis(180);
 /// Right side panels (browser, files, terminal) opening and closing on [`glide_curve`]:
 /// under 300 ms for responsive UI, with closing faster than opening.
 pub const PANEL_OPEN: Duration = Duration::from_millis(260);

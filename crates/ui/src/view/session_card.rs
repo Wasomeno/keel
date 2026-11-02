@@ -1606,19 +1606,21 @@ impl KeelWindow {
             .py(zpx(1.5))
             .px(zpx(3.))
             .rounded(RADIUS_MD)
-            .cursor_pointer()
-            .hover(|s| s.bg(alpha(c(t.hover), 0.5)))
-            .on_click(cx.listener({
-                let repo_id = repo.id.clone();
-                move |this, _: &ClickEvent, _, cx| {
-                    if this.session_card.closed_repos.contains(&repo_id) {
-                        this.session_card.closed_repos.remove(&repo_id);
-                    } else {
-                        this.session_card.closed_repos.insert(repo_id.clone());
-                    }
-                    cx.notify();
-                }
-            }));
+            .when(repo.files_count > 0, |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.bg(alpha(c(t.hover), 0.5)))
+                    .on_click(cx.listener({
+                        let repo_id = repo.id.clone();
+                        move |this, _: &ClickEvent, _, cx| {
+                            if this.session_card.closed_repos.contains(&repo_id) {
+                                this.session_card.closed_repos.remove(&repo_id);
+                            } else {
+                                this.session_card.closed_repos.insert(repo_id.clone());
+                            }
+                            cx.notify();
+                        }
+                    }))
+            });
 
         // Node icon (amber rounded square)
         header = header.child(
@@ -1707,38 +1709,16 @@ impl KeelWindow {
             header = header.child(branch_btn);
         }
 
-        // Dotted leader line
-        header = header.child(leader_line(c(t.border).opacity(0.6)));
+        // Dotted leader line and diff stat badge (only shown when there are changed files)
+        if repo.files_count > 0 {
+            header = header.child(leader_line(c(t.border).opacity(0.6)));
 
-        // Diff stat badge
-        let badge_tip = if repo.total_additions > 0 || repo.total_deletions > 0 {
-            format!("{} files changed · +{} / -{}", repo.files_count, repo.total_additions, repo.total_deletions)
-        } else if repo.files_count > 0 {
-            format!("{} files changed", repo.files_count)
-        } else {
-            "Clean working tree".to_string()
-        };
+            let badge_tip = if repo.total_additions > 0 || repo.total_deletions > 0 {
+                format!("{} files changed · +{} / -{}", repo.files_count, repo.total_additions, repo.total_deletions)
+            } else {
+                format!("{} files changed", repo.files_count)
+            };
 
-        let badge = if repo.files_count == 0 {
-            div()
-                .id(ElementId::Name(format!("tree-repo-badge-{}", repo.id).into()))
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(zpx(3.))
-                .px(zpx(5.))
-                .py(zpx(1.))
-                .rounded(RADIUS_SM)
-                .bg(c(t.code).opacity(0.35))
-                .t_caption()
-                .text_color(c(t.text_faint))
-                .child(div().flex_none().child(Icon::Check.el(zpx(10.))))
-                .child("clean")
-                .tooltip(move |_, cx| cx.new(|_| Tip::new(badge_tip.clone(), t)).into())
-                .tooltip_show_delay(crate::view::tooltip::delay())
-                .into_any_element()
-        } else {
             let mut b = div()
                 .id(ElementId::Name(format!("tree-repo-badge-{}", repo.id).into()))
                 .flex_none()
@@ -1780,11 +1760,12 @@ impl KeelWindow {
                         .child(format!("{} changed", repo.files_count)),
                 );
             }
-            b.tooltip(move |_, cx| cx.new(|_| Tip::new(badge_tip.clone(), t)).into())
+            let badge = b
+                .tooltip(move |_, cx| cx.new(|_| Tip::new(badge_tip.clone(), t)).into())
                 .tooltip_show_delay(crate::view::tooltip::delay())
-                .into_any_element()
-        };
-        header = header.child(badge);
+                .into_any_element();
+            header = header.child(badge);
+        }
 
         let mut group_el = div()
             .flex()
@@ -1794,8 +1775,8 @@ impl KeelWindow {
             .min_w_0()
             .child(header);
 
-        // Connected Tree Spine Children
-        if is_open {
+        // Connected Tree Spine Children: only shown when there are changed files
+        if is_open && repo.files_count > 0 && (!visible_files.is_empty() || show_more_pill) {
             let mut children_col = div()
                 .flex()
                 .flex_col()
@@ -1804,28 +1785,7 @@ impl KeelWindow {
                 .min_w_0()
                 .pl(zpx(10.));
 
-            if repo.files_count == 0 || (visible_files.is_empty() && !show_more_pill) {
-                children_col = children_col.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .h(zpx(24.))
-                        .child(tree_connector(true, spine_color))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(zpx(5.))
-                                .t_caption()
-                                .text_color(muted)
-                                .child(div().flex_none().text_color(c(t.success)).child(Icon::Check.el(zpx(11.))))
-                                .child("Clean, no uncommitted changes"),
-                        ),
-                );
-            } else {
-                for (ix, file) in visible_files.iter().enumerate() {
+            for (ix, file) in visible_files.iter().enumerate() {
                     let is_last = !show_more_pill && (ix + 1 == visible_files.len());
                     let group_id = SharedString::from(format!("tree-file-{}-{ix}", repo.id));
                     let file_target = if repo.target_prefix.is_empty() {
@@ -2071,7 +2031,6 @@ impl KeelWindow {
                             ),
                     );
                 }
-            }
 
             group_el = group_el.child(children_col);
         }

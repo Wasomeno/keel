@@ -1324,7 +1324,7 @@ impl KeelWindow {
     }
 
     /// How open the sliding sidebar is right now.
-    fn sidebar_open_now(&self) -> f32 {
+    pub(super) fn sidebar_open_now(&self) -> f32 {
         if !self.sidebar_toggling() {
             return self.sidebar_target();
         }
@@ -4348,9 +4348,10 @@ fn icon_button(id: &'static str, icon: Icon, t: Tokens) -> gpui::Stateful<gpui::
         .items_center()
         .justify_center()
         .rounded(RADIUS_MD)
-        .text_color(c(t.text_muted))
+        .text_color(c(t.text))
         .cursor_pointer()
         .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+        .active(|s| s.bg(c(t.selected)).text_color(c(t.text)).opacity(0.85))
         .child(icon.el(zpx(15.)))
 }
 
