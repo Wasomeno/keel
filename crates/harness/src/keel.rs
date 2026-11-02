@@ -137,8 +137,19 @@ pub(crate) fn register_bundled_packages(exe: &Path, agent: &Path) {
         .flatten()
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
-    let stale = |p: &String| p.contains("/pi-packages/") && !Path::new(p).is_dir();
-    let mut next: Vec<String> = have.iter().filter(|p| !stale(p)).cloned().collect();
+    let want_names: Vec<String> = want
+        .iter()
+        .filter_map(|p| Path::new(p).file_name().and_then(|f| f.to_str()).map(String::from))
+        .collect();
+    // Keep user-configured packages, but drop any entries for bundled packages
+    // (from older or other Keel app/dev locations) and any entries matching bundled package names.
+    let is_stale = |p: &String| {
+        p.contains("/pi-packages/")
+            || want_names
+                .iter()
+                .any(|name| p == name || p == &format!("npm:{name}") || p.ends_with(&format!("/{name}")))
+    };
+    let mut next: Vec<String> = have.iter().filter(|p| !is_stale(p)).cloned().collect();
     for p in want {
         if !next.contains(&p) {
             next.push(p);
@@ -323,7 +334,16 @@ mod tests {
         let agent = root.join("agent");
         std::fs::create_dir_all(&agent).unwrap();
         let gone = "/old/Keel.app/Contents/Resources/pi-packages/x";
-        std::fs::write(agent.join("settings.json"), format!(r#"{{"theme":"dark","packages":["npm:a","{gone}"]}}"#)).unwrap();
+        let other_existing = root.join("other-debug/pi-packages/pi-commandcode-provider");
+        std::fs::create_dir_all(&other_existing).unwrap();
+        std::fs::write(
+            agent.join("settings.json"),
+            format!(
+                r#"{{"theme":"dark","packages":["npm:a","{gone}","{}"]}}"#,
+                other_existing.to_string_lossy()
+            ),
+        )
+        .unwrap();
         register_bundled_packages(&exe, &agent);
         register_bundled_packages(&exe, &agent);
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();

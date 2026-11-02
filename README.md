@@ -28,12 +28,13 @@
 
 Download the latest pre-built application for macOS:
 
-| Platform | Format | Download |
-|---|---|---|
-| **macOS** (Apple Silicon / arm64) | DMG Installer | [**Keel-0.2.1-macos-arm64.dmg**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.dmg) |
-| **macOS** (Apple Silicon / arm64) | App Archive (ZIP) | [**Keel-0.2.1-macos-arm64.zip**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.zip) |
+| Platform | Format | Size | Download |
+|---|---|---|---|
+| **macOS** (Apple Silicon / arm64) | **Tar XZ Archive** (Smallest) | **139 MB** | [**Keel-0.2.1-macos-arm64.tar.xz**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.tar.xz) |
+| **macOS** (Apple Silicon / arm64) | **DMG Installer** | **216 MB** | [**Keel-0.2.1-macos-arm64.dmg**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.dmg) |
+| **macOS** (Apple Silicon / arm64) | **Zip Archive** | **214 MB** | [**Keel-0.2.1-macos-arm64.zip**](https://github.com/Wasomeno/keel/releases/download/v0.2.1/Keel-0.2.1-macos-arm64.zip) |
 
-*See all assets on the [Releases page](https://github.com/Wasomeno/keel/releases).*
+*See all assets and checksums on the [Releases page](https://github.com/Wasomeno/keel/releases).*
 
 > **Note on First Launch:** Because this build is ad-hoc signed, right-click `Keel.app` in `/Applications` and choose **Open**, then click **Open** on the macOS security prompt.
 

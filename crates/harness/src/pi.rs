@@ -1534,7 +1534,12 @@ fn bundle_dirs() -> Vec<PathBuf> {
     let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) else {
         return Vec::new();
     };
-    vec![dir.join("../Resources/pi"), dir.join("pi")]
+    let mut dirs = Vec::new();
+    if let Some(contents) = dir.parent() {
+        dirs.push(contents.join("Resources/pi"));
+    }
+    dirs.push(dir.join("pi"));
+    dirs
 }
 
 fn candidate_paths(input: &ResolveInput) -> Vec<PathBuf> {
