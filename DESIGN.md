@@ -5,7 +5,7 @@
 | Author | _unspecified_ |
 | Date | 2026-10-07 |
 | Status | Draft |
-| Project root (created when implementation starts, not by this document) | `/Users/kevinananda/Codes/keel/` |
+| Project root (created when implementation starts, not by this document) | `keel/` |
 | Prior art | [Zeron](https://github.com/zeronsh/zeron) (`ARCHITECTURE.md`, workspace `Cargo.toml`, harness README, `docs/pi.md`, `docs/mcp.md`, `docs/registry-sync.md`, `docs/chat2-sync.md`, fetched 2026-10-07) and [zeron.sh](https://zeron.sh/) |
 | Audience | One senior engineer implementing a greenfield repo. There is no existing crate to extend. |
 
@@ -17,11 +17,11 @@ This document is the plan. It does not create the directory, the Rust workspace,
 
 ## Overview
 
-Keel is a control plane for coding-agent CLIs Kevin already runs on this Mac. It is not a new agent, not a model, and not a chat product of its own. One local engine owns the child processes. A native gpui window is a viewport onto that engine. Each agent has a driver that speaks that CLI's own wire and normalizes it into one `AgentEvent` stream and one transcript.
+Keel is a control plane for coding-agent CLIs running on the machine. It is not a new agent, not a model, and not a chat product of its own. One local engine owns the child processes. A native gpui window is a viewport onto that engine. Each agent has a driver that speaks that CLI's own wire and normalizes it into one `AgentEvent` stream and one transcript.
 
 Keel is local-only. No account is required. Sessions stay on the device. (An optional multi-device sync shipped in M8 and was removed on 2026-10-19.)
 
-The repo will be created at `/Users/kevinananda/Codes/keel/`. The binary is `keel`. The macOS data directory is `~/Library/Application Support/Keel/`. The localhost IPC port is **47821** (`KEEL_IPC_PORT` overrides it). Zeron's port 27654 is intentionally not reused, so both processes can run on the same machine.
+The repo will be created at `keel/`. The binary is `keel`. The macOS data directory is `~/Library/Application Support/Keel/`. The localhost IPC port is **47821** (`KEEL_IPC_PORT` overrides it). Zeron's port 27654 is intentionally not reused, so both processes can run on the same machine.
 
 Scale target for the first year: one person, one or two devices, dozens of sessions (design point: 50 index rows, warm set of 30), not thousands. A heavy agentic chat is budgeted at roughly 160 KB of session snapshot once tool bodies are summaries; the host-local run journal holds the full tool IO and is the thing that can grow into hundreds of megabytes.
 
@@ -29,9 +29,9 @@ Scale target for the first year: one person, one or two devices, dozens of sessi
 
 ## Background & Motivation
 
-Kevin runs coding agents as CLIs (Pi is installed and is the daily driver). Each CLI has its own terminal UI, its own session file, and its own steering rules. What is missing is one process that can start a session in a folder, keep the child alive, record a single transcript, and later let a second machine watch the same session. That is the shape of Zeron. Keel copies the shape and the materials, not the source tree.
+Coding agents run as CLIs (Pi is installed and is the daily driver). Each CLI has its own terminal UI, its own session file, and its own steering rules. What is missing is one process that can start a session in a folder, keep the child alive, record a single transcript, and later let a second machine watch the same session. That is the shape of Zeron. Keel copies the shape and the materials, not the source tree.
 
-`/Users/kevinananda/Codes/` already holds unrelated apps (`hermes-webui`, `optchat-trial`, `kds-react`, and others). Keel does not live inside any of them and does not depend on `hermes-webui`. Pi on this machine is the official managed install: `~/.local/bin/pi` resolves to `~/.pi/agent/bin/pi`, and `pi --version` prints **1.0.4** (checked 2026-10-07). Reinstalls use `https://pi.dev/install.sh`. `npm install -g` is not an install path for Pi.
+Keel is standalone and does not depend on external web wrappers. Pi on this machine is the official managed install: `~/.local/bin/pi` resolves to `~/.pi/agent/bin/pi`, and `pi --version` prints **1.0.4** (checked 2026-10-07). Reinstalls use `https://pi.dev/install.sh`. `npm install -g` is not an install path for Pi.
 
 Current pain:
 
@@ -107,7 +107,7 @@ Zeron's published topology (fetched `ARCHITECTURE.md`, 2026-10-07) is the same p
 All crates are original. Nothing is named `zeron-*`.
 
 ```
-/Users/kevinananda/Codes/keel/
+keel/
   Cargo.toml
   rust-toolchain.toml          # channel = stable, components rustfmt, clippy
   crates/
@@ -207,7 +207,7 @@ Reasons:
 - The `zui` tree at that rev was fetched. Its workspace members are gpui, platform backends, `gpui_tokio`, and support crates. It does not include Zed's `markdown`, `ui`, `theme`, or `editor` crates. Keel still must not add those GPL crates itself.
 - `gpui-base` may be used for low-level widgets (button, popover, list chrome) so we do not rebuild focus handling. Theme selection, semantic colors, and markdown rendering are ours: `keel-theme` and `keel-ui::markdown`. If a `gpui-base` theme type is in the way, do not call it.
 
-What was not verified: a `LICENSE` file at the root of `zeronsh/zui` at that rev returned HTTP 404. GitHub's API reports SPDX `NOASSERTION` for `zeronsh/zui`, `zeronsh/gpui-component`, and the upstream `longbridge/gpui-kit`. Zeron's `ARCHITECTURE.md` says Zed gpui is Apache-2.0. That statement is about Zed, not automatically about these forks. The scaffold PR reads the license files inside the pinned trees before any binary is distributed. Fork drift is a named risk, not a reason to vendor the forks into `/Users/kevinananda/Codes/keel/`.
+What was not verified: a `LICENSE` file at the root of `zeronsh/zui` at that rev returned HTTP 404. GitHub's API reports SPDX `NOASSERTION` for `zeronsh/zui`, `zeronsh/gpui-component`, and the upstream `longbridge/gpui-kit`. Zeron's `ARCHITECTURE.md` says Zed gpui is Apache-2.0. That statement is about Zed, not automatically about these forks. The scaffold PR reads the license files inside the pinned trees before any binary is distributed. Fork drift is a named risk, not a reason to vendor the forks into `keel/`.
 
 ### Process model
 
@@ -1026,11 +1026,11 @@ Registry and session schema version lives in `meta.schema`. A reader that sees a
 
 ### (a) Electron or a local web UI
 
-A browser frontend would reuse whatever CSS skills already exist under `/Users/kevinananda/Codes/` and would make the transcript a DOM list. It loses the reason to copy this stack: gpui is what makes the virtualized, bottom-anchored transcript cheap, and Zeron's own UI work is the prior art for that. A local web UI also splits the process story (Node plus Rust, or a Rust server plus a bundled browser) and makes "one binary, headed or headless" a lie. Electron's RSS on a chat app is the wrong direction given the allocator notes above. Rejected.
+A browser frontend would make the transcript a DOM list. It loses the reason to copy this stack: gpui is what makes the virtualized, bottom-anchored transcript cheap, and Zeron's own UI work is the prior art for that. A local web UI also splits the process story (Node plus Rust, or a Rust server plus a bundled browser) and makes "one binary, headed or headless" a lie. Electron's RSS on a chat app is the wrong direction given the allocator notes above. Rejected.
 
 ### (b) Forking Zeron
 
-Forking `github.com/zeronsh/zeron` would start from a working Pi driver, a real edge, and a polished shell. It would also import a year of product surface Keel is explicitly not building (voice, iOS, appshots, token graphs, Antigravity), a GPL-adjacent UI history we would have to keep auditing, and a license-and-trademark problem the moment the app is called anything like Zeron. Kevin asked for an original app with the same materials, in `/Users/kevinananda/Codes/`, not a downstream branch. The maintenance win is real and is still the wrong default: every upstream refactor would be a merge, and the harness trait we need is small enough to write. Rejected.
+Forking `github.com/zeronsh/zeron` would start from a working Pi driver, a real edge, and a polished shell. It would also import a year of product surface Keel is explicitly not building (voice, iOS, appshots, token graphs, Antigravity), a GPL-adjacent UI history we would have to keep auditing, and a license-and-trademark problem the moment the app is called anything like Zeron. The goal is an original app with the same materials, not a downstream branch. The maintenance win is real and is still the wrong default: every upstream refactor would be a merge, and the harness trait we need is small enough to write. Rejected.
 
 ### (c) SQLite only, add Loro when sync exists
 
@@ -1048,7 +1048,7 @@ SQLite rows for messages would make M1 and M3 shorter. The cost shows up at the 
 
 ## Key Decisions
 
-1. **Original app, not a fork.** Repo `/Users/kevinananda/Codes/keel/`, binary `keel`, display name Keel. No Zeron crate names, no vendored Zeron sources, no import of `hermes-webui`. Prior art is cited and re-verified at the PR that needs it.
+1. **Original app, not a fork.** Repo `keel`, binary `keel`, display name Keel. No Zeron crate names, no vendored Zeron sources, no import of external web UIs. Prior art is cited and re-verified at the PR that needs it.
 2. **Pin `zeronsh/zui` rev `0966d065b23e0b7c9b53c2e186705b8bce16fe2d` and `zeronsh/gpui-component` rev `4764fd002ab5894ec9413511d01d37481b2129ab`.** Not upstream Zed gpui. The pair is what Zeron's workspace builds, and the zui rev carries the macOS compositor fixes described in that `Cargo.toml`. Theme, markdown, and product components are still ours. Zed's GPL `markdown`, `ui`, `theme`, and `editor` crates are not dependencies. License files inside the pins are unchecked (root `LICENSE` 404); confirm before distributing a binary.
 3. **Native drivers, ACP only for ACP agents.** Pi JSONL, Claude stream-json, Codex app-server, OpenCode HTTP/SSE, Cursor via its native SDK (later). Grok, Command Code, Hermes, and Devin use one ACP implementation. Adapter-mediated ACP was retired upstream because adapters hold turns open and invent done-status.
 4. **Loro 1.13 on the device for the session doc and the registry, in both modes.** Sync off still writes those docs. The edge stores raw `LoroDoc` update and snapshot bytes as opaque SQLite blobs. It does not link `loro-wasm` or `loro-protocol`. Zeron pins `loro-protocol` 0.3 for a legacy SessionRoom that current clients do not dial; chat2, the session wire `ARCHITECTURE.md` describes, stores opaque Loro updates and says no `loro-protocol`. A 256 KiB protocol-message cap would reject the snapshots the HTTP path exists to carry. This keeps the required CRDT and avoids the Worker wedge Zeron documented.
@@ -1132,11 +1132,11 @@ M8 adds one line to `keel status`: `cursor`, `head_seq`, `pending_pushes` per op
 
 There is no feature-flag service. The rollout is the PR order. Each PR merges only when its tests pass on this Mac (Apple Silicon, macOS, zsh).
 
-1. Implementation starts by creating `/Users/kevinananda/Codes/keel/`. This design document does not create it.
+1. Implementation starts by creating the `keel` repository. This design document does not create it.
 2. M0–M3 ship a local Pi chat. `keel-sync` is linked because PR 7 depends on PR 5, and the process dials nothing. The fake room is a unit test, not a socket.
 3. M4–M6 add CLIs behind the same trait. A broken driver is a harness error, not a down engine. The mock driver remains the default in tests.
 4. M7 puts the engine under `launchd` with the PATH captured at install time into the plist `EnvironmentVariables`. Uninstall is `launchctl bootout` and deleting the plist. It does not delete `~/Library/Application Support/Keel/`.
-5. M8 deploys the Worker with `wrangler` to whatever account Kevin uses. Until `keel login` succeeds, a release build never opens a socket to it. The convergence test writes `session.json` (same `owner_id`, distinct `device_id`) in each data dir and sets `KEEL_DEV_BEARER` to that engine's access token, so both start in `Development` against `wrangler dev`. The bearer is not the owner id. Same owner id and a different `KEEL_DATA_DIR` do not select that scope.
+5. M8 deploys the Worker with `wrangler` to the user's Cloudflare account. Until `keel login` succeeds, a release build never opens a socket to it. The convergence test writes `session.json` (same `owner_id`, distinct `device_id`) in each data dir and sets `KEEL_DEV_BEARER` to that engine's access token, so both start in `Development` against `wrangler dev`. The bearer is not the owner id. Same owner id and a different `KEEL_DATA_DIR` do not select that scope.
 6. Rollback of a bad build: quit the app, `keel daemon stop`, run the previous binary. The SQLite snapshot is the data. A `meta.schema` bump must be backward-readable or it waits for a major version; do not bump it casually. If a snapshot is unreadable, the engine moves it aside and starts empty — take a copy of `store.sqlite` before any compaction PR.
 7. There is no import from Zeron and no dual-write.
 
@@ -1199,17 +1199,17 @@ Fetched 2026-10-07 unless noted:
 
 GitHub code search against the Zeron repo returned 401. Facts that depended on search were checked by fetching the file instead. No crate version in this document was invented; `security-framework` is named without a version on purpose.
 
-Local context that is not upstream: Pi on this Mac is the managed 1.0.4 install, `~/.local/bin/pi` → `~/.pi/agent/bin/pi` (`pi --version` on 2026-10-07). `npm install -g` was already retired for that CLI. There is no `/Users/kevinananda/Codes/keel` tree yet.
+Local context that is not upstream: Pi on this Mac is the managed 1.0.4 install, `~/.local/bin/pi` → `~/.pi/agent/bin/pi` (`pi --version` on 2026-10-07). `npm install -g` was already retired for that CLI.
 
 ---
 
 ## PR Plan
 
-Implementation creates `/Users/kevinananda/Codes/keel/` at PR 1. Each PR merges on its own. Tests are `cargo test -p <crate>` unless noted. The stack is 21 PRs. No PR below adds iOS, voice, terminals, MCP injection, auto-update, Windows, Antigravity, Cursor, OpenCode, Hermes, or Devin. Dependencies that are numbered do not cycle: PR 7 depends on PR 5, and PR 5 does not depend on PR 7.
+Implementation creates the workspace at PR 1. Each PR merges on its own. Tests are `cargo test -p <crate>` unless noted. The stack is 21 PRs. No PR below adds iOS, voice, terminals, MCP injection, auto-update, Windows, Antigravity, Cursor, OpenCode, Hermes, or Devin. Dependencies that are numbered do not cycle: PR 7 depends on PR 5, and PR 5 does not depend on PR 7.
 
 ### PR 1 — Scaffold the workspace and open a window
 
-- **Files/components:** `/Users/kevinananda/Codes/keel/Cargo.toml`, `rust-toolchain.toml`, `.gitignore`, `apps/keel/`, `crates/theme/` (empty schema module), `crates/ui/` (one gpui window), `crates/proto/` (package only), license note draft after reading the pinned trees.
+- **Files/components:** `Cargo.toml`, `rust-toolchain.toml`, `.gitignore`, `apps/keel/`, `crates/theme/` (empty schema module), `crates/ui/` (one gpui window), `crates/proto/` (package only), license note draft after reading the pinned trees.
 - **Dependencies:** none.
 - **Description:** Edition 2024 workspace. Pins gpui, gpui_platform, gpui_tokio, and gpui-base at the revisions in this document. Release and dev profiles, mimalloc v2 on macOS only. `keel` parses clap and opens a gpui window titled Keel that renders a theme token. `cargo build -p keel` succeeds on this Mac. No engine, no network.
 
@@ -1311,7 +1311,7 @@ Implementation creates `/Users/kevinananda/Codes/keel/` at PR 1. Each PR merges 
 
 ### PR 18 — Edge Worker, rooms, R2 (removed 2026-10-19)
 
-- **Files/components:** `/Users/kevinananda/Codes/keel/edge/` — TypeScript Worker, ChatRoom DO, registry room DO, DeviceRoom DO, wrangler config, R2 bindings.
+- **Files/components:** `edge/` — TypeScript Worker, ChatRoom DO, registry room DO, DeviceRoom DO, wrangler config, R2 bindings.
 - **Dependencies:** PR 5 fixture. No Rust changes required to merge the Worker skeleton.
 - **Description:** Durable Object SQLite stores the length-prefixed frames from PR 5. Payload bytes are raw Loro updates or snapshots. No `loro-wasm`, no `loro-protocol`, no Postgres, no Hono, no WebRTC. `GET /room/{id}/snapshot` returns the raw snapshot and supports `Range`. Device room relays RPC envelopes (`{s, k, to, from, payload}`) plus nudge, and does not parse `payload`. A Node test parses the hex fixture from PR 5, checks `json_len` and `payload_len`, and asserts the payload bytes are unchanged. Hibernation: no idle timers. Auth routes are PR 19; this PR rejects a socket that lacks a bearer with 401 before any DO forward, using a test token seeded in the auth DO.
 

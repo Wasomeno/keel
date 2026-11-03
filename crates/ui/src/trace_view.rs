@@ -1,6 +1,5 @@
 //! Trace lines in the chat: tool calls, thinking, plans, subagents and past
-//! turns, each one line with an icon, a title and an optional description
-//! (docs/trace-codeblock-spec.md §2–§5).
+//! turns, each one line with an icon, a title and an optional description.
 //!
 //! Motion is timestamp-driven: every progress value here is computed from
 //! `rc.now` against a stored instant (a toggle, a tool's start or end), and

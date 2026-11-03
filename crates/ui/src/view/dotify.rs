@@ -1,7 +1,7 @@
 //! Dotify (clock-in / clock-out at work) in the timer pill: state, sync,
-//! actions, keys and dev hooks. Rendering is `dotify_ui.rs`; the look and
-//! motion follow `docs/dotify-ui-spec.md`, with every curve a pure function
-//! of time in `crate::dotify`. The engine holds the token and does the HTTP.
+//! actions, keys and dev hooks. Rendering is `dotify_ui.rs`; every curve
+//! is a pure function of time in `crate::dotify`. The engine holds the
+//! token and does the HTTP.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};

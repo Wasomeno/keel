@@ -2,7 +2,7 @@
 //! timer pill. One connection at a time, kept like GitLab's (host and user in
 //! `connections.json`, the token in a 0600 file). The token is only ever
 //! sent to the Dotify base URL it was saved for, and never logged.
-//! API: `docs/dotify-api-reference.md`; wire types in `keel_proto::dotify`.
+//! Wire types in `keel_proto::dotify`.
 
 use std::path::Path;
 use std::time::Duration;

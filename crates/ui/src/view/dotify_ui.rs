@@ -1,4 +1,4 @@
-//! Dotify's look (`docs/dotify-ui-spec.md`): the pill's content, the
+//! Dotify's look: the pill's content, the
 //! popover (header, banners, idle / clocked-in / result / edit views,
 //! stats), the receipt pill, the right-click items and the Settings card.
 //! All motion is timestamp-driven: each frame computes its look from the

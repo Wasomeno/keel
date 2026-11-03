@@ -1,10 +1,9 @@
 //! Dotify in the UI, apart from gpui: the local UTC offset, what a clock-in
 //! starts with, the small file that remembers projects and last-seen stats,
 //! the popover's state machine and project list, search highlighting, the
-//! two-click confirm, what the pill looks like, and every motion curve of
-//! `docs/dotify-ui-spec.md` as a pure function of time (reduced-motion
-//! aware). Wire types and sync rules are `keel_proto::dotify`; the HTTP is
-//! the engine's.
+//! two-click confirm, what the pill looks like, and every motion curve
+//! as a pure function of time (reduced-motion aware). Wire types and sync
+//! rules are `keel_proto::dotify`; the HTTP is the engine's.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -169,15 +169,11 @@ cargo run -p keel -- headless
 cargo run -p keel -- status
 ```
 
-See [docs/dev-run.md](docs/dev-run.md) for day-to-day development workflows, LaunchAgent configurations, and debugging hooks.
-
 ---
 
 ## Documentation
 
 - [DESIGN.md](DESIGN.md) — Comprehensive design specification and architectural rationale.
-- [docs/dev-run.md](docs/dev-run.md) — Daily development runbook, LaunchAgent setup, and logging.
-- [docs/trace-codeblock-spec.md](docs/trace-codeblock-spec.md) — Codeblock rendering specification.
 - [THIRD_PARTY.md](THIRD_PARTY.md) — Third-party licenses and acknowledgments.
 - [assets/brand/USAGE.md](assets/brand/USAGE.md) — Brand guidelines and mark specifications.
 

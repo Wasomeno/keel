@@ -1,7 +1,7 @@
 //! Dotify (workplace clock-in / clock-out) wire types and the pure rules the
 //! timer pill follows: token clean-up, the `{message, data}` envelope, UTC
 //! timestamps, and how a fresh `check-status` reconciles with what the pill
-//! shows. No I/O; the engine does the HTTP (`docs/dotify-api-reference.md`).
+//! shows. No I/O; the engine does the HTTP.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

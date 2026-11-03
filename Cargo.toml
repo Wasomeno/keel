@@ -65,7 +65,7 @@ url = "2"
 
 [profile.release]
 # One codegen unit lets LLVM inline across the whole crate; thin LTO across
-# crates. Slower to build, for the daily-driver binary (see docs/dev-run.md).
+# crates. Slower to build, for the daily-driver binary.
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
