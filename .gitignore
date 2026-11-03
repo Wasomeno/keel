@@ -5,4 +5,7 @@
 .shots/
 .briefs/
 *.log
+DESIGN.md
+GEMINI.md
+THIRD_PARTY.md
 

@@ -173,12 +173,10 @@ cargo run -p keel -- status
 
 ## Documentation
 
-- [DESIGN.md](DESIGN.md) — Comprehensive design specification and architectural rationale.
-- [THIRD_PARTY.md](THIRD_PARTY.md) — Third-party licenses and acknowledgments.
 - [assets/brand/USAGE.md](assets/brand/USAGE.md) — Brand guidelines and mark specifications.
 
 ---
 
 ## License
 
-This project is licensed under the Apache License 2.0. See [THIRD_PARTY.md](THIRD_PARTY.md) for third-party component licenses.
+This project is licensed under the Apache License 2.0.
