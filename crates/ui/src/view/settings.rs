@@ -2519,7 +2519,13 @@ impl KeelWindow {
                     let matches_desc = row.description.to_lowercase().contains(&needle);
                     let matches_auth = row.author.to_lowercase().contains(&needle);
                     let matches_coll = row.collection.to_lowercase().contains(&needle);
-                    let matches_insert = row.insert.to_lowercase().contains(&needle);
+                    let display_insert = row
+                        .insert
+                        .strip_prefix("/skill:")
+                        .map(|n| format!("/{n}"))
+                        .unwrap_or_else(|| row.insert.clone());
+                    let matches_insert = display_insert.to_lowercase().contains(&needle)
+                        || row.insert.to_lowercase().contains(&needle);
                     if !matches_name
                         && !matches_desc
                         && !matches_auth
@@ -2739,7 +2745,12 @@ impl KeelWindow {
                                                         .font_family(MONO)
                                                         .text_size(zpx(10.5))
                                                         .text_color(c(t.accent).opacity(0.9))
-                                                        .child(insert.clone()),
+                                                        .child(
+                                                            insert
+                                                                .strip_prefix("/skill:")
+                                                                .map(|n| format!("/{n}"))
+                                                                .unwrap_or_else(|| insert.clone()),
+                                                        ),
                                                 ),
                                         )
                                         .child(
@@ -3170,7 +3181,12 @@ impl KeelWindow {
                             .font_family(MONO)
                             .text_size(zpx(11.5))
                             .text_color(c(t.accent))
-                            .child(insert),
+                            .child(
+                                insert
+                                    .strip_prefix("/skill:")
+                                    .map(|n| format!("/{n}"))
+                                    .unwrap_or_else(|| insert.clone()),
+                            ),
                     ),
             )
             .child(

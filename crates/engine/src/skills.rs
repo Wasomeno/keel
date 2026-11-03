@@ -485,7 +485,7 @@ fn select(found: Vec<Found>) -> Vec<SkillRow> {
             continue;
         }
         rows.push(SkillRow {
-            insert: format!("/skill:{}", skill.name),
+            insert: format!("/{}", skill.name),
             name: skill.name,
             description: skill.description,
             scope: skill.scope.to_string(),
@@ -1342,7 +1342,7 @@ mod tests {
             got.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["pdf-tools"]
         );
-        assert_eq!(got[0].insert, "/skill:pdf-tools");
+        assert_eq!(got[0].insert, "/pdf-tools");
         assert!(got[0].enabled && got[0].removable && got[0].scope == "user");
         let _ = fs::remove_dir_all(&root);
     }

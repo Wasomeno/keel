@@ -1181,7 +1181,15 @@ impl KeelWindow {
                             div()
                                 .flex_none()
                                 .text_color(c(t.text))
-                                .child(command.insert.clone()),
+                                .child(if command.skill {
+                                    command
+                                        .insert
+                                        .strip_prefix("/skill:")
+                                        .map(|n| format!("/{n}"))
+                                        .unwrap_or_else(|| command.insert.clone())
+                                } else {
+                                    command.insert.clone()
+                                }),
                         )
                         .when(command.project, |d| {
                             d.child(

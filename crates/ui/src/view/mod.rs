@@ -3448,7 +3448,8 @@ impl KeelWindow {
                 .iter()
                 .map(|c| (c.name.as_str(), c.description.as_str()))
                 .collect();
-            return crate::mention::rank_commands(&keys, &m.query, MENTION_COMMAND_ROWS)
+            let query = m.query.strip_prefix("skill:").unwrap_or(&m.query);
+            return crate::mention::rank_commands(&keys, query, MENTION_COMMAND_ROWS)
                 .into_iter()
                 .map(|ix| MentionItem::Command(commands[ix].clone()))
                 .collect();
@@ -5674,16 +5675,16 @@ mod refs_tests {
         // A command leads, whatever the order it was picked in.
         let command = MentionItem::Command(SlashCommand {
             name: "brandkit".into(),
-            insert: "/skill:brandkit".into(),
+            insert: "/brandkit".into(),
             description: String::new(),
             skill: true,
             project: true,
         });
         assert_eq!(
             with_refs("make a logo", &[refs[0].clone(), command.clone()]),
-            "/skill:brandkit make a logo\n\n@src/a.json"
+            "/brandkit make a logo\n\n@src/a.json"
         );
-        assert_eq!(with_refs("", &[command]), "/skill:brandkit");
+        assert_eq!(with_refs("", &[command]), "/brandkit");
     }
 }
 

@@ -2301,10 +2301,18 @@ impl Engine {
                 "steer" if live => {
                     // Rule 2: the processed mark is committed before execution.
                     self.mark_committed(state, chat_id, command_id, Outcome::Processed, now);
+                    let steer_text = self.resolve_project_mentions(chat_id, &command.text);
+                    let steer_text = if let Some(agent) = keel_harness::pi_agent_dir() {
+                        let cwd = state.store.session(chat_id).map(|d| d.view().meta.cwd);
+                        let cwd = cwd.as_deref().map(Path::new);
+                        commands::translate_skill_for_harness(&steer_text, cwd, agent)
+                    } else {
+                        steer_text
+                    };
                     let sent = state.live.get(chat_id).is_some_and(|run| {
                         run.control
                             .send(ControlMsg::Steer {
-                                text: self.resolve_project_mentions(chat_id, &command.text),
+                                text: steer_text,
                             })
                             .is_ok()
                     });
@@ -2520,6 +2528,11 @@ impl Engine {
                 &self.project_mention_roots(chat_id, &meta.cwd),
             ),
             None => command.text.clone(),
+        };
+        let initial_text = if let Some(agent) = keel_harness::pi_agent_dir() {
+            commands::translate_skill_for_harness(&initial_text, Some(Path::new(&meta.cwd)), agent)
+        } else {
+            initial_text
         };
         // A session saved on the retired poteto effort runs at `high` (else
         // the model's top level); the harness default when the list isn't

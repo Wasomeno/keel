@@ -3,7 +3,7 @@
 //! message, and Pi expands it when the message arrives: `prompts/*.md` as
 //! `/name` (a subfolder namespaces the name, `a/b.md` → `/a:b`). Skills
 //! come from the same scan as Settings (`skills`): enabled ones only,
-//! including manual-only skills, since `/skill:name` is how those run.
+//! including manual-only skills, since `/name` is how those run.
 //!
 //! A project command wins over a user one with the same name.
 
@@ -72,7 +72,7 @@ pub(crate) fn list_commands_at(cwd: Option<&Path>, agent: &Path, home: &Path) ->
             } else {
                 "user"
             };
-            if seen.insert(format!("skill:{}", skill.name)) {
+            if seen.insert(skill.name.clone()) {
                 out.push(CommandEntry {
                     name: skill.name,
                     insert: skill.insert,
@@ -84,6 +84,44 @@ pub(crate) fn list_commands_at(cwd: Option<&Path>, agent: &Path, home: &Path) ->
         }
     }
     out
+}
+
+/// Translates a leading `/{skill_name}` to `/skill:{skill_name}` for Pi so
+/// that Pi's internal CLI/RPC expands the skill instructions.
+pub fn translate_skill_for_harness(text: &str, cwd: Option<&Path>, agent: &Path) -> String {
+    translate_skill_at(text, cwd, agent, &crate::skills::home_dir())
+}
+
+pub(crate) fn translate_skill_at(
+    text: &str,
+    cwd: Option<&Path>,
+    agent: &Path,
+    home: &Path,
+) -> String {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') || trimmed.starts_with("/skill:") {
+        return text.to_string();
+    }
+    let after_slash = &trimmed[1..];
+    let end_of_cmd = after_slash
+        .find(char::is_whitespace)
+        .unwrap_or(after_slash.len());
+    let cmd_name = &after_slash[..end_of_cmd];
+    if cmd_name.is_empty() {
+        return text.to_string();
+    }
+    let commands = list_commands_at(cwd, agent, home);
+    let is_skill = commands
+        .iter()
+        .any(|c| c.kind == "skill" && c.name == cmd_name);
+    if is_skill {
+        let prefix_len = text.len() - trimmed.len();
+        let leading_ws = &text[..prefix_len];
+        let rest = &after_slash[end_of_cmd..];
+        format!("{leading_ws}/skill:{cmd_name}{rest}")
+    } else {
+        text.to_string()
+    }
 }
 
 fn clip_menu(text: &str) -> String {
@@ -209,7 +247,7 @@ mod tests {
                 ("/frontend:component", "project", "Make a component"),
                 ("/review", "project", "Project review"),
                 ("/deploy", "user", "Deploy to staging"),
-                ("/skill:pdf-tools", "user", "Work with PDFs"),
+                ("/pdf-tools", "user", "Work with PDFs"),
             ]
         );
         assert_eq!(
@@ -236,5 +274,67 @@ mod tests {
             !got.iter().any(|c| c.name.contains("indonesian-natural")
                 || c.insert.contains("indonesian-natural"))
         );
+    }
+
+    #[test]
+    fn translates_skill_to_pi_command() {
+        let tmp = std::env::temp_dir().join(format!("keel-commands-{}", uuid::Uuid::new_v4()));
+        let (agent, project) = (tmp.join("agent"), tmp.join("project"));
+        write(
+            &agent.join("prompts/review.md"),
+            "---\ndescription: Review\n---\nBody",
+        );
+        write(
+            &agent.join("skills/pdf/SKILL.md"),
+            "---\nname: pdf-tools\ndescription: \"Work with PDFs\"\n---\n",
+        );
+
+        assert_eq!(
+            translate_skill_at(
+                "/pdf-tools extract doc.pdf",
+                Some(&project),
+                &agent,
+                &tmp.join("home")
+            ),
+            "/skill:pdf-tools extract doc.pdf"
+        );
+        assert_eq!(
+            translate_skill_at(
+                "/pdf-tools",
+                Some(&project),
+                &agent,
+                &tmp.join("home")
+            ),
+            "/skill:pdf-tools"
+        );
+        assert_eq!(
+            translate_skill_at(
+                "/review the diff",
+                Some(&project),
+                &agent,
+                &tmp.join("home")
+            ),
+            "/review the diff"
+        );
+        assert_eq!(
+            translate_skill_at(
+                "just text",
+                Some(&project),
+                &agent,
+                &tmp.join("home")
+            ),
+            "just text"
+        );
+        assert_eq!(
+            translate_skill_at(
+                "/skill:pdf-tools",
+                Some(&project),
+                &agent,
+                &tmp.join("home")
+            ),
+            "/skill:pdf-tools"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
