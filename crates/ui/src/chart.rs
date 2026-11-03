@@ -38,7 +38,11 @@ impl Chart {
         if spec["component"] != "chart" {
             return None;
         }
-        let labels: Vec<String> = spec["labels"].as_array()?.iter().map(|l| l.as_str().unwrap_or_default().to_string()).collect();
+        let labels: Vec<String> = spec["labels"]
+            .as_array()?
+            .iter()
+            .map(|l| l.as_str().unwrap_or_default().to_string())
+            .collect();
         let series: Vec<Series> = spec["series"]
             .as_array()?
             .iter()
@@ -47,26 +51,52 @@ impl Chart {
                 let values: Vec<Option<f64>> = s["values"]
                     .as_array()?
                     .iter()
-                    .map(|v| if v.is_null() { Some(None) } else { v.as_f64().filter(|v| v.is_finite()).map(Some) })
+                    .map(|v| {
+                        if v.is_null() {
+                            Some(None)
+                        } else {
+                            v.as_f64().filter(|v| v.is_finite()).map(Some)
+                        }
+                    })
                     .collect::<Option<_>>()?;
-                (values.len() == labels.len() && values.iter().flatten().count() >= 2)
-                    .then(|| Series { name: s["name"].as_str().unwrap_or_default().to_string(), values })
+                (values.len() == labels.len() && values.iter().flatten().count() >= 2).then(|| {
+                    Series {
+                        name: s["name"].as_str().unwrap_or_default().to_string(),
+                        values,
+                    }
+                })
             })
             .collect();
         if labels.is_empty() || series.is_empty() {
             return None;
         }
-        let kind = if spec["kind"] == "line" { Kind::Line } else { Kind::Bar };
-        Some(Self { kind, x: spec["x"].as_str().unwrap_or_default().to_string(), labels, series })
+        let kind = if spec["kind"] == "line" {
+            Kind::Line
+        } else {
+            Kind::Bar
+        };
+        Some(Self {
+            kind,
+            x: spec["x"].as_str().unwrap_or_default().to_string(),
+            labels,
+            series,
+        })
     }
 
     /// The value axis: from zero (or the lowest value, if negative) to a
     /// round number at or above the highest, with its tick step.
     pub fn axis(&self) -> (f64, f64, f64) {
-        let values = self.series.iter().flat_map(|s| s.values.iter().flatten().copied());
+        let values = self
+            .series
+            .iter()
+            .flat_map(|s| s.values.iter().flatten().copied());
         let (lo, hi) = values.fold((0f64, 0f64), |(lo, hi), v| (lo.min(v), hi.max(v)));
         let step = nice_step((hi - lo).max(f64::EPSILON) / 5.);
-        ((lo / step).floor() * step, ((hi / step).ceil() * step).max(step), step)
+        (
+            (lo / step).floor() * step,
+            ((hi / step).ceil() * step).max(step),
+            step,
+        )
     }
 
     /// Whether this chart was drawn from a table with these cells: its x
@@ -78,13 +108,20 @@ impl Chart {
             return false;
         };
         rows.len() == self.labels.len()
-            && rows.iter().zip(&self.labels).all(|(row, label)| row.get(x) == Some(&label.as_str()))
-            && self.series.iter().all(|s| header.contains(&s.name.as_str()))
+            && rows
+                .iter()
+                .zip(&self.labels)
+                .all(|(row, label)| row.get(x) == Some(&label.as_str()))
+            && self
+                .series
+                .iter()
+                .all(|s| header.contains(&s.name.as_str()))
     }
 
     /// For the transcript's height memo.
     pub fn content_len(&self) -> usize {
-        self.labels.iter().map(|l| l.len() + 1).sum::<usize>() + self.series.len() * self.labels.len()
+        self.labels.iter().map(|l| l.len() + 1).sum::<usize>()
+            + self.series.len() * self.labels.len()
     }
 
     /// Format this chart as a markdown table.
@@ -99,7 +136,12 @@ impl Chart {
         for (ix, label) in self.labels.iter().enumerate() {
             out.push_str(&format!("| {label} |"));
             for s in &self.series {
-                let val_str = s.values.get(ix).and_then(|v| *v).map(exact).unwrap_or_default();
+                let val_str = s
+                    .values
+                    .get(ix)
+                    .and_then(|v| *v)
+                    .map(exact)
+                    .unwrap_or_default();
                 out.push_str(&format!(" {val_str} |"));
             }
             out.push('\n');
@@ -111,7 +153,11 @@ impl Chart {
 /// 1, 2 or 5 times a power of ten, at or above `raw`.
 fn nice_step(raw: f64) -> f64 {
     let pow = 10f64.powf(raw.log10().floor());
-    [1., 2., 5., 10.].into_iter().map(|m| m * pow).find(|&s| s >= raw).unwrap_or(10. * pow)
+    [1., 2., 5., 10.]
+        .into_iter()
+        .map(|m| m * pow)
+        .find(|&s| s >= raw)
+        .unwrap_or(10. * pow)
 }
 
 /// Plot box inside a chart canvas: left, top, width, height, in px.
@@ -120,7 +166,12 @@ pub fn plot_box(width: f32, height: f32) -> (f32, f32, f32, f32) {
     const RIGHT: f32 = 12.;
     const TOP: f32 = 10.;
     const BOTTOM: f32 = 26.;
-    (LEFT, TOP, (width - LEFT - RIGHT).max(20.), (height - TOP - BOTTOM).max(20.))
+    (
+        LEFT,
+        TOP,
+        (width - LEFT - RIGHT).max(20.),
+        (height - TOP - BOTTOM).max(20.),
+    )
 }
 
 /// The category under a pointer in the plot, if any.
@@ -139,7 +190,13 @@ pub fn hover_rows(chart: &Chart, ix: usize) -> Option<(String, Vec<(usize, Strin
         .series
         .iter()
         .enumerate()
-        .filter_map(|(si, series)| Some((si, series.name.clone(), exact(series.values.get(ix).copied().flatten()?))))
+        .filter_map(|(si, series)| {
+            Some((
+                si,
+                series.name.clone(),
+                exact(series.values.get(ix).copied().flatten()?),
+            ))
+        })
         .collect();
     (!rows.is_empty()).then_some((name, rows))
 }
@@ -148,7 +205,9 @@ pub fn hover_rows(chart: &Chart, ix: usize) -> Option<(String, Vec<(usize, Strin
 pub fn exact(v: f64) -> String {
     let text = format!("{:.2}", v.abs());
     let text = text.trim_end_matches('0').trim_end_matches('.');
-    let (whole, frac) = text.split_once('.').map_or((text, None), |(w, f)| (w, Some(f)));
+    let (whole, frac) = text
+        .split_once('.')
+        .map_or((text, None), |(w, f)| (w, Some(f)));
     let mut grouped = String::new();
     for (i, ch) in whole.chars().enumerate() {
         if i > 0 && (whole.len() - i) % 3 == 0 {
@@ -165,7 +224,13 @@ pub fn exact(v: f64) -> String {
 
 /// A tick or value label: `1.5k`, `40`, `2.5`, `0.25`.
 pub fn label(v: f64) -> String {
-    let trim = |s: String| if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
     if v.abs() >= 1000. {
         format!("{}k", trim(format!("{:.1}", v / 1000.)))
     } else {
@@ -224,7 +289,10 @@ mod tests {
         assert!(chart.is_of(&["crate", "before"], &rows));
         assert!(!chart.is_of(&["crate", "after"], &rows));
         assert!(!chart.is_of(&["crate", "before"], &rows[..1]));
-        assert!(!chart.is_of(&["crate", "before"], &[vec!["engine", "1"], vec!["ui", "2"]]));
+        assert!(!chart.is_of(
+            &["crate", "before"],
+            &[vec!["engine", "1"], vec!["ui", "2"]]
+        ));
     }
 
     #[test]
@@ -233,7 +301,13 @@ mod tests {
         assert_eq!(category_at(&chart, 200., 10.), Some(0));
         assert_eq!(category_at(&chart, 200., 150.), Some(1));
         assert_eq!(category_at(&chart, 200., 200.), None);
-        assert_eq!(hover_rows(&chart, 0).unwrap(), ("ui".to_string(), vec![(0, "before".to_string(), "41.2".to_string())]));
+        assert_eq!(
+            hover_rows(&chart, 0).unwrap(),
+            (
+                "ui".to_string(),
+                vec![(0, "before".to_string(), "41.2".to_string())]
+            )
+        );
     }
 
     #[test]

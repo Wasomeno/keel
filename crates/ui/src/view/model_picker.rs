@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, ElementId, IntoElement, Keystroke, ScrollHandle, Window, div, point, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, ElementId, IntoElement, Keystroke, ScrollHandle, Window, div,
+    point, prelude::*, px,
+};
 use keel_theme::Tokens;
 
 use super::KeelWindow;
@@ -88,7 +91,9 @@ fn fold_amount(state: Option<&(bool, Option<Instant>)>, now: Instant) -> f32 {
         None => 0.,
         Some(&(open, None)) => f32::from(u8::from(open)),
         Some(&(open, Some(at))) => {
-            let p = unit(ease_out_strong(unit(now.saturating_duration_since(at).as_secs_f32() / EXPAND.as_secs_f32())));
+            let p = unit(ease_out_strong(unit(
+                now.saturating_duration_since(at).as_secs_f32() / EXPAND.as_secs_f32(),
+            )));
             if open { p } else { 1. - p }
         }
     }
@@ -97,7 +102,9 @@ fn fold_amount(state: Option<&(bool, Option<Instant>)>, now: Instant) -> f32 {
 /// The fold row's chevron: right (-90°) folded, down open. In radians, since
 /// gpui's `percentage()` only takes 0..=1 and this turns backwards.
 fn chevron_turn(amount: f32) -> gpui::Transformation {
-    gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2 * (1. - unit(amount))))
+    gpui::Transformation::rotate(gpui::radians(
+        -std::f32::consts::FRAC_PI_2 * (1. - unit(amount)),
+    ))
 }
 
 /// The older-versions chevron: down folded, up open.
@@ -107,8 +114,16 @@ fn older_turn(amount: f32) -> gpui::Transformation {
 
 /// The popover's width for these names (a rough measure at the 13 px body).
 fn menu_width(models: &[ModelOption]) -> f32 {
-    let longest = models.iter().map(|m| m.name.chars().count()).max().unwrap_or(0) as f32;
-    let note = if models.iter().any(|m| m.context_window.is_some()) { 48. } else { 0. };
+    let longest = models
+        .iter()
+        .map(|m| m.name.chars().count())
+        .max()
+        .unwrap_or(0) as f32;
+    let note = if models.iter().any(|m| m.context_window.is_some()) {
+        48.
+    } else {
+        0.
+    };
     // left edge + gap + trailing check + right inset + panel padding
     (longest * 7.4 + PAD_X + 8. + 14. + PAD_R + 8. + note).clamp(MENU_MIN_W, MENU_MAX_W)
 }
@@ -118,17 +133,32 @@ impl KeelWindow {
     pub(super) fn model_menu_opened(&mut self) {
         let scroll = std::mem::take(&mut self.model_menu.scroll);
         scroll.set_offset(point(px(0.), px(0.)));
-        self.model_menu = ModelMenu { scroll, fresh: true, reveal: Some(true), ..ModelMenu::default() };
+        self.model_menu = ModelMenu {
+            scroll,
+            fresh: true,
+            reveal: Some(true),
+            ..ModelMenu::default()
+        };
     }
 
     /// Repaint while a fold moves.
     pub(super) fn model_menu_animating(&self) -> bool {
-        self.show_model_picker && self.model_menu.expanded.values().any(|(_, at)| at.is_some_and(|at| at.elapsed() < EXPAND))
+        self.show_model_picker
+            && self
+                .model_menu
+                .expanded
+                .values()
+                .any(|(_, at)| at.is_some_and(|at| at.elapsed() < EXPAND))
     }
 
     /// Keys while the menu is open, ahead of the search field's own
     /// bindings. True when used.
-    pub(super) fn model_menu_key(&mut self, key: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn model_menu_key(
+        &mut self,
+        key: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.show_model_picker {
             return false;
         }
@@ -142,7 +172,11 @@ impl KeelWindow {
                 let n = self.model_menu.nav.len();
                 if n > 0 {
                     let hi = self.model_menu.hi.min(n - 1);
-                    self.model_menu.hi = if key.key == "up" { hi.saturating_sub(1) } else { (hi + 1).min(n - 1) };
+                    self.model_menu.hi = if key.key == "up" {
+                        hi.saturating_sub(1)
+                    } else {
+                        (hi + 1).min(n - 1)
+                    };
                     self.model_menu.reveal = Some(false);
                     cx.notify();
                 }
@@ -159,8 +193,14 @@ impl KeelWindow {
             // On a fold row, Left folds and Right unfolds; elsewhere they
             // move the search field's cursor.
             "left" | "right" => {
-                let Some(Nav::Fold(fold)) = on else { return false };
-                let open = self.model_menu.expanded.get(&fold).is_some_and(|(open, _)| *open);
+                let Some(Nav::Fold(fold)) = on else {
+                    return false;
+                };
+                let open = self
+                    .model_menu
+                    .expanded
+                    .get(&fold)
+                    .is_some_and(|(open, _)| *open);
                 if open != (key.key == "right") {
                     self.model_menu_toggle(fold, cx);
                 }
@@ -179,7 +219,12 @@ impl KeelWindow {
     fn model_menu_pick(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let harness = self.selected_harness.clone();
         if !harness.is_empty() {
-            let recent = self.state.ui_settings.recent_models.entry(harness).or_default();
+            let recent = self
+                .state
+                .ui_settings
+                .recent_models
+                .entry(harness)
+                .or_default();
             if model_menu::push_recent(recent, &id) {
                 self.state.save_settings();
             }
@@ -212,7 +257,10 @@ impl KeelWindow {
                 .map(|(k, _)| k[2..].to_string())
                 .collect();
             providers.sort();
-            self.state.ui_settings.open_model_providers.insert(self.selected_harness.clone(), providers);
+            self.state
+                .ui_settings
+                .open_model_providers
+                .insert(self.selected_harness.clone(), providers);
             self.state.save_settings();
         }
         self.kick_motion(cx);
@@ -228,10 +276,22 @@ impl KeelWindow {
 
     /// The search box and the list, for [`Self::render_picker_menu`]. Also
     /// returns the popover's width.
-    pub(super) fn render_model_menu(&mut self, mut items: Vec<AnyElement>, t: Tokens, cx: &mut Context<Self>) -> (Vec<AnyElement>, f32) {
+    pub(super) fn render_model_menu(
+        &mut self,
+        mut items: Vec<AnyElement>,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, f32) {
         let harness = self.selected_harness.clone();
-        let models = if self.demo_model_loader { None } else { self.models.get(&harness).cloned() };
-        let list = models.as_ref().map(|l| l.models.clone()).unwrap_or_default();
+        let models = if self.demo_model_loader {
+            None
+        } else {
+            self.models.get(&harness).cloned()
+        };
+        let list = models
+            .as_ref()
+            .map(|l| l.models.clone())
+            .unwrap_or_default();
         let width = menu_width(&list);
         let query = self.picker_filter.read(cx).value().trim().to_lowercase();
         if query != self.model_menu.query {
@@ -241,7 +301,15 @@ impl KeelWindow {
             self.model_menu.scroll.set_offset(point(px(0.), px(0.)));
         }
         // A fixed header: the search, then a hairline the list scrolls under.
-        let mut search = vec![self.picker_search_box(Icon::Search, t), div().flex_none().mx(zpx(-4.)).h(zpx(1.)).bg(c(t.border)).into_any_element()];
+        let mut search = vec![
+            self.picker_search_box(Icon::Search, t),
+            div()
+                .flex_none()
+                .mx(zpx(-4.))
+                .h(zpx(1.))
+                .bg(c(t.border))
+                .into_any_element(),
+        ];
         search.append(&mut items);
         let mut items = search;
 
@@ -262,7 +330,13 @@ impl KeelWindow {
         let reduced = self.reduced();
         match models {
             None if self.demo_model_loader || self.models_loading.contains(&harness) => {
-                items.push(div().flex().flex_col().children(super::composer_view::model_skeleton(t, clock, reduced)).into_any_element());
+                items.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .children(super::composer_view::model_skeleton(t, clock, reduced))
+                        .into_any_element(),
+                );
                 return (items, width);
             }
             None => return (items, width),
@@ -317,11 +391,22 @@ impl KeelWindow {
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(c(t.text_muted))
                 .child(div().flex_none().whitespace_nowrap().child(name))
-                .child(div().flex_none().font_weight(gpui::FontWeight::NORMAL).text_color(c(t.text_faint)).child(count.to_string()))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(c(t.text_faint))
+                        .child(count.to_string()),
+                )
                 .child(div().flex_1().min_w(zpx(8.)))
         };
         // A foldable provider header: the chevron trails at the right edge.
-        let provider_head = |key: String, name: String, count: usize, amount: f32, ix: usize, cx: &mut Context<Self>| {
+        let provider_head = |key: String,
+                             name: String,
+                             count: usize,
+                             amount: f32,
+                             ix: usize,
+                             cx: &mut Context<Self>| {
             let k = key.clone();
             provider_inner(name, count)
                 .id(ElementId::Name(format!("model-fold-{key}").into()))
@@ -334,10 +419,18 @@ impl KeelWindow {
                         .flex()
                         .justify_center()
                         .text_color(c(t.text_faint))
-                        .child(Icon::ChevronDown.el(zpx(11.)).with_transformation(chevron_turn(amount))),
+                        .child(
+                            Icon::ChevronDown
+                                .el(zpx(11.))
+                                .with_transformation(chevron_turn(amount)),
+                        ),
                 )
-                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| this.model_menu_hover(ix, cx)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.model_menu_toggle(k.clone(), cx)))
+                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    this.model_menu_hover(ix, cx)
+                }))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.model_menu_toggle(k.clone(), cx)
+                }))
                 .into_any_element()
         };
         // One model line: 13 px name, with the check on the left.
@@ -345,7 +438,9 @@ impl KeelWindow {
         // apart; `older` lines read one step quieter.
         let row = |key: &str, m: &ModelOption, ix: usize, older: bool, cx: &mut Context<Self>| {
             let (id, tip) = (m.id.clone(), m.id.clone());
-            let note = m.context_window.map(|w| format!("{} ctx", crate::usage::compact(w)));
+            let note = m
+                .context_window
+                .map(|w| format!("{} ctx", crate::usage::compact(w)));
             let selected = m.id == current;
             div()
                 .id(ElementId::Name(format!("model-{key}-{}", m.id).into()))
@@ -372,45 +467,74 @@ impl KeelWindow {
                 )
                 .child(div().flex_none().whitespace_nowrap().child(m.name.clone()))
                 .child(div().flex_1().min_w(zpx(8.)))
-                .when_some(note, |d, n| d.child(div().flex_none().t_caption().text_color(c(t.text_faint)).child(n)))
-                .tooltip(move |_, cx| cx.new(|_| Tip::new(tip.clone(), t)).into()).tooltip_show_delay(crate::view::tooltip::delay())
-                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| this.model_menu_hover(ix, cx)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.model_menu_pick(id.clone(), window, cx)))
+                .when_some(note, |d, n| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child(n),
+                    )
+                })
+                .tooltip(move |_, cx| cx.new(|_| Tip::new(tip.clone(), t)).into())
+                .tooltip_show_delay(crate::view::tooltip::delay())
+                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    this.model_menu_hover(ix, cx)
+                }))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.model_menu_pick(id.clone(), window, cx)
+                }))
                 .into_any_element()
         };
         // The provider's last line: "Show N older" / "Hide older", on the
         // model rows' geometry, 12 px faint, with a small trailing chevron.
-        let older_toggle = |key: String, n: usize, open: bool, amount: f32, ix: usize, cx: &mut Context<Self>| {
-            let k = key.clone();
-            div()
-                .id(ElementId::Name(format!("model-fold-{key}").into()))
-                .flex_none()
-                .h(zpx(ROW_H))
-                .pl(zpx(PAD_X))
-                .pr(zpx(PAD_R))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .rounded(RADIUS_SM)
-                .t_small()
-                .text_color(c(if ix == hi { t.text_muted } else { t.text_faint }))
-                .cursor_pointer()
-                .when(ix == hi, |d| d.bg(c(t.hover)))
-                .child(div().w(zpx(14.)).flex_none())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(zpx(4.))
-                        .child(div().flex_none().whitespace_nowrap().child(model_menu::older_label(n, open)))
-                        .child(div().flex_none().flex().items_center().child(Icon::ChevronDown.el(zpx(10.)).with_transformation(older_turn(amount)))),
-                )
-                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| this.model_menu_hover(ix, cx)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.model_menu_toggle(k.clone(), cx)))
-                .into_any_element()
-        };
+        let older_toggle =
+            |key: String, n: usize, open: bool, amount: f32, ix: usize, cx: &mut Context<Self>| {
+                let k = key.clone();
+                div()
+                    .id(ElementId::Name(format!("model-fold-{key}").into()))
+                    .flex_none()
+                    .h(zpx(ROW_H))
+                    .pl(zpx(PAD_X))
+                    .pr(zpx(PAD_R))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_SM)
+                    .t_small()
+                    .text_color(c(if ix == hi { t.text_muted } else { t.text_faint }))
+                    .cursor_pointer()
+                    .when(ix == hi, |d| d.bg(c(t.hover)))
+                    .child(div().w(zpx(14.)).flex_none())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(4.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .child(model_menu::older_label(n, open)),
+                            )
+                            .child(
+                                div().flex_none().flex().items_center().child(
+                                    Icon::ChevronDown
+                                        .el(zpx(10.))
+                                        .with_transformation(older_turn(amount)),
+                                ),
+                            ),
+                    )
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        this.model_menu_hover(ix, cx)
+                    }))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.model_menu_toggle(k.clone(), cx)
+                    }))
+                    .into_any_element()
+            };
         // Clips a fold's body to its share of `full` (unscaled px).
         let fold_body = |full: f32, amount: f32, children: Vec<AnyElement>| {
             div()
@@ -442,20 +566,35 @@ impl KeelWindow {
                     spans.push((y, z(ROW_H)));
                     y += z(ROW_H);
                 }
-                lines.push(div().flex_none().pt(zpx(DIVIDER_GAP)).child(div().h(zpx(1.)).bg(c(t.border))).into_any_element());
+                lines.push(
+                    div()
+                        .flex_none()
+                        .pt(zpx(DIVIDER_GAP))
+                        .child(div().h(zpx(1.)).bg(c(t.border)))
+                        .into_any_element(),
+                );
                 y += z(DIVIDER_GAP + 1.);
             }
             lines.push(section_label("All models"));
             y += z(LABEL_H);
             let sections = model_menu::sections(&list);
             if self.model_menu.fresh {
-                let saved = self.state.ui_settings.open_model_providers.get(&harness).map(Vec::as_slice);
+                let saved = self
+                    .state
+                    .ui_settings
+                    .open_model_providers
+                    .get(&harness)
+                    .map(Vec::as_slice);
                 let open = model_menu::open_providers(saved, &sections, current_ix);
                 for s in &sections {
                     let is_open = open.contains(&s.provider);
-                    self.model_menu.expanded.insert(provider_key(&s.provider), (is_open, None));
+                    self.model_menu
+                        .expanded
+                        .insert(provider_key(&s.provider), (is_open, None));
                     let older_current = current_ix.is_some_and(|i| s.older.contains(&i));
-                    self.model_menu.expanded.insert(older_key(&s.provider), (is_open && older_current, None));
+                    self.model_menu
+                        .expanded
+                        .insert(older_key(&s.provider), (is_open && older_current, None));
                 }
             }
             for (si, s) in sections.into_iter().enumerate() {
@@ -471,14 +610,26 @@ impl KeelWindow {
                 nav.push(Nav::Fold(pkey.clone()));
                 spans.push((y, z(PROV_H)));
                 y += z(PROV_H);
-                lines.push(provider_head(pkey, s.provider.clone(), s.count(), pamount, ix, cx));
+                lines.push(provider_head(
+                    pkey,
+                    s.provider.clone(),
+                    s.count(),
+                    pamount,
+                    ix,
+                    cx,
+                ));
                 if pamount <= 0. {
                     continue;
                 }
                 // The body; only an open provider's lines take the keyboard.
                 let mut body = Vec::new();
                 let mut full = 0f32;
-                let line = |nav: &mut Vec<Nav>, spans: &mut Vec<(f32, f32)>, y: &mut f32, n: Option<Nav>, h: f32| -> usize {
+                let line = |nav: &mut Vec<Nav>,
+                            spans: &mut Vec<(f32, f32)>,
+                            y: &mut f32,
+                            n: Option<Nav>,
+                            h: f32|
+                 -> usize {
                     match n.filter(|_| popen) {
                         Some(n) => {
                             nav.push(n);
@@ -501,7 +652,13 @@ impl KeelWindow {
                         line(&mut nav, &mut spans, &mut y, None, FAMILY_GAP);
                         full += FAMILY_GAP;
                     }
-                    let ix = line(&mut nav, &mut spans, &mut y, Some(Nav::Model(list[i].id.clone())), ROW_H);
+                    let ix = line(
+                        &mut nav,
+                        &mut spans,
+                        &mut y,
+                        Some(Nav::Model(list[i].id.clone())),
+                        ROW_H,
+                    );
                     body.push(row("list", &list[i], ix, false, cx));
                     full += ROW_H;
                 }
@@ -513,14 +670,30 @@ impl KeelWindow {
                     if oamount > 0. {
                         let mut older = Vec::new();
                         for &i in &s.older {
-                            let ix = if oopen { line(&mut nav, &mut spans, &mut y, Some(Nav::Model(list[i].id.clone())), ROW_H) } else { usize::MAX };
+                            let ix = if oopen {
+                                line(
+                                    &mut nav,
+                                    &mut spans,
+                                    &mut y,
+                                    Some(Nav::Model(list[i].id.clone())),
+                                    ROW_H,
+                                )
+                            } else {
+                                usize::MAX
+                            };
                             older.push(row("older", &list[i], ix, true, cx));
                         }
                         let ofull = s.older.len() as f32 * ROW_H;
                         body.push(fold_body(ofull, oamount, older));
                         full += ofull * oamount;
                     }
-                    let ix = line(&mut nav, &mut spans, &mut y, Some(Nav::Fold(okey.clone())), ROW_H);
+                    let ix = line(
+                        &mut nav,
+                        &mut spans,
+                        &mut y,
+                        Some(Nav::Fold(okey.clone())),
+                        ROW_H,
+                    );
                     body.push(older_toggle(okey, s.older.len(), oopen, oamount, ix, cx));
                     full += ROW_H;
                 }
@@ -529,7 +702,17 @@ impl KeelWindow {
         } else {
             let hits = model_menu::search_by_provider(&list, &query);
             if hits.is_empty() {
-                lines.push(div().h(zpx(ROW_H)).pl(zpx(PAD_X)).flex().items_center().t_small().text_color(c(t.text_muted)).child("No models match").into_any_element());
+                lines.push(
+                    div()
+                        .h(zpx(ROW_H))
+                        .pl(zpx(PAD_X))
+                        .flex()
+                        .items_center()
+                        .t_small()
+                        .text_color(c(t.text_muted))
+                        .child("No models match")
+                        .into_any_element(),
+                );
             }
             // Flat, folds ignored, still under their providers.
             for (pi, (provider, hits)) in hits.into_iter().enumerate() {
@@ -552,7 +735,10 @@ impl KeelWindow {
 
         let menu = &mut self.model_menu;
         if std::mem::take(&mut menu.fresh) {
-            menu.hi = nav.iter().position(|n| *n == Nav::Model(current.clone())).unwrap_or(0);
+            menu.hi = nav
+                .iter()
+                .position(|n| *n == Nav::Model(current.clone()))
+                .unwrap_or(0);
             // Re-render so the highlight shows on the current model.
             cx.notify();
         }
@@ -575,7 +761,8 @@ impl KeelWindow {
                     } else {
                         at
                     };
-                    menu.scroll.set_offset(point(px(0.), px(-next.clamp(0., max))));
+                    menu.scroll
+                        .set_offset(point(px(0.), px(-next.clamp(0., max))));
                     menu.reveal = None;
                 }
                 // Not measured yet (the first frame): next frame.
@@ -623,21 +810,27 @@ pub(super) fn model_menu_shell(
     items: Vec<AnyElement>,
 ) -> AnyElement {
     use gpui::AnimationExt as _;
-    let panel = super::menu_panel(id, t, width, up, items).overflow_hidden().when(leaving.is_none(), |d| d.on_mouse_down_out(on_dismiss));
+    let panel = super::menu_panel(id, t, width, up, items)
+        .overflow_hidden()
+        .when(leaving.is_none(), |d| d.on_mouse_down_out(on_dismiss));
     let rise = if up { 4. } else { -4. };
     let curve = |p: f32| ease_out_strong(p);
     let el = match leaving {
         Some(_) if reduced => gpui::Empty.into_any_element(),
         _ if reduced => panel.into_any_element(),
         None => panel
-            .with_animation(ElementId::Name(format!("{id}-in").into()), gpui::Animation::new(MENU_IN).with_easing(curve), move |el, d| {
-                el.opacity(d).relative().top(zpx(rise * (1. - d)))
-            })
+            .with_animation(
+                ElementId::Name(format!("{id}-in").into()),
+                gpui::Animation::new(MENU_IN).with_easing(curve),
+                move |el, d| el.opacity(d).relative().top(zpx(rise * (1. - d))),
+            )
             .into_any_element(),
         Some(n) => panel
-            .with_animation(ElementId::Name(format!("{id}-out-{n}").into()), gpui::Animation::new(MENU_OUT).with_easing(curve), move |el, d| {
-                el.opacity(1. - d).relative().top(zpx(rise * d))
-            })
+            .with_animation(
+                ElementId::Name(format!("{id}-out-{n}").into()),
+                gpui::Animation::new(MENU_OUT).with_easing(curve),
+                move |el, d| el.opacity(1. - d).relative().top(zpx(rise * d)),
+            )
             .into_any_element(),
     };
     super::anchored_menu_positioned(anchor, at, el)

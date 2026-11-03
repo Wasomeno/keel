@@ -1,6 +1,5 @@
 //! Window-level keyboard actions and the hold-⌘ key-cap hints.
 
-
 use gpui::{Context, Div, prelude::*};
 use keel_proto::ChatStatus;
 
@@ -22,33 +21,59 @@ impl KeelWindow {
             })
             .on_action(cx.listener(|this, _: &NewChat, _, cx| this.create_new_session(None, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.set_zoom(crate::style::zoom_step(crate::style::zoom(), true), cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.set_zoom(crate::style::zoom_step(crate::style::zoom(), false), cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.set_zoom(crate::style::zoom_step(crate::style::zoom(), true), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.set_zoom(crate::style::zoom_step(crate::style::zoom(), false), cx)
+            }))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.set_zoom(1.0, cx)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.composer.update(cx, |s, cx| s.focus(window, cx));
             }))
-            .on_action(cx.listener(|this, _: &AcceptPromptSuggestion, window, cx| this.accept_suggestion(window, cx)))
+            .on_action(cx.listener(|this, _: &AcceptPromptSuggestion, window, cx| {
+                this.accept_suggestion(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ExpandSteps, _, cx| this.toggle_expand_steps(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.toggle_sidebar(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| this.toggle_terminal(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleBrowser, window, cx| this.toggle_browser(window, cx)))
-            .on_action(cx.listener(|this, _: &BrowserAddress, window, cx| this.focus_browser_address(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                    this.toggle_terminal(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleBrowser, window, cx| this.toggle_browser(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &BrowserAddress, window, cx| {
+                this.focus_browser_address(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &BrowserReload, _, cx| this.browser_reload(cx)))
             .on_action(cx.listener(|this, _: &BrowserBack, _, _| this.browser_history(false)))
             .on_action(cx.listener(|this, _: &BrowserForward, _, _| this.browser_history(true)))
             .on_action(cx.listener(|this, _: &BrowserExpand, _, cx| this.toggle_browser_expand(cx)))
-            .on_action(cx.listener(|this, _: &BrowserEndSession, window, cx| this.end_browser_session(window, cx)))
-            .on_action(cx.listener(|this, _: &BrowserNewTab, window, cx| this.browser_new_tab(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleFiles, window, cx| this.toggle_files(window, cx)))
+            .on_action(cx.listener(|this, _: &BrowserEndSession, window, cx| {
+                this.end_browser_session(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &BrowserNewTab, window, cx| this.browser_new_tab(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleFiles, window, cx| this.toggle_files(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &FilesSave, _, cx| this.files_save(false, cx)))
-            .on_action(cx.listener(|this, _: &BrowserCloseTab, window, cx| this.browser_close_active_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &BrowserCloseTab, window, cx| {
+                this.browser_close_active_tab(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &TimerStartPause, _, cx| this.timer_start_pause(cx)))
             .on_action(cx.listener(|this, _: &TimerReset, _, cx| this.timer_reset(cx)))
-            .on_action(cx.listener(|this, _: &ToggleTimer, _, cx| this.timer_set_hidden(!this.timer.hidden, cx)))
-            .on_action(cx.listener(|this, _: &TrackMergeRequest, window, cx| this.mr_open_prompt(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleTimer, _, cx| {
+                this.timer_set_hidden(!this.timer.hidden, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TrackMergeRequest, window, cx| {
+                this.mr_open_prompt(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NextChat, _, cx| this.step_chat(1, cx)))
             .on_action(cx.listener(|this, _: &PrevChat, _, cx| this.step_chat(-1, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
@@ -64,7 +89,10 @@ impl KeelWindow {
                 }
             }))
             .on_action(cx.listener(|this, _: &StopRun, _, cx| {
-                let busy = matches!(this.active_status(), Some(ChatStatus::Running | ChatStatus::AwaitingInput));
+                let busy = matches!(
+                    this.active_status(),
+                    Some(ChatStatus::Running | ChatStatus::AwaitingInput)
+                );
                 if busy {
                     this.handle_interrupt(cx);
                 }
@@ -99,7 +127,8 @@ impl KeelWindow {
                 let m = event.keystroke.modifiers;
                 if !this.lightbox_fx.shown() && this.dotify_key(event, window, cx) {
                     cx.stop_propagation();
-                } else if let Some(super::Lightbox::Diagram { source, view, .. }) = this.lightbox.as_ref().filter(|_| this.lightbox_fx.shown())
+                } else if let Some(super::Lightbox::Diagram { source, view, .. }) =
+                    this.lightbox.as_ref().filter(|_| this.lightbox_fx.shown())
                     && !m.secondary()
                     && matches!(key, "=" | "+" | "-" | "0")
                 {
@@ -115,7 +144,8 @@ impl KeelWindow {
                     cx.stop_propagation();
                 } else if key == "escape" && this.close_menus(cx) {
                     cx.stop_propagation();
-                } else if key == "v" && m.secondary() && !m.shift && !m.alt && this.paste_images(cx) {
+                } else if key == "v" && m.secondary() && !m.shift && !m.alt && this.paste_images(cx)
+                {
                     // An image paste attaches; text pastes reach the field as usual.
                     cx.stop_propagation();
                 }
@@ -128,7 +158,12 @@ impl KeelWindow {
             return;
         }
         let len = rows.len() as isize;
-        let next = match self.state.active_tab.as_ref().and_then(|id| rows.iter().position(|r| r == id)) {
+        let next = match self
+            .state
+            .active_tab
+            .as_ref()
+            .and_then(|id| rows.iter().position(|r| r == id))
+        {
             Some(ix) => (ix as isize + delta).rem_euclid(len),
             None if delta < 0 => len - 1,
             None => 0,
@@ -152,6 +187,10 @@ impl KeelWindow {
 
     /// Close every menu and picker. True when one was open.
     pub(super) fn close_menus(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.skills.modal_skill.is_some() {
+            self.dismiss_skill_modal(cx);
+            return true;
+        }
         let timer_menu = self.timer_close_menu();
         let mr_menu = self.mr_close_menus();
         let scope_menu = self.projects.close_scope();

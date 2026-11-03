@@ -8,17 +8,14 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, point, px, AnyElement, Context, ElementId, FontWeight, IntoElement,
-    ParentElement, Styled, Window, prelude::*,
+    AnyElement, Context, ElementId, FontWeight, IntoElement, ParentElement, Styled, Window, div,
+    point, prelude::*, px,
 };
 use keel_proto::DisplayStatus;
 use keel_theme::Tokens;
 
 use crate::icons::Icon;
-use crate::style::{
-    c, zpx, KeelStyled, MONO, RADIUS_LG, RADIUS_SM,
-    CAPTION, SMALL, TITLE,
-};
+use crate::style::{CAPTION, KeelStyled, MONO, RADIUS_LG, RADIUS_SM, SMALL, TITLE, c, zpx};
 
 /// Width of the summary card popover.
 pub const SUMMARY_CARD_WIDTH: f32 = 340.;
@@ -85,25 +82,34 @@ impl ChatSummary {
             chat.title.clone()
         };
 
-        let git = diff.filter(|d| d.additions > 0 || d.deletions > 0 || d.files > 0).map(|d| {
-            SessionGitDelta {
-                branch: if chat.branch.is_empty() { "HEAD".into() } else { chat.branch.clone() },
+        let git = diff
+            .filter(|d| d.additions > 0 || d.deletions > 0 || d.files > 0)
+            .map(|d| SessionGitDelta {
+                branch: if chat.branch.is_empty() {
+                    "HEAD".into()
+                } else {
+                    chat.branch.clone()
+                },
                 added: d.additions,
                 removed: d.deletions,
                 file_count: d.files,
-            }
-        });
+            });
 
         let summary = match (&git, status) {
-            (Some(g), _) => format!("Modified {} files (+{} / −{}) on {}.", g.file_count, g.added, g.removed, g.branch),
+            (Some(g), _) => format!(
+                "Modified {} files (+{} / −{}) on {}.",
+                g.file_count, g.added, g.removed, g.branch
+            ),
             (None, DisplayStatus::Running) => "Working on active turn in workspace.".into(),
             (None, DisplayStatus::AwaitingInput) => "Awaiting input from user to continue.".into(),
             (None, DisplayStatus::Aborted) => "Session was stopped.".into(),
-            (None, _) => if chat.branch.is_empty() {
-                "Clean working tree. Ready for prompt.".into()
-            } else {
-                format!("Clean working tree on {}.", chat.branch)
-            },
+            (None, _) => {
+                if chat.branch.is_empty() {
+                    "Clean working tree. Ready for prompt.".into()
+                } else {
+                    format!("Clean working tree on {}.", chat.branch)
+                }
+            }
         };
 
         let last_handoff = match status {
@@ -123,8 +129,15 @@ impl ChatSummary {
         };
 
         let total_tokens = chat.usage.total();
-        let token_usage = if total_tokens > 0 { Some(total_tokens) } else { None };
-        let context_percent = chat.usage.fill().map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u8);
+        let token_usage = if total_tokens > 0 {
+            Some(total_tokens)
+        } else {
+            None
+        };
+        let context_percent = chat
+            .usage
+            .fill()
+            .map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u8);
 
         let branch = if !chat.branch.is_empty() {
             chat.branch.clone()
@@ -145,7 +158,11 @@ impl ChatSummary {
             model: model_display.or_else(|| (!chat.model.is_empty()).then(|| chat.model.clone())),
             token_usage,
             context_percent,
-            updated_at: if chat.last_message_at > 0 { chat.last_message_at } else { now_ms },
+            updated_at: if chat.last_message_at > 0 {
+                chat.last_message_at
+            } else {
+                now_ms
+            },
         }
     }
 }
@@ -195,7 +212,13 @@ pub struct SummaryMotionLook {
 impl SessionSummaryHover {
     /// Pointer entered (`on == true`) or left (`on == false`) chat `chat_id`.
     /// Returns `Some(delay)` if cold delay timer should be started.
-    pub fn hover(&mut self, chat_id: String, anchor_y: f32, on: bool, now: Instant) -> Option<Duration> {
+    pub fn hover(
+        &mut self,
+        chat_id: String,
+        anchor_y: f32,
+        on: bool,
+        now: Instant,
+    ) -> Option<Duration> {
         if !on {
             if self.suppressed.as_deref() == Some(&chat_id) {
                 self.suppressed = None;
@@ -206,7 +229,8 @@ impl SessionSummaryHover {
             if let Some((s, cur_anchor_y, _, _)) = &self.shown {
                 if s == &chat_id {
                     let exit_y = if let Some(tr) = &self.transition {
-                        let elapsed = now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0 / SUMMARY_SWITCH_MS;
+                        let elapsed = now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0
+                            / SUMMARY_SWITCH_MS;
                         let p = crate::motion::ease_out_strong(elapsed.clamp(0.0, 1.0));
                         tr.1 + (tr.2 - tr.1) * p
                     } else {
@@ -222,14 +246,20 @@ impl SessionSummaryHover {
         }
 
         self.hovered = Some((chat_id.clone(), now));
-        if self.suppressed.as_deref() == Some(&chat_id) || self.shown.as_ref().is_some_and(|(s, _, _, _)| s == &chat_id) {
+        if self.suppressed.as_deref() == Some(&chat_id)
+            || self
+                .shown
+                .as_ref()
+                .is_some_and(|(s, _, _, _)| s == &chat_id)
+        {
             return None;
         }
 
         if self.warm(now) {
             // Warm switch: sleek transition across adjacent chat sessions
             let (from_id, current_y) = if let Some(tr) = &self.transition {
-                let elapsed = now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0 / SUMMARY_SWITCH_MS;
+                let elapsed =
+                    now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0 / SUMMARY_SWITCH_MS;
                 let p = crate::motion::ease_out_strong(elapsed.clamp(0.0, 1.0));
                 let cur = tr.1 + (tr.2 - tr.1) * p;
                 (tr.0.clone(), cur)
@@ -253,7 +283,10 @@ impl SessionSummaryHover {
     }
 
     fn warm(&self, now: Instant) -> bool {
-        self.shown.is_some() || self.hidden_at.is_some_and(|at| now.saturating_duration_since(at) < SUMMARY_WARM_WINDOW)
+        self.shown.is_some()
+            || self
+                .hidden_at
+                .is_some_and(|at| now.saturating_duration_since(at) < SUMMARY_WARM_WINDOW)
     }
 
     /// The hover delay that began at `since` ran out: show if pointer is still on that chat.
@@ -277,7 +310,8 @@ impl SessionSummaryHover {
         self.suppressed = Some(chat_id.to_string());
         if let Some((s, target_anchor_y, _, _)) = self.shown.take() {
             let current_y = if let Some(tr) = self.transition.take() {
-                let elapsed = now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0 / SUMMARY_SWITCH_MS;
+                let elapsed =
+                    now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0 / SUMMARY_SWITCH_MS;
                 let p = crate::motion::ease_out_strong(elapsed.clamp(0.0, 1.0));
                 tr.1 + (tr.2 - tr.1) * p
             } else {
@@ -328,7 +362,9 @@ impl SessionSummaryHover {
             (1.0, 0.0, 0.0, false)
         };
 
-        let (current_anchor_y, content_opacity, content_dy, trans_moving) = if let Some(tr) = &self.transition {
+        let (current_anchor_y, content_opacity, content_dy, trans_moving) = if let Some(tr) =
+            &self.transition
+        {
             let x = now.saturating_duration_since(tr.3).as_secs_f32() * 1000.0 / SUMMARY_SWITCH_MS;
             if reduced || x >= 1.0 {
                 self.transition = None;
@@ -380,7 +416,10 @@ fn render_header(summary: &ChatSummary, status: DisplayStatus, t: Tokens) -> imp
         DisplayStatus::Aborted | DisplayStatus::Unknown => ("Stopped", t.text_faint, t.text_faint),
     };
 
-    let branch = summary.git.as_ref().map(|g| g.branch.clone())
+    let branch = summary
+        .git
+        .as_ref()
+        .map(|g| g.branch.clone())
         .or_else(|| (!summary.branch.is_empty()).then(|| summary.branch.clone()))
         .unwrap_or_else(|| "no repo".into());
     let time_ago = time_ago_str(summary.updated_at);
@@ -400,19 +439,14 @@ fn render_header(summary: &ChatSummary, status: DisplayStatus, t: Tokens) -> imp
                 .py(zpx(2.))
                 .rounded_full()
                 .bg(c(bg_tint).opacity(0.12))
-                .child(
-                    div()
-                        .size(zpx(6.))
-                        .rounded_full()
-                        .bg(c(dot_color))
-                )
+                .child(div().size(zpx(6.)).rounded_full().bg(c(dot_color)))
                 .child(
                     div()
                         .type_step(CAPTION)
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(c(dot_color))
-                        .child(status_text)
-                )
+                        .child(status_text),
+                ),
         )
         .child(
             div()
@@ -429,10 +463,10 @@ fn render_header(summary: &ChatSummary, status: DisplayStatus, t: Tokens) -> imp
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(branch)
+                        .child(branch),
                 )
                 .child(div().child("·"))
-                .child(div().child(time_ago))
+                .child(div().child(time_ago)),
         )
 }
 
@@ -450,7 +484,7 @@ fn render_objective(summary: &ChatSummary, t: Tokens) -> impl IntoElement {
                 .max_h(zpx(36.))
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(summary.objective.clone())
+                .child(summary.objective.clone()),
         )
         .child(
             div()
@@ -460,7 +494,7 @@ fn render_objective(summary: &ChatSummary, t: Tokens) -> impl IntoElement {
                 .max_h(zpx(48.))
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(summary.summary.clone())
+                .child(summary.summary.clone()),
         )
 }
 
@@ -494,15 +528,15 @@ fn render_handoff(handoff: &SessionHandoff, t: Tokens) -> impl IntoElement {
                     div()
                         .flex_none()
                         .text_color(c(accent_color))
-                        .child(icon.el(zpx(12.)))
+                        .child(icon.el(zpx(12.))),
                 )
                 .child(
                     div()
                         .type_step(CAPTION)
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(c(t.text))
-                        .child(label)
-                )
+                        .child(label),
+                ),
         )
         .child(
             div()
@@ -513,11 +547,15 @@ fn render_handoff(handoff: &SessionHandoff, t: Tokens) -> impl IntoElement {
                 .max_h(zpx(45.))
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(message.to_string())
+                .child(message.to_string()),
         )
 }
 
-fn render_git_impact(git: &SessionGitDelta, touched_files: &[String], t: Tokens) -> impl IntoElement {
+fn render_git_impact(
+    git: &SessionGitDelta,
+    touched_files: &[String],
+    t: Tokens,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -533,7 +571,7 @@ fn render_git_impact(git: &SessionGitDelta, touched_files: &[String], t: Tokens)
                         .type_step(CAPTION)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c(t.text_faint))
-                        .child("CODE IMPACT")
+                        .child("CODE IMPACT"),
                 )
                 .child(
                     div()
@@ -542,10 +580,22 @@ fn render_git_impact(git: &SessionGitDelta, touched_files: &[String], t: Tokens)
                         .flex()
                         .flex_row()
                         .gap(zpx(5.))
-                        .child(div().text_color(c(t.success)).child(format!("+{}", git.added)))
-                        .child(div().text_color(c(t.danger)).child(format!("−{}", git.removed)))
-                        .child(div().text_color(c(t.text_faint)).child(format!("in {} files", git.file_count)))
-                )
+                        .child(
+                            div()
+                                .text_color(c(t.success))
+                                .child(format!("+{}", git.added)),
+                        )
+                        .child(
+                            div()
+                                .text_color(c(t.danger))
+                                .child(format!("−{}", git.removed)),
+                        )
+                        .child(
+                            div()
+                                .text_color(c(t.text_faint))
+                                .child(format!("in {} files", git.file_count)),
+                        ),
+                ),
         )
         .when(!touched_files.is_empty(), |el| {
             el.child(
@@ -568,7 +618,7 @@ fn render_git_impact(git: &SessionGitDelta, touched_files: &[String], t: Tokens)
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .child(f.clone())
-                    }))
+                    })),
             )
         })
 }
@@ -588,12 +638,20 @@ fn render_checks(checks: &SessionChecks, t: Tokens) -> impl IntoElement {
         .font_family(MONO)
         .type_step(CAPTION)
         .text_color(c(t.text_muted))
-        .child(div().font_weight(FontWeight::BOLD).text_color(c(color)).child(icon))
+        .child(
+            div()
+                .font_weight(FontWeight::BOLD)
+                .text_color(c(color))
+                .child(icon),
+        )
         .child(div().child(checks.summary_label.clone()))
 }
 
 fn render_footer(summary: &ChatSummary, t: Tokens) -> impl IntoElement {
-    let model_str = summary.model.clone().unwrap_or_else(|| "Default agent".into());
+    let model_str = summary
+        .model
+        .clone()
+        .unwrap_or_else(|| "Default agent".into());
     let token_str = summary.token_usage.map(crate::usage::compact);
     let pct_str = summary.context_percent.map(|p| format!("({p}%)"));
 
@@ -622,27 +680,29 @@ fn render_footer(summary: &ChatSummary, t: Tokens) -> impl IntoElement {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(model_str)
+                        .child(model_str),
                 )
                 .children(token_str.map(|tok| {
                     div().child(match pct_str {
                         Some(pct) => format!("{tok} {pct}"),
                         None => tok,
                     })
-                }))
+                })),
         )
         .child(
             div()
                 .type_step(CAPTION)
                 .text_color(c(t.text_faint))
-                .child("Click chat to open ↵")
+                .child("Click chat to open ↵"),
         )
 }
 
 impl super::KeelWindow {
     /// Update or synthesize a summary for a chat when its turn ends.
     pub(super) fn record_chat_summary_on_turn_end(&mut self, chat_id: &str) {
-        let Some(chat) = self.state.chats.get(chat_id).cloned() else { return };
+        let Some(chat) = self.state.chats.get(chat_id).cloned() else {
+            return;
+        };
         let diff = (!chat.checkout_id.is_empty())
             .then(|| self.state.diffs.get(&chat.checkout_id))
             .flatten()
@@ -655,117 +715,169 @@ impl super::KeelWindow {
             .unwrap_or(0);
 
         // Find last user prompt and last assistant conclusion if this is the current chat
-        let (objective, summary_text, touched_files, checks, last_handoff) = if self.current_chat.as_deref() == Some(chat_id) {
-            let last_user_msg = self.msg_order.iter().rev()
-                .find(|id| self.messages.get(*id).is_some_and(|m| m.role == "user"))
-                .and_then(|id| self.messages.get(id))
-                .map(|m| m.blocks.full_text.trim().to_string())
-                .filter(|s| !s.is_empty());
+        let (objective, summary_text, touched_files, checks, last_handoff) =
+            if self.current_chat.as_deref() == Some(chat_id) {
+                let last_user_msg = self
+                    .msg_order
+                    .iter()
+                    .rev()
+                    .find(|id| self.messages.get(*id).is_some_and(|m| m.role == "user"))
+                    .and_then(|id| self.messages.get(id))
+                    .map(|m| m.blocks.full_text.trim().to_string())
+                    .filter(|s| !s.is_empty());
 
-            let last_assistant = self.msg_order.iter().rev()
-                .find(|id| self.messages.get(*id).is_some_and(|m| m.role == "assistant"))
-                .and_then(|id| self.messages.get(id));
+                let last_assistant = self
+                    .msg_order
+                    .iter()
+                    .rev()
+                    .find(|id| {
+                        self.messages
+                            .get(*id)
+                            .is_some_and(|m| m.role == "assistant")
+                    })
+                    .and_then(|id| self.messages.get(id));
 
-            let mut files: Vec<String> = Vec::new();
-            let mut checks_label: Option<String> = None;
-            let mut conclusion: Option<String> = None;
+                let mut files: Vec<String> = Vec::new();
+                let mut checks_label: Option<String> = None;
+                let mut conclusion: Option<String> = None;
 
-            if let Some(asst) = last_assistant {
-                conclusion = Some(asst.blocks.full_text.trim().to_string()).filter(|s| !s.is_empty());
+                if let Some(asst) = last_assistant {
+                    conclusion =
+                        Some(asst.blocks.full_text.trim().to_string()).filter(|s| !s.is_empty());
 
-                for step in &asst.steps {
-                    if let crate::turn::Step::Tools(tools) = step {
-                        for tool in tools {
-                            if let Some(diff) = &tool.diff {
-                                if !files.contains(&diff.path) {
-                                    files.push(diff.path.clone());
+                    for step in &asst.steps {
+                        if let crate::turn::Step::Tools(tools) = step {
+                            for tool in tools {
+                                if let Some(diff) = &tool.diff {
+                                    if !files.contains(&diff.path) {
+                                        files.push(diff.path.clone());
+                                    }
                                 }
-                            }
-                            if tool.name.contains("test") || tool.name.contains("check") || tool.summary.contains("passed") {
-                                if checks_label.is_none() {
-                                    checks_label = Some(if tool.state == "error" { "checks failed".into() } else { "tests passed".into() });
+                                if tool.name.contains("test")
+                                    || tool.name.contains("check")
+                                    || tool.summary.contains("passed")
+                                {
+                                    if checks_label.is_none() {
+                                        checks_label = Some(if tool.state == "error" {
+                                            "checks failed".into()
+                                        } else {
+                                            "tests passed".into()
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            let obj = last_user_msg.unwrap_or_else(|| {
-                if chat.title.trim().is_empty() { "New chat".into() } else { chat.title.clone() }
-            });
+                let obj = last_user_msg.unwrap_or_else(|| {
+                    if chat.title.trim().is_empty() {
+                        "New chat".into()
+                    } else {
+                        chat.title.clone()
+                    }
+                });
 
-            // Extract first sentence or up to 100 chars for objective
-            let clean_obj = if let Some(dot_idx) = obj.find(". ") {
-                obj[..dot_idx].to_string()
-            } else if obj.chars().count() > 100 {
-                format!("{}…", obj.chars().take(99).collect::<String>())
-            } else {
-                obj
-            };
-
-            let sum = conclusion.unwrap_or_else(|| {
-                if let Some(d) = &diff {
-                    format!("Modified {} files (+{} / −{}) on {}.", d.files, d.additions, d.deletions, chat.branch)
+                // Extract first sentence or up to 100 chars for objective
+                let clean_obj = if let Some(dot_idx) = obj.find(". ") {
+                    obj[..dot_idx].to_string()
+                } else if obj.chars().count() > 100 {
+                    format!("{}…", obj.chars().take(99).collect::<String>())
                 } else {
-                    format!("Turn completed cleanly on {}.", chat.branch)
-                }
-            });
+                    obj
+                };
 
-            let handoff = if let Some(panel) = self.question_panels.get(chat_id) {
-                panel.current_question().map(|q| SessionHandoff {
-                    kind: HandoffKind::Question,
-                    message: q.prompt.clone(),
-                })
-            } else if chat.status == keel_proto::ChatStatus::AwaitingInput {
-                Some(SessionHandoff {
-                    kind: HandoffKind::Question,
-                    message: "Awaiting user confirmation or response.".into(),
-                })
-            } else if chat.status == keel_proto::ChatStatus::Aborted {
-                Some(SessionHandoff {
-                    kind: HandoffKind::Error,
-                    message: "Turn was aborted or stopped.".into(),
-                })
-            } else if chat.status == keel_proto::ChatStatus::Running {
-                Some(SessionHandoff {
-                    kind: HandoffKind::Step,
-                    message: "Agent is actively processing tools and commands.".into(),
-                })
+                let sum = conclusion.unwrap_or_else(|| {
+                    if let Some(d) = &diff {
+                        format!(
+                            "Modified {} files (+{} / −{}) on {}.",
+                            d.files, d.additions, d.deletions, chat.branch
+                        )
+                    } else {
+                        format!("Turn completed cleanly on {}.", chat.branch)
+                    }
+                });
+
+                let handoff = if let Some(panel) = self.question_panels.get(chat_id) {
+                    panel.current_question().map(|q| SessionHandoff {
+                        kind: HandoffKind::Question,
+                        message: q.prompt.clone(),
+                    })
+                } else if chat.status == keel_proto::ChatStatus::AwaitingInput {
+                    Some(SessionHandoff {
+                        kind: HandoffKind::Question,
+                        message: "Awaiting user confirmation or response.".into(),
+                    })
+                } else if chat.status == keel_proto::ChatStatus::Aborted {
+                    Some(SessionHandoff {
+                        kind: HandoffKind::Error,
+                        message: "Turn was aborted or stopped.".into(),
+                    })
+                } else if chat.status == keel_proto::ChatStatus::Running {
+                    Some(SessionHandoff {
+                        kind: HandoffKind::Step,
+                        message: "Agent is actively processing tools and commands.".into(),
+                    })
+                } else {
+                    None
+                };
+
+                (
+                    clean_obj,
+                    sum,
+                    files,
+                    checks_label.map(|lbl| SessionChecks {
+                        passed: !lbl.contains("failed"),
+                        summary_label: lbl,
+                    }),
+                    handoff,
+                )
             } else {
-                None
+                let status = match chat.status {
+                    keel_proto::ChatStatus::Idle => DisplayStatus::Idle,
+                    keel_proto::ChatStatus::Running => DisplayStatus::Running,
+                    keel_proto::ChatStatus::AwaitingInput => DisplayStatus::AwaitingInput,
+                    keel_proto::ChatStatus::Aborted => DisplayStatus::Aborted,
+                };
+                let fallback = ChatSummary::from_chat_state(
+                    &chat,
+                    diff.as_ref(),
+                    status,
+                    model_display.clone(),
+                    now_ms,
+                );
+                (
+                    fallback.objective,
+                    fallback.summary,
+                    fallback.touched_files,
+                    fallback.checks,
+                    fallback.last_handoff,
+                )
             };
 
-            (clean_obj, sum, files, checks_label.map(|lbl| SessionChecks { passed: !lbl.contains("failed"), summary_label: lbl }), handoff)
-        } else {
-            let status = match chat.status {
-                keel_proto::ChatStatus::Idle => DisplayStatus::Idle,
-                keel_proto::ChatStatus::Running => DisplayStatus::Running,
-                keel_proto::ChatStatus::AwaitingInput => DisplayStatus::AwaitingInput,
-                keel_proto::ChatStatus::Aborted => DisplayStatus::Aborted,
-            };
-            let fallback = ChatSummary::from_chat_state(
-                &chat,
-                diff.as_ref(),
-                status,
-                model_display.clone(),
-                now_ms,
-            );
-            (fallback.objective, fallback.summary, fallback.touched_files, fallback.checks, fallback.last_handoff)
-        };
-
-        let git = diff.filter(|d| d.additions > 0 || d.deletions > 0 || d.files > 0).map(|d| {
-            SessionGitDelta {
-                branch: if chat.branch.is_empty() { "HEAD".into() } else { chat.branch.clone() },
+        let git = diff
+            .filter(|d| d.additions > 0 || d.deletions > 0 || d.files > 0)
+            .map(|d| SessionGitDelta {
+                branch: if chat.branch.is_empty() {
+                    "HEAD".into()
+                } else {
+                    chat.branch.clone()
+                },
                 added: d.additions,
                 removed: d.deletions,
                 file_count: d.files,
-            }
-        });
+            });
 
         let total_tokens = chat.usage.total();
-        let token_usage = if total_tokens > 0 { Some(total_tokens) } else { None };
-        let context_percent = chat.usage.fill().map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u8);
+        let token_usage = if total_tokens > 0 {
+            Some(total_tokens)
+        } else {
+            None
+        };
+        let context_percent = chat
+            .usage
+            .fill()
+            .map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u8);
 
         let summary = ChatSummary {
             chat_id: chat_id.to_string(),
@@ -780,7 +892,11 @@ impl super::KeelWindow {
             model: model_display.or_else(|| (!chat.model.is_empty()).then(|| chat.model.clone())),
             token_usage,
             context_percent,
-            updated_at: if chat.last_message_at > 0 { chat.last_message_at } else { now_ms },
+            updated_at: if chat.last_message_at > 0 {
+                chat.last_message_at
+            } else {
+                now_ms
+            },
         };
 
         self.chat_summaries.insert(chat_id.to_string(), summary);
@@ -796,10 +912,17 @@ impl super::KeelWindow {
         if let Some(summary) = self.chat_summaries.get(chat_id) {
             let mut s = summary.clone();
             if let Some(chat) = self.state.chats.get(chat_id) {
-                if let Some(diff) = (!chat.checkout_id.is_empty()).then(|| self.state.diffs.get(&chat.checkout_id)).flatten() {
+                if let Some(diff) = (!chat.checkout_id.is_empty())
+                    .then(|| self.state.diffs.get(&chat.checkout_id))
+                    .flatten()
+                {
                     if diff.additions > 0 || diff.deletions > 0 || diff.files > 0 {
                         s.git = Some(SessionGitDelta {
-                            branch: if chat.branch.is_empty() { "HEAD".into() } else { chat.branch.clone() },
+                            branch: if chat.branch.is_empty() {
+                                "HEAD".into()
+                            } else {
+                                chat.branch.clone()
+                            },
                             added: diff.additions,
                             removed: diff.deletions,
                             file_count: diff.files,
@@ -809,7 +932,9 @@ impl super::KeelWindow {
             }
             s
         } else if let Some(chat) = self.state.chats.get(chat_id) {
-            let diff = (!chat.checkout_id.is_empty()).then(|| self.state.diffs.get(&chat.checkout_id)).flatten();
+            let diff = (!chat.checkout_id.is_empty())
+                .then(|| self.state.diffs.get(&chat.checkout_id))
+                .flatten();
             let model = self.model_name(&chat.harness, &chat.model);
             ChatSummary::from_chat_state(chat, diff, status, model, now_ms)
         } else {
@@ -831,9 +956,18 @@ impl super::KeelWindow {
         }
     }
 
-    pub(super) fn chat_summary_hover(&mut self, chat_id: String, anchor_y: f32, hovered: bool, cx: &mut Context<Self>) {
+    pub(super) fn chat_summary_hover(
+        &mut self,
+        chat_id: String,
+        anchor_y: f32,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
         let now = Instant::now();
-        if let Some(delay) = self.summary_hover.hover(chat_id.clone(), anchor_y, hovered, now) {
+        if let Some(delay) = self
+            .summary_hover
+            .hover(chat_id.clone(), anchor_y, hovered, now)
+        {
             let id = chat_id.clone();
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(delay).await;
@@ -854,7 +988,12 @@ impl super::KeelWindow {
         cx.notify();
     }
 
-    pub(super) fn render_session_summary_card(&mut self, t: Tokens, window: &mut Window, _: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_session_summary_card(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let reduced = self.reduced();
         let now = Instant::now();
         let look = self.summary_hover.phase(now, reduced)?;
@@ -882,7 +1021,9 @@ impl super::KeelWindow {
                     .snap_to_window_with_margin(zpx(8.))
                     .child(
                         div()
-                            .id(ElementId::Name(format!("session-summary-popover-{}", summary.chat_id).into()))
+                            .id(ElementId::Name(
+                                format!("session-summary-popover-{}", summary.chat_id).into(),
+                            ))
                             .w(zpx(SUMMARY_CARD_WIDTH))
                             .bg(c(t.floating))
                             .border_1()
@@ -922,9 +1063,15 @@ impl super::KeelWindow {
                                     // 2. Objective & Synthesis
                                     .child(render_objective(&summary, t))
                                     // 3. Next Action / Handoff Box (if any)
-                                    .children(summary.last_handoff.as_ref().map(|h| render_handoff(h, t)))
+                                    .children(
+                                        summary.last_handoff.as_ref().map(|h| render_handoff(h, t)),
+                                    )
                                     // 4. Code Impact / Git Delta (if any)
-                                    .children(summary.git.as_ref().map(|g| render_git_impact(g, &summary.touched_files, t)))
+                                    .children(
+                                        summary.git.as_ref().map(|g| {
+                                            render_git_impact(g, &summary.touched_files, t)
+                                        }),
+                                    )
                                     // 5. Automated Checks (if any)
                                     .children(summary.checks.as_ref().map(|c| render_checks(c, t)))
                                     // 6. Footer: Model, token usage, hint
@@ -941,9 +1088,9 @@ impl super::KeelWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keel_proto::ChatStatus;
     use crate::state::{ChatItem, DiffItem};
     use crate::usage::{ChatUsage, ModelTokens};
+    use keel_proto::ChatStatus;
 
     #[test]
     fn chat_summary_fallback_generation() {
@@ -1025,13 +1172,7 @@ mod tests {
             usage: Default::default(),
         };
 
-        let summary = ChatSummary::from_chat_state(
-            &chat,
-            None,
-            DisplayStatus::Idle,
-            None,
-            5000,
-        );
+        let summary = ChatSummary::from_chat_state(&chat, None, DisplayStatus::Idle, None, 5000);
 
         assert_eq!(summary.title, "New chat");
         assert_eq!(summary.objective, "New chat");
@@ -1079,13 +1220,17 @@ mod tests {
         assert!(look0.moving);
 
         // 5. Midway: moving, opacity increasing
-        let look_mid = hover.phase(t_ripe + Duration::from_millis(80), false).expect("look present");
+        let look_mid = hover
+            .phase(t_ripe + Duration::from_millis(80), false)
+            .expect("look present");
         assert!(look_mid.opacity > 0.0 && look_mid.opacity < 1.0);
         assert!(look_mid.dx > -8.0 && look_mid.dx < 0.0);
         assert!(look_mid.moving);
 
         // 6. Finished entrance: opacity 1, dx 0, dy 0, settled
-        let look_end = hover.phase(t_ripe + Duration::from_millis(170), false).expect("look present");
+        let look_end = hover
+            .phase(t_ripe + Duration::from_millis(170), false)
+            .expect("look present");
         assert_eq!(look_end.opacity, 1.0);
         assert_eq!(look_end.dx, 0.0);
         assert_eq!(look_end.dy, 0.0);
@@ -1118,14 +1263,18 @@ mod tests {
         assert!(look0.moving);
 
         // 4. Midway (70ms into 140ms switch):
-        let look_mid = hover.phase(t_switch + Duration::from_millis(70), false).expect("chat-2 mid");
+        let look_mid = hover
+            .phase(t_switch + Duration::from_millis(70), false)
+            .expect("chat-2 mid");
         assert!(look_mid.anchor_y > 100.0 && look_mid.anchor_y < 150.0);
         assert!(look_mid.content_opacity > 0.0 && look_mid.content_opacity <= 1.0);
         assert!(look_mid.content_dy > -4.0 && look_mid.content_dy <= 0.0);
         assert!(look_mid.moving);
 
         // 5. Settled at 150ms:
-        let look_end = hover.phase(t_switch + Duration::from_millis(150), false).expect("chat-2 settled");
+        let look_end = hover
+            .phase(t_switch + Duration::from_millis(150), false)
+            .expect("chat-2 settled");
         assert_eq!(look_end.anchor_y, 150.0);
         assert_eq!(look_end.content_opacity, 1.0);
         assert_eq!(look_end.content_dy, 0.0);
@@ -1169,13 +1318,19 @@ mod tests {
         hover.hover("chat-1".into(), 100.0, false, t_leave);
 
         // Exit plays: opacity 1 -> 0, dx 0 -> -6px
-        let look_mid = hover.phase(t_leave + Duration::from_millis(60), false).expect("leaving look");
+        let look_mid = hover
+            .phase(t_leave + Duration::from_millis(60), false)
+            .expect("leaving look");
         assert!(look_mid.opacity < 1.0 && look_mid.opacity > 0.0);
         assert!(look_mid.dx < 0.0 && look_mid.dx >= -6.0);
         assert!(look_mid.moving);
 
         // Exit finishes: None
-        assert!(hover.phase(t_leave + Duration::from_millis(130), false).is_none());
+        assert!(
+            hover
+                .phase(t_leave + Duration::from_millis(130), false)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1191,11 +1346,21 @@ mod tests {
         hover.press("chat-1", t_press);
 
         // Plays exit
-        let look = hover.phase(t_press + Duration::from_millis(40), false).expect("leaving");
+        let look = hover
+            .phase(t_press + Duration::from_millis(40), false)
+            .expect("leaving");
         assert_eq!(look.chat_id, "chat-1");
 
         // Hovering while suppressed returns None
-        assert_eq!(hover.hover("chat-1".into(), 100.0, true, t_press + Duration::from_millis(50)), None);
+        assert_eq!(
+            hover.hover(
+                "chat-1".into(),
+                100.0,
+                true,
+                t_press + Duration::from_millis(50)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1213,7 +1378,16 @@ mod tests {
         assert!(!look.moving);
 
         // Pointer leaves: instant cut, is_none() at once
-        hover.hover("chat-1".into(), 100.0, false, t0 + SUMMARY_HOVER_DELAY + Duration::from_millis(10));
-        assert!(hover.phase(t0 + SUMMARY_HOVER_DELAY + Duration::from_millis(10), true).is_none());
+        hover.hover(
+            "chat-1".into(),
+            100.0,
+            false,
+            t0 + SUMMARY_HOVER_DELAY + Duration::from_millis(10),
+        );
+        assert!(
+            hover
+                .phase(t0 + SUMMARY_HOVER_DELAY + Duration::from_millis(10), true)
+                .is_none()
+        );
     }
 }

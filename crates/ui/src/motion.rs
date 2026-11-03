@@ -3,10 +3,13 @@
 //! (sidebar width, new-chat composer drop), and reduced motion turns every
 //! transition into an instant cut.
 
-use std::time::Duration;
 use crate::style::zpx;
+use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, ElementId, IntoElement, ParentElement, Styled, Transformation, percentage};
+use gpui::{
+    Animation, AnimationExt, ElementId, IntoElement, ParentElement, Styled, Transformation,
+    percentage,
+};
 
 /// Menus, chips, small state changes.
 pub const FAST: Duration = Duration::from_millis(120);
@@ -51,11 +54,17 @@ pub fn ease_out_strong(t: f32) -> f32 {
         return 1.;
     }
     let (x1, y1, x2, y2) = (0.23, 1.0, 0.32, 1.0);
-    let bez = |a: f32, b: f32, s: f32| 3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3);
+    let bez = |a: f32, b: f32, s: f32| {
+        3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3)
+    };
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..12 {
         let mid = (lo + hi) / 2.;
-        if bez(x1, x2, mid) < t { lo = mid } else { hi = mid }
+        if bez(x1, x2, mid) < t {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     bez(y1, y2, (lo + hi) / 2.)
 }
@@ -71,12 +80,18 @@ pub fn glide_curve(t: f32) -> f32 {
         return 1.;
     }
     let (x1, y1, x2, y2) = (0.32, 0.72, 0.0, 1.0);
-    let bez = |a: f32, b: f32, s: f32| 3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3);
+    let bez = |a: f32, b: f32, s: f32| {
+        3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3)
+    };
     // x(s) is increasing on 0..1: bisect for the s where x(s) = t.
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..24 {
         let mid = (lo + hi) / 2.;
-        if bez(x1, x2, mid) < t { lo = mid } else { hi = mid }
+        if bez(x1, x2, mid) < t {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     bez(y1, y2, (lo + hi) / 2.)
 }
@@ -110,7 +125,11 @@ pub fn ease_in(t: f32) -> f32 {
 
 /// A one-shot that becomes an instant cut under reduced motion.
 fn once(duration: Duration, reduced: bool) -> Animation {
-    let duration = if reduced { Duration::from_millis(1) } else { duration };
+    let duration = if reduced {
+        Duration::from_millis(1)
+    } else {
+        duration
+    };
     Animation::new(duration).with_easing(ease_out)
 }
 
@@ -137,7 +156,11 @@ pub struct Look {
 }
 
 impl Look {
-    pub const REST: Look = Look { opacity: 1., dy: 0., scale: 1. };
+    pub const REST: Look = Look {
+        opacity: 1.,
+        dy: 0.,
+        scale: 1.,
+    };
     fn lerp(self, to: Look, e: f32) -> Look {
         Look {
             opacity: self.opacity + (to.opacity - self.opacity) * e,
@@ -151,8 +174,16 @@ impl Look {
 pub const PILL_IN: Duration = Duration::from_millis(240);
 /// Leaving: quicker, to 6 px lower at 97%.
 pub const PILL_OUT: Duration = Duration::from_millis(180);
-const PILL_ENTER_FROM: Look = Look { opacity: 0., dy: 8., scale: 0.96 };
-const PILL_EXIT_TO: Look = Look { opacity: 0., dy: 6., scale: 0.97 };
+const PILL_ENTER_FROM: Look = Look {
+    opacity: 0.,
+    dy: 8.,
+    scale: 0.96,
+};
+const PILL_EXIT_TO: Look = Look {
+    opacity: 0.,
+    dy: 6.,
+    scale: 0.97,
+};
 
 /// `cubic-bezier(0.2, 0.8, 0.2, 1)`: the pill's entrance.
 pub fn ease_pill_in(t: f32) -> f32 {
@@ -178,7 +209,12 @@ impl Default for Presence {
 
 impl Presence {
     pub fn hidden() -> Self {
-        Self { shown: false, from: PILL_EXIT_TO, at: None, duration: PILL_OUT }
+        Self {
+            shown: false,
+            from: PILL_EXIT_TO,
+            at: None,
+            duration: PILL_OUT,
+        }
     }
 
     fn target(&self) -> Look {
@@ -190,7 +226,8 @@ impl Presence {
     }
 
     pub fn animating(&self, now: std::time::Instant) -> bool {
-        self.at.is_some_and(|at| now.saturating_duration_since(at) < self.duration)
+        self.at
+            .is_some_and(|at| now.saturating_duration_since(at) < self.duration)
     }
 
     /// Drawn at all: shown, or still playing its exit.
@@ -204,9 +241,16 @@ impl Presence {
     }
 
     pub fn look_at(&self, now: std::time::Instant) -> Look {
-        let Some(at) = self.at else { return self.target() };
-        let t = (now.saturating_duration_since(at).as_secs_f32() / self.duration.as_secs_f32()).clamp(0., 1.);
-        let e = if self.shown { ease_pill_in(t) } else { ease_in_out(t) };
+        let Some(at) = self.at else {
+            return self.target();
+        };
+        let t = (now.saturating_duration_since(at).as_secs_f32() / self.duration.as_secs_f32())
+            .clamp(0., 1.);
+        let e = if self.shown {
+            ease_pill_in(t)
+        } else {
+            ease_in_out(t)
+        };
         self.from.lerp(self.target(), e)
     }
 
@@ -215,7 +259,11 @@ impl Presence {
         if shown == self.shown {
             return;
         }
-        let from = if self.mounted(now) { self.look_at(now) } else { PILL_ENTER_FROM };
+        let from = if self.mounted(now) {
+            self.look_at(now)
+        } else {
+            PILL_ENTER_FROM
+        };
         self.shown = shown;
         if reduced {
             self.at = None;
@@ -251,30 +299,50 @@ pub struct RowLook {
 
 /// The entrance of a row whose motion starts `at` (may be ahead, for the
 /// stagger), at `now`. `None` once it rests, or under reduced motion.
-pub fn row_enter(at: std::time::Instant, now: std::time::Instant, reduced: bool) -> Option<RowLook> {
+pub fn row_enter(
+    at: std::time::Instant,
+    now: std::time::Instant,
+    reduced: bool,
+) -> Option<RowLook> {
     if reduced {
         return None;
     }
     let Some(elapsed) = now.checked_duration_since(at) else {
-        return Some(RowLook { opacity: 0., dy: 5., height: 0. });
+        return Some(RowLook {
+            opacity: 0.,
+            dy: 5.,
+            height: 0.,
+        });
     };
     if elapsed >= ROW_ENTER.max(ROW_OPEN) {
         return None;
     }
     let p = ease_out_strong((elapsed.as_secs_f32() / ROW_ENTER.as_secs_f32()).min(1.));
     let h = glide_curve((elapsed.as_secs_f32() / ROW_OPEN.as_secs_f32()).min(1.));
-    Some(RowLook { opacity: p, dy: 5. * (1. - p), height: h })
+    Some(RowLook {
+        opacity: p,
+        dy: 5. * (1. - p),
+        height: h,
+    })
 }
 
 /// The exit of a row that started leaving `elapsed` ago. Reduced motion
 /// keeps a plain fade, with no collapse.
 pub fn row_exit(elapsed: Duration, reduced: bool) -> Option<RowLook> {
     if elapsed >= ROW_EXIT {
-        return Some(RowLook { opacity: 0., dy: 0., height: 0. });
+        return Some(RowLook {
+            opacity: 0.,
+            dy: 0.,
+            height: 0.,
+        });
     }
     let t = elapsed.as_secs_f32() / ROW_EXIT.as_secs_f32();
     let fade = ease_out((t / 0.6).min(1.));
-    Some(RowLook { opacity: 1. - fade, dy: 0., height: if reduced { 1. } else { 1. - ease_in_out(t) } })
+    Some(RowLook {
+        opacity: 1. - fade,
+        dy: 0.,
+        height: if reduced { 1. } else { 1. - ease_in_out(t) },
+    })
 }
 
 /// The "Latest" click's scroll: long enough to read as travel to the end.
@@ -310,17 +378,71 @@ pub fn travel<E: IntoElement + Styled + 'static>(
     lift: f32,
     reduced: bool,
 ) -> impl IntoElement {
-    let duration = if reduced { Duration::from_millis(1) } else { SPATIAL };
-    el.with_animation(id, Animation::new(duration).with_easing(ease_out), move |el, delta| {
-        el.relative().top(zpx(lift * (1.0 - delta)))
-    })
+    let duration = if reduced {
+        Duration::from_millis(1)
+    } else {
+        SPATIAL
+    };
+    el.with_animation(
+        id,
+        Animation::new(duration).with_easing(ease_out),
+        move |el, delta| el.relative().top(zpx(lift * (1.0 - delta))),
+    )
 }
 
 /// Fade in over [`SPATIAL`], without moving.
-pub fn fade_in<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, reduced: bool) -> gpui::AnyElement {
-    let duration = if reduced { Duration::from_millis(1) } else { SPATIAL };
-    el.with_animation(id, Animation::new(duration).with_easing(ease_out), |el, delta| el.opacity(delta))
-        .into_any_element()
+pub fn fade_in<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    reduced: bool,
+) -> gpui::AnyElement {
+    let duration = if reduced {
+        Duration::from_millis(1)
+    } else {
+        SPATIAL
+    };
+    el.with_animation(
+        id,
+        Animation::new(duration).with_easing(ease_out),
+        |el, delta| el.opacity(delta),
+    )
+    .into_any_element()
+}
+
+/// One frame of a settings drill-in. `t` is already eased (0 at the click,
+/// 1 at rest). The child travels a full width, in from the right and back
+/// out the same way. The parent only shifts [`DRILL_PARALLAX`] px, so it
+/// reads as the page underneath. Reduced motion cuts: no travel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrillFrame {
+    /// Parent offset in px. Negative is to the left.
+    pub parent_x: f32,
+    /// Child offset as a fraction of its own width. 1 is fully off to the right.
+    pub child_shift: f32,
+}
+
+/// How far the page you came from slides while the new one covers it.
+pub const DRILL_PARALLAX: f32 = 28.;
+
+pub fn drill_frame(t: f32, leaving: bool, reduced: bool) -> DrillFrame {
+    let t = t.clamp(0., 1.);
+    if reduced {
+        return DrillFrame {
+            parent_x: 0.,
+            child_shift: 0.,
+        };
+    }
+    if leaving {
+        DrillFrame {
+            parent_x: -DRILL_PARALLAX * (1. - t),
+            child_shift: t,
+        }
+    } else {
+        DrillFrame {
+            parent_x: -DRILL_PARALLAX * t,
+            child_shift: 1. - t,
+        }
+    }
 }
 
 /// Settings arriving or leaving, at eased progress `t` (the animation
@@ -349,9 +471,21 @@ pub fn panel_opacity(k: f32, entering: bool) -> f32 {
 }
 
 /// Fade out over [`SPATIAL`].
-pub fn vanish<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, reduced: bool) -> impl IntoElement {
-    let duration = if reduced { Duration::from_millis(1) } else { SPATIAL };
-    el.with_animation(id, Animation::new(duration).with_easing(ease_out), |el, delta| el.opacity(1.0 - delta))
+pub fn vanish<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    reduced: bool,
+) -> impl IntoElement {
+    let duration = if reduced {
+        Duration::from_millis(1)
+    } else {
+        SPATIAL
+    };
+    el.with_animation(
+        id,
+        Animation::new(duration).with_easing(ease_out),
+        |el, delta| el.opacity(1.0 - delta),
+    )
 }
 
 /// Quick exit: fade and drop a few px over [`FAST`]. For dismissals that should
@@ -372,12 +506,17 @@ pub fn dismiss<E: IntoElement + Styled + 'static>(
     .into_any_element()
 }
 
-
 /// A skeleton block: `el` (sized and filled by the caller) with a soft
 /// light band sweeping across it every 1.4 s. `phase` (0..1) offsets the
 /// sweep so stacked blocks ripple instead of flashing in unison. Plain under
 /// reduced motion.
-pub fn shimmer(el: gpui::Div, id: impl Into<ElementId>, phase: f32, highlight: gpui::Hsla, reduced: bool) -> gpui::AnyElement {
+pub fn shimmer(
+    el: gpui::Div,
+    id: impl Into<ElementId>,
+    phase: f32,
+    highlight: gpui::Hsla,
+    reduced: bool,
+) -> gpui::AnyElement {
     use gpui::{ParentElement, Styled};
     let el = el.relative().overflow_hidden();
     if reduced {
@@ -385,7 +524,11 @@ pub fn shimmer(el: gpui::Div, id: impl Into<ElementId>, phase: f32, highlight: g
     }
     let clear = gpui::Hsla { a: 0., ..highlight };
     let half = |from: gpui::Hsla, to: gpui::Hsla| {
-        gpui::div().flex_1().h_full().bg(gpui::linear_gradient(90., gpui::linear_color_stop(from, 0.), gpui::linear_color_stop(to, 1.)))
+        gpui::div().flex_1().h_full().bg(gpui::linear_gradient(
+            90.,
+            gpui::linear_color_stop(from, 0.),
+            gpui::linear_color_stop(to, 1.),
+        ))
     };
     let band = gpui::div()
         .absolute()
@@ -396,10 +539,16 @@ pub fn shimmer(el: gpui::Div, id: impl Into<ElementId>, phase: f32, highlight: g
         .flex_row()
         .child(half(clear, highlight))
         .child(half(highlight, clear))
-        .with_animation(id, Animation::new(SHIMMER).repeat().with_easing(move |t| (t + phase).fract()), |el, t| {
-            // From fully off the left edge to fully off the right.
-            el.left(gpui::relative(-0.6 + 1.8 * t))
-        });
+        .with_animation(
+            id,
+            Animation::new(SHIMMER)
+                .repeat()
+                .with_easing(move |t| (t + phase).fract()),
+            |el, t| {
+                // From fully off the left edge to fully off the right.
+                el.left(gpui::relative(-0.6 + 1.8 * t))
+            },
+        );
     el.child(band).into_any_element()
 }
 
@@ -422,20 +571,31 @@ pub fn slide_x<E: IntoElement + Styled + 'static>(
 
 /// A 4 px rise on [`ease_out_strong`]. For the one element the eye should
 /// land on. gpui's scale is SVG-only, so this stays a rise. Reduced motion skips it.
-pub fn settle<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, reduced: bool) -> gpui::AnyElement {
+pub fn settle<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    reduced: bool,
+) -> gpui::AnyElement {
     if reduced {
         return el.into_any_element();
     }
-    el.with_animation(id, Animation::new(BASE).with_easing(ease_out_strong), |el, delta| {
-        el.relative().top(zpx(4. * (1. - delta)))
-    })
+    el.with_animation(
+        id,
+        Animation::new(BASE).with_easing(ease_out_strong),
+        |el, delta| el.relative().top(zpx(4. * (1. - delta))),
+    )
     .into_any_element()
 }
 
 /// Fade and rise in, the `index`-th of a list: each waits 35 ms more than
 /// the one before (capped at 10), so a list cascades in. `id` must be new
 /// for each load so it plays once per load, not on every render.
-pub fn stagger_in<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, index: usize, reduced: bool) -> gpui::AnyElement {
+pub fn stagger_in<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    index: usize,
+    reduced: bool,
+) -> gpui::AnyElement {
     if reduced {
         return el.into_any_element();
     }
@@ -444,7 +604,9 @@ pub fn stagger_in<E: IntoElement + Styled + 'static>(el: E, id: impl Into<Elemen
     let total = Duration::from_millis((delay + length) as u64);
     el.with_animation(
         id,
-        Animation::new(total).with_easing(move |t| ease_out_strong(((t * (delay + length) - delay) / length).clamp(0., 1.))),
+        Animation::new(total).with_easing(move |t| {
+            ease_out_strong(((t * (delay + length) - delay) / length).clamp(0., 1.))
+        }),
         |el, delta| el.opacity(delta).relative().top(zpx(4. * (1. - delta))),
     )
     .into_any_element()
@@ -452,7 +614,12 @@ pub fn stagger_in<E: IntoElement + Styled + 'static>(el: E, id: impl Into<Elemen
 
 /// [`stagger_in`] for rows riding in with the sidebar: after 20 ms, 20 ms
 /// apart (capped at 6) over 220 ms, so the cascade lands with [`SHEET_OPEN`].
-pub fn stagger_in_light<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, index: usize, reduced: bool) -> gpui::AnyElement {
+pub fn stagger_in_light<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    index: usize,
+    reduced: bool,
+) -> gpui::AnyElement {
     if reduced {
         return el.into_any_element();
     }
@@ -461,20 +628,28 @@ pub fn stagger_in_light<E: IntoElement + Styled + 'static>(el: E, id: impl Into<
     let total = Duration::from_millis((delay + length) as u64);
     el.with_animation(
         id,
-        Animation::new(total).with_easing(move |t| ease_out(((t * (delay + length) - delay) / length).clamp(0., 1.))),
+        Animation::new(total).with_easing(move |t| {
+            ease_out(((t * (delay + length) - delay) / length).clamp(0., 1.))
+        }),
         |el, delta| el.opacity(delta).relative().top(zpx(4. * (1. - delta))),
     )
     .into_any_element()
 }
 
 /// Breathing opacity for "running" indicators. Static under reduced motion.
-pub fn pulse<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, reduced: bool) -> gpui::AnyElement {
+pub fn pulse<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    reduced: bool,
+) -> gpui::AnyElement {
     if reduced {
         return el.into_any_element();
     }
     el.with_animation(
         id,
-        Animation::new(PULSE).repeat().with_easing(gpui::pulsating_between(0.35, 1.0)),
+        Animation::new(PULSE)
+            .repeat()
+            .with_easing(gpui::pulsating_between(0.35, 1.0)),
         |el, delta| el.opacity(delta),
     )
     .into_any_element()
@@ -482,20 +657,30 @@ pub fn pulse<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>,
 
 /// The session timer's dot: opacity 0.5 ↔ 1 over [`BREATHE`]. Solid under
 /// reduced motion.
-pub fn breathe<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, reduced: bool) -> gpui::AnyElement {
+pub fn breathe<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    reduced: bool,
+) -> gpui::AnyElement {
     if reduced {
         return el.into_any_element();
     }
     el.with_animation(
         id,
-        Animation::new(BREATHE).repeat().with_easing(gpui::pulsating_between(0.5, 1.0)),
+        Animation::new(BREATHE)
+            .repeat()
+            .with_easing(gpui::pulsating_between(0.5, 1.0)),
         |el, delta| el.opacity(delta),
     )
     .into_any_element()
 }
 
 /// A spinning icon. Static under reduced motion.
-pub fn spin(icon: crate::icons::IconSvg, id: impl Into<ElementId>, reduced: bool) -> gpui::AnyElement {
+pub fn spin(
+    icon: crate::icons::IconSvg,
+    id: impl Into<ElementId>,
+    reduced: bool,
+) -> gpui::AnyElement {
     if reduced {
         return icon.into_any_element();
     }
@@ -510,9 +695,17 @@ pub fn spin(icon: crate::icons::IconSvg, id: impl Into<ElementId>, reduced: bool
 pub fn dot_grid(color: gpui::Hsla, id: &'static str, reduced: bool) -> gpui::AnyElement {
     let dot = || gpui::div().size(zpx(3.)).rounded_full().bg(color);
     let grid = |cell: &dyn Fn(usize) -> gpui::AnyElement| {
-        gpui::div().flex().flex_col().gap(zpx(2.)).children((0..3).map(|row| {
-            gpui::div().flex().flex_row().gap(zpx(2.)).children((0..3).map(|col| cell(row * 3 + col)))
-        }))
+        gpui::div()
+            .flex()
+            .flex_col()
+            .gap(zpx(2.))
+            .children((0..3).map(|row| {
+                gpui::div()
+                    .flex()
+                    .flex_row()
+                    .gap(zpx(2.))
+                    .children((0..3).map(|col| cell(row * 3 + col)))
+            }))
     };
     if reduced {
         return grid(&|_| dot().opacity(0.6).into_any_element()).into_any_element();
@@ -521,11 +714,15 @@ pub fn dot_grid(color: gpui::Hsla, id: &'static str, reduced: bool) -> gpui::Any
         // Diagonal index 0..=4: the wave reaches each diagonal a fifth of a cycle apart.
         let diagonal = (i / 3 + i % 3) as f32;
         dot()
-            .with_animation((id, i), Animation::new(SPIN + SPIN / 3).repeat(), move |el, delta| {
-                let phase = (delta - diagonal / 5.0).rem_euclid(1.0);
-                let bump = (phase * std::f32::consts::TAU).cos() * 0.5 + 0.5;
-                el.opacity(0.2 + 0.8 * bump)
-            })
+            .with_animation(
+                (id, i),
+                Animation::new(SPIN + SPIN / 3).repeat(),
+                move |el, delta| {
+                    let phase = (delta - diagonal / 5.0).rem_euclid(1.0);
+                    let bump = (phase * std::f32::consts::TAU).cos() * 0.5 + 0.5;
+                    el.opacity(0.2 + 0.8 * bump)
+                },
+            )
             .into_any_element()
     })
     .into_any_element()
@@ -534,7 +731,11 @@ pub fn dot_grid(color: gpui::Hsla, id: &'static str, reduced: bool) -> gpui::Any
 /// "1s", "59s", "1m 5s".
 pub fn elapsed_label(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
-    if secs < 60 { format!("{secs}s") } else { format!("{}m {}s", secs / 60, secs % 60) }
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
 }
 
 /// A 0..1 fill that eases to a new target over [`FAST`], on [`ease_out_strong`]
@@ -549,13 +750,18 @@ pub struct FillTween {
 
 impl FillTween {
     pub fn settled(v: f32) -> Self {
-        Self { from: v, to: v, start: None }
+        Self {
+            from: v,
+            to: v,
+            start: None,
+        }
     }
 
     pub fn value_at(&self, now: std::time::Instant) -> f32 {
         match self.start {
             Some(start) => {
-                let t = (now.saturating_duration_since(start).as_secs_f32() / FAST.as_secs_f32()).clamp(0., 1.);
+                let t = (now.saturating_duration_since(start).as_secs_f32() / FAST.as_secs_f32())
+                    .clamp(0., 1.);
                 self.from + (self.to - self.from) * ease_out_strong(t)
             }
             None => self.to,
@@ -563,7 +769,8 @@ impl FillTween {
     }
 
     pub fn animating(&self, now: std::time::Instant) -> bool {
-        self.start.is_some_and(|start| now.saturating_duration_since(start) < FAST)
+        self.start
+            .is_some_and(|start| now.saturating_duration_since(start) < FAST)
     }
 
     /// Head for `to`. No move when already there. `animate: false` snaps.
@@ -597,14 +804,20 @@ pub struct WidthTween {
 impl WidthTween {
     /// Resting at `width`: the first render does not grow from 0.
     pub fn settled(width: f32) -> Self {
-        Self { from: width, to: width, start: None, generation: 0 }
+        Self {
+            from: width,
+            to: width,
+            start: None,
+            generation: 0,
+        }
     }
 
     /// Where it is at `now`.
     pub fn value_at(&self, now: std::time::Instant) -> f32 {
         match self.start {
             Some(start) => {
-                let t = (now.saturating_duration_since(start).as_secs_f32() / SLOW.as_secs_f32()).clamp(0., 1.);
+                let t = (now.saturating_duration_since(start).as_secs_f32() / SLOW.as_secs_f32())
+                    .clamp(0., 1.);
                 self.from + (self.to - self.from) * ease_out(t)
             }
             None => self.to,
@@ -613,7 +826,8 @@ impl WidthTween {
 
     /// Still moving at `now`.
     pub fn animating(&self, now: std::time::Instant) -> bool {
-        self.start.is_some_and(|start| now.saturating_duration_since(start) < SLOW)
+        self.start
+            .is_some_and(|start| now.saturating_duration_since(start) < SLOW)
     }
 
     /// Head for `to`, from the current position. `animate: false` (reduced
@@ -624,7 +838,10 @@ impl WidthTween {
             return false;
         }
         if !animate {
-            *self = Self { generation: self.generation, ..Self::settled(to) };
+            *self = Self {
+                generation: self.generation,
+                ..Self::settled(to)
+            };
             return false;
         }
         self.from = self.value_at(now);
@@ -655,7 +872,9 @@ impl RollingLabel {
         if label == self.now {
             return false;
         }
-        let mid_roll = self.started.is_some_and(|s| at.saturating_duration_since(s) < SLOW);
+        let mid_roll = self
+            .started
+            .is_some_and(|s| at.saturating_duration_since(s) < SLOW);
         if self.now.is_empty() || !animate || mid_roll {
             self.now = label.to_string();
             return false;
@@ -677,7 +896,14 @@ pub fn unit(x: f32) -> f32 {
 mod tests {
     #[test]
     fn unit_is_always_a_fraction() {
-        for (x, want) in [(0.5, 0.5), (-0.25, 0.), (1.7, 1.), (f32::NAN, 0.), (f32::INFINITY, 0.), (f32::NEG_INFINITY, 0.)] {
+        for (x, want) in [
+            (0.5, 0.5),
+            (-0.25, 0.),
+            (1.7, 1.),
+            (f32::NAN, 0.),
+            (f32::INFINITY, 0.),
+            (f32::NEG_INFINITY, 0.),
+        ] {
             assert_eq!(super::unit(x), want, "{x}");
         }
         // The strong ease-out never leaves 0..=1, even fed out-of-range input.
@@ -698,7 +924,10 @@ mod tests {
         // A staggered row waits closed.
         assert_eq!(row_enter(t0 + ms(30), t0, false).unwrap().opacity, 0.);
         let mid = row_enter(t0, t0 + ms(110), false).unwrap();
-        assert!(mid.opacity > 0.6 && mid.height > 0.6 && mid.dy < 2., "{mid:?}");
+        assert!(
+            mid.opacity > 0.6 && mid.height > 0.6 && mid.dy < 2.,
+            "{mid:?}"
+        );
         assert_eq!(row_enter(t0, t0 + ROW_ENTER, false), None);
         assert_eq!(row_enter(t0, t0, true), None);
         // Content fades ahead of the space closing.
@@ -713,13 +942,20 @@ mod tests {
     fn pill_presence_enters_exits_and_reverses_from_where_it_is() {
         let t0 = std::time::Instant::now();
         let ms = |n| Duration::from_millis(n);
-        let near = |a: Look, b: Look| (a.opacity - b.opacity).abs() < 1e-4 && (a.dy - b.dy).abs() < 1e-3 && (a.scale - b.scale).abs() < 1e-4;
+        let near = |a: Look, b: Look| {
+            (a.opacity - b.opacity).abs() < 1e-4
+                && (a.dy - b.dy).abs() < 1e-3
+                && (a.scale - b.scale).abs() < 1e-4
+        };
         let mut p = Presence::hidden();
         assert!(!p.mounted(t0));
         p.set(true, t0, false);
         assert_eq!(p.look_at(t0), PILL_ENTER_FROM);
         let mid = p.look_at(t0 + ms(60));
-        assert!(mid.opacity > 0.3 && mid.opacity < 1. && mid.dy > 0. && mid.scale < 1., "{mid:?}");
+        assert!(
+            mid.opacity > 0.3 && mid.opacity < 1. && mid.dy > 0. && mid.scale < 1.,
+            "{mid:?}"
+        );
         assert!(near(p.look_at(t0 + PILL_IN), Look::REST));
         assert!(!p.animating(t0 + PILL_IN));
 
@@ -765,7 +1001,10 @@ mod tests {
         let ms = |n| Duration::from_millis(n);
         assert_eq!(reorder_offset(-40., ms(0), false), -40.);
         let mid = reorder_offset(-40., ms(150), false);
-        assert!(mid > -10. && mid < 0., "ease-out covers most of the way early: {mid}");
+        assert!(
+            mid > -10. && mid < 0.,
+            "ease-out covers most of the way early: {mid}"
+        );
         assert_eq!(reorder_offset(-40., REORDER, false), 0.);
         assert_eq!(reorder_offset(-40., ms(0), true), 0.);
         assert!(REORDER >= ms(250) && REORDER <= ms(350));
@@ -797,9 +1036,14 @@ mod tests {
         assert!((glide_curve(1.0) - 1.0).abs() < 1e-4);
         // Moving from the first frame, but gentler than a cubic ease-out.
         let first = glide_curve(0.04);
-        assert!(first > 0.02 && first < ease_out(0.04), "first frame {first}");
+        assert!(
+            first > 0.02 && first < ease_out(0.04),
+            "first frame {first}"
+        );
         // Monotonic.
-        assert!((1..=100).all(|i| glide_curve(i as f32 / 100.) >= glide_curve((i - 1) as f32 / 100.)));
+        assert!(
+            (1..=100).all(|i| glide_curve(i as f32 / 100.) >= glide_curve((i - 1) as f32 / 100.))
+        );
     }
 
     #[test]
@@ -812,7 +1056,9 @@ mod tests {
     fn spring_overshoots_a_little_then_settles() {
         assert_eq!(spring(0.0), 0.0);
         assert_eq!(spring(1.0), 1.0);
-        let peak = (0..=100).map(|i| spring(i as f32 / 100.0)).fold(0.0, f32::max);
+        let peak = (0..=100)
+            .map(|i| spring(i as f32 / 100.0))
+            .fold(0.0, f32::max);
         assert!(peak > 1.03 && peak < 1.09, "overshoot {peak}");
         // Nearly home well before the end: the tail doesn't wobble visibly.
         assert!((spring(0.85) - 1.0).abs() < 0.01);
@@ -845,6 +1091,24 @@ mod tests {
     }
 
     #[test]
+    fn drill_enters_from_the_right_and_leaves_the_same_way() {
+        let start = drill_frame(0., false, false);
+        assert_eq!(start.child_shift, 1.);
+        assert_eq!(start.parent_x, 0.);
+        let rest = drill_frame(1., false, false);
+        assert_eq!(rest.child_shift, 0.);
+        assert_eq!(rest.parent_x, -DRILL_PARALLAX);
+        // Back starts where forward landed, then reverses out to the right.
+        let leave = drill_frame(0., true, false);
+        assert_eq!(leave, rest);
+        let gone = drill_frame(1., true, false);
+        assert_eq!(gone.child_shift, 1.);
+        assert_eq!(gone.parent_x, 0.);
+        assert_eq!(drill_frame(0.4, false, true).child_shift, 0.);
+        assert_eq!(drill_frame(0.4, true, true).parent_x, 0.);
+    }
+
+    #[test]
     fn sheet_enters_from_below_and_leaves_the_same_way() {
         assert_eq!(sheet_look(0., false, false), (0., 8.));
         assert_eq!(sheet_look(1., false, false), (1., 0.));
@@ -871,7 +1135,10 @@ mod tests {
         let mid = t0 + Duration::from_millis(100);
         let at_mid = w.value_at(mid);
         assert!(at_mid > 60. && at_mid < 160.);
-        assert!(at_mid > 110., "ease-out is past halfway at half time: {at_mid}");
+        assert!(
+            at_mid > 110.,
+            "ease-out is past halfway at half time: {at_mid}"
+        );
         assert_eq!(w.value_at(t0 + SLOW), 160.);
 
         // Retarget mid-move: continues from where it is, no jump.
@@ -901,7 +1168,10 @@ mod tests {
         assert_eq!((l.prev.as_str(), l.now.as_str(), l.roll), ("a", "c", 1));
         assert!(l.commit("d", t0 + SLOW + Duration::from_millis(1), true));
         assert_eq!((l.prev.as_str(), l.roll), ("c", 2));
-        assert!(!l.commit("e", t0 + SLOW * 3, false), "reduced motion just swaps");
+        assert!(
+            !l.commit("e", t0 + SLOW * 3, false),
+            "reduced motion just swaps"
+        );
         assert_eq!(l.now, "e");
     }
 }

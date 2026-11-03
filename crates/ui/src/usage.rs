@@ -50,7 +50,11 @@ impl ChatUsage {
             })
             .collect();
         models.sort_by(|a, b| b.total().cmp(&a.total()).then(a.model.cmp(&b.model)));
-        Self { models, context_used: n(view, "context_used"), context_window: n(view, "context_window") }
+        Self {
+            models,
+            context_used: n(view, "context_used"),
+            context_window: n(view, "context_window"),
+        }
     }
 
     pub fn total(&self) -> u64 {
@@ -59,7 +63,8 @@ impl ChatUsage {
 
     /// How full the context is, 0..1, when the window is known.
     pub fn fill(&self) -> Option<f32> {
-        (self.context_window > 0).then(|| (self.context_used as f64 / self.context_window as f64).min(1.) as f32)
+        (self.context_window > 0)
+            .then(|| (self.context_used as f64 / self.context_window as f64).min(1.) as f32)
     }
 }
 
@@ -77,14 +82,19 @@ impl HarnessTotals {
 }
 
 /// Sum chats' usage by harness, then model. Harnesses with nothing spent are left out.
-pub fn by_harness<'a>(chats: impl IntoIterator<Item = (&'a str, &'a ChatUsage)>) -> Vec<HarnessTotals> {
+pub fn by_harness<'a>(
+    chats: impl IntoIterator<Item = (&'a str, &'a ChatUsage)>,
+) -> Vec<HarnessTotals> {
     let mut out: Vec<HarnessTotals> = Vec::new();
     for (harness, usage) in chats {
         for m in usage.models.iter().filter(|m| m.total() > 0) {
             let entry = match out.iter().position(|h| h.harness == harness) {
                 Some(i) => &mut out[i],
                 None => {
-                    out.push(HarnessTotals { harness: harness.to_string(), models: Vec::new() });
+                    out.push(HarnessTotals {
+                        harness: harness.to_string(),
+                        models: Vec::new(),
+                    });
                     out.last_mut().unwrap()
                 }
             };
@@ -95,7 +105,8 @@ pub fn by_harness<'a>(chats: impl IntoIterator<Item = (&'a str, &'a ChatUsage)>)
         }
     }
     for h in &mut out {
-        h.models.sort_by(|a, b| b.total().cmp(&a.total()).then(a.model.cmp(&b.model)));
+        h.models
+            .sort_by(|a, b| b.total().cmp(&a.total()).then(a.model.cmp(&b.model)));
     }
     out.sort_by(|a, b| b.total().cmp(&a.total()).then(a.harness.cmp(&b.harness)));
     out
@@ -144,13 +155,27 @@ mod tests {
         assert_eq!(usage.models[0].model, "b");
         assert_eq!(usage.total(), 103);
         assert_eq!(usage.fill(), Some(0.25));
-        assert_eq!(ChatUsage { context_used: 9, ..Default::default() }.fill(), None);
+        assert_eq!(
+            ChatUsage {
+                context_used: 9,
+                ..Default::default()
+            }
+            .fill(),
+            None
+        );
     }
 
     #[test]
     fn totals_group_by_harness_then_model() {
-        let tokens = |model: &str, input| ModelTokens { model: model.into(), input, ..Default::default() };
-        let chat = |models| ChatUsage { models, ..Default::default() };
+        let tokens = |model: &str, input| ModelTokens {
+            model: model.into(),
+            input,
+            ..Default::default()
+        };
+        let chat = |models| ChatUsage {
+            models,
+            ..Default::default()
+        };
         let (a, b, c) = (
             chat(vec![tokens("opus", 100), tokens("haiku", 5)]),
             chat(vec![tokens("opus", 50)]),
@@ -158,8 +183,18 @@ mod tests {
         );
         let totals = by_harness([("claude_code", &a), ("claude_code", &b), ("codex", &c)]);
         assert_eq!(totals.len(), 2);
-        assert_eq!((totals[0].harness.as_str(), totals[0].total()), ("claude_code", 155));
-        assert_eq!(totals[0].models.iter().map(|m| (m.model.as_str(), m.input)).collect::<Vec<_>>(), [("opus", 150), ("haiku", 5)]);
+        assert_eq!(
+            (totals[0].harness.as_str(), totals[0].total()),
+            ("claude_code", 155)
+        );
+        assert_eq!(
+            totals[0]
+                .models
+                .iter()
+                .map(|m| (m.model.as_str(), m.input))
+                .collect::<Vec<_>>(),
+            [("opus", 150), ("haiku", 5)]
+        );
         // A model that spent nothing isn't listed.
         assert_eq!(totals[1].models.len(), 1);
     }

@@ -37,7 +37,10 @@ impl FileChanges {
             .filter_map(|f| {
                 Some(FileChange {
                     path: f["path"].as_str()?.to_string(),
-                    status: f["status"].as_str().and_then(|s| s.chars().next()).unwrap_or('M'),
+                    status: f["status"]
+                        .as_str()
+                        .and_then(|s| s.chars().next())
+                        .unwrap_or('M'),
                     added: count(&f["added"]),
                     removed: count(&f["removed"]),
                 })
@@ -52,7 +55,9 @@ impl FileChanges {
 
     /// Lines added and removed across the listed files.
     pub fn totals(&self) -> (u32, u32) {
-        self.files.iter().fold((0, 0), |(a, r), f| (a + f.added.unwrap_or(0), r + f.removed.unwrap_or(0)))
+        self.files.iter().fold((0, 0), |(a, r), f| {
+            (a + f.added.unwrap_or(0), r + f.removed.unwrap_or(0))
+        })
     }
 
     /// "3 files changed".
@@ -63,7 +68,10 @@ impl FileChanges {
 
     /// The absolute path of a listed file.
     pub fn abs(&self, file: &FileChange) -> String {
-        std::path::Path::new(&self.root).join(&file.path).to_string_lossy().into_owned()
+        std::path::Path::new(&self.root)
+            .join(&file.path)
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// For the transcript's height memo.
@@ -90,10 +98,12 @@ mod tests {
 
     #[test]
     fn totals_headline_and_blocks() {
-        let card = FileChanges::from_spec(&json!({ "component": "files", "root": "/w", "more": 1, "files": [
+        let card = FileChanges::from_spec(
+            &json!({ "component": "files", "root": "/w", "more": 1, "files": [
             { "path": "src/a.rs", "status": "M", "added": 12, "removed": 3 },
             { "path": "img.png", "status": "?", "added": null, "removed": null },
-        ] }))
+        ] }),
+        )
         .unwrap();
         assert_eq!(card.totals(), (12, 3));
         assert_eq!(card.headline(), "3 files changed");

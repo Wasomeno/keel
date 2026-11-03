@@ -71,7 +71,10 @@ pub struct SessionTimer {
 }
 
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 impl SessionTimer {
@@ -131,7 +134,11 @@ impl SessionTimer {
     }
 
     pub fn toggle(&mut self, now: i64) {
-        if self.running() { self.pause(now) } else { self.start(now) }
+        if self.running() {
+            self.pause(now)
+        } else {
+            self.start(now)
+        }
     }
 
     pub fn reset(&mut self) {
@@ -149,7 +156,11 @@ impl SessionTimer {
 pub fn clock_label(elapsed_ms: i64) -> String {
     let secs = elapsed_ms.max(0) / 1000;
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
 }
 
 #[cfg(test)]
@@ -191,14 +202,22 @@ mod tests {
         assert_eq!(TimerDock::for_drop(100., 100., area), TimerDock::TopLeft);
         assert_eq!(TimerDock::for_drop(700., 100., area), TimerDock::TopRight);
         assert_eq!(TimerDock::for_drop(100., 600., area), TimerDock::BottomLeft);
-        assert_eq!(TimerDock::for_drop(700., 600., area), TimerDock::BottomRight);
+        assert_eq!(
+            TimerDock::for_drop(700., 600., area),
+            TimerDock::BottomRight
+        );
         assert_eq!(TimerDock::for_drop(700., 600., None), TimerDock::Header);
     }
 
     #[test]
     fn round_trips_through_disk() {
         let dir = std::env::temp_dir().join(format!("keel-timer-{}", uuid::Uuid::new_v4()));
-        let t = SessionTimer { started_at_ms: Some(42), accumulated_ms: 7, dock: TimerDock::BottomLeft, hidden: true };
+        let t = SessionTimer {
+            started_at_ms: Some(42),
+            accumulated_ms: 7,
+            dock: TimerDock::BottomLeft,
+            hidden: true,
+        };
         t.save(&dir);
         assert_eq!(SessionTimer::load(&dir), t);
         let _ = std::fs::remove_dir_all(&dir);

@@ -16,7 +16,10 @@ impl KeelWindow {
             && self.chat_stream.is_some()
             && !self.messages.is_empty()
             && !self.awaiting_first_output
-            && matches!(self.active_status(), Some(ChatStatus::Idle | ChatStatus::Aborted));
+            && matches!(
+                self.active_status(),
+                Some(ChatStatus::Idle | ChatStatus::Aborted)
+            );
         if !ready {
             if self.suggestion_key.is_some() {
                 self.invalidate_suggestion();
@@ -41,12 +44,17 @@ impl KeelWindow {
                     if this.chat_gen != generation
                         || this.suggestion_key != Some(revision)
                         || this.awaiting_first_output
-                        || !matches!(this.active_status(), Some(ChatStatus::Idle | ChatStatus::Aborted))
+                        || !matches!(
+                            this.active_status(),
+                            Some(ChatStatus::Idle | ChatStatus::Aborted)
+                        )
                     {
                         return;
                     }
                     match result {
-                        Ok(body) => this.prompt_suggestion = body["suggestion"].as_str().map(str::to_string),
+                        Ok(body) => {
+                            this.prompt_suggestion = body["suggestion"].as_str().map(str::to_string)
+                        }
                         Err(err) => tracing::info!("prompt suggestion unavailable: {err}"),
                     }
                     cx.notify();
@@ -62,15 +70,19 @@ impl KeelWindow {
         };
         if self.composer_placeholder != placeholder {
             self.composer_placeholder = placeholder.to_string();
-            self.composer
-                .update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+            self.composer.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
         }
     }
 
     pub(super) fn can_accept_suggestion(&self, cx: &Context<Self>) -> bool {
         self.prompt_suggestion.is_some()
             && self.current_chat == self.state.active_tab
-            && matches!(self.active_status(), Some(ChatStatus::Idle | ChatStatus::Aborted))
+            && matches!(
+                self.active_status(),
+                Some(ChatStatus::Idle | ChatStatus::Aborted)
+            )
             && !self.awaiting_first_output
             && !self.settings_open
             && !self.gitlab_open

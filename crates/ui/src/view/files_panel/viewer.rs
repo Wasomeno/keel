@@ -13,7 +13,8 @@ const GLOW: Duration = Duration::from_millis(1400);
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
 pub(super) fn is_image(path: &str) -> bool {
-    path.rsplit_once('.').is_some_and(|(_, e)| IMAGE_EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+    path.rsplit_once('.')
+        .is_some_and(|(_, e)| IMAGE_EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
 /// An image on disk: where, how big, and its pixel size when it could be read.
@@ -82,7 +83,10 @@ impl Viewer {
 
     /// The row lit by the last reveal, while it's lit.
     pub(super) fn glow(&self) -> Option<(String, u64)> {
-        self.glow_at.as_ref().filter(|(_, _, at)| at.elapsed() < GLOW).map(|(p, n, _)| (p.clone(), *n))
+        self.glow_at
+            .as_ref()
+            .filter(|(_, _, at)| at.elapsed() < GLOW)
+            .map(|(p, n, _)| (p.clone(), *n))
     }
 
     /// Dev: what the viewer shows.
@@ -104,15 +108,25 @@ impl Viewer {
 /// it costs a few frames and a click elsewhere cuts it short (the row redraws
 /// without it).
 pub(super) fn reveal_glow(n: u64, t: Tokens, reduced: bool) -> AnyElement {
-    let wash = div().absolute().inset_0().rounded(RADIUS_MD).bg(c(t.accent).opacity(0.16)).border_1().border_color(c(t.accent).opacity(0.45));
+    let wash = div()
+        .absolute()
+        .inset_0()
+        .rounded(RADIUS_MD)
+        .bg(c(t.accent).opacity(0.16))
+        .border_1()
+        .border_color(c(t.accent).opacity(0.45));
     if reduced {
         return wash.into_any_element();
     }
-    wash.with_animation(("files-reveal-glow", n as usize), gpui::Animation::new(GLOW), |el, d| {
-        // Hold for the first half, then ease out.
-        let fade = ((d - 0.5) * 2.).clamp(0., 1.);
-        el.opacity(1. - crate::motion::ease_out(fade))
-    })
+    wash.with_animation(
+        ("files-reveal-glow", n as usize),
+        gpui::Animation::new(GLOW),
+        |el, d| {
+            // Hold for the first half, then ease out.
+            let fade = ((d - 0.5) * 2.).clamp(0., 1.);
+            el.opacity(1. - crate::motion::ease_out(fade))
+        },
+    )
     .into_any_element()
 }
 
@@ -127,7 +141,14 @@ fn checker(t: Tokens) -> impl IntoElement {
             let rows = (f32::from(bounds.size.height) / f32::from(s)).ceil() as usize;
             for r in 0..rows {
                 for k in (r % 2..cols).step_by(2) {
-                    let cell = gpui::Bounds::new(gpui::point(bounds.origin.x + s * k as f32, bounds.origin.y + s * r as f32), gpui::size(s, s)).intersect(&bounds);
+                    let cell = gpui::Bounds::new(
+                        gpui::point(
+                            bounds.origin.x + s * k as f32,
+                            bounds.origin.y + s * r as f32,
+                        ),
+                        gpui::size(s, s),
+                    )
+                    .intersect(&bounds);
                     window.paint_quad(gpui::fill(cell, tone));
                 }
             }
@@ -147,13 +168,21 @@ fn human_bytes(n: u64) -> String {
 
 /// An image's pixel size, read from its header (or an SVG's own size).
 fn image_dims(path: &std::path::Path) -> Option<(u32, u32)> {
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+    {
         let data = std::fs::read(path).ok()?;
         let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
         let size = tree.size();
         return Some((size.width().round() as u32, size.height().round() as u32));
     }
-    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 fn text_key(path: &str, text: &str) -> u64 {
@@ -184,14 +213,23 @@ impl KeelWindow {
     /// down to it, its row scrolled to the middle and lit for a moment. It
     /// opens in the viewer too when asked, or when there's room for both
     /// (not a deleted file: there's nothing to open).
-    pub(super) fn files_reveal(&mut self, path: String, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn files_reveal(
+        &mut self,
+        path: String,
+        select: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.files.tab = FilesTab::Files;
         if !self.files.dirs.contains_key("") {
             self.files_load_dir(String::new(), cx);
         }
         for dir in ancestors(&path) {
             self.files.expanded.insert(dir.clone());
-            if !matches!(self.files.dirs.get(&dir), Some(Load::Ready(_) | Load::Loading)) {
+            if !matches!(
+                self.files.dirs.get(&dir),
+                Some(Load::Ready(_) | Load::Loading)
+            ) {
                 self.files_load_dir(dir, cx);
             }
         }
@@ -215,15 +253,36 @@ impl KeelWindow {
             return;
         };
         let dirs = ancestors(&path);
-        let found = rows.iter().position(|r| r.path == path).map(|ix| (ix, path.clone())).or_else(|| {
-            let loading = std::iter::once("").chain(dirs.iter().map(String::as_str)).any(|d| !matches!(self.files.dirs.get(d), Some(Load::Ready(_) | Load::Failed(_))));
-            if loading {
-                return None;
-            }
-            dirs.iter().rev().find_map(|d| rows.iter().position(|r| r.path == *d).map(|ix| (ix, d.clone())))
-        });
+        let found = rows
+            .iter()
+            .position(|r| r.path == path)
+            .map(|ix| (ix, path.clone()))
+            .or_else(|| {
+                let loading = std::iter::once("")
+                    .chain(dirs.iter().map(String::as_str))
+                    .any(|d| {
+                        !matches!(
+                            self.files.dirs.get(d),
+                            Some(Load::Ready(_) | Load::Failed(_))
+                        )
+                    });
+                if loading {
+                    return None;
+                }
+                dirs.iter().rev().find_map(|d| {
+                    rows.iter()
+                        .position(|r| r.path == *d)
+                        .map(|ix| (ix, d.clone()))
+                })
+            });
         let Some((ix, lit)) = found else {
-            if dirs.iter().all(|d| matches!(self.files.dirs.get(d.as_str()), Some(Load::Ready(_) | Load::Failed(_)))) && self.files.dirs.contains_key("") {
+            if dirs.iter().all(|d| {
+                matches!(
+                    self.files.dirs.get(d.as_str()),
+                    Some(Load::Ready(_) | Load::Failed(_))
+                )
+            }) && self.files.dirs.contains_key("")
+            {
                 self.files.viewer.pending = None;
             }
             return;
@@ -232,12 +291,16 @@ impl KeelWindow {
         v.pending = None;
         v.reveals += 1;
         v.glow_at = Some((lit, v.reveals, Instant::now()));
-        v.tree_scroll.scroll_to_item(ix, gpui::ScrollStrategy::Center);
+        v.tree_scroll
+            .scroll_to_item(ix, gpui::ScrollStrategy::Center);
     }
 
     /// Where an image is on disk and how big, read once per file.
     pub(super) fn files_locate(&mut self, path: String, cx: &mut Context<Self>) {
-        if matches!(self.files.viewer.images.get(&path), Some(Load::Ready(_) | Load::Loading)) {
+        if matches!(
+            self.files.viewer.images.get(&path),
+            Some(Load::Ready(_) | Load::Loading)
+        ) {
             return;
         }
         let (Some(chat), Some(client)) = (self.files.chat.clone(), self.client.clone()) else {
@@ -245,7 +308,12 @@ impl KeelWindow {
         };
         self.files.viewer.images.insert(path.clone(), Load::Loading);
         cx.spawn(async move |this, cx| {
-            let res = client.call("chat_file_info", serde_json::json!({ "chat_id": chat, "path": path })).await;
+            let res = client
+                .call(
+                    "chat_file_info",
+                    serde_json::json!({ "chat_id": chat, "path": path }),
+                )
+                .await;
             let info = match res {
                 Ok(v) => {
                     let abs = PathBuf::from(v["path"].as_str().unwrap_or_default());
@@ -270,10 +338,19 @@ impl KeelWindow {
     /// fit to the pane (never blown up past its pixels, but an SVG may grow a
     /// little), or at actual size and scrollable. A status line gives its
     /// size, weight and format.
-    pub(super) fn render_image_view(&mut self, path: &str, width: f32, t: Tokens, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_image_view(
+        &mut self,
+        path: &str,
+        width: f32,
+        t: Tokens,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let info = match self.files.viewer.images.get(path) {
             Some(Load::Ready(info)) => info.clone(),
-            Some(Load::Failed(err)) => return empty_state(Icon::Image, "Can't show this image", err.clone(), t),
+            Some(Load::Failed(err)) => {
+                return empty_state(Icon::Image, "Can't show this image", err.clone(), t);
+            }
             Some(Load::Loading) => return self.render_code_skeleton("files-image-skel", t),
             None => {
                 self.files_locate(path.to_string(), cx);
@@ -287,10 +364,16 @@ impl KeelWindow {
             _ => (width, 420. * zoom),
         };
         let (aw, ah) = ((aw - 2. * pad).max(40.), (ah - 2. * pad).max(40.));
-        let svg = path.rsplit_once('.').is_some_and(|(_, e)| e.eq_ignore_ascii_case("svg"));
+        let svg = path
+            .rsplit_once('.')
+            .is_some_and(|(_, e)| e.eq_ignore_ascii_case("svg"));
         let fit = info.dims.map(|(w, h)| {
             let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-            let grow = if svg { (160. * zoom / w.max(h)).max(1.) } else { 1. };
+            let grow = if svg {
+                (160. * zoom / w.max(h)).max(1.)
+            } else {
+                1.
+            };
             (aw / w).min(ah / h).min(grow)
         });
         let actual = self.files.viewer.actual;
@@ -298,7 +381,10 @@ impl KeelWindow {
         let shrunk = fit.is_some_and(|f| f < 0.999);
         let picture = match (info.dims, scale) {
             (Some((w, h)), Some(s)) => {
-                let (w, h) = (px((w as f32 * s).round().max(1.)), px((h as f32 * s).round().max(1.)));
+                let (w, h) = (
+                    px((w as f32 * s).round().max(1.)),
+                    px((h as f32 * s).round().max(1.)),
+                );
                 div()
                     .flex_none()
                     .relative()
@@ -310,11 +396,27 @@ impl KeelWindow {
                     .border_color(c(t.border))
                     .bg(c(t.window))
                     .child(checker(t))
-                    .child(gpui::img(info.abs.clone()).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Contain))
+                    .child(
+                        gpui::img(info.abs.clone())
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
                     .into_any_element()
             }
             // Its size couldn't be read: let the image size itself.
-            _ => div().flex_none().max_w(px(aw)).max_h(px(ah)).child(gpui::img(info.abs.clone()).max_w(px(aw)).max_h(px(ah)).object_fit(gpui::ObjectFit::Contain)).into_any_element(),
+            _ => div()
+                .flex_none()
+                .max_w(px(aw))
+                .max_h(px(ah))
+                .child(
+                    gpui::img(info.abs.clone())
+                        .max_w(px(aw))
+                        .max_h(px(ah))
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .into_any_element(),
         };
         let area = self.files.viewer.area.clone();
         // Measure the area as it paints; a new size draws once more to fit it.
@@ -339,13 +441,34 @@ impl KeelWindow {
             .child(measure)
             .map(|d| {
                 if actual {
-                    d.overflow_scroll().child(div().p(px(pad)).flex().min_w_full().min_h_full().items_center().justify_center().child(picture))
+                    d.overflow_scroll().child(
+                        div()
+                            .p(px(pad))
+                            .flex()
+                            .min_w_full()
+                            .min_h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(picture),
+                    )
                 } else {
-                    d.overflow_hidden().flex().items_center().justify_center().p(px(pad)).child(picture)
+                    d.overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(px(pad))
+                        .child(picture)
                 }
             });
-        let ext = path.rsplit_once('.').map_or(String::new(), |(_, e)| e.to_ascii_uppercase());
-        let facts = [info.dims.map(|(w, h)| format!("{} \u{00D7} {}", grouped(w), grouped(h))), Some(human_bytes(info.bytes)), Some(if ext == "JPEG" { "JPG".into() } else { ext })];
+        let ext = path
+            .rsplit_once('.')
+            .map_or(String::new(), |(_, e)| e.to_ascii_uppercase());
+        let facts = [
+            info.dims
+                .map(|(w, h)| format!("{} \u{00D7} {}", grouped(w), grouped(h))),
+            Some(human_bytes(info.bytes)),
+            Some(if ext == "JPEG" { "JPG".into() } else { ext }),
+        ];
         let status = div()
             .flex_none()
             .h(zpx(30.))
@@ -359,41 +482,89 @@ impl KeelWindow {
             .border_color(c(t.border).opacity(0.7))
             .t_caption()
             .text_color(c(t.text_faint))
-            .children(facts.into_iter().flatten().map(|f| div().flex_none().child(f)))
+            .children(
+                facts
+                    .into_iter()
+                    .flatten()
+                    .map(|f| div().flex_none().child(f)),
+            )
             .child(div().flex_1())
-            .when_some(fit.filter(|_| shrunk && !actual), |d, f| d.child(div().flex_none().child(format!("{}%", (f * 100.).round() as u32))))
+            .when_some(fit.filter(|_| shrunk && !actual), |d, f| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .child(format!("{}%", (f * 100.).round() as u32)),
+                )
+            })
             .when(shrunk, |d| {
                 d.child(
                     seg_track(t)
-                        .child(seg_item("files-image-fit", "Fit", None, !actual, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.files.viewer.actual = false;
-                            cx.notify();
-                        })))
-                        .child(seg_item("files-image-actual", "Actual size", None, actual, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.files.viewer.actual = true;
-                            cx.notify();
-                        }))),
+                        .child(
+                            seg_item("files-image-fit", "Fit", None, !actual, t).on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.files.viewer.actual = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(
+                            seg_item("files-image-actual", "Actual size", None, actual, t)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.files.viewer.actual = true;
+                                    cx.notify();
+                                })),
+                        ),
                 )
             });
-        div().flex_1().min_h_0().flex().flex_col().child(stage).child(status).into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(stage)
+            .child(status)
+            .into_any_element()
     }
 
     /// Markdown as the transcript draws it: the same headings, lists, code
     /// blocks (with copy and folding) and images. It follows unsaved edits.
-    pub(super) fn render_md_preview(&mut self, path: &str, width: f32, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_md_preview(
+        &mut self,
+        path: &str,
+        width: f32,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(file) = self.files.file.as_ref().filter(|f| f.path == path) else {
             return self.render_code_skeleton("files-md-skel", t);
         };
-        let text = if file.dirty { file.editor.read(cx).text().to_string() } else { file.saved.clone() };
+        let text = if file.dirty {
+            file.editor.read(cx).text().to_string()
+        } else {
+            file.saved.clone()
+        };
         if text.trim().is_empty() {
-            return empty_state(Icon::FileText, "Empty file", "Switch to Source to write it.", t);
+            return empty_state(
+                Icon::FileText,
+                "Empty file",
+                "Switch to Source to write it.",
+                t,
+            );
         }
         let key = text_key(path, &text);
         if self.files.viewer.md.as_ref().is_none_or(|m| m.key != key) {
             let born = Instant::now();
             let items: Vec<_> = crate::markdown::parse_markdown_blocks("files-md", &text)
                 .into_iter()
-                .map(|block| crate::transcript::TranscriptRowItem { message_id: "files-md".into(), role: "assistant".into(), block, born, enter: None, leaving: None })
+                .map(|block| crate::transcript::TranscriptRowItem {
+                    message_id: "files-md".into(),
+                    role: "assistant".into(),
+                    block,
+                    born,
+                    enter: None,
+                    leaving: None,
+                })
                 .collect();
             match &mut self.files.viewer.md {
                 Some(m) if m.path == path => {
@@ -403,14 +574,22 @@ impl KeelWindow {
                 }
                 slot => {
                     let list = ListState::new(items.len(), ListAlignment::Top, px(1200.));
-                    *slot = Some(MdDoc { path: path.to_string(), key, items: Rc::new(items), list });
+                    *slot = Some(MdDoc {
+                        path: path.to_string(),
+                        key,
+                        items: Rc::new(items),
+                        list,
+                    });
                 }
             }
         }
         let Some(md) = self.files.viewer.md.as_ref() else {
             return div().into_any_element();
         };
-        let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
+        let dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
         let syntax = keel_theme::resolve_syntax_theme(self.state.ui_settings.theme, dark);
         let weak = cx.entity().downgrade();
         let zoom = crate::style::zoom();
@@ -423,8 +602,12 @@ impl KeelWindow {
             on_action: Rc::new(move |action, cx| {
                 let _ = weak.update(cx, |view, cx| match action {
                     crate::transcript::RowAction::Toggle { row_id } => view.toggle_row(&row_id, cx),
-                    crate::transcript::RowAction::Copy { row_id, content } => view.copy_code(row_id, content, cx),
-                    crate::transcript::RowAction::OpenImage { path } => view.open_lightbox(crate::view::Lightbox::Image(path.into()), cx),
+                    crate::transcript::RowAction::Copy { row_id, content } => {
+                        view.copy_code(row_id, content, cx)
+                    }
+                    crate::transcript::RowAction::OpenImage { path } => {
+                        view.open_lightbox(crate::view::Lightbox::Image(path.into()), cx)
+                    }
                     crate::transcript::RowAction::OpenUrl { url } => cx.open_url(&url),
                     _ => {}
                 });
@@ -465,7 +648,13 @@ impl KeelWindow {
 
 impl KeelWindow {
     /// Dev socket commands for the Files pane (`files_*`). None: not one.
-    pub(in crate::view) fn files_dev(&mut self, cmd: &str, arg: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
+    pub(in crate::view) fn files_dev(
+        &mut self,
+        cmd: &str,
+        arg: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let ok = |s: &str| Some(s.to_string());
         let out = match cmd {
             "files_toggle" => {

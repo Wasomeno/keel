@@ -24,8 +24,8 @@ use keel_theme::Tokens;
 use super::{KeelWindow, icon_button};
 use crate::icons::Icon;
 use crate::motion::{BASE, appear};
-use crate::syntax::SyntaxKind;
 use crate::style::{HEADER_HEIGHT, KeelStyled, MONO, RADIUS_MD, c, zpx};
+use crate::syntax::SyntaxKind;
 
 pub(super) mod fold;
 mod stack;
@@ -226,7 +226,10 @@ fn parse_patch(patch: &str) -> (Vec<DiffLine>, usize) {
         let (kind, text) = if let Some(rest) = raw.strip_prefix("@@") {
             // `@@ -a,b +c,d @@ context`
             let mut nums = rest.split_whitespace();
-            let start = |s: Option<&str>| s.and_then(|s| s[1..].split(',').next()?.parse::<u32>().ok()).unwrap_or(1);
+            let start = |s: Option<&str>| {
+                s.and_then(|s| s[1..].split(',').next()?.parse::<u32>().ok())
+                    .unwrap_or(1)
+            };
             if in_hunk {
                 shown_to = new;
             }
@@ -259,7 +262,11 @@ fn parse_patch(patch: &str) -> (Vec<DiffLine>, usize) {
             LineKind::Hunk => (Some(old), Some(new)),
             _ => (None, None),
         };
-        let gap = if kind == LineKind::Hunk { new.saturating_sub(shown_to) } else { 0 };
+        let gap = if kind == LineKind::Hunk {
+            new.saturating_sub(shown_to)
+        } else {
+            0
+        };
         match kind {
             LineKind::Added => new += 1,
             LineKind::Removed => old += 1,
@@ -274,7 +281,15 @@ fn parse_patch(patch: &str) -> (Vec<DiffLine>, usize) {
         if text.len() > widest_len {
             (widest, widest_len) = (lines.len(), text.len());
         }
-        lines.push(DiffLine { kind, old: o, new: n, text, spans: Vec::new(), emph: None, gap });
+        lines.push(DiffLine {
+            kind,
+            old: o,
+            new: n,
+            text,
+            spans: Vec::new(),
+            emph: None,
+            gap,
+        });
     }
     mark_inline(&mut lines);
     (lines, widest)
@@ -317,7 +332,13 @@ fn inline_change(old: &str, new: &str) -> Option<(std::ops::Range<usize>, std::o
         pre -= 1;
     }
     let room = o.len().min(n.len()) - pre;
-    let mut suf = o.iter().rev().zip(n.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+    let mut suf = o
+        .iter()
+        .rev()
+        .zip(n.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
     while !old.is_char_boundary(o.len() - suf) {
         suf -= 1;
     }
@@ -347,7 +368,15 @@ fn expand_gap(lines: &[DiffLine], ix: usize, file: &str) -> Vec<DiffLine> {
     let mut out = lines[..ix].to_vec();
     for (n, text) in (from..new_start).zip(file.lines().skip(from.saturating_sub(1) as usize)) {
         let text: SharedString = text.replace('\t', "    ").into();
-        out.push(DiffLine { kind: LineKind::Context, old: Some((n as i64 + shift) as u32), new: Some(n), text, spans: Vec::new(), emph: None, gap: 0 });
+        out.push(DiffLine {
+            kind: LineKind::Context,
+            old: Some((n as i64 + shift) as u32),
+            new: Some(n),
+            text,
+            spans: Vec::new(),
+            emph: None,
+            gap: 0,
+        });
     }
     out.extend_from_slice(&lines[ix + 1..]);
     out
@@ -355,16 +384,31 @@ fn expand_gap(lines: &[DiffLine], ix: usize, file: &str) -> Vec<DiffLine> {
 
 /// Syntax colours and the in-line change wash as one run list (gpui wants
 /// runs that don't overlap): cut at every edge, then style each piece.
-fn paint_runs(line: &DiffLine, syntax: &keel_theme::SyntaxPaintMap, emph_bg: gpui::Hsla) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+fn paint_runs(
+    line: &DiffLine,
+    syntax: &keel_theme::SyntaxPaintMap,
+    emph_bg: gpui::Hsla,
+) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
     let emph = line.emph.clone().filter(|r| !r.is_empty());
-    let mut cuts: Vec<usize> = line.spans.iter().flat_map(|(r, _)| [r.start, r.end]).chain(emph.iter().flat_map(|r| [r.start, r.end])).collect();
+    let mut cuts: Vec<usize> = line
+        .spans
+        .iter()
+        .flat_map(|(r, _)| [r.start, r.end])
+        .chain(emph.iter().flat_map(|r| [r.start, r.end]))
+        .collect();
     cuts.sort_unstable();
     cuts.dedup();
     cuts.windows(2)
         .filter_map(|w| {
             let piece = w[0]..w[1];
-            let kind = line.spans.iter().find(|(r, _)| r.start <= piece.start && piece.end <= r.end).map(|(_, k)| *k);
-            let hot = emph.as_ref().is_some_and(|r| r.start <= piece.start && piece.end <= r.end);
+            let kind = line
+                .spans
+                .iter()
+                .find(|(r, _)| r.start <= piece.start && piece.end <= r.end)
+                .map(|(_, k)| *k);
+            let hot = emph
+                .as_ref()
+                .is_some_and(|r| r.start <= piece.start && piece.end <= r.end);
             if kind.is_none() && !hot {
                 return None;
             }
@@ -380,7 +424,8 @@ fn paint_runs(line: &DiffLine, syntax: &keel_theme::SyntaxPaintMap, emph_bg: gpu
                 piece,
                 gpui::HighlightStyle {
                     color: color.map(|v| c(v << 8 | 0xFF)),
-                    font_style: (kind == Some(SyntaxKind::Comment)).then_some(gpui::FontStyle::Italic),
+                    font_style: (kind == Some(SyntaxKind::Comment))
+                        .then_some(gpui::FontStyle::Italic),
                     background_color: hot.then_some(emph_bg),
                     ..Default::default()
                 },
@@ -395,7 +440,9 @@ fn paint_runs(line: &DiffLine, syntax: &keel_theme::SyntaxPaintMap, emph_bg: gpu
 fn highlight_diff(lines: &mut [DiffLine], path: &str) {
     let ext = path.rsplit_once('.').map(|(_, e)| e);
     for side in [LineKind::Removed, LineKind::Added] {
-        let rows: Vec<usize> = (0..lines.len()).filter(|&i| matches!(lines[i].kind, LineKind::Context) || lines[i].kind == side).collect();
+        let rows: Vec<usize> = (0..lines.len())
+            .filter(|&i| matches!(lines[i].kind, LineKind::Context) || lines[i].kind == side)
+            .collect();
         let (mut code, mut starts) = (String::new(), Vec::with_capacity(rows.len()));
         for &i in &rows {
             starts.push(code.len());
@@ -447,7 +494,9 @@ impl KeelWindow {
         }
         let settle = self.right_panel_duration();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(settle + Duration::from_millis(20)).await;
+            cx.background_executor()
+                .timer(settle + Duration::from_millis(20))
+                .await;
             let _ = this.update(cx, |_, cx| {
                 cx.notify();
             });
@@ -458,8 +507,16 @@ impl KeelWindow {
 
     /// Open a changed file's diff in the right-side files panel: its section
     /// in the stack, opened and brought to the top.
-    pub(super) fn show_file_diff(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self.projects.map_path(self.current_chat.as_deref().or(self.files.chat.as_deref()), &path);
+    pub(super) fn show_file_diff(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.projects.map_path(
+            self.current_chat.as_deref().or(self.files.chat.as_deref()),
+            &path,
+        );
         let rel = if path.starts_with('@') {
             path
         } else if let Some(root) = self.mention_root() {
@@ -486,7 +543,9 @@ impl KeelWindow {
             self.files_refresh(cx);
             let settle = self.right_panel_duration();
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(settle + Duration::from_millis(20)).await;
+                cx.background_executor()
+                    .timer(settle + Duration::from_millis(20))
+                    .await;
                 let _ = this.update(cx, |_, cx| cx.notify());
             })
             .detach();
@@ -500,7 +559,10 @@ impl KeelWindow {
 
     /// Open a file in the right-side files panel editor.
     pub(super) fn show_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self.projects.map_path(self.current_chat.as_deref().or(self.files.chat.as_deref()), &path);
+        let path = self.projects.map_path(
+            self.current_chat.as_deref().or(self.files.chat.as_deref()),
+            &path,
+        );
         let rel = if path.starts_with('@') {
             path
         } else if let Some(root) = self.mention_root() {
@@ -511,7 +573,10 @@ impl KeelWindow {
         } else {
             path
         };
-        let rel = rel.trim_start_matches("./").trim_start_matches('/').to_string();
+        let rel = rel
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
 
         if self.files.dirty() && self.files.file.as_ref().is_some_and(|f| f.path != rel) {
             if let Some(file) = &mut self.files.file {
@@ -536,7 +601,9 @@ impl KeelWindow {
             self.files_refresh(cx);
             let settle = self.right_panel_duration();
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(settle + Duration::from_millis(20)).await;
+                cx.background_executor()
+                    .timer(settle + Duration::from_millis(20))
+                    .await;
                 let _ = this.update(cx, |_, cx| cx.notify());
             })
             .detach();
@@ -634,8 +701,16 @@ impl KeelWindow {
             let mut failed: Option<String> = None;
             let mut any_ok = false;
             for root in &queries {
-                let res = client.call("chat_changes", serde_json::json!({ "chat_id": chat, "path": root })).await;
-                match res.and_then(|v| serde_json::from_value::<Vec<Change>>(v["changes"].clone()).map_err(|e| e.to_string())) {
+                let res = client
+                    .call(
+                        "chat_changes",
+                        serde_json::json!({ "chat_id": chat, "path": root }),
+                    )
+                    .await;
+                match res.and_then(|v| {
+                    serde_json::from_value::<Vec<Change>>(v["changes"].clone())
+                        .map_err(|e| e.to_string())
+                }) {
                     Ok(list) => {
                         any_ok = true;
                         for mut change in list {
@@ -666,7 +741,8 @@ impl KeelWindow {
                     });
                     f.tree_cache = None;
                     // A folder that isn't a repo has no changes to show.
-                    let show_files = matches!(f.changes, Some(Load::Failed(_))) && f.tab == FilesTab::Changes;
+                    let show_files =
+                        matches!(f.changes, Some(Load::Failed(_))) && f.tab == FilesTab::Changes;
                     if show_files {
                         f.tab = FilesTab::Files;
                     }
@@ -709,7 +785,12 @@ impl KeelWindow {
     /// The engine saw the checkout change, or a turn ended: refresh if the
     /// pane shows that chat.
     pub(super) fn files_on_checkout_changed(&mut self, checkout_id: &str, cx: &mut Context<Self>) {
-        let ours = self.files.chat.as_ref().and_then(|id| self.state.chats.get(id)).is_some_and(|c| c.checkout_id == checkout_id);
+        let ours = self
+            .files
+            .chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))
+            .is_some_and(|c| c.checkout_id == checkout_id);
         if self.files.open && ours {
             self.files_refresh(cx);
         }
@@ -727,12 +808,20 @@ impl KeelWindow {
         };
         self.files.dirs.insert(rel.clone(), Load::Loading);
         cx.spawn(async move |this, cx| {
-            let res = client.call("chat_list_dir", serde_json::json!({ "chat_id": chat, "path": rel })).await;
+            let res = client
+                .call(
+                    "chat_list_dir",
+                    serde_json::json!({ "chat_id": chat, "path": rel }),
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.files.chat.as_deref() != Some(chat.as_str()) {
                     return;
                 }
-                let load = match res.and_then(|v| serde_json::from_value::<Vec<Entry>>(v["entries"].clone()).map_err(|e| e.to_string())) {
+                let load = match res.and_then(|v| {
+                    serde_json::from_value::<Vec<Entry>>(v["entries"].clone())
+                        .map_err(|e| e.to_string())
+                }) {
                     Ok(list) => Load::Ready(list),
                     Err(err) => Load::Failed(err),
                 };
@@ -759,13 +848,24 @@ impl KeelWindow {
         self.files.tree_cache = None;
         if !self.files.expanded.remove(&rel) {
             self.files.expanded.insert(rel.clone());
-            if !matches!(self.files.dirs.get(&rel), Some(Load::Ready(_) | Load::Loading)) {
+            if !matches!(
+                self.files.dirs.get(&rel),
+                Some(Load::Ready(_) | Load::Loading)
+            ) {
                 self.files_load_dir(rel.clone(), cx);
             }
         }
         let new = self.tree_rows();
         let at = old.iter().position(|r| r.dir && r.path == rel);
-        self.files.tree_fold = fold::TreeFold::toggled(self.files.tree_fold.take(), &rel, at, old, new, now, reduced);
+        self.files.tree_fold = fold::TreeFold::toggled(
+            self.files.tree_fold.take(),
+            &rel,
+            at,
+            old,
+            new,
+            now,
+            reduced,
+        );
         cx.notify();
     }
 
@@ -804,7 +904,12 @@ impl KeelWindow {
         self.files.viewer.open_error = None;
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let res = client.call("chat_read_file", serde_json::json!({ "chat_id": chat, "path": path })).await;
+            let res = client
+                .call(
+                    "chat_read_file",
+                    serde_json::json!({ "chat_id": chat, "path": path }),
+                )
+                .await;
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = this.update(cx, |this, cx| {
                     if this.files.opening.as_deref() != Some(path.as_str()) {
@@ -829,14 +934,31 @@ impl KeelWindow {
         .detach();
     }
 
-    fn files_install_editor(&mut self, path: String, content: String, base: String, window: &mut Window, cx: &mut Context<Self>) {
-        let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
-        let style = code_editor_style(self.state.effective_tokens(dark), keel_theme::resolve_syntax_theme(self.state.ui_settings.theme, dark));
+    fn files_install_editor(
+        &mut self,
+        path: String,
+        content: String,
+        base: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
+        let style = code_editor_style(
+            self.state.effective_tokens(dark),
+            keel_theme::resolve_syntax_theme(self.state.ui_settings.theme, dark),
+        );
         let text = content.clone();
         // The extension names the grammar (`rs`, `json`, `tsx`…); none, plain.
         let lang = path.rsplit_once('.').map_or("", |(_, e)| e).to_string();
         let editor = cx.new(|cx| {
-            let mut s = EditorState::new(window, cx).line_number(true).soft_wrap(false).folding(false).language(lang);
+            let mut s = EditorState::new(window, cx)
+                .line_number(true)
+                .soft_wrap(false)
+                .folding(false)
+                .language(lang);
             crate::syntax::EditorHighlighter::attach(&mut s, cx);
             s.set_editor_style(style);
             s.set_value(text, window, cx);
@@ -853,7 +975,18 @@ impl KeelWindow {
                 cx.notify();
             }
         });
-        self.files.file = Some(OpenFile { path, editor, base, saved: content, dirty: false, saving: false, conflict: false, error: None, saved_at: None, _changes: sub });
+        self.files.file = Some(OpenFile {
+            path,
+            editor,
+            base,
+            saved: content,
+            dirty: false,
+            saving: false,
+            conflict: false,
+            error: None,
+            saved_at: None,
+            _changes: sub,
+        });
     }
 
     /// The open file changed on disk and has no edits: load it again in place.
@@ -863,19 +996,31 @@ impl KeelWindow {
         };
         let handle = self.files.handle;
         cx.spawn(async move |this, cx| {
-            let Ok(v) = client.call("chat_read_file", serde_json::json!({ "chat_id": chat, "path": path })).await else {
+            let Ok(v) = client
+                .call(
+                    "chat_read_file",
+                    serde_json::json!({ "chat_id": chat, "path": path }),
+                )
+                .await
+            else {
                 return;
             };
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    let Some(file) = this.files.file.as_mut().filter(|f| f.path == path && (!f.dirty || f.conflict)) else {
+                    let Some(file) = this
+                        .files
+                        .file
+                        .as_mut()
+                        .filter(|f| f.path == path && (!f.dirty || f.conflict))
+                    else {
                         return;
                     };
                     let content = v["content"].as_str().unwrap_or_default().to_string();
                     file.base = v["hash"].as_str().unwrap_or_default().to_string();
                     if content != file.saved || file.conflict {
                         file.saved = content.clone();
-                        file.editor.update(cx, |s, cx| s.set_value(content, window, cx));
+                        file.editor
+                            .update(cx, |s, cx| s.set_value(content, window, cx));
                     }
                     file.dirty = false;
                     file.conflict = false;
@@ -893,7 +1038,12 @@ impl KeelWindow {
         let (Some(chat), Some(client)) = (self.files.chat.clone(), self.client.clone()) else {
             return;
         };
-        let Some(file) = self.files.file.as_mut().filter(|f| (f.dirty || force) && !f.saving) else {
+        let Some(file) = self
+            .files
+            .file
+            .as_mut()
+            .filter(|f| (f.dirty || force) && !f.saving)
+        else {
             return;
         };
         file.saving = true;
@@ -955,10 +1105,19 @@ impl KeelWindow {
 
     /// Spacer beside the chat plus the pane over the window's right edge,
     /// like the browser pane (and the same width and drag edge).
-    pub(super) fn render_files_panel(&mut self, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_files_panel(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let allowed = self.browser_allowed();
         let open = self.files.open && allowed;
-        let toggling = !self.reduced() && self.files.anim.is_some_and(|(at, _)| at.elapsed() < self.right_panel_duration());
+        let toggling = !self.reduced()
+            && self
+                .files
+                .anim
+                .is_some_and(|(at, _)| at.elapsed() < self.right_panel_duration());
         if !open && !toggling {
             return Vec::new();
         }
@@ -986,24 +1145,38 @@ impl KeelWindow {
             .child(body)
             .child(self.render_browser_edge(t, cx))
             // Dev only (`files_tip`): a tooltip shown without a hover.
-            .children(self.files.dev_tip.clone().map(|tip| div().absolute().top(zpx(52.)).left(zpx(16.)).child(tip)));
+            .children(
+                self.files
+                    .dev_tip
+                    .clone()
+                    .map(|tip| div().absolute().top(zpx(52.)).left(zpx(16.)).child(tip)),
+            );
 
         let anim = self.files.anim.filter(|_| toggling);
         if let Some((_, n)) = anim {
             use gpui::AnimationExt as _;
             let (from, to) = (self.right_panel_from, self.right_panel_target());
             let entering = to >= from;
-            let curve = gpui::Animation::new(self.right_panel_duration()).with_easing(crate::motion::glide_curve);
+            let curve = gpui::Animation::new(self.right_panel_duration())
+                .with_easing(crate::motion::glide_curve);
             let pane = pane
-                .with_animation(("files-slide", n as usize), curve.clone(), move |el, delta| {
-                    let k = from + (to - from) * delta;
-                    el.right(px(-full * (1.0 - k)))
-                        .opacity(crate::motion::panel_opacity(k, entering))
-                })
+                .with_animation(
+                    ("files-slide", n as usize),
+                    curve.clone(),
+                    move |el, delta| {
+                        let k = from + (to - from) * delta;
+                        el.right(px(-full * (1.0 - k)))
+                            .opacity(crate::motion::panel_opacity(k, entering))
+                    },
+                )
                 .into_any_element();
             // Full width at once. Animating it resizes the chat every frame,
             // which is the jump; the pane sliding over it is the motion.
-            let spacer = div().h_full().flex_none().w(px(full * to)).into_any_element();
+            let spacer = div()
+                .h_full()
+                .flex_none()
+                .w(px(full * to))
+                .into_any_element();
             vec![spacer, pane]
         } else if open {
             let pane = pane.right_0().into_any_element();
@@ -1023,7 +1196,18 @@ impl KeelWindow {
         };
         let refresh = if f.refreshing {
             // Spinning while it fetches: the click registered and work is on.
-            div().size(zpx(28.)).flex().items_center().justify_center().text_color(c(t.text_muted)).child(crate::motion::spin(Icon::Reload.el(zpx(14.)), "files-refresh-spin", reduced)).into_any_element()
+            div()
+                .size(zpx(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(c(t.text_muted))
+                .child(crate::motion::spin(
+                    Icon::Reload.el(zpx(14.)),
+                    "files-refresh-spin",
+                    reduced,
+                ))
+                .into_any_element()
         } else {
             icon_button("files-refresh", Icon::Reload, t)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1049,55 +1233,120 @@ impl KeelWindow {
             .gap_1()
             .child(
                 seg_track(t)
-                    .child(seg_item("files-tab-changes", "Changes", badge, f.tab == FilesTab::Changes, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.files.tab = FilesTab::Changes;
-                        cx.notify();
-                    })))
-                    .child(seg_item("files-tab-files", "Files", None, f.tab == FilesTab::Files, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.files.tab = FilesTab::Files;
-                        this.files_refresh(cx);
-                        cx.notify();
-                    }))),
+                    .child(
+                        seg_item(
+                            "files-tab-changes",
+                            "Changes",
+                            badge,
+                            f.tab == FilesTab::Changes,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.files.tab = FilesTab::Changes;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        seg_item(
+                            "files-tab-files",
+                            "Files",
+                            None,
+                            f.tab == FilesTab::Files,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.files.tab = FilesTab::Files;
+                                this.files_refresh(cx);
+                                cx.notify();
+                            },
+                        )),
+                    ),
             )
             .child(div().flex_1())
             .child(refresh)
-            .child(icon_button("files-close", Icon::SidebarClose, t).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_files(window, cx))))
+            .child(icon_button("files-close", Icon::SidebarClose, t).on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_files(window, cx)),
+            ))
     }
 
-    fn render_files_body(&mut self, width: f32, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_files_body(
+        &mut self,
+        width: f32,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.files.chat.is_none() {
             return div()
                 .flex_1()
                 .border_t_1()
                 .border_color(c(t.border))
-                .child(empty_state(Icon::Folder, "No chat open", "Open a chat to browse its folder and review what the agent changed.", t))
+                .child(empty_state(
+                    Icon::Folder,
+                    "No chat open",
+                    "Open a chat to browse its folder and review what the agent changed.",
+                    t,
+                ))
                 .into_any_element();
         }
         let inner = match self.files.tab {
             FilesTab::Changes => self.render_changes(width, t, window, cx),
             FilesTab::Files => self.render_files_tab(width, t, window, cx),
         };
-        div().flex_1().min_h_0().flex().flex_row().border_t_1().border_color(c(t.border)).child(inner).into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .border_t_1()
+            .border_color(c(t.border))
+            .child(inner)
+            .into_any_element()
     }
 
     /// The folder tree beside the viewer; when narrow, one or the other.
-    fn render_files_tab(&mut self, width: f32, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_files_tab(
+        &mut self,
+        width: f32,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let stacked = width < STACK_BELOW;
         self.files.viewer.narrow = stacked;
-        let showing = self.files.selected.is_some() && !(stacked && self.files.viewer.reveal.is_some());
+        let showing =
+            self.files.selected.is_some() && !(stacked && self.files.viewer.reveal.is_some());
         let list = (!stacked || !showing).then(|| {
             div()
                 .flex_none()
                 .when(stacked, |d| d.flex_1())
-                .when(!stacked, |d| d.w(zpx(LIST_W)).border_r_1().border_color(c(t.border)))
+                .when(!stacked, |d| {
+                    d.w(zpx(LIST_W)).border_r_1().border_color(c(t.border))
+                })
                 .h_full()
                 .flex()
                 .flex_col()
                 .child(self.render_tree(t, window, cx))
         });
-        let content_w = if stacked { width } else { width - f32::from(zpx(LIST_W)) };
-        let content = (!stacked || showing).then(|| self.render_files_content(content_w, stacked, t, window, cx));
-        div().flex_1().min_w_0().h_full().flex().flex_row().children(list).children(content).into_any_element()
+        let content_w = if stacked {
+            width
+        } else {
+            width - f32::from(zpx(LIST_W))
+        };
+        let content = (!stacked || showing)
+            .then(|| self.render_files_content(content_w, stacked, t, window, cx));
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_row()
+            .children(list)
+            .children(content)
+            .into_any_element()
     }
 
     /// Placeholder rows while a list loads, shaped like the rows to come.
@@ -1117,10 +1366,39 @@ impl KeelWindow {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(crate::motion::shimmer(div().size(zpx(13.)).rounded(px(3.)).bg(c(t.text).opacity(0.06)), (prefix, i * 3), phase, c(t.text).opacity(0.05), reduced))
-                    .child(crate::motion::shimmer(div().h(zpx(8.)).w(zpx(64. + 22. * (i % 3) as f32)).rounded(px(3.)).bg(c(t.text).opacity(0.06)), (prefix, i * 3 + 1), phase, c(t.text).opacity(0.05), reduced))
+                    .child(crate::motion::shimmer(
+                        div()
+                            .size(zpx(13.))
+                            .rounded(px(3.))
+                            .bg(c(t.text).opacity(0.06)),
+                        (prefix, i * 3),
+                        phase,
+                        c(t.text).opacity(0.05),
+                        reduced,
+                    ))
+                    .child(crate::motion::shimmer(
+                        div()
+                            .h(zpx(8.))
+                            .w(zpx(64. + 22. * (i % 3) as f32))
+                            .rounded(px(3.))
+                            .bg(c(t.text).opacity(0.06)),
+                        (prefix, i * 3 + 1),
+                        phase,
+                        c(t.text).opacity(0.05),
+                        reduced,
+                    ))
                     .child(div().flex_1())
-                    .child(crate::motion::shimmer(div().h(zpx(8.)).w(zpx(22.)).rounded(px(3.)).bg(c(t.text).opacity(0.05)), (prefix, i * 3 + 2), phase, c(t.text).opacity(0.05), reduced))
+                    .child(crate::motion::shimmer(
+                        div()
+                            .h(zpx(8.))
+                            .w(zpx(22.))
+                            .rounded(px(3.))
+                            .bg(c(t.text).opacity(0.05)),
+                        (prefix, i * 3 + 2),
+                        phase,
+                        c(t.text).opacity(0.05),
+                        reduced,
+                    ))
             }))
             .into_any_element()
     }
@@ -1138,27 +1416,60 @@ impl KeelWindow {
             Some(Load::Ready(list)) => list.iter().map(|c| (c.path.clone(), c.status)).collect(),
             _ => HashMap::new(),
         };
-        fn walk(f: &FilesPanel, changed: &HashMap<String, char>, rel: &str, depth: usize, rows: &mut Vec<TreeRow>) {
+        fn walk(
+            f: &FilesPanel,
+            changed: &HashMap<String, char>,
+            rel: &str,
+            depth: usize,
+            rows: &mut Vec<TreeRow>,
+        ) {
             let Some(Load::Ready(entries)) = f.dirs.get(rel) else {
                 return;
             };
             for e in entries {
-                let path = if rel.is_empty() { e.name.clone() } else { format!("{rel}/{}", e.name) };
+                let path = if rel.is_empty() {
+                    e.name.clone()
+                } else {
+                    format!("{rel}/{}", e.name)
+                };
                 let open = e.dir && f.expanded.contains(&path);
                 // A folder holding changes says so, so they can be found.
                 let status = if e.dir {
                     let prefix = format!("{path}/");
-                    changed.keys().any(|p| p.starts_with(&prefix)).then_some('•')
+                    changed
+                        .keys()
+                        .any(|p| p.starts_with(&prefix))
+                        .then_some('•')
                 } else {
                     changed.get(&path).copied()
                 };
-                rows.push(TreeRow { path: path.clone(), name: e.name.clone(), depth, dir: e.dir, open, status, placeholder: false, root_ix: None, root_name: None });
+                rows.push(TreeRow {
+                    path: path.clone(),
+                    name: e.name.clone(),
+                    depth,
+                    dir: e.dir,
+                    open,
+                    status,
+                    placeholder: false,
+                    root_ix: None,
+                    root_name: None,
+                });
                 if open {
                     // Listed and empty: a placeholder, so opening it shows something
                     // (and it folds like any child). Still loading: nothing yet.
                     if matches!(f.dirs.get(&path), Some(Load::Ready(inner)) if inner.is_empty()) {
                         let path = format!("{path}/\0empty");
-                        rows.push(TreeRow { path, name: "Empty".into(), depth: depth + 1, dir: false, open: false, status: None, placeholder: true, root_ix: None, root_name: None });
+                        rows.push(TreeRow {
+                            path,
+                            name: "Empty".into(),
+                            depth: depth + 1,
+                            dir: false,
+                            open: false,
+                            status: None,
+                            placeholder: true,
+                            root_ix: None,
+                            root_name: None,
+                        });
                     } else {
                         walk(f, changed, &path, depth + 1, rows);
                     }
@@ -1173,8 +1484,21 @@ impl KeelWindow {
                 let key = format!("@{alias}");
                 let open = f.expanded.contains(&key);
                 let prefix = format!("{key}/");
-                let status = changed.keys().any(|p| p.starts_with(&prefix)).then_some('•');
-                rows.push(TreeRow { path: key.clone(), name: alias.clone(), depth: 0, dir: true, open, status, placeholder: false, root_ix: Some(ix), root_name: Some(folder.clone()) });
+                let status = changed
+                    .keys()
+                    .any(|p| p.starts_with(&prefix))
+                    .then_some('•');
+                rows.push(TreeRow {
+                    path: key.clone(),
+                    name: alias.clone(),
+                    depth: 0,
+                    dir: true,
+                    open,
+                    status,
+                    placeholder: false,
+                    root_ix: Some(ix),
+                    root_name: Some(folder.clone()),
+                });
                 if open {
                     walk(f, &changed, &key, 1, &mut rows);
                 }
@@ -1188,14 +1512,35 @@ impl KeelWindow {
     /// The folder tree: no guide lines, a small indent per level, a dot on
     /// folders holding changes. A reveal scrolls its row to the middle and
     /// lights it briefly.
-    fn render_tree(&mut self, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let rooted = !self.projects.file_roots(self.files.chat.as_deref()).is_empty();
-        if !rooted { match self.files.dirs.get("") {
-            None | Some(Load::Loading) => return self.render_list_skeleton("files-tree-skel", t),
-            Some(Load::Failed(err)) => return empty_state(Icon::Alert, "Couldn't list files", err.clone(), t),
-            Some(Load::Ready(entries)) if entries.is_empty() => return empty_state(Icon::Folder, "Empty folder", "There's nothing in this chat's folder yet.", t),
-            Some(Load::Ready(_)) => {}
-        } }
+    fn render_tree(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rooted = !self
+            .projects
+            .file_roots(self.files.chat.as_deref())
+            .is_empty();
+        if !rooted {
+            match self.files.dirs.get("") {
+                None | Some(Load::Loading) => {
+                    return self.render_list_skeleton("files-tree-skel", t);
+                }
+                Some(Load::Failed(err)) => {
+                    return empty_state(Icon::Alert, "Couldn't list files", err.clone(), t);
+                }
+                Some(Load::Ready(entries)) if entries.is_empty() => {
+                    return empty_state(
+                        Icon::Folder,
+                        "Empty folder",
+                        "There's nothing in this chat's folder yet.",
+                        t,
+                    );
+                }
+                Some(Load::Ready(_)) => {}
+            }
+        }
         let live = self.tree_rows();
         self.files_reveal_scroll(&live, cx);
         let now = self.frame_now.get().unwrap_or_else(Instant::now);
@@ -1208,7 +1553,17 @@ impl KeelWindow {
             }
         }
         // While a folder moves, the rows with it open, laid out slot by slot.
-        let moving = self.files.tree_fold.as_ref().map(|m| (m.key.clone(), m.motion.content(now), m.motion.chevron(now), m.start, m.children, m.rows.clone(), m.reveal(now, ROW_H)));
+        let moving = self.files.tree_fold.as_ref().map(|m| {
+            (
+                m.key.clone(),
+                m.motion.content(now),
+                m.motion.chevron(now),
+                m.start,
+                m.children,
+                m.rows.clone(),
+                m.reveal(now, ROW_H),
+            )
+        });
         let rows = moving.as_ref().and_then(|m| m.5.clone()).unwrap_or(live);
         let glow = self.files.viewer.glow();
         let reduced = self.reduced();
@@ -1216,74 +1571,32 @@ impl KeelWindow {
         let weak = cx.entity().downgrade();
         uniform_list("files-tree", rows.len(), move |range, _, _| {
             let row_el = |ix: usize| -> AnyElement {
-                    let TreeRow { path, name, depth, dir, open, status, placeholder, root_ix, root_name } = rows[ix].clone();
-                    if let Some(root_ix) = root_ix {
-                        let weak = weak.clone();
-                        let folder = root_name.unwrap_or_default();
-                        let turn = fold::chevron_turn(match &moving {
-                            Some(m) if m.0 == path => m.2,
-                            _ if open => 1.,
-                            _ => 0.,
-                        });
-                        return div()
-                            .id(("files-tree-row", ix))
-                            .h(zpx(ROW_H))
-                            .w_full()
-                            .pr_2()
-                            .pl(zpx(6.))
-                            .mt(if ix > 0 { zpx(6.) } else { zpx(0.) })
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .rounded(RADIUS_MD)
-                            .t_small()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(c(t.hover)))
-                            .child(div().flex_none().w(zpx(10.)).text_color(c(t.text_faint)).child(Icon::ChevronDown.el(zpx(10.)).with_transformation(gpui::Transformation::rotate(gpui::percentage(turn)))))
-                            .child(div().w(zpx(14.)).flex_none().flex().justify_center().t_caption().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(match root_ix % 3 { 0 => t.accent, 1 => t.success, _ => t.warning })).child(name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into())))
-                            .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(name.clone()))
-                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().t_caption().text_color(c(t.text_faint)).child(folder))
-                            .on_click(move |_, _, cx| {
-                                let path = path.clone();
-                                let _ = weak.update(cx, |this, cx| this.files_toggle_dir(path, cx));
-                            })
-                            .into_any_element();
-                    }
-                    if placeholder {
-                        // The sidebar's empty-group look: small, faint, inert;
-                        // the label sits where a child's name would.
-                        return div()
-                            .id(("files-tree-row", ix))
-                            .h(zpx(ROW_H))
-                            .w_full()
-                            .pr_2()
-                            .pl(zpx(6. + depth as f32 * 12. + 10. + 6. + 13. + 6.))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .t_small()
-                            .text_color(c(t.text_faint))
-                            .child(div().min_w_0().truncate().child(name))
-                            .into_any_element();
-                    }
-                    let on = selected.as_deref() == Some(path.as_str());
-                    let lit = glow.as_ref().filter(|(p, _)| *p == path).map(|(_, n)| *n);
+                let TreeRow {
+                    path,
+                    name,
+                    depth,
+                    dir,
+                    open,
+                    status,
+                    placeholder,
+                    root_ix,
+                    root_name,
+                } = rows[ix].clone();
+                if let Some(root_ix) = root_ix {
                     let weak = weak.clone();
-                    let icon = if dir { Icon::Folder } else { Icon::for_path(&name) };
-                    let dot = status.map(|s| match s {
-                        'A' | '?' => t.success,
-                        'D' => t.danger,
-                        '•' => t.text_faint,
-                        _ => t.warning,
+                    let folder = root_name.unwrap_or_default();
+                    let turn = fold::chevron_turn(match &moving {
+                        Some(m) if m.0 == path => m.2,
+                        _ if open => 1.,
+                        _ => 0.,
                     });
-                    div()
+                    return div()
                         .id(("files-tree-row", ix))
-                        .relative()
                         .h(zpx(ROW_H))
                         .w_full()
                         .pr_2()
-                        .pl(zpx(6. + depth as f32 * 12.))
+                        .pl(zpx(6.))
+                        .mt(if ix > 0 { zpx(6.) } else { zpx(0.) })
                         .flex()
                         .flex_row()
                         .items_center()
@@ -1291,42 +1604,174 @@ impl KeelWindow {
                         .rounded(RADIUS_MD)
                         .t_small()
                         .cursor_pointer()
-                        .map(|d| if on { d.bg(c(t.selected)) } else { d.hover(|s| s.bg(c(t.hover))) })
-                        .active(|s| s.bg(c(t.selected)))
-                        .children(lit.map(|n| viewer::reveal_glow(n, t, reduced)))
+                        .hover(|s| s.bg(c(t.hover)))
                         .child(
                             div()
                                 .flex_none()
                                 .w(zpx(10.))
                                 .text_color(c(t.text_faint))
-                                .when(dir, |d| {
-                                    let turn = fold::chevron_turn(match &moving {
-                                        Some(m) if m.0 == path => m.2,
-                                        _ if open => 1.,
-                                        _ => 0.,
-                                    });
-                                    d.child(Icon::ChevronDown.el(zpx(10.)).with_transformation(gpui::Transformation::rotate(gpui::percentage(turn))))
-                                }),
+                                .child(Icon::ChevronDown.el(zpx(10.)).with_transformation(
+                                    gpui::Transformation::rotate(gpui::percentage(turn)),
+                                )),
                         )
-                        .child(div().flex_none().text_color(c(if dir { t.text_muted } else { t.text_faint })).child(icon.el(zpx(13.))))
-                        .child(div().flex_1().min_w_0().truncate().text_color(c(if dir || on || lit.is_some() { t.text } else { t.text_muted })).when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM)).child(name))
-                        .children(dot.map(|col| div().flex_none().size(zpx(6.)).rounded_full().bg(c(col))))
-                        .on_click(move |_, window, cx| {
+                        .child(
+                            div()
+                                .w(zpx(14.))
+                                .flex_none()
+                                .flex()
+                                .justify_center()
+                                .t_caption()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(c(match root_ix % 3 {
+                                    0 => t.accent,
+                                    1 => t.success,
+                                    _ => t.warning,
+                                }))
+                                .child(
+                                    name.chars()
+                                        .next()
+                                        .map(|c| c.to_uppercase().to_string())
+                                        .unwrap_or_else(|| "?".into()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(c(t.text))
+                                .child(name.clone()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .t_caption()
+                                .text_color(c(t.text_faint))
+                                .child(folder),
+                        )
+                        .on_click(move |_, _, cx| {
                             let path = path.clone();
-                            let _ = weak.update(cx, |this, cx| {
-                                if dir {
-                                    this.files_toggle_dir(path, cx);
-                                } else {
-                                    this.files.viewer.reveal = None;
-                                    this.files_select(path, window, cx);
-                                }
-                            });
+                            let _ = weak.update(cx, |this, cx| this.files_toggle_dir(path, cx));
                         })
-                        .into_any_element()
+                        .into_any_element();
+                }
+                if placeholder {
+                    // The sidebar's empty-group look: small, faint, inert;
+                    // the label sits where a child's name would.
+                    return div()
+                        .id(("files-tree-row", ix))
+                        .h(zpx(ROW_H))
+                        .w_full()
+                        .pr_2()
+                        .pl(zpx(6. + depth as f32 * 12. + 10. + 6. + 13. + 6.))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .t_small()
+                        .text_color(c(t.text_faint))
+                        .child(div().min_w_0().truncate().child(name))
+                        .into_any_element();
+                }
+                let on = selected.as_deref() == Some(path.as_str());
+                let lit = glow.as_ref().filter(|(p, _)| *p == path).map(|(_, n)| *n);
+                let weak = weak.clone();
+                let icon = if dir {
+                    Icon::Folder
+                } else {
+                    Icon::for_path(&name)
+                };
+                let dot = status.map(|s| match s {
+                    'A' | '?' => t.success,
+                    'D' => t.danger,
+                    '•' => t.text_faint,
+                    _ => t.warning,
+                });
+                div()
+                    .id(("files-tree-row", ix))
+                    .relative()
+                    .h(zpx(ROW_H))
+                    .w_full()
+                    .pr_2()
+                    .pl(zpx(6. + depth as f32 * 12.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .rounded(RADIUS_MD)
+                    .t_small()
+                    .cursor_pointer()
+                    .map(|d| {
+                        if on {
+                            d.bg(c(t.selected))
+                        } else {
+                            d.hover(|s| s.bg(c(t.hover)))
+                        }
+                    })
+                    .active(|s| s.bg(c(t.selected)))
+                    .children(lit.map(|n| viewer::reveal_glow(n, t, reduced)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(zpx(10.))
+                            .text_color(c(t.text_faint))
+                            .when(dir, |d| {
+                                let turn = fold::chevron_turn(match &moving {
+                                    Some(m) if m.0 == path => m.2,
+                                    _ if open => 1.,
+                                    _ => 0.,
+                                });
+                                d.child(Icon::ChevronDown.el(zpx(10.)).with_transformation(
+                                    gpui::Transformation::rotate(gpui::percentage(turn)),
+                                ))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(if dir { t.text_muted } else { t.text_faint }))
+                            .child(icon.el(zpx(13.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(c(if dir || on || lit.is_some() {
+                                t.text
+                            } else {
+                                t.text_muted
+                            }))
+                            .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                            .child(name),
+                    )
+                    .children(
+                        dot.map(|col| div().flex_none().size(zpx(6.)).rounded_full().bg(c(col))),
+                    )
+                    .on_click(move |_, window, cx| {
+                        let path = path.clone();
+                        let _ = weak.update(cx, |this, cx| {
+                            if dir {
+                                this.files_toggle_dir(path, cx);
+                            } else {
+                                this.files.viewer.reveal = None;
+                                this.files_select(path, window, cx);
+                            }
+                        });
+                    })
+                    .into_any_element()
             };
             range
                 .map(|ix| match &moving {
-                    Some((_, open, _, start, children, Some(_), reveal)) => fold::slot(ix, fold::slot_rows(ix, rows.len(), *start, *children, *reveal, ROW_H), *start..*start + *children, *open, ROW_H, &row_el),
+                    Some((_, open, _, start, children, Some(_), reveal)) => fold::slot(
+                        ix,
+                        fold::slot_rows(ix, rows.len(), *start, *children, *reveal, ROW_H),
+                        *start..*start + *children,
+                        *open,
+                        ROW_H,
+                        &row_el,
+                    ),
                     _ => row_el(ix),
                 })
                 .collect()
@@ -1339,7 +1784,14 @@ impl KeelWindow {
 
     /// The selected file: a header (name, folder, a way to its diff when it
     /// changed, Preview / Source for Markdown, save state) over the viewer.
-    fn render_files_content(&mut self, width: f32, stacked: bool, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_files_content(
+        &mut self,
+        width: f32,
+        stacked: bool,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(path) = self.files.selected.clone() else {
             return div()
                 .flex_1()
@@ -1353,114 +1805,210 @@ impl KeelWindow {
         let markdown = kind == crate::files::FileKind::Markdown;
         let file = self.files.file.as_ref().filter(|f| f.path == path);
         let loaded = file.is_some();
-        let (dirty, saving, conflict, error) = file.map_or((false, false, false, None), |f| (f.dirty, f.saving, f.conflict, f.error.clone()));
-        let just_saved = file.and_then(|f| f.saved_at).filter(|at| at.elapsed() < SAVED_FOR).is_some();
+        let (dirty, saving, conflict, error) = file.map_or((false, false, false, None), |f| {
+            (f.dirty, f.saving, f.conflict, f.error.clone())
+        });
+        let just_saved = file
+            .and_then(|f| f.saved_at)
+            .filter(|at| at.elapsed() < SAVED_FOR)
+            .is_some();
         let preview = markdown && loaded && !self.files.viewer.md_source;
-        let (dir, name) = path.rsplit_once('/').map_or(("", path.as_str()), |(d, n)| (d, n));
-        let header = div()
-            .h(HEADER_HEIGHT)
-            .flex_none()
-            .pl(zpx(if stacked { 6. } else { 12. }))
-            .pr_2()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(c(t.border))
-            .when(stacked, |d| {
-                d.child(icon_button("files-back", Icon::Back, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.files.selected = None;
-                    cx.notify();
-                })))
-            })
-            .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::for_path(name).el(zpx(14.))))
-            // Name first and strong, its folder after it and faint: the eye
-            // lands on the file, the path is there when wanted.
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .items_baseline()
-                    .gap_1p5()
-                    .overflow_hidden()
-                    .child(div().flex_none().t_small().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(name.to_string()))
-                    .child(div().flex_1().min_w_0().truncate().t_caption().text_color(c(t.text_faint)).child(dir.to_string())),
-            )
-            // A quiet confirmation after a save, gone on its own.
-            .when(just_saved && !dirty, |d| {
-                d.child(appear(
-                    div().flex_none().flex().flex_row().items_center().gap_1().t_caption().text_color(c(t.success)).child(Icon::Check.el(zpx(12.))).child("Saved"),
-                    "files-saved",
-                    crate::motion::FAST,
-                    2.,
-                    reduced,
-                ))
-            })
-            .when(dirty && !conflict, |d| {
-                d.child(div().flex_none().flex().flex_row().items_center().gap_1p5().t_caption().text_color(c(t.text_muted)).child(div().size(zpx(6.)).rounded_full().bg(c(t.warning))).child("Unsaved"))
-                    .child(text_button("files-discard", "Discard", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx))))
-                    .child(
-                        solid_button("files-save", if saving { "Saving…" } else { "Save" }, t)
-                            .child(kbd("⌘S", true, t))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_save(false, cx))),
-                    )
-            })
-            // The file changed in this chat: its diff, one click away.
-            .when(change.is_some() && !dirty, |d| {
-                let p = path.clone();
-                d.child(diffstat(change.as_ref().and_then(|c| c.added), change.as_ref().and_then(|c| c.removed), t)).child(
-                    icon_button("files-view-diff", Icon::FileDiff, t)
-                        .tooltip(move |_, cx| cx.new(|_| super::dotify_ui::Tip::new("View changes", t)).into()).tooltip_show_delay(crate::view::tooltip::delay())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_goto_change(p.clone(), cx))),
-                )
-            })
-            .when(markdown && loaded, |d| {
-                d.child(
-                    seg_track(t)
-                        .child(seg_item("files-md-preview", "Preview", None, preview, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.files.viewer.md_source = false;
-                            cx.notify();
-                        })))
-                        .child(seg_item("files-md-source", "Source", None, !preview, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.files.viewer.md_source = true;
-                            cx.notify();
-                        }))),
-                )
-            });
-        // The agent (or anyone) wrote the file since it was opened.
-        let banner = conflict.then(|| {
+        let (dir, name) = path
+            .rsplit_once('/')
+            .map_or(("", path.as_str()), |(d, n)| (d, n));
+        let header =
             div()
+                .h(HEADER_HEIGHT)
                 .flex_none()
-                .mx_2()
-                .mt_2()
-                .px_3()
-                .py_2()
+                .pl(zpx(if stacked { 6. } else { 12. }))
+                .pr_2()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .rounded(RADIUS_MD)
-                .bg(c(t.warning).opacity(0.1))
-                .border_1()
-                .border_color(c(t.warning).opacity(0.25))
-                .t_small()
-                .text_color(c(t.text))
-                .child(div().flex_none().text_color(c(t.warning)).child(Icon::Alert.el(zpx(13.))))
+                .border_b_1()
+                .border_color(c(t.border))
+                .when(stacked, |d| {
+                    d.child(
+                        icon_button("files-back", Icon::Back, t).on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.files.selected = None;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::for_path(name).el(zpx(14.))),
+                )
+                // Name first and strong, its folder after it and faint: the eye
+                // lands on the file, the path is there when wanted.
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
-                        .flex_col()
-                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Changed on disk"))
-                        .child(div().t_caption().text_color(c(t.text_muted)).child("Something wrote this file after you opened it.")),
+                        .flex_row()
+                        .items_baseline()
+                        .gap_1p5()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_none()
+                                .t_small()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(c(t.text))
+                                .child(name.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .t_caption()
+                                .text_color(c(t.text_faint))
+                                .child(dir.to_string()),
+                        ),
                 )
-                .child(text_button("files-take-disk", "Use disk version", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx))))
-                .child(solid_button("files-overwrite", "Keep mine", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_save(true, cx))))
-        });
+                // A quiet confirmation after a save, gone on its own.
+                .when(just_saved && !dirty, |d| {
+                    d.child(appear(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .t_caption()
+                            .text_color(c(t.success))
+                            .child(Icon::Check.el(zpx(12.)))
+                            .child("Saved"),
+                        "files-saved",
+                        crate::motion::FAST,
+                        2.,
+                        reduced,
+                    ))
+                })
+                .when(dirty && !conflict, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .t_caption()
+                            .text_color(c(t.text_muted))
+                            .child(div().size(zpx(6.)).rounded_full().bg(c(t.warning)))
+                            .child("Unsaved"),
+                    )
+                    .child(text_button("files-discard", "Discard", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx)),
+                    ))
+                    .child(
+                        solid_button("files-save", if saving { "Saving…" } else { "Save" }, t)
+                            .child(kbd("⌘S", true, t))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.files_save(false, cx)
+                            })),
+                    )
+                })
+                // The file changed in this chat: its diff, one click away.
+                .when(change.is_some() && !dirty, |d| {
+                    let p = path.clone();
+                    d.child(diffstat(
+                        change.as_ref().and_then(|c| c.added),
+                        change.as_ref().and_then(|c| c.removed),
+                        t,
+                    ))
+                    .child(
+                        icon_button("files-view-diff", Icon::FileDiff, t)
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| super::dotify_ui::Tip::new("View changes", t))
+                                    .into()
+                            })
+                            .tooltip_show_delay(crate::view::tooltip::delay())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.files_goto_change(p.clone(), cx)
+                            })),
+                    )
+                })
+                .when(markdown && loaded, |d| {
+                    d.child(
+                        seg_track(t)
+                            .child(
+                                seg_item("files-md-preview", "Preview", None, preview, t).on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.files.viewer.md_source = false;
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                seg_item("files-md-source", "Source", None, !preview, t).on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.files.viewer.md_source = true;
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                    )
+                });
+        // The agent (or anyone) wrote the file since it was opened.
+        let banner =
+            conflict.then(|| {
+                div()
+                    .flex_none()
+                    .mx_2()
+                    .mt_2()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_MD)
+                    .bg(c(t.warning).opacity(0.1))
+                    .border_1()
+                    .border_color(c(t.warning).opacity(0.25))
+                    .t_small()
+                    .text_color(c(t.text))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(t.warning))
+                            .child(Icon::Alert.el(zpx(13.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("Changed on disk"),
+                            )
+                            .child(
+                                div()
+                                    .t_caption()
+                                    .text_color(c(t.text_muted))
+                                    .child("Something wrote this file after you opened it."),
+                            ),
+                    )
+                    .child(
+                        text_button("files-take-disk", "Use disk version", t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx)),
+                        ),
+                    )
+                    .child(solid_button("files-overwrite", "Keep mine", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.files_save(true, cx)),
+                    ))
+            });
         let error = error.map(|e| {
             div()
                 .flex_none()
@@ -1490,11 +2038,24 @@ impl KeelWindow {
             // A short settle when another file (or view) comes up, so the
             // swap reads as a change rather than a flicker. Keyed by file and
             // view: a refresh of the same file doesn't replay it.
-            .child(appear(div().flex_1().min_h_0().flex().flex_col().child(body), ("files-content-in", hash_key(&path, preview)), BASE, 4., reduced))
+            .child(appear(
+                div().flex_1().min_h_0().flex().flex_col().child(body),
+                ("files-content-in", hash_key(&path, preview)),
+                BASE,
+                4.,
+                reduced,
+            ))
             .into_any_element()
     }
 
-    pub(super) fn render_file_view_body(&mut self, path: &str, width: f32, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_file_view_body(
+        &mut self,
+        path: &str,
+        width: f32,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let kind = crate::files::FileKind::of(std::path::Path::new(path));
         let image = viewer::is_image(path);
         let markdown = kind == crate::files::FileKind::Markdown;
@@ -1509,15 +2070,31 @@ impl KeelWindow {
             match self.files.file.as_ref().filter(|f| f.path == path) {
                 Some(file) => {
                     let lines = file.editor.read(cx).text().lines_len();
-                    let lang = path.rsplit_once('.').and_then(|(_, e)| crate::syntax::language_name(e)).unwrap_or("Plain text");
-                    let eol = if file.saved.contains("\r\n") { "CRLF" } else { "LF" };
+                    let lang = path
+                        .rsplit_once('.')
+                        .and_then(|(_, e)| crate::syntax::language_name(e))
+                        .unwrap_or("Plain text");
+                    let eol = if file.saved.contains("\r\n") {
+                        "CRLF"
+                    } else {
+                        "LF"
+                    };
                     div()
                         .flex_1()
                         .min_h_0()
                         .size_full()
                         .flex()
                         .flex_col()
-                        .child(div().flex_1().min_h_0().size_full().pt_2().pl_1().t_code().child(file.editor.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .size_full()
+                                .pt_2()
+                                .pl_1()
+                                .t_code()
+                                .child(file.editor.clone()),
+                        )
                         .child(
                             div()
                                 .flex_none()
@@ -1531,7 +2108,11 @@ impl KeelWindow {
                                 .border_color(c(t.border).opacity(0.7))
                                 .t_caption()
                                 .text_color(c(t.text_faint))
-                                .child(div().child(if lines == 1 { "1 line".to_string() } else { format!("{} lines", grouped(lines as u32)) }))
+                                .child(div().child(if lines == 1 {
+                                    "1 line".to_string()
+                                } else {
+                                    format!("{} lines", grouped(lines as u32))
+                                }))
                                 .child(div().flex_1())
                                 .child(div().child(lang))
                                 .child(div().child(eol))
@@ -1540,8 +2121,17 @@ impl KeelWindow {
                         .into_any_element()
                 }
                 None => {
-                    let failed = self.files.viewer.open_error.as_ref().filter(|(p, _)| *p == path).map(|(_, e)| e.clone());
-                    if failed.is_none() && self.files.opening.as_deref() != Some(path) && self.files.file.as_ref().is_none_or(|f| !f.dirty) {
+                    let failed = self
+                        .files
+                        .viewer
+                        .open_error
+                        .as_ref()
+                        .filter(|(p, _)| *p == path)
+                        .map(|(_, e)| e.clone());
+                    if failed.is_none()
+                        && self.files.opening.as_deref() != Some(path)
+                        && self.files.file.as_ref().is_none_or(|f| !f.dirty)
+                    {
                         self.files_open_file(path.to_string(), window, cx);
                     }
                     match failed {
@@ -1556,7 +2146,9 @@ impl KeelWindow {
     /// Placeholder lines while code loads: a gutter and ragged lines.
     fn render_code_skeleton(&self, prefix: &'static str, t: Tokens) -> AnyElement {
         let reduced = self.reduced();
-        const WIDTHS: [f32; 12] = [0.42, 0.6, 0.35, 0.72, 0.5, 0.28, 0.64, 0.55, 0.38, 0.7, 0.46, 0.3];
+        const WIDTHS: [f32; 12] = [
+            0.42, 0.6, 0.35, 0.72, 0.5, 0.28, 0.64, 0.55, 0.38, 0.7, 0.46, 0.3,
+        ];
         div()
             .flex_1()
             .pt_2()
@@ -1570,8 +2162,24 @@ impl KeelWindow {
                     .flex_row()
                     .items_center()
                     .gap_4()
-                    .child(div().w(zpx(18.)).h(zpx(7.)).rounded(px(2.)).bg(c(t.text).opacity(0.04)))
-                    .child(crate::motion::shimmer(div().h(zpx(8.)).w(gpui::relative(*w)).rounded(px(3.)).bg(c(t.text).opacity(0.06)), (prefix, i), i as f32 * 0.05, c(t.text).opacity(0.05), reduced))
+                    .child(
+                        div()
+                            .w(zpx(18.))
+                            .h(zpx(7.))
+                            .rounded(px(2.))
+                            .bg(c(t.text).opacity(0.04)),
+                    )
+                    .child(crate::motion::shimmer(
+                        div()
+                            .h(zpx(8.))
+                            .w(gpui::relative(*w))
+                            .rounded(px(3.))
+                            .bg(c(t.text).opacity(0.06)),
+                        (prefix, i),
+                        i as f32 * 0.05,
+                        c(t.text).opacity(0.05),
+                        reduced,
+                    ))
             }))
             .into_any_element()
     }
@@ -1582,12 +2190,26 @@ const SAVED_FOR: Duration = Duration::from_millis(1600);
 
 /// A segmented control's track: a quiet well the segments sit in.
 fn seg_track(t: Tokens) -> gpui::Div {
-    div().flex_none().p(px(2.)).flex().flex_row().items_center().gap(px(2.)).rounded(px(7.)).bg(c(t.text).opacity(0.05))
+    div()
+        .flex_none()
+        .p(px(2.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.))
+        .rounded(px(7.))
+        .bg(c(t.text).opacity(0.05))
 }
 
 /// One segment: raised on the track when on (a fill and a hairline, no
 /// shadow), plain text that brightens on hover when off. `badge` is a count.
-fn seg_item(id: &'static str, label: &'static str, badge: Option<usize>, on: bool, t: Tokens) -> gpui::Stateful<gpui::Div> {
+fn seg_item(
+    id: &'static str,
+    label: &'static str,
+    badge: Option<usize>,
+    on: bool,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(zpx(22.))
@@ -1600,18 +2222,36 @@ fn seg_item(id: &'static str, label: &'static str, badge: Option<usize>, on: boo
         .font_weight(gpui::FontWeight::MEDIUM)
         .map(|d| {
             if on {
-                d.bg(c(t.window)).border_1().border_color(c(t.border)).text_color(c(t.text))
+                d.bg(c(t.window))
+                    .border_1()
+                    .border_color(c(t.border))
+                    .text_color(c(t.text))
             } else {
-                d.border_1().border_color(gpui::transparent_black()).text_color(c(t.text_muted)).cursor_pointer().hover(|s| s.text_color(c(t.text)))
+                d.border_1()
+                    .border_color(gpui::transparent_black())
+                    .text_color(c(t.text_muted))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(c(t.text)))
             }
         })
         .child(label)
-        .children(badge.map(|n| div().t_caption().font_family(MONO).text_color(c(if on { t.text_muted } else { t.text_faint })).child(grouped(n as u32))))
+        .children(badge.map(|n| {
+            div()
+                .t_caption()
+                .font_family(MONO)
+                .text_color(c(if on { t.text_muted } else { t.text_faint }))
+                .child(grouped(n as u32))
+        }))
 }
 
 /// A centred empty, error or nothing-yet view: a quiet outline icon, a
 /// short title, one plain sentence.
-fn empty_state(icon: Icon, title: &'static str, body: impl Into<SharedString>, t: Tokens) -> AnyElement {
+fn empty_state(
+    icon: Icon,
+    title: &'static str,
+    body: impl Into<SharedString>,
+    t: Tokens,
+) -> AnyElement {
     div()
         .flex_1()
         .size_full()
@@ -1621,9 +2261,27 @@ fn empty_state(icon: Icon, title: &'static str, body: impl Into<SharedString>, t
         .items_center()
         .justify_center()
         .gap_2()
-        .child(div().mb_1().text_color(c(t.text_faint)).child(icon.el(zpx(18.))))
-        .child(div().t_small().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(title))
-        .child(div().max_w(zpx(240.)).t_caption().text_center().text_color(c(t.text_faint)).child(body.into()))
+        .child(
+            div()
+                .mb_1()
+                .text_color(c(t.text_faint))
+                .child(icon.el(zpx(18.))),
+        )
+        .child(
+            div()
+                .t_small()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(c(t.text))
+                .child(title),
+        )
+        .child(
+            div()
+                .max_w(zpx(240.))
+                .t_caption()
+                .text_center()
+                .text_color(c(t.text_faint))
+                .child(body.into()),
+        )
         .into_any_element()
 }
 
@@ -1636,8 +2294,16 @@ fn diffstat(added: Option<u32>, removed: Option<u32>, t: Tokens) -> gpui::Div {
         .gap_1()
         .t_caption()
         .font_family(MONO)
-        .children(added.filter(|n| *n > 0).map(|n| div().text_color(c(t.success)).child(format!("+{}", grouped(n)))))
-        .children(removed.filter(|n| *n > 0).map(|n| div().text_color(c(t.danger)).child(format!("−{}", grouped(n)))))
+        .children(added.filter(|n| *n > 0).map(|n| {
+            div()
+                .text_color(c(t.success))
+                .child(format!("+{}", grouped(n)))
+        }))
+        .children(removed.filter(|n| *n > 0).map(|n| {
+            div()
+                .text_color(c(t.danger))
+                .child(format!("−{}", grouped(n)))
+        }))
 }
 
 /// A file's git status as a small tinted letter: readable without
@@ -1660,7 +2326,11 @@ fn status_chip(status: char, t: Tokens) -> gpui::Div {
         .text_color(c(color))
         .t_caption()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(if status == '?' { "A".to_string() } else { status.to_string() })
+        .child(if status == '?' {
+            "A".to_string()
+        } else {
+            status.to_string()
+        })
 }
 
 /// The primary action: solid ink on the page colour, no shadow.
@@ -1736,7 +2406,10 @@ fn grouped(n: u32) -> String {
 
 /// The file editor's look: the app's input colours plus syntax colours, a
 /// faint band on the caret's line, and line numbers that stay out of the way.
-pub(super) fn code_editor_style(t: Tokens, syntax: keel_theme::SyntaxPaintMap) -> gpui_base::input::InputEditorStyle {
+pub(super) fn code_editor_style(
+    t: Tokens,
+    syntax: keel_theme::SyntaxPaintMap,
+) -> gpui_base::input::InputEditorStyle {
     gpui_base::input::InputEditorStyle {
         foreground: c(syntax.plain << 8 | 0xFF),
         muted_foreground: c(t.text_faint).opacity(0.7),
@@ -1762,48 +2435,108 @@ mod tests {
     fn patches_number_their_lines() {
         let patch = "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -3,3 +3,4 @@ fn main\n keep\n-old\n+new\n+\tmore\n tail\n\\ No newline at end of file\n";
         let (lines, widest) = parse_patch(patch);
-        let view: Vec<_> = lines.iter().map(|l| (l.kind, l.old, l.new, l.text.to_string())).collect();
+        let view: Vec<_> = lines
+            .iter()
+            .map(|l| (l.kind, l.old, l.new, l.text.to_string()))
+            .collect();
         assert_eq!(
             view,
             vec![
-                (LineKind::Hunk, Some(3), Some(3), "@@ -3,3 +3,4 @@ fn main".into()),
+                (
+                    LineKind::Hunk,
+                    Some(3),
+                    Some(3),
+                    "@@ -3,3 +3,4 @@ fn main".into()
+                ),
                 (LineKind::Context, Some(3), Some(3), "keep".into()),
                 (LineKind::Removed, Some(4), None, "old".into()),
                 (LineKind::Added, None, Some(4), "new".into()),
                 (LineKind::Added, None, Some(5), "    more".into()),
                 (LineKind::Context, Some(5), Some(6), "tail".into()),
-                (LineKind::Note, None, None, "\\ No newline at end of file".into()),
+                (
+                    LineKind::Note,
+                    None,
+                    None,
+                    "\\ No newline at end of file".into()
+                ),
             ]
         );
         assert_eq!(widest, 6);
         // A new file starts at line 1; a second file's headers are skipped.
-        let (lines, _) = parse_patch("--- /dev/null\n+++ b/n\n@@ -0,0 +1,2 @@\n+a\n+b\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n");
+        let (lines, _) = parse_patch(
+            "--- /dev/null\n+++ b/n\n@@ -0,0 +1,2 @@\n+a\n+b\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n",
+        );
         let nums: Vec<_> = lines.iter().map(|l| (l.old, l.new)).collect();
-        assert_eq!(nums, vec![(Some(0), Some(1)), (None, Some(1)), (None, Some(2)), (Some(1), Some(1)), (Some(1), None), (None, Some(1))]);
+        assert_eq!(
+            nums,
+            vec![
+                (Some(0), Some(1)),
+                (None, Some(1)),
+                (None, Some(2)),
+                (Some(1), Some(1)),
+                (Some(1), None),
+                (None, Some(1))
+            ]
+        );
         // Each side colours as its own file; runs stay inside their line.
-        let (mut lines, _) = parse_patch("@@ -1,2 +1,2 @@\n-let a = \"x\";\n+let b = 42;\n fn f() {}\n");
+        let (mut lines, _) =
+            parse_patch("@@ -1,2 +1,2 @@\n-let a = \"x\";\n+let b = 42;\n fn f() {}\n");
         highlight_diff(&mut lines, "src/x.rs");
         for l in &lines {
             assert!(l.spans.iter().all(|(r, _)| r.end <= l.text.len()), "{l:?}");
         }
-        assert!(lines[1].spans.iter().any(|(_, k)| *k == SyntaxKind::String), "{:?}", lines[1]);
-        assert!(lines[2].spans.iter().any(|(r, k)| &lines[2].text[r.clone()] == "42" && *k == SyntaxKind::Number), "{:?}", lines[2]);
-        assert_eq!((grouped(7), grouped(1894), grouped(1_000_000)), ("7".into(), "1,894".into(), "1,000,000".into()));
+        assert!(
+            lines[1].spans.iter().any(|(_, k)| *k == SyntaxKind::String),
+            "{:?}",
+            lines[1]
+        );
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .any(|(r, k)| &lines[2].text[r.clone()] == "42" && *k == SyntaxKind::Number),
+            "{:?}",
+            lines[2]
+        );
+        assert_eq!(
+            (grouped(7), grouped(1894), grouped(1_000_000)),
+            ("7".into(), "1,894".into(), "1,000,000".into())
+        );
         // A one-word edit marks that word (whole), not the line.
         let (o, n) = inline_change("let count = total + 1;", "let count = total + 2;").unwrap();
-        assert_eq!((&"let count = total + 1;"[o], &"let count = total + 2;"[n]), ("1", "2"));
+        assert_eq!(
+            (&"let count = total + 1;"[o], &"let count = total + 2;"[n]),
+            ("1", "2")
+        );
         let (o, n) = inline_change("fn old_name(x)", "fn new_name(x)").unwrap();
-        assert_eq!((&"fn old_name(x)"[o], &"fn new_name(x)"[n]), ("old_name", "new_name"));
-        assert!(inline_change("abc", "xyz").is_none(), "a rewrite stays a plain wash");
+        assert_eq!(
+            (&"fn old_name(x)"[o], &"fn new_name(x)"[n]),
+            ("old_name", "new_name")
+        );
+        assert!(
+            inline_change("abc", "xyz").is_none(),
+            "a rewrite stays a plain wash"
+        );
         assert!(inline_change("é ✓ a", "é ✓ b").is_some());
         // Hidden lines between hunks are counted, and expand from the file.
-        let (lines, _) = parse_patch("@@ -2,2 +2,2 @@\n a2\n-b3\n+B3\n@@ -10,1 +10,1 @@\n-j10\n+J10\n");
-        let hunk = lines.iter().position(|l| l.kind == LineKind::Hunk && l.new == Some(10)).unwrap();
+        let (lines, _) =
+            parse_patch("@@ -2,2 +2,2 @@\n a2\n-b3\n+B3\n@@ -10,1 +10,1 @@\n-j10\n+J10\n");
+        let hunk = lines
+            .iter()
+            .position(|l| l.kind == LineKind::Hunk && l.new == Some(10))
+            .unwrap();
         assert_eq!((lines[0].gap, lines[hunk].gap), (1, 6));
-        assert_eq!((lines[2].emph.clone(), lines[3].emph.clone()), (Some(0..2), Some(0..2)));
+        assert_eq!(
+            (lines[2].emph.clone(), lines[3].emph.clone()),
+            (Some(0..2), Some(0..2))
+        );
         let file: String = (1..=12).map(|i| format!("l{i}\n")).collect();
         let open = expand_gap(&lines, hunk, &file);
-        let shown: Vec<_> = open.iter().filter(|l| l.kind == LineKind::Context).map(|l| (l.old, l.new, l.text.to_string())).collect();
+        let shown: Vec<_> = open
+            .iter()
+            .filter(|l| l.kind == LineKind::Context)
+            .map(|l| (l.old, l.new, l.text.to_string()))
+            .collect();
         assert_eq!(shown.first(), Some(&(Some(2), Some(2), "a2".into())));
         assert_eq!(shown.last(), Some(&(Some(9), Some(9), "l9".into())));
         assert_eq!(shown.len(), 7);

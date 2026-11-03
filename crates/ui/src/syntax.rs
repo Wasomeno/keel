@@ -45,7 +45,11 @@ fn syntax_for(language: Option<&str>) -> Option<&'static SyntaxReference> {
 
 /// The most specific scope on the stack decides the paint role.
 fn classify(stack: &ScopeStack) -> Option<SyntaxKind> {
-    stack.as_slice().iter().rev().find_map(|scope| kind_of(*scope))
+    stack
+        .as_slice()
+        .iter()
+        .rev()
+        .find_map(|scope| kind_of(*scope))
 }
 
 fn kind_of(scope: Scope) -> Option<SyntaxKind> {
@@ -59,7 +63,12 @@ fn kind_of(scope: Scope) -> Option<SyntaxKind> {
         Some(SyntaxKind::Number)
     } else if is("entity.name.function") || is("support.function") || is("meta.function-call") {
         Some(SyntaxKind::Function)
-    } else if is("entity.name.type") || is("entity.name.class") || is("support.type") || is("support.class") || is("storage.type") {
+    } else if is("entity.name.type")
+        || is("entity.name.class")
+        || is("support.type")
+        || is("support.class")
+        || is("storage.type")
+    {
         Some(SyntaxKind::Type)
     } else if is("keyword") || is("storage") {
         Some(SyntaxKind::Keyword)
@@ -86,7 +95,10 @@ pub fn highlight(code: &str, language: Option<&str>) -> Spans {
             return spans;
         };
         let mut cursor = 0;
-        for (offset, op) in ops.into_iter().chain(std::iter::once((line.len(), syntect::parsing::ScopeStackOp::Noop))) {
+        for (offset, op) in ops.into_iter().chain(std::iter::once((
+            line.len(),
+            syntect::parsing::ScopeStackOp::Noop,
+        ))) {
             if offset > cursor
                 && let Some(kind) = classify(&stack)
             {
@@ -121,13 +133,21 @@ const EDITOR_MAX_BYTES: usize = 256 * 1024;
 impl EditorHighlighter {
     /// For a file extension or language name; None when there's no grammar.
     pub fn new(language: &str) -> Option<Self> {
-        Some(Self { language: language.to_string().into(), syntax: syntax_for(Some(language))?, runs: Vec::new() })
+        Some(Self {
+            language: language.to_string().into(),
+            syntax: syntax_for(Some(language))?,
+            runs: Vec::new(),
+        })
     }
 
     /// Install on `editor`, for `path`'s language.
-    pub fn attach(editor: &mut gpui_base::input::EditorState, cx: &mut gpui::Context<gpui_base::input::EditorState>) {
-        let factory: gpui_base::input::InputHighlighterFactory =
-            std::rc::Rc::new(|lang: &str| Self::new(lang).map(|h| Box::new(h) as Box<dyn gpui_base::input::InputHighlighter>));
+    pub fn attach(
+        editor: &mut gpui_base::input::EditorState,
+        cx: &mut gpui::Context<gpui_base::input::EditorState>,
+    ) {
+        let factory: gpui_base::input::InputHighlighterFactory = std::rc::Rc::new(|lang: &str| {
+            Self::new(lang).map(|h| Box::new(h) as Box<dyn gpui_base::input::InputHighlighter>)
+        });
         editor.set_highlighter_factory(factory, cx);
     }
 }
@@ -158,11 +178,18 @@ impl gpui_base::input::InputHighlighter for EditorHighlighter {
                 return;
             };
             let mut cursor = 0;
-            for (offset, op) in ops.into_iter().chain(std::iter::once((line.len(), syntect::parsing::ScopeStackOp::Noop))) {
+            for (offset, op) in ops.into_iter().chain(std::iter::once((
+                line.len(),
+                syntect::parsing::ScopeStackOp::Noop,
+            ))) {
                 if offset > cursor
                     && let Some(kind) = classify(&stack)
                 {
-                    push(&mut self.runs, line_start + cursor..line_start + offset, kind);
+                    push(
+                        &mut self.runs,
+                        line_start + cursor..line_start + offset,
+                        kind,
+                    );
                 }
                 cursor = offset;
                 let _ = stack.apply(&op);
@@ -171,7 +198,11 @@ impl gpui_base::input::InputHighlighter for EditorHighlighter {
         }
     }
 
-    fn styles(&self, range: &Range<usize>, resolver: &dyn gpui_base::input::HighlightStyleResolver) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+    fn styles(
+        &self,
+        range: &Range<usize>,
+        resolver: &dyn gpui_base::input::HighlightStyleResolver,
+    ) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
         // Gap-free runs over `range`, as the editor asks.
         let first = self.runs.partition_point(|(r, _)| r.end <= range.start);
         let (mut out, mut cursor) = (Vec::new(), range.start);
@@ -259,11 +290,29 @@ mod tests {
         let code = "// hi\nfn main() { let x = \"s\"; 42 }\n";
         let spans = highlight(code, Some("rust"));
         let got = kinds(code, &spans);
-        assert!(got.iter().any(|(t, k)| t.contains("// hi") && *k == SyntaxKind::Comment), "{got:?}");
-        assert!(got.contains(&("fn", SyntaxKind::Keyword)) || got.iter().any(|(t, k)| *t == "fn" && *k == SyntaxKind::Type), "{got:?}");
-        assert!(got.iter().any(|(t, k)| t.contains("\"s\"") && *k == SyntaxKind::String), "{got:?}");
+        assert!(
+            got.iter()
+                .any(|(t, k)| t.contains("// hi") && *k == SyntaxKind::Comment),
+            "{got:?}"
+        );
+        assert!(
+            got.contains(&("fn", SyntaxKind::Keyword))
+                || got
+                    .iter()
+                    .any(|(t, k)| *t == "fn" && *k == SyntaxKind::Type),
+            "{got:?}"
+        );
+        assert!(
+            got.iter()
+                .any(|(t, k)| t.contains("\"s\"") && *k == SyntaxKind::String),
+            "{got:?}"
+        );
         assert!(got.contains(&("42", SyntaxKind::Number)), "{got:?}");
-        assert!(got.iter().any(|(t, k)| *t == "main" && *k == SyntaxKind::Function), "{got:?}");
+        assert!(
+            got.iter()
+                .any(|(t, k)| *t == "main" && *k == SyntaxKind::Function),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -272,7 +321,11 @@ mod tests {
         assert!(!highlight("echo hi # c", Some("sh")).is_empty());
         assert!(highlight("whatever", Some("no-such-lang")).is_empty());
         assert!(highlight("whatever", None).is_empty());
-        assert!(EditorHighlighter::new("json").is_some() && EditorHighlighter::new("rs").is_some() && EditorHighlighter::new("tsx").is_some());
+        assert!(
+            EditorHighlighter::new("json").is_some()
+                && EditorHighlighter::new("rs").is_some()
+                && EditorHighlighter::new("tsx").is_some()
+        );
         let code = "s = \"héllo — ✓\"\n";
         for (range, _) in highlight(code, Some("python")) {
             assert!(code.is_char_boundary(range.start) && code.is_char_boundary(range.end));

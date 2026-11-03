@@ -4,14 +4,14 @@ pub mod approval;
 pub mod background;
 pub mod browser;
 pub mod browser_trace;
-pub mod chart;
-pub mod code_block;
 pub mod callout;
+pub mod chart;
 pub mod choices;
+pub mod code_block;
 pub mod compare;
 pub mod composer;
-pub mod diagram;
 pub mod dev_control;
+pub mod diagram;
 pub mod dotify;
 pub mod file_changes;
 pub mod files;
@@ -46,20 +46,25 @@ pub mod turn;
 pub mod usage;
 pub mod view;
 
-use std::path::PathBuf;
 use gpui::{
-    App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px,
-    size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, point, px, size,
 };
 use gpui_platform::application;
 use keel_rpc::{RpcClient, ServerGuard};
+use std::path::PathBuf;
 
 pub use state::AppState;
 pub use view::KeelWindow;
 
 /// Launch the Keel window.
 /// `on_quit` runs once before the process exits (the engine flushes there).
-pub fn run(data_dir: PathBuf, guard: Option<ServerGuard>, port: u16, on_quit: impl FnOnce() + 'static) {
+pub fn run(
+    data_dir: PathBuf,
+    guard: Option<ServerGuard>,
+    port: u16,
+    on_quit: impl FnOnce() + 'static,
+) {
     let mut guard = guard;
     let mut on_quit = Some(on_quit);
     let app = application().with_assets(icons::Assets);
@@ -77,7 +82,11 @@ pub fn run(data_dir: PathBuf, guard: Option<ServerGuard>, port: u16, on_quit: im
     app.run(move |cx: &mut App| {
         crate::browser::cef::ensure_cef_initialized();
         // The new-chat headline's face (see `view::main_pane`).
-        let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/hero-title.ttf"))]);
+        let _ = cx
+            .text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
+                "../assets/fonts/hero-title.ttf"
+            ))]);
         style::load_mono(cx);
         if let Some(on_quit) = on_quit.take() {
             let mut on_quit = Some(on_quit);
@@ -170,7 +179,10 @@ pub fn run(data_dir: PathBuf, guard: Option<ServerGuard>, port: u16, on_quit: im
 /// default) absorbs a late frame instead.
 #[cfg(target_os = "macos")]
 fn triple_buffer() {
-    use objc2::{msg_send, runtime::{AnyClass, AnyObject}};
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
     use objc2_app_kit::{NSApplication, NSView};
     fn visit(view: &NSView, metal: &AnyClass) {
         let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
@@ -184,7 +196,12 @@ fn triple_buffer() {
             visit(&sub, metal);
         }
     }
-    let (Some(mtm), Some(metal)) = (objc2::MainThreadMarker::new(), AnyClass::get(c"CAMetalLayer")) else { return };
+    let (Some(mtm), Some(metal)) = (
+        objc2::MainThreadMarker::new(),
+        AnyClass::get(c"CAMetalLayer"),
+    ) else {
+        return;
+    };
     for window in NSApplication::sharedApplication(mtm).windows().iter() {
         if let Some(view) = window.contentView() {
             visit(&view, metal);

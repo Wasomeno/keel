@@ -27,26 +27,35 @@ impl FrameProbe {
     pub fn frame(&self, label: &'static str) -> (gpui::AnyElement, gpui::AnyElement) {
         use gpui::{IntoElement, Styled};
         let start = Instant::now();
-        let gap = self.last.replace(Some(start)).map(|at| start.duration_since(at).as_secs_f32() * 1e3);
+        let gap = self
+            .last
+            .replace(Some(start))
+            .map(|at| start.duration_since(at).as_secs_f32() * 1e3);
         let laid_out = Rc::new(Cell::new(0f32));
         let mark = laid_out.clone();
-        let first = gpui::canvas(|_, _, _| {}, move |_, _, _, _| mark.set(start.elapsed().as_secs_f32() * 1e3))
-            .absolute()
-            .size_0()
-            .into_any_element();
+        let first = gpui::canvas(
+            |_, _, _| {},
+            move |_, _, _, _| mark.set(start.elapsed().as_secs_f32() * 1e3),
+        )
+        .absolute()
+        .size_0()
+        .into_any_element();
         let logged = Rc::new(Cell::new(false));
-        let last = gpui::canvas(|_, _, _| {}, move |_, _, _, _| {
-            if !logged.replace(true) {
-                tracing::info!(
-                    target: "keel_ui::frames",
-                    what = label,
-                    gap_ms = gap.unwrap_or(0.),
-                    layout_ms = laid_out.get(),
-                    painted_ms = start.elapsed().as_secs_f32() * 1e3,
-                    "frame"
-                );
-            }
-        })
+        let last = gpui::canvas(
+            |_, _, _| {},
+            move |_, _, _, _| {
+                if !logged.replace(true) {
+                    tracing::info!(
+                        target: "keel_ui::frames",
+                        what = label,
+                        gap_ms = gap.unwrap_or(0.),
+                        layout_ms = laid_out.get(),
+                        painted_ms = start.elapsed().as_secs_f32() * 1e3,
+                        "frame"
+                    );
+                }
+            },
+        )
         .absolute()
         .size_0()
         .into_any_element();

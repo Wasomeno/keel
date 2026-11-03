@@ -48,7 +48,13 @@ fn norm(s: &str) -> String {
 /// `browser_click` for a browser tool's name, else `None`.
 pub fn tool_base(name: &str) -> Option<String> {
     let raw = name.trim();
-    let prefixed = |base: &str| if base.starts_with("browser_") { base.to_string() } else { format!("browser_{base}") };
+    let prefixed = |base: &str| {
+        if base.starts_with("browser_") {
+            base.to_string()
+        } else {
+            format!("browser_{base}")
+        }
+    };
     let (base, server) = keel_proto::ToolAsk::split_name(raw);
     let base = norm(&base);
     if let Some(server) = server {
@@ -76,13 +82,17 @@ pub fn op_of(base: &str) -> BrowserOp {
         "click" | "double_click" | "dblclick" | "tap" => BrowserOp::Click,
         "type" | "fill" | "fill_form" | "input" | "type_text" => BrowserOp::Type,
         "scroll" | "scroll_to" => BrowserOp::Scroll,
-        "snapshot" | "read" | "read_page" | "get_text" | "find" | "extract" | "page_text" => BrowserOp::Snapshot,
+        "snapshot" | "read" | "read_page" | "get_text" | "find" | "extract" | "page_text" => {
+            BrowserOp::Snapshot
+        }
         "screenshot" | "take_screenshot" | "capture" => BrowserOp::Screenshot,
         "wait" | "wait_for" => BrowserOp::Wait,
         "press_key" | "press" | "key" | "keypress" => BrowserOp::PressKey,
         "select_option" | "select" => BrowserOp::Select,
         "hover" => BrowserOp::Hover,
-        "evaluate" | "eval" | "run_code" | "run_code_unsafe" | "execute_script" => BrowserOp::Evaluate,
+        "evaluate" | "eval" | "run_code" | "run_code_unsafe" | "execute_script" => {
+            BrowserOp::Evaluate
+        }
         "console_messages" | "console" | "console_logs" => BrowserOp::Console,
         "network_requests" | "network_request" | "network" => BrowserOp::Network,
         "handle_dialog" | "dialog" | "accept_dialog" | "dismiss_dialog" => BrowserOp::Dialog,
@@ -121,22 +131,60 @@ pub fn icon(op: BrowserOp) -> Icon {
     }
 }
 
-const fn v(imperative: &'static str, present: &'static str, past: &'static str, failed: &'static str, stopped: &'static str) -> Verb {
-    Verb { imperative, present, past, failed, stopped }
+const fn v(
+    imperative: &'static str,
+    present: &'static str,
+    past: &'static str,
+    failed: &'static str,
+    stopped: &'static str,
+) -> Verb {
+    Verb {
+        imperative,
+        present,
+        past,
+        failed,
+        stopped,
+    }
 }
 
 /// The verb forms. Errors read "Couldn't {failed} {subject}".
 pub fn verb(op: BrowserOp, args: &Args) -> Verb {
     match op {
-        BrowserOp::OpenPane | BrowserOp::Navigate => v("Open", "Opening", "Opened", "open", "opening"),
-        BrowserOp::NewTab => v("Open new tab", "Opening new tab", "Opened new tab", "open new tab", "opening new tab"),
-        BrowserOp::Back => v("Go back", "Going back", "Went back", "go back", "going back"),
-        BrowserOp::Forward => v("Go forward", "Going forward", "Went forward", "go forward", "going forward"),
+        BrowserOp::OpenPane | BrowserOp::Navigate => {
+            v("Open", "Opening", "Opened", "open", "opening")
+        }
+        BrowserOp::NewTab => v(
+            "Open new tab",
+            "Opening new tab",
+            "Opened new tab",
+            "open new tab",
+            "opening new tab",
+        ),
+        BrowserOp::Back => v(
+            "Go back",
+            "Going back",
+            "Went back",
+            "go back",
+            "going back",
+        ),
+        BrowserOp::Forward => v(
+            "Go forward",
+            "Going forward",
+            "Went forward",
+            "go forward",
+            "going forward",
+        ),
         BrowserOp::Reload => v("Reload", "Reloading", "Reloaded", "reload", "reloading"),
         BrowserOp::Click => v("Click", "Clicking", "Clicked", "click", "clicking"),
         BrowserOp::Type => v("Type", "Typing", "Typed", "type", "typing"),
         BrowserOp::Scroll => v("Scroll", "Scrolling", "Scrolled", "scroll", "scrolling"),
-        BrowserOp::Snapshot => v("Read page", "Reading page", "Read page", "read page", "reading page"),
+        BrowserOp::Snapshot => v(
+            "Read page",
+            "Reading page",
+            "Read page",
+            "read page",
+            "reading page",
+        ),
         BrowserOp::Screenshot if args.full_page => v(
             "Take full-page screenshot",
             "Taking full-page screenshot",
@@ -144,21 +192,93 @@ pub fn verb(op: BrowserOp, args: &Args) -> Verb {
             "take full-page screenshot",
             "taking full-page screenshot",
         ),
-        BrowserOp::Screenshot => v("Take screenshot", "Taking screenshot", "Took screenshot", "take screenshot", "taking screenshot"),
-        BrowserOp::Wait => v("Wait for", "Waiting for", "Waited for", "wait for", "waiting for"),
+        BrowserOp::Screenshot => v(
+            "Take screenshot",
+            "Taking screenshot",
+            "Took screenshot",
+            "take screenshot",
+            "taking screenshot",
+        ),
+        BrowserOp::Wait => v(
+            "Wait for",
+            "Waiting for",
+            "Waited for",
+            "wait for",
+            "waiting for",
+        ),
         BrowserOp::PressKey => v("Press", "Pressing", "Pressed", "press", "pressing"),
         BrowserOp::Select => v("Select", "Selecting", "Selected", "select", "selecting"),
-        BrowserOp::Hover => v("Hover over", "Hovering over", "Hovered over", "hover over", "hovering over"),
-        BrowserOp::Evaluate => v("Run script", "Running script", "Ran script", "run script", "running script"),
-        BrowserOp::Console => v("Read console", "Reading console", "Read console", "read console", "reading console"),
-        BrowserOp::Dialog if args.accept == Some(false) => v("Dismiss dialog", "Dismissing dialog", "Dismissed dialog", "dismiss dialog", "dismissing dialog"),
-        BrowserOp::Dialog => v("Answer dialog", "Answering dialog", "Answered dialog", "answer dialog", "answering dialog"),
+        BrowserOp::Hover => v(
+            "Hover over",
+            "Hovering over",
+            "Hovered over",
+            "hover over",
+            "hovering over",
+        ),
+        BrowserOp::Evaluate => v(
+            "Run script",
+            "Running script",
+            "Ran script",
+            "run script",
+            "running script",
+        ),
+        BrowserOp::Console => v(
+            "Read console",
+            "Reading console",
+            "Read console",
+            "read console",
+            "reading console",
+        ),
+        BrowserOp::Dialog if args.accept == Some(false) => v(
+            "Dismiss dialog",
+            "Dismissing dialog",
+            "Dismissed dialog",
+            "dismiss dialog",
+            "dismissing dialog",
+        ),
+        BrowserOp::Dialog => v(
+            "Answer dialog",
+            "Answering dialog",
+            "Answered dialog",
+            "answer dialog",
+            "answering dialog",
+        ),
         BrowserOp::Upload => v("Upload", "Uploading", "Uploaded", "upload", "uploading"),
-        BrowserOp::Network => v("Read network requests", "Reading network requests", "Read network requests", "read network requests", "reading network requests"),
-        BrowserOp::Tabs => v("Check tabs", "Checking tabs", "Checked tabs", "check tabs", "checking tabs"),
-        BrowserOp::Request => v("Ask you", "Asking you", "Asked you", "ask you", "asking you"),
-        BrowserOp::Complete => v("Finish up", "Finishing up", "Finished in browser", "finish up", "finishing up"),
-        BrowserOp::Other => v("Use browser", "Using browser", "Used browser", "use browser", "using browser"),
+        BrowserOp::Network => v(
+            "Read network requests",
+            "Reading network requests",
+            "Read network requests",
+            "read network requests",
+            "reading network requests",
+        ),
+        BrowserOp::Tabs => v(
+            "Check tabs",
+            "Checking tabs",
+            "Checked tabs",
+            "check tabs",
+            "checking tabs",
+        ),
+        BrowserOp::Request => v(
+            "Ask you",
+            "Asking you",
+            "Asked you",
+            "ask you",
+            "asking you",
+        ),
+        BrowserOp::Complete => v(
+            "Finish up",
+            "Finishing up",
+            "Finished in browser",
+            "finish up",
+            "finishing up",
+        ),
+        BrowserOp::Other => v(
+            "Use browser",
+            "Using browser",
+            "Used browser",
+            "use browser",
+            "using browser",
+        ),
     }
 }
 
@@ -191,7 +311,12 @@ pub fn args_of(detail: &str) -> Args {
         return Args::default();
     }
     if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(detail) {
-        let s = |k: &str| m.get(k).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
+        let s = |k: &str| {
+            m.get(k)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
         let n = |k: &str| m.get(k).and_then(Value::as_f64);
         return Args {
             url: s("url"),
@@ -212,9 +337,15 @@ pub fn args_of(detail: &str) -> Args {
         };
     }
     if detail.contains("://") || detail.starts_with("about:") {
-        Args { url: Some(detail.to_string()), ..Args::default() }
+        Args {
+            url: Some(detail.to_string()),
+            ..Args::default()
+        }
     } else {
-        Args { selector: Some(detail.to_string()), ..Args::default() }
+        Args {
+            selector: Some(detail.to_string()),
+            ..Args::default()
+        }
     }
 }
 
@@ -236,7 +367,9 @@ pub fn outcome_of(output: &str, failed: bool) -> Outcome {
     if let Some(out) = footer_outcome(text) {
         return out;
     }
-    let json = text.find('{').and_then(|start| serde_json::from_str::<Value>(&text[start..text.rfind('}')? + 1]).ok());
+    let json = text
+        .find('{')
+        .and_then(|start| serde_json::from_str::<Value>(&text[start..text.rfind('}')? + 1]).ok());
     let field = |k: &str| match &json {
         Some(v) => v.get(k).and_then(Value::as_str).map(str::to_string),
         None => json_field(text, k),
@@ -245,11 +378,17 @@ pub fn outcome_of(output: &str, failed: bool) -> Outcome {
         url: field("url").filter(|s| !s.is_empty()),
         title: field("title").filter(|s| !s.is_empty()),
         text: field("text").filter(|s| !s.is_empty()),
-        saved: field("saved_path").or_else(|| saved_lead(text)).filter(|s| !s.is_empty()),
+        saved: field("saved_path")
+            .or_else(|| saved_lead(text))
+            .filter(|s| !s.is_empty()),
         error: field("error").filter(|s| !s.is_empty()),
     };
     if failed && out.error.is_none() && out.url.is_none() && out.text.is_none() {
-        let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
+        let line = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .trim();
         out.error = (!line.is_empty()).then(|| cut(line, 200));
     }
     out
@@ -265,14 +404,27 @@ fn footer_outcome(text: &str) -> Option<Outcome> {
     if !last.starts_with('{') || !last.ends_with('}') {
         return None;
     }
-    let Ok(Value::Object(m)) = serde_json::from_str::<Value>(last) else { return None };
+    let Ok(Value::Object(m)) = serde_json::from_str::<Value>(last) else {
+        return None;
+    };
     if !(m.contains_key("url") || m.contains_key("title")) || m.contains_key("text") {
         return None;
     }
-    let field = |k: &str| m.get(k).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
+    let field = |k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
     // A screenshot's lead line comes first: it is not page text.
     let saved = field("saved_path").or_else(|| saved_lead(page));
-    let page = if page.starts_with("Saved to ") { page.split_once('\n').map(|(_, rest)| rest.trim()).unwrap_or("") } else { page };
+    let page = if page.starts_with("Saved to ") {
+        page.split_once('\n')
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or("")
+    } else {
+        page
+    };
     Some(Outcome {
         url: field("url"),
         title: field("title"),
@@ -317,7 +469,16 @@ fn json_field(text: &str, key: &str) -> Option<String> {
 
 fn cut(s: &str, n: usize) -> String {
     let s = s.trim();
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n.saturating_sub(1)).collect::<String>().trim_end().to_string() + "…" }
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars()
+            .take(n.saturating_sub(1))
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+            + "…"
+    }
 }
 
 /// `traveloka.com`, or `traveloka.com/en-id/flight` with the path.
@@ -333,7 +494,11 @@ pub fn site(url: &str, with_path: bool) -> String {
     if !with_path {
         return host.to_string();
     }
-    let path = rest[end..].split(['?', '#']).next().unwrap_or("").trim_matches('/');
+    let path = rest[end..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_matches('/');
     if path.is_empty() {
         host.to_string()
     } else {
@@ -345,10 +510,16 @@ pub fn site(url: &str, with_path: bool) -> String {
 fn element_of(result: &str, lead: &str) -> Option<(String, Option<String>)> {
     let rest = result.trim().strip_prefix(lead)?.trim_start();
     let (tag, label) = match rest.split_once(" \"") {
-        Some((tag, tail)) => (tag, tail.rsplit_once('"').map(|(label, _)| label.to_string())),
+        Some((tag, tail)) => (
+            tag,
+            tail.rsplit_once('"').map(|(label, _)| label.to_string()),
+        ),
         None => (rest.split([',', ' ']).next().unwrap_or(rest), None),
     };
-    Some((tag.trim().to_string(), label.filter(|l| !l.trim().is_empty())))
+    Some((
+        tag.trim().to_string(),
+        label.filter(|l| !l.trim().is_empty()),
+    ))
 }
 
 /// A typed field as the row names it: never with its value.
@@ -367,22 +538,49 @@ fn typed_field(result: &str) -> Option<String> {
 }
 
 fn secret(args: &Args, result: &str) -> bool {
-    args.selector.as_deref().is_some_and(keel_proto_secret) || result.contains("(password)") || args.text.as_deref().is_some_and(|t| t.chars().all(|c| c == '•'))
+    args.selector.as_deref().is_some_and(keel_proto_secret)
+        || result.contains("(password)")
+        || args
+            .text
+            .as_deref()
+            .is_some_and(|t| t.chars().all(|c| c == '•'))
 }
 
 /// Same test as the harness's `secret_field` (the UI does not depend on it).
 fn keel_proto_secret(selector: &str) -> bool {
     let s = selector.to_ascii_lowercase();
-    ["pass", "pwd", "secret", "otp", "one-time-code", "cvv", "cvc", "pin\"", "pin]", "#pin", "[name=pin"].iter().any(|k| s.contains(k))
+    [
+        "pass",
+        "pwd",
+        "secret",
+        "otp",
+        "one-time-code",
+        "cvv",
+        "cvc",
+        "pin\"",
+        "pin]",
+        "#pin",
+        "[name=pin",
+    ]
+    .iter()
+    .any(|k| s.contains(k))
 }
 
 /// The value a type result quotes back (`into input#q "hello"`), removed.
 pub fn redact_typed(text: &str) -> String {
-    let Some(at) = text.find(" into ") else { return text.to_string() };
+    let Some(at) = text.find(" into ") else {
+        return text.to_string();
+    };
     let head = &text[..at + 6];
     let rest = &text[at + 6..];
     match rest.split_once(" \"") {
-        Some((_, tail)) if tail.split_once('"').is_some_and(|(_, after)| after.trim_start().starts_with("(e")) => text.to_string(),
+        Some((_, tail))
+            if tail
+                .split_once('"')
+                .is_some_and(|(_, after)| after.trim_start().starts_with("(e")) =>
+        {
+            text.to_string()
+        }
         Some((tag, tail)) => match tail.split_once('"') {
             Some((_, after)) => format!("{head}{tag}{after}"),
             None => format!("{head}{tag}"),
@@ -395,23 +593,47 @@ pub fn redact_typed(text: &str) -> String {
 pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
     let url = out.url.as_deref().or(args.url.as_deref());
     // The outcome is the first line; a page diff may follow it.
-    let result = out.text.as_deref().unwrap_or("").lines().next().unwrap_or("");
+    let result = out
+        .text
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("");
     let short_sel = |s: &str| cut(s, 40);
     match op {
         BrowserOp::OpenPane => "browser".to_string(),
-        BrowserOp::Navigate => args.url.as_deref().or(url).map(|u| site(out.url.as_deref().unwrap_or(u), true)).unwrap_or_else(|| "page".to_string()),
-        BrowserOp::Console if args.level.as_deref().is_some_and(|l| l != "all") => format!("{}s", args.level.as_deref().unwrap_or_default()),
-        BrowserOp::NewTab | BrowserOp::Back | BrowserOp::Forward | BrowserOp::Snapshot | BrowserOp::Console | BrowserOp::Network => {
-            url.map(|u| site(u, false)).unwrap_or_default()
+        BrowserOp::Navigate => args
+            .url
+            .as_deref()
+            .or(url)
+            .map(|u| site(out.url.as_deref().unwrap_or(u), true))
+            .unwrap_or_else(|| "page".to_string()),
+        BrowserOp::Console if args.level.as_deref().is_some_and(|l| l != "all") => {
+            format!("{}s", args.level.as_deref().unwrap_or_default())
         }
-        BrowserOp::Reload => url.map(|u| site(u, false)).unwrap_or_else(|| "page".to_string()),
+        BrowserOp::NewTab
+        | BrowserOp::Back
+        | BrowserOp::Forward
+        | BrowserOp::Snapshot
+        | BrowserOp::Console
+        | BrowserOp::Network => url.map(|u| site(u, false)).unwrap_or_default(),
+        BrowserOp::Reload => url
+            .map(|u| site(u, false))
+            .unwrap_or_else(|| "page".to_string()),
         BrowserOp::Click | BrowserOp::Hover => {
-            let lead = if op == BrowserOp::Click { "clicked " } else { "hovered " };
+            let lead = if op == BrowserOp::Click {
+                "clicked "
+            } else {
+                "hovered "
+            };
             match element_of(result, lead) {
                 Some((_, Some(label))) => format!("\u{201c}{}\u{201d}", cut(&label, 40)),
                 Some((tag, None)) if tag.contains(['#', '.']) => tag,
                 _ => match (&args.selector, args.x, args.y) {
-                    _ if args.target.is_some() && args.selector.is_none() => args.target.clone().unwrap_or_default(),
+                    _ if args.target.is_some() && args.selector.is_none() => {
+                        args.target.clone().unwrap_or_default()
+                    }
                     (Some(sel), _, _) => short_sel(sel),
                     (None, Some(x), Some(y)) => format!("at {}, {}", x.round(), y.round()),
                     _ => match element_of(result, lead) {
@@ -422,9 +644,13 @@ pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
             }
         }
         BrowserOp::Type => {
-            let field = typed_field(result).or_else(|| args.selector.as_deref().map(short_sel)).or_else(|| args.target.clone());
+            let field = typed_field(result)
+                .or_else(|| args.selector.as_deref().map(short_sel))
+                .or_else(|| args.target.clone());
             let what = match &args.text {
-                Some(_) if secret(args, result) => Some("\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()),
+                Some(_) if secret(args, result) => {
+                    Some("\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string())
+                }
                 Some(text) => Some(format!("\u{201c}{}\u{201d}", cut(text, 24))),
                 None => result
                     .strip_prefix("typed ")
@@ -461,10 +687,26 @@ pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
             .or_else(|| args.target.clone())
             .or_else(|| args.url.as_deref().map(|u| site(u, true)))
             .unwrap_or_else(|| "page".to_string()),
-        BrowserOp::PressKey => args.key.clone().or_else(|| args.text.clone()).unwrap_or_default(),
-        BrowserOp::Select => args.value.as_deref().map(|v| format!("\u{201c}{}\u{201d}", cut(v, 32))).unwrap_or_default(),
-        BrowserOp::Upload => args.paths.as_deref().map(|p| cut(p, 48)).unwrap_or_else(|| "file".to_string()),
-        BrowserOp::Dialog => args.text.as_deref().map(|t| format!("with \u{201c}{}\u{201d}", cut(t, 24))).unwrap_or_default(),
+        BrowserOp::PressKey => args
+            .key
+            .clone()
+            .or_else(|| args.text.clone())
+            .unwrap_or_default(),
+        BrowserOp::Select => args
+            .value
+            .as_deref()
+            .map(|v| format!("\u{201c}{}\u{201d}", cut(v, 32)))
+            .unwrap_or_default(),
+        BrowserOp::Upload => args
+            .paths
+            .as_deref()
+            .map(|p| cut(p, 48))
+            .unwrap_or_else(|| "file".to_string()),
+        BrowserOp::Dialog => args
+            .text
+            .as_deref()
+            .map(|t| format!("with \u{201c}{}\u{201d}", cut(t, 24)))
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -491,16 +733,30 @@ pub fn body(op: BrowserOp, args: &Args, out: &Outcome, output: &str, error: bool
     if let Some(err) = &out.error {
         rows.push(("Error", cut(err, 240)));
     } else if let Some(text) = out.text.as_deref().filter(|t| !t.trim().is_empty()) {
-        let text = if op == BrowserOp::Type { redact_typed(text) } else { text.to_string() };
+        let text = if op == BrowserOp::Type {
+            redact_typed(text)
+        } else {
+            text.to_string()
+        };
         let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let result = match op {
-            BrowserOp::Snapshot => format!("{} ({} characters)", cut(&flat, 140), text.chars().count()),
+            BrowserOp::Snapshot => {
+                format!("{} ({} characters)", cut(&flat, 140), text.chars().count())
+            }
             BrowserOp::Navigate if flat == "loaded" => "Loaded".to_string(),
             _ => {
                 // The outcome line; the page diff after it stays in the raw view.
-                let first = text.lines().next().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+                let first = text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let mut c = first.chars();
-                c.next().map_or_else(String::new, |f| f.to_uppercase().collect::<String>() + c.as_str())
+                c.next().map_or_else(String::new, |f| {
+                    f.to_uppercase().collect::<String>() + c.as_str()
+                })
             }
         };
         rows.push(("Result", cut(&result, 200)));
@@ -522,7 +778,12 @@ pub fn body(op: BrowserOp, args: &Args, out: &Outcome, output: &str, error: bool
         Err(_) if op == BrowserOp::Type => redact_typed(&inner),
         Err(_) => inner,
     };
-    BrowserBody { rows, raw, error, host: url.map(|u| site(u, false)) }
+    BrowserBody {
+        rows,
+        raw,
+        error,
+        host: url.map(|u| site(u, false)),
+    }
 }
 
 #[cfg(test)]
@@ -537,7 +798,10 @@ mod tests {
             ("keel-browser:browser_type", "browser_type"),
             ("keel-browser_browser_open_pane", "browser_open_pane"),
             ("keel-browser__browser_scroll", "browser_scroll"),
-            ("browser_screenshot (keel-browser MCP Server)", "browser_screenshot"),
+            (
+                "browser_screenshot (keel-browser MCP Server)",
+                "browser_screenshot",
+            ),
             ("mcp__keel-browser__navigate", "browser_navigate"),
             ("browser_back", "browser_back"),
         ] {
@@ -549,23 +813,96 @@ mod tests {
 
     #[test]
     fn subjects_name_what_was_acted_on() {
-        let ok = |text: &str| Outcome { url: Some("https://www.traveloka.com/en-id".into()), text: Some(text.into()), ..Outcome::default() };
+        let ok = |text: &str| Outcome {
+            url: Some("https://www.traveloka.com/en-id".into()),
+            text: Some(text.into()),
+            ..Outcome::default()
+        };
         let click = ok("clicked button#search \"Search flights\"");
-        assert_eq!(subject(BrowserOp::Click, &args_of(r##"{"selector":"#search"}"##), &click), "\u{201c}Search flights\u{201d}");
-        assert_eq!(subject(BrowserOp::Click, &args_of(r#"{"x":640,"y":400}"#), &ok("clicked div")), "at 640, 400");
+        assert_eq!(
+            subject(
+                BrowserOp::Click,
+                &args_of(r##"{"selector":"#search"}"##),
+                &click
+            ),
+            "\u{201c}Search flights\u{201d}"
+        );
+        assert_eq!(
+            subject(
+                BrowserOp::Click,
+                &args_of(r#"{"x":640,"y":400}"#),
+                &ok("clicked div")
+            ),
+            "at 640, 400"
+        );
         let typed = ok("typed 7 chars into input#q \"jakarta\", pressed Enter");
-        assert_eq!(subject(BrowserOp::Type, &args_of(r##"{"text":"jakarta","selector":"#q"}"##), &typed), "\u{201c}jakarta\u{201d} in input#q");
-        assert_eq!(subject(BrowserOp::Type, &Args::default(), &typed), "7 characters in input#q");
+        assert_eq!(
+            subject(
+                BrowserOp::Type,
+                &args_of(r##"{"text":"jakarta","selector":"#q"}"##),
+                &typed
+            ),
+            "\u{201c}jakarta\u{201d} in input#q"
+        );
+        assert_eq!(
+            subject(BrowserOp::Type, &Args::default(), &typed),
+            "7 characters in input#q"
+        );
         let pw = ok("typed 8 chars into input#pw (password)");
-        let masked = subject(BrowserOp::Type, &args_of(r##"{"text":"hunter22","selector":"#pw"}"##), &pw);
+        let masked = subject(
+            BrowserOp::Type,
+            &args_of(r##"{"text":"hunter22","selector":"#pw"}"##),
+            &pw,
+        );
         assert!(!masked.contains("hunter"), "{masked}");
-        assert!(subject(BrowserOp::Type, &args_of(r#"{"text":"x","selector":"input[type=password]"}"#), &ok("typed")).starts_with('\u{2022}'));
-        assert_eq!(redact_typed("typed 7 chars into input#q \"jakarta\", pressed Enter"), "typed 7 chars into input#q, pressed Enter");
-        assert_eq!(subject(BrowserOp::Scroll, &args_of(r#"{"dy":600}"#), &Outcome::default()), "down");
-        assert_eq!(subject(BrowserOp::Scroll, &args_of(r#"{"to":"bottom"}"#), &Outcome::default()), "to bottom");
-        assert_eq!(subject(BrowserOp::Snapshot, &Args::default(), &ok("Flights Hotels")), "traveloka.com");
-        assert_eq!(subject(BrowserOp::Navigate, &args_of("https://www.resonafinance.co.id/id/about-us/company-profile"), &Outcome::default()), "resonafinance.co.id/id/about-us/company-profile");
-        assert_eq!(subject(BrowserOp::Navigate, &args_of(r#"{"url":"https://traveloka.com"}"#), &Outcome::default()), "traveloka.com");
+        assert!(
+            subject(
+                BrowserOp::Type,
+                &args_of(r#"{"text":"x","selector":"input[type=password]"}"#),
+                &ok("typed")
+            )
+            .starts_with('\u{2022}')
+        );
+        assert_eq!(
+            redact_typed("typed 7 chars into input#q \"jakarta\", pressed Enter"),
+            "typed 7 chars into input#q, pressed Enter"
+        );
+        assert_eq!(
+            subject(
+                BrowserOp::Scroll,
+                &args_of(r#"{"dy":600}"#),
+                &Outcome::default()
+            ),
+            "down"
+        );
+        assert_eq!(
+            subject(
+                BrowserOp::Scroll,
+                &args_of(r#"{"to":"bottom"}"#),
+                &Outcome::default()
+            ),
+            "to bottom"
+        );
+        assert_eq!(
+            subject(BrowserOp::Snapshot, &Args::default(), &ok("Flights Hotels")),
+            "traveloka.com"
+        );
+        assert_eq!(
+            subject(
+                BrowserOp::Navigate,
+                &args_of("https://www.resonafinance.co.id/id/about-us/company-profile"),
+                &Outcome::default()
+            ),
+            "resonafinance.co.id/id/about-us/company-profile"
+        );
+        assert_eq!(
+            subject(
+                BrowserOp::Navigate,
+                &args_of(r#"{"url":"https://traveloka.com"}"#),
+                &Outcome::default()
+            ),
+            "traveloka.com"
+        );
     }
 
     #[test]
@@ -574,8 +911,16 @@ mod tests {
         let o = outcome_of(out, false);
         assert_eq!(o.url.as_deref(), Some("https://shop.test/results"));
         assert_eq!(o.title.as_deref(), Some("Results"));
-        assert!(o.text.as_deref().unwrap().starts_with("clicked button \"Search\" (e12)"));
-        assert_eq!(subject(BrowserOp::Click, &args_of(r#"{"ref":"e12"}"#), &o), "\u{201c}Search\u{201d}");
+        assert!(
+            o.text
+                .as_deref()
+                .unwrap()
+                .starts_with("clicked button \"Search\" (e12)")
+        );
+        assert_eq!(
+            subject(BrowserOp::Click, &args_of(r#"{"ref":"e12"}"#), &o),
+            "\u{201c}Search\u{201d}"
+        );
         // Only the tail kept: the fields still come through.
         let o = outcome_of(&out[60..], false);
         assert_eq!(o.url.as_deref(), Some("https://shop.test/results"));
@@ -599,7 +944,11 @@ mod tests {
     #[test]
     fn every_op_has_its_own_icon() {
         use BrowserOp::*;
-        let all = [OpenPane, Navigate, NewTab, Back, Forward, Reload, Click, Type, Scroll, Snapshot, Screenshot, Wait, PressKey, Select, Hover, Evaluate, Console, Network, Dialog, Upload, Tabs, Request, Complete, Other];
+        let all = [
+            OpenPane, Navigate, NewTab, Back, Forward, Reload, Click, Type, Scroll, Snapshot,
+            Screenshot, Wait, PressKey, Select, Hover, Evaluate, Console, Network, Dialog, Upload,
+            Tabs, Request, Complete, Other,
+        ];
         for op in all {
             assert_ne!(icon(op), Icon::Terminal);
             assert_ne!(icon(op), Icon::Tool);
@@ -617,36 +966,133 @@ mod tests {
         assert_eq!(icon(op_of("browser_console")), Icon::ScrollText);
         // Every action this server offers has an icon of its own, apart from
         // read/scroll pairs that share nothing with the generic globe.
-        for name in ["browser_click", "browser_type", "browser_select_option", "browser_scroll", "browser_wait_for", "browser_handle_dialog", "browser_upload", "browser_console", "browser_screenshot", "browser_snapshot"] {
+        for name in [
+            "browser_click",
+            "browser_type",
+            "browser_select_option",
+            "browser_scroll",
+            "browser_wait_for",
+            "browser_handle_dialog",
+            "browser_upload",
+            "browser_console",
+            "browser_screenshot",
+            "browser_snapshot",
+        ] {
             assert_ne!(icon(op_of(name)), Icon::Globe, "{name}");
         }
     }
 
     #[test]
     fn the_new_tools_read_as_plain_lines() {
-        let at = |text: &str| Outcome { url: Some("https://shop.test/cart".into()), text: Some(text.into()), ..Outcome::default() };
+        let at = |text: &str| Outcome {
+            url: Some("https://shop.test/cart".into()),
+            text: Some(text.into()),
+            ..Outcome::default()
+        };
         let line = |name: &str, detail: &str, out: &Outcome| {
             let op = op_of(name);
             let args = args_of(detail);
             (verb(op, &args).past, subject(op, &args, out))
         };
-        assert_eq!(line("browser_click", r#"{"ref":"e12"}"#, &at("clicked button \"Send\" (e12)")), ("Clicked", "\u{201c}Send\u{201d}".to_string()));
-        assert_eq!(line("browser_click", r#"{"ref":"e12"}"#, &at("clicked div (e12)")), ("Clicked", "e12".to_string()));
         assert_eq!(
-            line("browser_type", r#"{"ref":"e5","text":"jakarta"}"#, &at("typed 7 chars into textbox \"Search\" (e5)")),
-            ("Typed", "\u{201c}jakarta\u{201d} in \u{201c}Search\u{201d}".to_string())
+            line(
+                "browser_click",
+                r#"{"ref":"e12"}"#,
+                &at("clicked button \"Send\" (e12)")
+            ),
+            ("Clicked", "\u{201c}Send\u{201d}".to_string())
         );
-        let pw = line("browser_type", r#"{"ref":"e6","text":"hunter22"}"#, &at("typed 8 chars into textbox \"Password\" (e6) (password)"));
+        assert_eq!(
+            line(
+                "browser_click",
+                r#"{"ref":"e12"}"#,
+                &at("clicked div (e12)")
+            ),
+            ("Clicked", "e12".to_string())
+        );
+        assert_eq!(
+            line(
+                "browser_type",
+                r#"{"ref":"e5","text":"jakarta"}"#,
+                &at("typed 7 chars into textbox \"Search\" (e5)")
+            ),
+            (
+                "Typed",
+                "\u{201c}jakarta\u{201d} in \u{201c}Search\u{201d}".to_string()
+            )
+        );
+        let pw = line(
+            "browser_type",
+            r#"{"ref":"e6","text":"hunter22"}"#,
+            &at("typed 8 chars into textbox \"Password\" (e6) (password)"),
+        );
         assert!(!pw.1.contains("hunter"), "{pw:?}");
-        assert_eq!(line("browser_select_option", r#"{"ref":"e7","value":"Business"}"#, &at("selected \"Business\" in combobox \"Class\" (e7)")), ("Selected", "\u{201c}Business\u{201d}".to_string()));
-        assert_eq!(line("browser_press_key", r#"{"key":"Enter"}"#, &at("pressed Enter")), ("Pressed", "Enter".to_string()));
-        assert_eq!(line("browser_wait_for", r#"{"text":"Saved"}"#, &at("waited 0.4s")), ("Waited for", "\u{201c}Saved\u{201d}".to_string()));
-        assert_eq!(line("browser_wait_for", r#"{"url":"https://shop.test/done"}"#, &at("waited")).1, "shop.test/done");
-        assert_eq!(line("browser_upload", r#"{"ref":"e9","paths":"a.png, b.pdf"}"#, &at("uploaded 2 files")), ("Uploaded", "a.png, b.pdf".to_string()));
-        assert_eq!(line("browser_handle_dialog", r#"{"accept":false}"#, &at("dismissed")).0, "Dismissed dialog");
-        assert_eq!(line("browser_handle_dialog", r#"{"accept":true,"text":"Ana"}"#, &at("accepted")), ("Answered dialog", "with \u{201c}Ana\u{201d}".to_string()));
-        assert_eq!(line("browser_console", r#"{"level":"error"}"#, &at("")), ("Read console", "errors".to_string()));
+        assert_eq!(
+            line(
+                "browser_select_option",
+                r#"{"ref":"e7","value":"Business"}"#,
+                &at("selected \"Business\" in combobox \"Class\" (e7)")
+            ),
+            ("Selected", "\u{201c}Business\u{201d}".to_string())
+        );
+        assert_eq!(
+            line(
+                "browser_press_key",
+                r#"{"key":"Enter"}"#,
+                &at("pressed Enter")
+            ),
+            ("Pressed", "Enter".to_string())
+        );
+        assert_eq!(
+            line(
+                "browser_wait_for",
+                r#"{"text":"Saved"}"#,
+                &at("waited 0.4s")
+            ),
+            ("Waited for", "\u{201c}Saved\u{201d}".to_string())
+        );
+        assert_eq!(
+            line(
+                "browser_wait_for",
+                r#"{"url":"https://shop.test/done"}"#,
+                &at("waited")
+            )
+            .1,
+            "shop.test/done"
+        );
+        assert_eq!(
+            line(
+                "browser_upload",
+                r#"{"ref":"e9","paths":"a.png, b.pdf"}"#,
+                &at("uploaded 2 files")
+            ),
+            ("Uploaded", "a.png, b.pdf".to_string())
+        );
+        assert_eq!(
+            line(
+                "browser_handle_dialog",
+                r#"{"accept":false}"#,
+                &at("dismissed")
+            )
+            .0,
+            "Dismissed dialog"
+        );
+        assert_eq!(
+            line(
+                "browser_handle_dialog",
+                r#"{"accept":true,"text":"Ana"}"#,
+                &at("accepted")
+            ),
+            ("Answered dialog", "with \u{201c}Ana\u{201d}".to_string())
+        );
+        assert_eq!(
+            line("browser_console", r#"{"level":"error"}"#, &at("")),
+            ("Read console", "errors".to_string())
+        );
         // A ref label survives the typed-value redaction.
-        assert_eq!(redact_typed("typed 7 chars into textbox \"Search\" (e5)"), "typed 7 chars into textbox \"Search\" (e5)");
+        assert_eq!(
+            redact_typed("typed 7 chars into textbox \"Search\" (e5)"),
+            "typed 7 chars into textbox \"Search\" (e5)"
+        );
     }
 }

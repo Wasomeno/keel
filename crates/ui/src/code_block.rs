@@ -10,13 +10,14 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, Hitbox, Hsla, IntoElement, SharedString, div, prelude::*, px,
+    AnyElement, App, Bounds, Element, ElementId, Hitbox, Hsla, IntoElement, SharedString, div,
+    prelude::*, px,
 };
 use keel_theme::{SyntaxPaintMap, Tokens};
 
 use crate::icons::Icon;
 use crate::motion::glide_curve;
-use crate::style::{CODE, KeelStyled, MONO, RADIUS_MD, TypeStep, c, zpx, zoom};
+use crate::style::{CODE, KeelStyled, MONO, RADIUS_MD, TypeStep, c, zoom, zpx};
 use crate::syntax::{Spans, SyntaxKind};
 
 /// Collapsed compact body, logical px. `max-h-64`.
@@ -78,15 +79,25 @@ pub enum LineVariant {
 pub enum CodeAction {
     /// `text` is the visible source. Gutters are not included.
     /// Not sent while [`CodeBlockProps::closed`] is false.
-    Copy { text: String },
+    Copy {
+        text: String,
+    },
     /// Toggle soft wrap.
     Wrap,
     /// Toggle the show-more cap. Set `toggled_at` to `Instant::now()`.
     ShowMore,
     /// Compact output was cut at [`keel_proto::OUTPUT_TAIL`] or [`MAX_RENDERED_LINES`].
-    ShowFull { content: String, title: Option<String>, error: bool },
+    ShowFull {
+        content: String,
+        title: Option<String>,
+        error: bool,
+    },
     Run,
-    OpenViewer { content: String, title: Option<String>, error: bool },
+    OpenViewer {
+        content: String,
+        title: Option<String>,
+        error: bool,
+    },
 }
 
 /// Parent callback. Same shape as the transcript's row action.
@@ -218,17 +229,32 @@ pub fn parse_unified(diff: &str) -> Vec<ParsedDiffLine> {
             old = o;
             new = n;
             in_hunk = true;
-            out.push(ParsedDiffLine { variant: LineVariant::Hunk, text: raw.to_string(), old: Some(old), new: Some(new) });
+            out.push(ParsedDiffLine {
+                variant: LineVariant::Hunk,
+                text: raw.to_string(),
+                old: Some(old),
+                new: Some(new),
+            });
             continue;
         }
         if !in_hunk || raw.starts_with('\\') {
             continue;
         }
         if let Some(text) = raw.strip_prefix('+') {
-            out.push(ParsedDiffLine { variant: LineVariant::Added, text: text.to_string(), old: None, new: Some(new) });
+            out.push(ParsedDiffLine {
+                variant: LineVariant::Added,
+                text: text.to_string(),
+                old: None,
+                new: Some(new),
+            });
             new += 1;
         } else if let Some(text) = raw.strip_prefix('-') {
-            out.push(ParsedDiffLine { variant: LineVariant::Removed, text: text.to_string(), old: Some(old), new: None });
+            out.push(ParsedDiffLine {
+                variant: LineVariant::Removed,
+                text: text.to_string(),
+                old: Some(old),
+                new: None,
+            });
             old += 1;
         } else {
             let text = raw.strip_prefix(' ').unwrap_or(raw);
@@ -248,7 +274,11 @@ pub fn parse_unified(diff: &str) -> Vec<ParsedDiffLine> {
 /// Join a diff script into the `content` and `line_variants` a block paints.
 /// Markers stay out of `content`, so copy never picks them up.
 pub fn join_diff(lines: &[(LineVariant, String)]) -> (String, Vec<LineVariant>) {
-    let text = lines.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join("\n");
+    let text = lines
+        .iter()
+        .map(|(_, line)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let variants = lines.iter().map(|(variant, _)| *variant).collect();
     (text, variants)
 }
@@ -258,7 +288,11 @@ pub fn join_diff(lines: &[(LineVariant, String)]) -> (String, Vec<LineVariant>) 
 /// Full blocks return the whole string.
 pub fn display_window(size: CodeSize, content: &str) -> DisplayWindow {
     if size != CodeSize::Compact {
-        return DisplayWindow { start: 0, end: content.len(), truncated: false };
+        return DisplayWindow {
+            start: 0,
+            end: content.len(),
+            truncated: false,
+        };
     }
     let mut start = 0usize;
     if content.len() > keel_proto::OUTPUT_TAIL {
@@ -293,7 +327,11 @@ pub fn display_window(size: CodeSize, content: &str) -> DisplayWindow {
     while start < content.len() && !content.is_char_boundary(start) {
         start += 1;
     }
-    DisplayWindow { start, end: content.len(), truncated: start > 0 }
+    DisplayWindow {
+        start,
+        end: content.len(),
+        truncated: start > 0,
+    }
 }
 
 /// Spans that are safe to paint. While the fence is open, runs stop at the
@@ -315,7 +353,12 @@ pub fn visible_spans(content: &str, spans: &Spans, closed: bool) -> Spans {
 }
 
 /// `None` follows the full-block rule. Compact numbers only when asked.
-pub fn line_numbers_on(size: CodeSize, choice: Option<bool>, lines: usize, start_line: Option<u32>) -> bool {
+pub fn line_numbers_on(
+    size: CodeSize,
+    choice: Option<bool>,
+    lines: usize,
+    start_line: Option<u32>,
+) -> bool {
     match choice {
         Some(on) => on,
         None => size == CodeSize::Full && (lines > 8 || start_line.is_some()),
@@ -323,7 +366,11 @@ pub fn line_numbers_on(size: CodeSize, choice: Option<bool>, lines: usize, start
 }
 
 pub fn show_more_label(hidden: usize) -> String {
-    if hidden == 1 { "Show 1 more line".to_string() } else { format!("Show {hidden} more lines") }
+    if hidden == 1 {
+        "Show 1 more line".to_string()
+    } else {
+        format!("Show {hidden} more lines")
+    }
 }
 
 /// Capped body height. `viewport_h` is logical px; pass 0 when the viewport
@@ -342,7 +389,11 @@ pub fn block_layout(
     let content_h = pad * 2. + line_h * line_count as f32;
     let (collapsed_h, expanded_h) = resting_caps(size, content_h, viewport_h);
     let can_grow = expanded_h > collapsed_h + 0.5;
-    let (from, to) = if expanded { (collapsed_h, expanded_h) } else { (expanded_h, collapsed_h) };
+    let (from, to) = if expanded {
+        (collapsed_h, expanded_h)
+    } else {
+        (expanded_h, collapsed_h)
+    };
     let (cap, animating, chevron) = glide_cap(from, to, expanded, toggled_at, now, reduced);
     let more_lines = if content_h > collapsed_cap_of(size) + 0.5 {
         lines_hidden(line_h, pad, line_count, collapsed_cap_of(size))
@@ -364,11 +415,29 @@ pub fn block_layout(
 /// The block's outer height this frame (header, body cap, show-more row,
 /// border), for the list's height estimate.
 pub fn outer_height(props: &CodeBlockProps, viewport_h: f32, now: Instant) -> f32 {
-    let logical = if zoom() > 0. { viewport_h / zoom() } else { viewport_h };
+    let logical = if zoom() > 0. {
+        viewport_h / zoom()
+    } else {
+        viewport_h
+    };
     let window = display_window(props.size, &props.content);
-    let lines = split_line_ranges(&props.content[window.start..window.end]).len().max(1);
-    let m = block_layout(props.size, props.expanded, lines, logical, props.toggled_at, now, props.reduced);
-    let header = if props.size == CodeSize::Full { HEADER_H } else { 0. };
+    let lines = split_line_ranges(&props.content[window.start..window.end])
+        .len()
+        .max(1);
+    let m = block_layout(
+        props.size,
+        props.expanded,
+        lines,
+        logical,
+        props.toggled_at,
+        now,
+        props.reduced,
+    );
+    let header = if props.size == CodeSize::Full {
+        HEADER_H
+    } else {
+        0.
+    };
     header + m.cap + if m.show_more { MORE_H } else { 0. } + 2.
 }
 
@@ -381,7 +450,11 @@ pub fn render(
     viewport_h: f32,
     on_action: OnCodeAction,
 ) -> AnyElement {
-    let logical = if zoom() > 0. { viewport_h / zoom() } else { viewport_h };
+    let logical = if zoom() > 0. {
+        viewport_h / zoom()
+    } else {
+        viewport_h
+    };
     let window = display_window(props.size, &props.content);
     let shown = &props.content[window.start..window.end];
     let rows = split_line_ranges(shown);
@@ -394,14 +467,21 @@ pub fn render(
         Instant::now(),
         props.reduced,
     );
-    let skipped = props.content[..window.start].bytes().filter(|b| *b == b'\n').count();
+    let skipped = props.content[..window.start]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count();
     let variants = aligned_variants(props.line_variants.as_deref(), skipped, rows.len());
     let spans = spans_for(&props.content, window, props.spans.as_ref(), props.closed);
     let numbers = line_numbers_on(props.size, props.line_numbers, rows.len(), props.start_line);
     let first = props.start_line.filter(|n| *n > 0).unwrap_or(1);
     let bg = surface(tokens, props.variant);
     let border = border_of(tokens, props.variant);
-    let plain = if props.variant == CodeVariant::Destructive { c(tokens.text) } else { c(syntax.plain << 8 | 0xFF) };
+    let plain = if props.variant == CodeVariant::Destructive {
+        c(tokens.text)
+    } else {
+        c(syntax.plain << 8 | 0xFF)
+    };
     let group: SharedString = format!("code-{}", props.id).into();
     let copy_body = shown.to_string();
 
@@ -418,7 +498,13 @@ pub fn render(
         .border_color(border)
         .overflow_hidden()
         .when(props.size == CodeSize::Full, |d| {
-            d.child(header(props, tokens, border, copy_body.clone(), on_action.clone()))
+            d.child(header(
+                props,
+                tokens,
+                border,
+                copy_body.clone(),
+                on_action.clone(),
+            ))
         })
         .child(body(
             props,
@@ -437,15 +523,30 @@ pub fn render(
             copy_body,
             on_action.clone(),
         ))
-        .when(props.size == CodeSize::Compact && (window.truncated || metrics.fade), |d| {
-            let on_action = on_action.clone();
-            let content = props.content.clone();
-            let title = props.title.clone().or_else(|| props.language.clone());
-            let error = props.variant == CodeVariant::Destructive;
-            d.child(floating_show_full(&props.id, tokens, props.variant, move |_, _, cx| {
-                on_action(CodeAction::ShowFull { content: content.clone(), title: title.clone(), error }, cx)
-            }))
-        })
+        .when(
+            props.size == CodeSize::Compact && (window.truncated || metrics.fade),
+            |d| {
+                let on_action = on_action.clone();
+                let content = props.content.clone();
+                let title = props.title.clone().or_else(|| props.language.clone());
+                let error = props.variant == CodeVariant::Destructive;
+                d.child(floating_show_full(
+                    &props.id,
+                    tokens,
+                    props.variant,
+                    move |_, _, cx| {
+                        on_action(
+                            CodeAction::ShowFull {
+                                content: content.clone(),
+                                title: title.clone(),
+                                error,
+                            },
+                            cx,
+                        )
+                    },
+                ))
+            },
+        )
         .when(metrics.show_more, |d| {
             let label = show_more_label(metrics.more_lines);
             let turn = metrics.chevron;
@@ -456,18 +557,31 @@ pub fn render(
         })
         .when(metrics.animating, |d| {
             d.child(
-                gpui::canvas(|_, _, _| (), |_, _, window, _| window.request_animation_frame())
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size(px(0.)),
+                gpui::canvas(
+                    |_, _, _| (),
+                    |_, _, window, _| window.request_animation_frame(),
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(0.)),
             )
         })
         .into_any_element()
 }
 
-fn header(props: &CodeBlockProps, t: Tokens, border: Hsla, copy_text: String, on_action: OnCodeAction) -> AnyElement {
-    let label = props.title.clone().or_else(|| props.language.clone()).unwrap_or_else(|| "text".to_string());
+fn header(
+    props: &CodeBlockProps,
+    t: Tokens,
+    border: Hsla,
+    copy_text: String,
+    on_action: OnCodeAction,
+) -> AnyElement {
+    let label = props
+        .title
+        .clone()
+        .or_else(|| props.language.clone())
+        .unwrap_or_else(|| "text".to_string());
     let file = props.title.is_some();
     div()
         .h(zpx(HEADER_H))
@@ -491,7 +605,14 @@ fn header(props: &CodeBlockProps, t: Tokens, border: Hsla, copy_text: String, on
                 .t_caption()
                 .text_color(c(t.text_faint))
                 .when(file, |d| d.child(Icon::File.el(zpx(12.))))
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label)),
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                ),
         )
         .child(
             div()
@@ -512,7 +633,16 @@ fn header(props: &CodeBlockProps, t: Tokens, border: Hsla, copy_text: String, on
                         c(t.hover),
                         c(t.text),
                         true,
-                        move |_, _, cx| on_action(CodeAction::OpenViewer { content: content.clone(), title: title.clone(), error }, cx),
+                        move |_, _, cx| {
+                            on_action(
+                                CodeAction::OpenViewer {
+                                    content: content.clone(),
+                                    title: title.clone(),
+                                    error,
+                                },
+                                cx,
+                            )
+                        },
                     ))
                 })
                 .child(wrap_button(props, t, on_action.clone()))
@@ -551,13 +681,23 @@ fn body(
     on_action: OnCodeAction,
 ) -> AnyElement {
     let (line_h, _) = line_box(props.size);
-    let pad_x = if props.size == CodeSize::Compact { COMPACT_PAD_X } else { FULL_PAD_X };
+    let pad_x = if props.size == CodeSize::Compact {
+        COMPACT_PAD_X
+    } else {
+        FULL_PAD_X
+    };
     let step = code_type(props.size);
     let markers = variants.iter().any(|v| *v != LineVariant::Default);
     if props.size == CodeSize::Compact && !numbers && !markers {
         let mut highlights = Vec::new();
         if copy_body.starts_with("$ ") || copy_body == "$" {
-            highlights.push((0..1, gpui::HighlightStyle { color: Some(c(t.text_faint)), ..Default::default() }));
+            highlights.push((
+                0..1,
+                gpui::HighlightStyle {
+                    color: Some(c(t.text_faint)),
+                    ..Default::default()
+                },
+            ));
         }
         for (range, kind) in spans {
             let rgb = match kind {
@@ -613,7 +753,11 @@ fn body(
                         .right_0()
                         .bottom_0()
                         .h(zpx(FADE_H))
-                        .bg(gpui::linear_gradient(180., gpui::linear_color_stop(clear, 0.), gpui::linear_color_stop(solid, 1.))),
+                        .bg(gpui::linear_gradient(
+                            180.,
+                            gpui::linear_color_stop(clear, 0.),
+                            gpui::linear_color_stop(solid, 1.),
+                        )),
                 )
             })
             .when(props.size == CodeSize::Compact, {
@@ -629,7 +773,11 @@ fn body(
     } else {
         0
     };
-    let num_w = if numbers { digits as f32 * step.size * 0.7 + NUMBER_GAP } else { 0. };
+    let num_w = if numbers {
+        digits as f32 * step.size * 0.7 + NUMBER_GAP
+    } else {
+        0.
+    };
     let order = order_base(&props.id);
     let lines = rows.iter().enumerate().map(|(ix, (range, text))| {
         let variant = variants.get(ix).copied().unwrap_or(LineVariant::Default);
@@ -670,7 +818,14 @@ fn body(
                 .type_step(step)
                 .font_family(MONO)
                 .text_color(plain)
-                .child(div().min_w_full().when(props.wrap, |d| d.w_full()).flex().flex_col().children(lines)),
+                .child(
+                    div()
+                        .min_w_full()
+                        .when(props.wrap, |d| d.w_full())
+                        .flex()
+                        .flex_col()
+                        .children(lines),
+                ),
         )
         .when(metrics.fade && props.size == CodeSize::Full, |d| {
             let solid = c(bg);
@@ -682,7 +837,11 @@ fn body(
                     .right_0()
                     .bottom_0()
                     .h(zpx(FADE_H))
-                    .bg(gpui::linear_gradient(180., gpui::linear_color_stop(clear, 0.), gpui::linear_color_stop(solid, 1.))),
+                    .bg(gpui::linear_gradient(
+                        180.,
+                        gpui::linear_color_stop(clear, 0.),
+                        gpui::linear_color_stop(solid, 1.),
+                    )),
             )
         })
         .when(props.size == CodeSize::Compact, {
@@ -719,7 +878,10 @@ fn line_row(
         LineVariant::Default => (None, "", plain),
     };
     let hunk = variant == LineVariant::Hunk;
-    let dollar = props.size == CodeSize::Compact && index == 0 && variant == LineVariant::Default && (text == "$" || text.starts_with("$ "));
+    let dollar = props.size == CodeSize::Compact
+        && index == 0
+        && variant == LineVariant::Default
+        && (text == "$" || text.starts_with("$ "));
     let highlights = if hunk {
         Vec::new()
     } else {
@@ -744,7 +906,11 @@ fn line_row(
                     .text_right()
                     .text_color(c(t.text_faint))
                     .opacity(0.7)
-                    .child(if hunk { String::new() } else { number.to_string() }),
+                    .child(if hunk {
+                        String::new()
+                    } else {
+                        number.to_string()
+                    }),
             )
         })
         .when(markers, |d| {
@@ -759,7 +925,9 @@ fn line_row(
                     .child(mark),
             )
         })
-        .child(line_text(props, text, index, order, color, selection, highlights))
+        .child(line_text(
+            props, text, index, order, color, selection, highlights,
+        ))
         .into_any_element()
 }
 
@@ -818,7 +986,13 @@ fn line_highlights(
     let mut out = Vec::new();
     let skip = usize::from(dollar);
     if dollar && len > 0 {
-        out.push((0..1, gpui::HighlightStyle { color: Some(faint), ..Default::default() }));
+        out.push((
+            0..1,
+            gpui::HighlightStyle {
+                color: Some(faint),
+                ..Default::default()
+            },
+        ));
     }
     for (range, kind) in spans {
         if range.end <= base || range.start >= base + len {
@@ -852,11 +1026,21 @@ fn line_highlights(
     out
 }
 
-fn floating_copy(props: &CodeBlockProps, t: Tokens, group: SharedString, text: String, on_action: OnCodeAction) -> AnyElement {
+fn floating_copy(
+    props: &CodeBlockProps,
+    t: Tokens,
+    group: SharedString,
+    text: String,
+    on_action: OnCodeAction,
+) -> AnyElement {
     let shown = if props.closed { 1. } else { 0.45 };
     let hover_opacity = shown;
     let focus_opacity = shown;
-    let color = c(if props.copied { t.success } else { t.text_faint });
+    let color = c(if props.copied {
+        t.success
+    } else {
+        t.text_faint
+    });
     let hover_fg = c(if props.copied { t.success } else { t.text });
     let hover_bg = c(t.hover);
     let copied = props.copied;
@@ -881,15 +1065,27 @@ fn floating_copy(props: &CodeBlockProps, t: Tokens, group: SharedString, text: S
         .focus(move |s| s.opacity(focus_opacity))
         .focusable();
     if closed {
-        button = button.cursor_pointer().hover(move |s| s.bg(hover_bg).text_color(hover_fg)).on_click(move |_, _, cx| {
-            on_action(CodeAction::Copy { text: text.clone() }, cx);
-        });
+        button = button
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+            .on_click(move |_, _, cx| {
+                on_action(CodeAction::Copy { text: text.clone() }, cx);
+            });
     }
     button.child(copy_icon(copied)).into_any_element()
 }
 
-fn copy_button(props: &CodeBlockProps, t: Tokens, text: String, on_action: OnCodeAction) -> AnyElement {
-    let color = c(if props.copied { t.success } else { t.text_faint });
+fn copy_button(
+    props: &CodeBlockProps,
+    t: Tokens,
+    text: String,
+    on_action: OnCodeAction,
+) -> AnyElement {
+    let color = c(if props.copied {
+        t.success
+    } else {
+        t.text_faint
+    });
     let hover = c(if props.copied { t.success } else { t.text });
     icon_button(
         format!("code-copy-{}", props.id),
@@ -906,7 +1102,11 @@ fn wrap_button(props: &CodeBlockProps, t: Tokens, on_action: OnCodeAction) -> An
     let on = props.wrap;
     icon_button(
         format!("code-wrap-{}", props.id),
-        div().text_size(zpx(12.)).line_height(zpx(14.)).child("⏎").into_any_element(),
+        div()
+            .text_size(zpx(12.))
+            .line_height(zpx(14.))
+            .child("⏎")
+            .into_any_element(),
         c(if on { t.text } else { t.text_faint }),
         c(t.hover),
         c(if on { t.text } else { t.text }),
@@ -916,7 +1116,9 @@ fn wrap_button(props: &CodeBlockProps, t: Tokens, on_action: OnCodeAction) -> An
 }
 
 fn copy_icon(copied: bool) -> AnyElement {
-    (if copied { Icon::Check } else { Icon::Copy }).el(zpx(12.)).into_any_element()
+    (if copied { Icon::Check } else { Icon::Copy })
+        .el(zpx(12.))
+        .into_any_element()
 }
 
 fn icon_button(
@@ -960,25 +1162,26 @@ fn floating_show_full(
     let error = variant == CodeVariant::Destructive;
     let solid = c(surface(t, variant));
     let clear = solid.opacity(0.);
-    let (pill_bg, pill_hover_bg, pill_border, pill_hover_border, pill_text, pill_hover_text) = if error {
-        (
-            c(mix(t.danger, t.code, 0.20)),
-            c(mix(t.danger, t.code, 0.32)),
-            c(t.danger).opacity(0.40),
-            c(t.danger).opacity(0.75),
-            c(t.danger),
-            c(t.text),
-        )
-    } else {
-        (
-            c(mix(t.hover, t.surface, 0.50)),
-            c(t.hover),
-            c(t.border).opacity(0.55),
-            c(t.border),
-            c(t.text_muted),
-            c(t.text),
-        )
-    };
+    let (pill_bg, pill_hover_bg, pill_border, pill_hover_border, pill_text, pill_hover_text) =
+        if error {
+            (
+                c(mix(t.danger, t.code, 0.20)),
+                c(mix(t.danger, t.code, 0.32)),
+                c(t.danger).opacity(0.40),
+                c(t.danger).opacity(0.75),
+                c(t.danger),
+                c(t.text),
+            )
+        } else {
+            (
+                c(mix(t.hover, t.surface, 0.50)),
+                c(t.hover),
+                c(t.border).opacity(0.55),
+                c(t.border),
+                c(t.text_muted),
+                c(t.text),
+            )
+        };
 
     let on_click_bg = std::rc::Rc::new(on_click);
     let on_click_pill = on_click_bg.clone();
@@ -1025,7 +1228,11 @@ fn floating_show_full(
                 .t_caption()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(pill_text)
-                .hover(move |s| s.bg(pill_hover_bg).border_color(pill_hover_border).text_color(pill_hover_text))
+                .hover(move |s| {
+                    s.bg(pill_hover_bg)
+                        .border_color(pill_hover_border)
+                        .text_color(pill_hover_text)
+                })
                 .on_click(move |ev, window, cx| on_click_pill(ev, window, cx))
                 .child(Icon::Expand.el(zpx(11.)))
                 .child("Show full output"),
@@ -1062,11 +1269,9 @@ fn more_row(
         .on_click(on_click)
         .child(label.to_string())
         .when(chevron, |d| {
-            d.child(
-                Icon::ChevronDown
-                    .el(zpx(12.))
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::PI))),
-            )
+            d.child(Icon::ChevronDown.el(zpx(12.)).with_transformation(
+                gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::PI)),
+            ))
         })
         .into_any_element()
 }
@@ -1124,12 +1329,16 @@ impl Element for LineText {
     ) -> Self::PrepaintState {
         self.child.prepaint(window, cx);
         let handle = window
-            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |_, cx| gpui_base::TextSelectionHandle::new("", cx))
+            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |_, cx| {
+                gpui_base::TextSelectionHandle::new("", cx)
+            })
             .read(cx)
             .clone();
         let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
         handle.register(
-            gpui_base::TextSelectionRegistration::new(hitbox.clone(), bounds).with_document_order(self.order).with_text_bounds(vec![bounds]),
+            gpui_base::TextSelectionRegistration::new(hitbox.clone(), bounds)
+                .with_document_order(self.order)
+                .with_text_bounds(vec![bounds]),
             window,
             cx,
         );
@@ -1148,22 +1357,39 @@ impl Element for LineText {
     ) {
         window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
         self.child.paint(window, cx);
-        let run = gpui_base::TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds).with_document_order(self.order);
-        let range = handle.update_runs(&[run], cx).ranges().first().cloned().flatten();
+        let run = gpui_base::TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds)
+            .with_document_order(self.order);
+        let range = handle
+            .update_runs(&[run], cx)
+            .ranges()
+            .first()
+            .cloned()
+            .flatten();
         let Some(range) = range else { return };
-        let (Some(start), Some(end)) = (self.layout.position_for_index(range.start), self.layout.position_for_index(range.end)) else {
+        let (Some(start), Some(end)) = (
+            self.layout.position_for_index(range.start),
+            self.layout.position_for_index(range.end),
+        ) else {
             return;
         };
         let lh = self.layout.line_height();
-        let quad = |a: gpui::Point<gpui::Pixels>, b: gpui::Point<gpui::Pixels>| gpui::fill(Bounds::from_corners(a, b), self.selection);
+        let quad = |a: gpui::Point<gpui::Pixels>, b: gpui::Point<gpui::Pixels>| {
+            gpui::fill(Bounds::from_corners(a, b), self.selection)
+        };
         if start.y == end.y {
             window.paint_quad(quad(start, gpui::point(end.x, end.y + lh)));
         } else {
             window.paint_quad(quad(start, gpui::point(bounds.right(), start.y + lh)));
             if end.y > start.y + lh {
-                window.paint_quad(quad(gpui::point(bounds.left(), start.y + lh), gpui::point(bounds.right(), end.y)));
+                window.paint_quad(quad(
+                    gpui::point(bounds.left(), start.y + lh),
+                    gpui::point(bounds.right(), end.y),
+                ));
             }
-            window.paint_quad(quad(gpui::point(bounds.left(), end.y), gpui::point(end.x, end.y + lh)));
+            window.paint_quad(quad(
+                gpui::point(bounds.left(), end.y),
+                gpui::point(end.x, end.y + lh),
+            ));
         }
     }
 }
@@ -1194,7 +1420,11 @@ pub fn mix(fg: u32, bg: u32, alpha: f32) -> u32 {
 
 fn code_type(size: CodeSize) -> TypeStep {
     match size {
-        CodeSize::Compact => TypeStep { size: 11.5, line: COMPACT_LINE_H, weight: gpui::FontWeight::NORMAL },
+        CodeSize::Compact => TypeStep {
+            size: 11.5,
+            line: COMPACT_LINE_H,
+            weight: gpui::FontWeight::NORMAL,
+        },
         CodeSize::Full => CODE,
     }
 }
@@ -1220,7 +1450,11 @@ fn resting_caps(size: CodeSize, content_h: f32, viewport_h: f32) -> (f32, f32) {
     let expanded_h = match size {
         CodeSize::Compact => collapsed_h,
         CodeSize::Full => {
-            let limit = if viewport_h > 0. { viewport_h * EXPANDED_VIEWPORT } else { content_h };
+            let limit = if viewport_h > 0. {
+                viewport_h * EXPANDED_VIEWPORT
+            } else {
+                content_h
+            };
             // Show-more grows. A short window does not pull the cap under 480.
             content_h.min(limit.max(collapsed_h))
         }
@@ -1228,7 +1462,14 @@ fn resting_caps(size: CodeSize, content_h: f32, viewport_h: f32) -> (f32, f32) {
     (collapsed_h, expanded_h)
 }
 
-fn glide_cap(from: f32, to: f32, expanded: bool, toggled_at: Option<Instant>, now: Instant, reduced: bool) -> (f32, bool, f32) {
+fn glide_cap(
+    from: f32,
+    to: f32,
+    expanded: bool,
+    toggled_at: Option<Instant>,
+    now: Instant,
+    reduced: bool,
+) -> (f32, bool, f32) {
     let resting = if expanded { 1. } else { 0. };
     if (to - from).abs() < 0.5 {
         return (to, false, resting);
@@ -1259,7 +1500,11 @@ fn lines_hidden(line_h: f32, pad: f32, line_count: usize, cap: f32) -> usize {
 }
 
 fn split_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() { Vec::new() } else { text.lines().collect() }
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
+    }
 }
 
 fn split_line_ranges(text: &str) -> Vec<(Range<usize>, String)> {
@@ -1280,13 +1525,19 @@ fn split_line_ranges(text: &str) -> Vec<(Range<usize>, String)> {
 fn aligned_variants(all: Option<&[LineVariant]>, skipped: usize, shown: usize) -> Vec<LineVariant> {
     let mut out = Vec::with_capacity(shown);
     for i in 0..shown {
-        out.push(all.and_then(|v| v.get(skipped + i)).copied().unwrap_or(LineVariant::Default));
+        out.push(
+            all.and_then(|v| v.get(skipped + i))
+                .copied()
+                .unwrap_or(LineVariant::Default),
+        );
     }
     out
 }
 
 fn spans_for(content: &str, window: DisplayWindow, spans: Option<&Spans>, closed: bool) -> Spans {
-    let Some(spans) = spans else { return Vec::new() };
+    let Some(spans) = spans else {
+        return Vec::new();
+    };
     let shifted = spans
         .iter()
         .filter_map(|(range, kind)| {
@@ -1314,7 +1565,11 @@ fn lcs_diff(a: &[&str], b: &[&str]) -> Vec<(LineVariant, String)> {
     let mut dp = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            dp[i][j] = if a[i] == b[j] { dp[i + 1][j + 1] + 1 } else { dp[i + 1][j].max(dp[i][j + 1]) };
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
         }
     }
     let mut out = Vec::new();
@@ -1351,7 +1606,8 @@ fn coarse_diff(a: &[&str], b: &[&str]) -> Vec<(LineVariant, String)> {
         pre += 1;
     }
     let mut suf = 0usize;
-    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] {
+    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf]
+    {
         suf += 1;
     }
     let mut out = Vec::new();
@@ -1417,11 +1673,32 @@ mod tests {
 
     #[test]
     fn diff_lines_insertion_deletion_and_no_phantom_newline() {
-        assert_eq!(diff_lines("b", "a\nb"), vec![(LineVariant::Added, "a".into()), (LineVariant::Default, "b".into())]);
-        assert_eq!(diff_lines("a\nb", "b"), vec![(LineVariant::Removed, "a".into()), (LineVariant::Default, "b".into())]);
+        assert_eq!(
+            diff_lines("b", "a\nb"),
+            vec![
+                (LineVariant::Added, "a".into()),
+                (LineVariant::Default, "b".into())
+            ]
+        );
+        assert_eq!(
+            diff_lines("a\nb", "b"),
+            vec![
+                (LineVariant::Removed, "a".into()),
+                (LineVariant::Default, "b".into())
+            ]
+        );
         assert_eq!(diff_lines("", ""), Vec::<(LineVariant, String)>::new());
-        assert_eq!(diff_lines("a\n", "a"), vec![(LineVariant::Default, "a".into())]);
-        assert_eq!(diff_lines("", "a\nb"), vec![(LineVariant::Added, "a".into()), (LineVariant::Added, "b".into())]);
+        assert_eq!(
+            diff_lines("a\n", "a"),
+            vec![(LineVariant::Default, "a".into())]
+        );
+        assert_eq!(
+            diff_lines("", "a\nb"),
+            vec![
+                (LineVariant::Added, "a".into()),
+                (LineVariant::Added, "b".into())
+            ]
+        );
     }
 
     #[test]
@@ -1466,10 +1743,42 @@ index 111..222 100644
         assert_eq!(got[0].old, Some(1));
         assert_eq!(got[0].new, Some(10));
         assert!(got[0].text.starts_with("@@"));
-        assert_eq!(got[1], ParsedDiffLine { variant: LineVariant::Default, text: "context".into(), old: Some(1), new: Some(10) });
-        assert_eq!(got[2], ParsedDiffLine { variant: LineVariant::Removed, text: "old".into(), old: Some(2), new: None });
-        assert_eq!(got[3], ParsedDiffLine { variant: LineVariant::Added, text: "new".into(), old: None, new: Some(11) });
-        assert_eq!(got[4], ParsedDiffLine { variant: LineVariant::Default, text: "stay".into(), old: Some(3), new: Some(12) });
+        assert_eq!(
+            got[1],
+            ParsedDiffLine {
+                variant: LineVariant::Default,
+                text: "context".into(),
+                old: Some(1),
+                new: Some(10)
+            }
+        );
+        assert_eq!(
+            got[2],
+            ParsedDiffLine {
+                variant: LineVariant::Removed,
+                text: "old".into(),
+                old: Some(2),
+                new: None
+            }
+        );
+        assert_eq!(
+            got[3],
+            ParsedDiffLine {
+                variant: LineVariant::Added,
+                text: "new".into(),
+                old: None,
+                new: Some(11)
+            }
+        );
+        assert_eq!(
+            got[4],
+            ParsedDiffLine {
+                variant: LineVariant::Default,
+                text: "stay".into(),
+                old: Some(3),
+                new: Some(12)
+            }
+        );
         assert_eq!(got.len(), 5);
     }
 
@@ -1495,7 +1804,15 @@ diff --git a/b.rs b/b.rs
         assert_eq!(got[3].new, Some(21));
         assert_eq!(got[4].variant, LineVariant::Hunk);
         assert_eq!((got[4].old, got[4].new), (Some(30), Some(40)));
-        assert_eq!(got[5], ParsedDiffLine { variant: LineVariant::Default, text: "d".into(), old: Some(30), new: Some(40) });
+        assert_eq!(
+            got[5],
+            ParsedDiffLine {
+                variant: LineVariant::Default,
+                text: "d".into(),
+                old: Some(30),
+                new: Some(40)
+            }
+        );
         assert!(parse_unified("diff --git a/a b/a\n--- a\n+++ b\n").is_empty());
     }
 
@@ -1521,7 +1838,10 @@ diff --git a/b.rs b/b.rs
         let visible = ((FULL_CAP - FULL_PAD_Y * 2. + 0.01) / FULL_LINE_H).floor() as usize;
         assert_eq!(m.more_lines, lines - visible);
         assert_eq!(m.hidden_lines, m.more_lines);
-        assert_eq!(show_more_label(m.more_lines), format!("Show {} more lines", m.more_lines));
+        assert_eq!(
+            show_more_label(m.more_lines),
+            format!("Show {} more lines", m.more_lines)
+        );
         assert_eq!(show_more_label(1), "Show 1 more line");
     }
 
@@ -1541,14 +1861,33 @@ diff --git a/b.rs b/b.rs
         near(start.chevron, 0.);
 
         let half = Duration::from_millis(SHOW_MORE_MS / 2);
-        let mid = block_layout(CodeSize::Full, true, lines, viewport, Some(now), now + half, false);
+        let mid = block_layout(
+            CodeSize::Full,
+            true,
+            lines,
+            viewport,
+            Some(now),
+            now + half,
+            false,
+        );
         let t = half.as_secs_f32() / Duration::from_millis(SHOW_MORE_MS).as_secs_f32();
         let eased = glide_curve(t);
         near(mid.cap, FULL_CAP + (target - FULL_CAP) * eased);
-        assert!(mid.cap > FULL_CAP + (target - FULL_CAP) * 0.5, "glide starts fast");
+        assert!(
+            mid.cap > FULL_CAP + (target - FULL_CAP) * 0.5,
+            "glide starts fast"
+        );
         assert!(mid.animating);
 
-        let done = block_layout(CodeSize::Full, true, lines, viewport, Some(now), now + Duration::from_millis(SHOW_MORE_MS), false);
+        let done = block_layout(
+            CodeSize::Full,
+            true,
+            lines,
+            viewport,
+            Some(now),
+            now + Duration::from_millis(SHOW_MORE_MS),
+            false,
+        );
         near(done.cap, target);
         assert!(!done.animating);
         assert!(!done.show_more);
@@ -1566,12 +1905,28 @@ diff --git a/b.rs b/b.rs
         let viewport = 1000.;
         let lines = 100;
         let target = viewport * EXPANDED_VIEWPORT;
-        let closing = block_layout(CodeSize::Full, false, lines, viewport, Some(now), now, false);
+        let closing = block_layout(
+            CodeSize::Full,
+            false,
+            lines,
+            viewport,
+            Some(now),
+            now,
+            false,
+        );
         near(closing.cap, target);
         assert!(closing.animating);
         near(closing.chevron, 1.);
 
-        let shut = block_layout(CodeSize::Full, false, lines, viewport, Some(now), now + Duration::from_millis(SHOW_MORE_MS), false);
+        let shut = block_layout(
+            CodeSize::Full,
+            false,
+            lines,
+            viewport,
+            Some(now),
+            now + Duration::from_millis(SHOW_MORE_MS),
+            false,
+        );
         near(shut.cap, FULL_CAP);
         assert!(!shut.animating);
         assert!(shut.show_more);
@@ -1639,7 +1994,11 @@ diff --git a/b.rs b/b.rs
         assert!(!full.truncated);
         assert_eq!(full.start, 0);
 
-        let wide = format!("{}{}", "abcdefghij\n".repeat(20), "z".repeat(keel_proto::OUTPUT_TAIL));
+        let wide = format!(
+            "{}{}",
+            "abcdefghij\n".repeat(20),
+            "z".repeat(keel_proto::OUTPUT_TAIL)
+        );
         let cut = display_window(CodeSize::Compact, &wide);
         assert!(cut.truncated);
         assert!(wide.is_char_boundary(cut.start));

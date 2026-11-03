@@ -90,7 +90,9 @@ impl QuestionPanelState {
     /// Fresh per-page UI state: focus on Allow (or the first row), no ring.
     fn reset_page(&mut self) {
         self.focus = match self.current_question() {
-            Some(q) if q.is_permission() => crate::approval::default_focus(&crate::approval::permission_buttons(q)),
+            Some(q) if q.is_permission() => {
+                crate::approval::default_focus(&crate::approval::permission_buttons(q))
+            }
             _ => 0,
         };
         self.keyboard = false;
@@ -108,7 +110,11 @@ impl QuestionPanelState {
 
     /// Multi-select: check or uncheck option `ix`.
     pub fn toggle(&mut self, ix: usize) {
-        if self.current_question().is_some_and(|q| ix < q.options.len()) && !self.checked.remove(&ix) {
+        if self
+            .current_question()
+            .is_some_and(|q| ix < q.options.len())
+            && !self.checked.remove(&ix)
+        {
             self.checked.insert(ix);
         }
     }
@@ -119,7 +125,13 @@ impl QuestionPanelState {
         if self.checked.is_empty() {
             return None;
         }
-        let value = self.checked.iter().filter_map(|&ix| q.options.get(ix)).map(|o| o.id.clone()).collect::<Vec<_>>().join("\n");
+        let value = self
+            .checked
+            .iter()
+            .filter_map(|&ix| q.options.get(ix))
+            .map(|o| o.id.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         let kind = q.kind;
         self.record_answer(value, kind)
     }
@@ -167,7 +179,11 @@ impl QuestionPanelState {
     }
 
     /// Record an answer for the current question and advance or complete.
-    pub fn record_answer(&mut self, value: String, kind: QuestionKind) -> Option<Vec<UserInputAnswer>> {
+    pub fn record_answer(
+        &mut self,
+        value: String,
+        kind: QuestionKind,
+    ) -> Option<Vec<UserInputAnswer>> {
         let q_id = self.current_question()?.id.clone();
         self.answers.push(UserInputAnswer {
             question_id: q_id,
@@ -207,7 +223,10 @@ impl HarnessOption {
                         .and_then(|d| d.as_str())
                         .unwrap_or(&id)
                         .to_string(),
-                    installed: v.get("installed").and_then(|i| i.as_bool()).unwrap_or(false),
+                    installed: v
+                        .get("installed")
+                        .and_then(|i| i.as_bool())
+                        .unwrap_or(false),
                     permission_modes: v
                         .get("permission_modes")
                         .and_then(|m| serde_json::from_value(m.clone()).ok())
@@ -252,13 +271,24 @@ impl ModelList {
                     .filter_map(|m| {
                         let id = m.get("id")?.as_str()?.to_string();
                         Some(ModelOption {
-                            name: m.get("name").and_then(|n| n.as_str()).unwrap_or(&id).to_string(),
+                            name: m
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(&id)
+                                .to_string(),
                             reasoning_levels: m
                                 .get("reasoning_levels")
                                 .and_then(|r| r.as_array())
-                                .map(|r| r.iter().filter_map(|l| l.as_str().map(String::from)).collect())
+                                .map(|r| {
+                                    r.iter()
+                                        .filter_map(|l| l.as_str().map(String::from))
+                                        .collect()
+                                })
                                 .unwrap_or_default(),
-                            context_window: ["context_window", "contextWindow"].iter().find_map(|k| m.get(*k)?.as_u64()).filter(|w| *w > 0),
+                            context_window: ["context_window", "contextWindow"]
+                                .iter()
+                                .find_map(|k| m.get(*k)?.as_u64())
+                                .filter(|w| *w > 0),
                             id,
                         })
                     })
@@ -270,7 +300,10 @@ impl ModelList {
             .and_then(|d| d.as_str())
             .filter(|d| !d.is_empty())
             .map(String::from);
-        Self { models, default_model }
+        Self {
+            models,
+            default_model,
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&ModelOption> {
@@ -287,7 +320,9 @@ impl ModelList {
 
     /// Effort levels for `model` (empty: no knob, hide the picker).
     pub fn levels(&self, model: &str) -> &[String] {
-        self.get(model).map(|m| m.reasoning_levels.as_slice()).unwrap_or(&[])
+        self.get(model)
+            .map(|m| m.reasoning_levels.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Keep `effort` if `model` supports it, otherwise fall back to the
@@ -322,14 +357,23 @@ mod tests {
     fn button_action_morphs_correctly() {
         // Idle with any text -> Send
         assert_eq!(compute_button_action(false, ""), PrimaryButtonAction::Send);
-        assert_eq!(compute_button_action(false, "hello"), PrimaryButtonAction::Send);
+        assert_eq!(
+            compute_button_action(false, "hello"),
+            PrimaryButtonAction::Send
+        );
 
         // Running with text -> Steer
-        assert_eq!(compute_button_action(true, "faster"), PrimaryButtonAction::Steer);
+        assert_eq!(
+            compute_button_action(true, "faster"),
+            PrimaryButtonAction::Steer
+        );
 
         // Running with empty text -> Stop
         assert_eq!(compute_button_action(true, ""), PrimaryButtonAction::Stop);
-        assert_eq!(compute_button_action(true, "   "), PrimaryButtonAction::Stop);
+        assert_eq!(
+            compute_button_action(true, "   "),
+            PrimaryButtonAction::Stop
+        );
     }
 
     #[test]
@@ -339,20 +383,46 @@ mod tests {
             kind: QuestionKind::Select,
             prompt: "Choose option:".to_string(),
             options: vec![
-                QuestionOption { id: "opt_a".to_string(), label: "A".to_string(), role: Default::default(), detail: None, },
-                QuestionOption { id: "opt_b".to_string(), label: "B".to_string(), role: Default::default(), detail: None, },
+                QuestionOption {
+                    id: "opt_a".to_string(),
+                    label: "A".to_string(),
+                    role: Default::default(),
+                    detail: None,
+                },
+                QuestionOption {
+                    id: "opt_b".to_string(),
+                    label: "B".to_string(),
+                    role: Default::default(),
+                    detail: None,
+                },
             ],
-            required: true, tool: None, multi: false, other: false,
+            required: true,
+            tool: None,
+            multi: false,
+            other: false,
         };
         let q2 = UserInputQuestion {
             id: "q2".to_string(),
             kind: QuestionKind::Confirm,
             prompt: "Confirm?".to_string(),
             options: vec![
-                QuestionOption { id: "yes".to_string(), label: "Yes".to_string(), role: Default::default(), detail: None, },
-                QuestionOption { id: "no".to_string(), label: "No".to_string(), role: Default::default(), detail: None, },
+                QuestionOption {
+                    id: "yes".to_string(),
+                    label: "Yes".to_string(),
+                    role: Default::default(),
+                    detail: None,
+                },
+                QuestionOption {
+                    id: "no".to_string(),
+                    label: "No".to_string(),
+                    role: Default::default(),
+                    detail: None,
+                },
             ],
-            required: false, tool: None, multi: false, other: false,
+            required: false,
+            tool: None,
+            multi: false,
+            other: false,
         };
 
         let mut panel = QuestionPanelState::new("batch_1".to_string(), vec![q1, q2]);
@@ -389,7 +459,10 @@ mod tests {
     fn text_questions_and_escape_rules() {
         let mut panel = QuestionPanelState::new(
             "b".into(),
-            vec![q("q1", QuestionKind::Input, true), q("q2", QuestionKind::Editor, false)],
+            vec![
+                q("q1", QuestionKind::Input, true),
+                q("q2", QuestionKind::Editor, false),
+            ],
         );
         assert!(panel.needs_text());
         // Required: Escape does nothing.

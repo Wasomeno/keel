@@ -28,7 +28,13 @@ impl TestRun {
             skipped: n("skipped"),
             failures: spec["failures"]
                 .as_array()
-                .map(|names| names.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default(),
         };
         (run.total() > 0).then_some(run)
@@ -62,7 +68,10 @@ mod tests {
 
     #[test]
     fn headline_says_what_failed() {
-        let run = |passed, failed| TestRun::from_spec(&json!({ "component": "tests", "passed": passed, "failed": failed })).unwrap();
+        let run = |passed, failed| {
+            TestRun::from_spec(&json!({ "component": "tests", "passed": passed, "failed": failed }))
+                .unwrap()
+        };
         assert_eq!(run(172, 0).headline(), "All 172 tests passed");
         assert_eq!(run(1, 0).headline(), "1 test passed");
         assert_eq!(run(170, 2).headline(), "2 of 172 tests failed");

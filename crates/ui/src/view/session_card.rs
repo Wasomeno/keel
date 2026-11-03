@@ -35,7 +35,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, ElementId, FontFeatures, Hsla, IntoElement, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, ElementId, FontFeatures, Hsla, IntoElement, SharedString,
+    Window, div, prelude::*, px,
+};
 use keel_proto::ChatStatus;
 use keel_theme::Tokens;
 use serde_json::Value;
@@ -100,11 +103,14 @@ const NOTICE_HOLD: Duration = Duration::from_secs(10);
 /// Changed paths named under one folder on the card. The rest is "N more".
 const CARD_FILE_ROWS: usize = 2;
 
-pub(super) const SUBAGENT_NO_STOP: &str = "Subagents can't be stopped one at a time. Stop in the composer ends the whole turn.";
+pub(super) const SUBAGENT_NO_STOP: &str =
+    "Subagents can't be stopped one at a time. Stop in the composer ends the whole turn.";
 const BROWSER_STOP: &str = "Stop the browser agent's work for this chat";
 const BRANCH_TIP: &str = "Switch the branch this chat runs in";
-const BRANCH_BUSY: &str = "Can't switch branches while the agent is working. Wait for the turn to end.";
-const BRANCH_BUSY_OTHER: &str = "Another chat's agent is working in this folder. Switch when its turn ends.";
+const BRANCH_BUSY: &str =
+    "Can't switch branches while the agent is working. Wait for the turn to end.";
+const BRANCH_BUSY_OTHER: &str =
+    "Another chat's agent is working in this folder. Switch when its turn ends.";
 const BRANCH_SWITCHING: &str = "Switching branches…";
 
 /// What the engine said about the chat's working tree.
@@ -143,7 +149,8 @@ pub(super) fn parse_git(v: &Value) -> Git {
     }
     let n = |k: &str| v[k].as_u64().unwrap_or(0);
     let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-    let file_details = v.get("file_details")
+    let file_details = v
+        .get("file_details")
         .and_then(|d| serde_json::from_value::<Vec<GitFileChange>>(d.clone()).ok())
         .unwrap_or_default();
     Git::Repo(GitInfo {
@@ -205,7 +212,11 @@ pub(super) fn pill_layout(w: f32, column: f32, min_left: f32) -> (f32, f32, f32)
 
 /// Full or pill, given the reading width the full card would leave.
 pub(super) fn next_compact(compact: bool, avail: f32, need: f32) -> bool {
-    if compact { avail < need + HYSTERESIS } else { avail < need }
+    if compact {
+        avail < need + HYSTERESIS
+    } else {
+        avail < need
+    }
 }
 
 /// Where the reading column's text box sat in a frame: its left edge in the
@@ -238,7 +249,11 @@ impl ColumnSlide {
     /// fits the gliding box on every frame and re-wraps once (at the start
     /// when narrowing, at landing when widening), never per frame.
     pub fn wrap_w(&self) -> f32 {
-        let from = if self.from.dock_w > 0. { self.from.dock_w } else { self.from.w };
+        let from = if self.from.dock_w > 0. {
+            self.from.dock_w
+        } else {
+            self.from.w
+        };
         from.min(self.to.w)
     }
 }
@@ -248,7 +263,8 @@ fn mode_now(card: &SessionCard, now: Instant) -> f32 {
     let target = if card.compact { 1. } else { 0. };
     match card.mode_at {
         Some(at) => {
-            let p = (now.saturating_duration_since(at).as_secs_f32() / MODE_GLIDE.as_secs_f32()).min(1.);
+            let p = (now.saturating_duration_since(at).as_secs_f32() / MODE_GLIDE.as_secs_f32())
+                .min(1.);
             card.mode_from + (target - card.mode_from) * ease_out_strong(p)
         }
         None => target,
@@ -282,9 +298,21 @@ pub(super) struct ProcRow {
 
 /// The chat's background work: its browser agent (label, since), then its
 /// live subagents (the engine's `subagents.{id}` views), oldest first.
-pub(super) fn process_rows<'a>(chat: &str, subagents: impl IntoIterator<Item = &'a Value>, browser: Option<(String, i64)>) -> Vec<ProcRow> {
+pub(super) fn process_rows<'a>(
+    chat: &str,
+    subagents: impl IntoIterator<Item = &'a Value>,
+    browser: Option<(String, i64)>,
+) -> Vec<ProcRow> {
     let mut rows: Vec<ProcRow> = browser
-        .map(|(label, since)| ProcRow { key: "browser".into(), kind: ProcKind::Browser, label, started_ms: since, stop: Stop::Browser { chat: chat.to_string() } })
+        .map(|(label, since)| ProcRow {
+            key: "browser".into(),
+            kind: ProcKind::Browser,
+            label,
+            started_ms: since,
+            stop: Stop::Browser {
+                chat: chat.to_string(),
+            },
+        })
         .into_iter()
         .collect();
     let mut subs: Vec<ProcRow> = subagents
@@ -294,8 +322,16 @@ pub(super) fn process_rows<'a>(chat: &str, subagents: impl IntoIterator<Item = &
             if !matches!(status, "running" | "blocked") {
                 return None;
             }
-            let text = |k: &str| sub[k].as_str().map(str::trim).filter(|s| !s.is_empty() && *s != "subagent").map(str::to_string);
-            let mut label = text("name").or_else(|| text("description")).unwrap_or_else(|| "subagent".into());
+            let text = |k: &str| {
+                sub[k]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && *s != "subagent")
+                    .map(str::to_string)
+            };
+            let mut label = text("name")
+                .or_else(|| text("description"))
+                .unwrap_or_else(|| "subagent".into());
             if status == "blocked" {
                 label.push_str(" · waiting");
             }
@@ -351,7 +387,8 @@ struct Ring {
 
 impl Ring {
     fn at(&self, now: Instant) -> f32 {
-        let p = (now.saturating_duration_since(self.at).as_secs_f32() / SWEEP.as_secs_f32()).min(1.);
+        let p =
+            (now.saturating_duration_since(self.at).as_secs_f32() / SWEEP.as_secs_f32()).min(1.);
         self.from + (self.to - self.from) * ease_out_strong(p)
     }
 }
@@ -369,14 +406,28 @@ impl CardBranches {
     /// A listing with the checked-out branch pinned first.
     fn from_reply(v: &Value) -> Self {
         let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-        let mut branches: Vec<String> = v["branches"].as_array().into_iter().flatten().filter_map(|b| b.as_str().map(str::to_string)).collect();
+        let mut branches: Vec<String> = v["branches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b.as_str().map(str::to_string))
+            .collect();
         let current = s("current");
         if let Some(name) = &current {
             branches.retain(|b| b != name);
             branches.insert(0, name.clone());
         }
-        let detached = if current.is_some() { None } else { s("detached") };
-        Self { branches, current, detached, loading: false }
+        let detached = if current.is_some() {
+            None
+        } else {
+            s("detached")
+        };
+        Self {
+            branches,
+            current,
+            detached,
+            loading: false,
+        }
     }
 
     /// After a switch: `name` is checked out and leads the list.
@@ -395,7 +446,8 @@ pub(super) fn changes_parts(info: &GitInfo) -> Option<(Option<(String, String)>,
     if info.files == 0 && info.untracked == 0 {
         return None;
     }
-    let lines = (info.added + info.removed > 0).then(|| (format!("+{}", info.added), format!("−{}", info.removed)));
+    let lines = (info.added + info.removed > 0)
+        .then(|| (format!("+{}", info.added), format!("−{}", info.removed)));
     let tracked = info.files.saturating_sub(info.untracked);
     let mut text = match tracked {
         0 => String::new(),
@@ -538,24 +590,39 @@ fn fill_color(fill: f32, t: Tokens) -> Hsla {
 
 /// `color` at `alpha` of its own opacity.
 fn alpha(color: Hsla, a: f32) -> Hsla {
-    Hsla { a: color.a * a, ..color }
+    Hsla {
+        a: color.a * a,
+        ..color
+    }
 }
 
 fn ring(size: f32, fill: f32, track: Hsla, color: Hsla) -> AnyElement {
-    gpui::canvas(|_, _, _| {}, move |bounds, _, window, _| paint_ring(bounds, fill, track, color, window))
-        .size(zpx(size))
-        .flex_none()
-        .into_any_element()
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| paint_ring(bounds, fill, track, color, window),
+    )
+    .size(zpx(size))
+    .flex_none()
+    .into_any_element()
 }
 
 /// A full track and a clockwise arc from twelve o'clock, as polylines.
-fn paint_ring(bounds: gpui::Bounds<gpui::Pixels>, fill: f32, track: Hsla, color: Hsla, window: &mut Window) {
+fn paint_ring(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    fill: f32,
+    track: Hsla,
+    color: Hsla,
+    window: &mut Window,
+) {
     let stroke = f32::from(zpx(RING_STROKE));
     let center = bounds.center();
     let radius = f32::from(bounds.size.width.min(bounds.size.height)) / 2. - stroke / 2.;
     let point = |turn: f32| {
         let a = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-        gpui::point(center.x + px(radius * a.cos()), center.y + px(radius * a.sin()))
+        gpui::point(
+            center.x + px(radius * a.cos()),
+            center.y + px(radius * a.sin()),
+        )
     };
     let arc = |to: f32, color: Hsla, window: &mut Window| {
         if to <= 0. {
@@ -585,7 +652,14 @@ fn bar(fill: f32, track: Hsla, color: Hsla) -> AnyElement {
         .rounded_full()
         .bg(track)
         .overflow_hidden()
-        .child(div().h_full().rounded_full().bg(color).w(gpui::relative(fill)).when(fill > 0., |d| d.min_w(zpx(BAR_H))))
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .bg(color)
+                .w(gpui::relative(fill))
+                .when(fill > 0., |d| d.min_w(zpx(BAR_H))),
+        )
         .into_any_element()
 }
 
@@ -609,7 +683,13 @@ fn section_label(text: &'static str, note: Option<AnyElement>, t: Tokens) -> Any
 
 /// A hairline across the card, between sections.
 fn divider(t: Tokens) -> AnyElement {
-    div().flex_none().h(px(1.)).mx(zpx(-PAD)).my(zpx(SECTION_GAP)).bg(c(t.border)).into_any_element()
+    div()
+        .flex_none()
+        .h(px(1.))
+        .mx(zpx(-PAD))
+        .my(zpx(SECTION_GAP))
+        .bg(c(t.border))
+        .into_any_element()
 }
 
 fn elapsed(now_ms: i64, since_ms: i64) -> String {
@@ -628,9 +708,15 @@ fn token_split(usage: &ChatUsage) -> Option<String> {
     if sum.total() == 0 {
         return None;
     }
-    let mut parts = vec![format!("In {}", compact(sum.input)), format!("Out {}", compact(sum.output))];
+    let mut parts = vec![
+        format!("In {}", compact(sum.input)),
+        format!("Out {}", compact(sum.output)),
+    ];
     if sum.cache_read + sum.cache_write > 0 {
-        parts.push(format!("Cached {}", compact(sum.cache_read + sum.cache_write)));
+        parts.push(format!(
+            "Cached {}",
+            compact(sum.cache_read + sum.cache_write)
+        ));
     }
     Some(parts.join(" · "))
 }
@@ -707,7 +793,7 @@ fn leader_line(color: Hsla) -> AnyElement {
     .into_any_element()
 }
 
-        fn tree_connector(is_last: bool, border_color: Hsla) -> AnyElement {
+fn tree_connector(is_last: bool, border_color: Hsla) -> AnyElement {
     div()
         .relative()
         .w(zpx(16.))
@@ -790,7 +876,10 @@ impl KeelWindow {
             }
             // Ring stays: it sweeps from the previous fill to the new one.
         } else {
-            let (size, origin_x) = (self.session_card.size.clone(), self.session_card.origin_x.clone());
+            let (size, origin_x) = (
+                self.session_card.size.clone(),
+                self.session_card.origin_x.clone(),
+            );
             let (compact, ticker) = (self.session_card.compact, self.session_card.ticker.take());
             // Keep per-chat caches across leave/return so a revisit paints
             // the right git line and todo card on the first frame.
@@ -838,12 +927,18 @@ impl KeelWindow {
         // treat "no steps" as final once messages exist, or the chat has
         // never had any (nothing to load).
         let history_ready = !self.msg_order.is_empty()
-            || self.state.chats.get(&chat).is_some_and(|c| c.last_message_at == 0);
+            || self
+                .state
+                .chats
+                .get(&chat)
+                .is_some_and(|c| c.last_message_at == 0);
         let empty_confirmed = settled && history_ready;
 
         if self.session_card.steps_pending {
             if let Some(steps) = live {
-                self.session_card.steps_by_chat.insert(chat.clone(), Some(steps.clone()));
+                self.session_card
+                    .steps_by_chat
+                    .insert(chat.clone(), Some(steps.clone()));
                 self.session_card.held_steps = Some(steps.clone());
                 self.session_card.held_steps_chat = Some(chat);
                 self.session_card.steps_pending = false;
@@ -865,7 +960,9 @@ impl KeelWindow {
         }
 
         if let Some(steps) = live {
-            self.session_card.steps_by_chat.insert(chat.clone(), Some(steps.clone()));
+            self.session_card
+                .steps_by_chat
+                .insert(chat.clone(), Some(steps.clone()));
             self.session_card.held_steps = Some(steps.clone());
             self.session_card.held_steps_chat = Some(chat);
             return Some(steps);
@@ -904,7 +1001,12 @@ impl KeelWindow {
 
     /// The engine saw files change in a checkout (an agent's edit, among others).
     pub(super) fn card_on_checkout(&mut self, checkout_id: &str, cx: &mut Context<Self>) {
-        let ours = self.session_card.chat.as_ref().and_then(|id| self.state.chats.get(id)).is_some_and(|c| c.checkout_id == checkout_id);
+        let ours = self
+            .session_card
+            .chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))
+            .is_some_and(|c| c.checkout_id == checkout_id);
         if ours {
             self.card_poke(cx);
         }
@@ -912,15 +1014,22 @@ impl KeelWindow {
 
     /// The chat's folder, unless it's Keel's own "No project".
     fn card_folder(&self) -> Option<(String, String)> {
-        let chat = self.session_card.chat.as_ref().and_then(|id| self.state.chats.get(id))?;
+        let chat = self
+            .session_card
+            .chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))?;
         let space = self.state.spaces.get(&chat.space_id)?;
-        let no_project = std::path::Path::new(&space.path).file_name().is_some_and(|n| n == "No project");
+        let no_project = std::path::Path::new(&space.path)
+            .file_name()
+            .is_some_and(|n| n == "No project");
         (!no_project).then(|| (space.id.clone(), space.name.clone()))
     }
 
     /// One request at a time; one asked for meanwhile runs when it lands.
     fn card_refresh_git(&mut self, cx: &mut Context<Self>) {
-        let (Some(chat), Some(client)) = (self.session_card.chat.clone(), self.client.clone()) else {
+        let (Some(chat), Some(client)) = (self.session_card.chat.clone(), self.client.clone())
+        else {
             return;
         };
         if self.card_folder().is_none() {
@@ -934,7 +1043,9 @@ impl KeelWindow {
         self.session_card.fetching = true;
         self.session_card.fetched_at = Some(Instant::now());
         cx.spawn(async move |this, cx| {
-            let res = client.call("chat_git_summary", serde_json::json!({ "chat_id": chat })).await;
+            let res = client
+                .call("chat_git_summary", serde_json::json!({ "chat_id": chat }))
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let card = &mut this.session_card;
                 card.fetching = false;
@@ -976,14 +1087,21 @@ impl KeelWindow {
                     if card.chat.is_none() || card.chat != this.current_chat {
                         return;
                     }
-                    if card.notice.as_ref().is_some_and(|(_, at)| at.elapsed() >= NOTICE_HOLD) {
+                    if card
+                        .notice
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() >= NOTICE_HOLD)
+                    {
                         card.notice = None;
                         cx.notify();
                     }
                     if !card.shown.is_empty() || card.browser.is_some() {
                         cx.notify();
                     }
-                    if this.window_active && !card.fetching && card.fetched_at.is_none_or(|at| at.elapsed() >= POLL) {
+                    if this.window_active
+                        && !card.fetching
+                        && card.fetched_at.is_none_or(|at| at.elapsed() >= POLL)
+                    {
                         this.card_refresh_git(cx);
                     }
                 });
@@ -1014,7 +1132,10 @@ impl KeelWindow {
         // the card only finishes its glide, the column doesn't follow it.
         if self.right_panel_toggling() || self.sidebar_toggling() || self.browser_expanding() {
             let card = &mut self.session_card;
-            if card.mode_at.is_some_and(|at| now.saturating_duration_since(at) >= MODE_GLIDE) {
+            if card
+                .mode_at
+                .is_some_and(|at| now.saturating_duration_since(at) >= MODE_GLIDE)
+            {
                 card.mode_at = None;
             }
             if card.mode_at.is_some() {
@@ -1029,7 +1150,9 @@ impl KeelWindow {
             let target = if card.compact { 1. } else { 0. };
             match card.mode_at {
                 Some(at) => {
-                    let p = (now.saturating_duration_since(at).as_secs_f32() / MODE_GLIDE.as_secs_f32()).min(1.);
+                    let p = (now.saturating_duration_since(at).as_secs_f32()
+                        / MODE_GLIDE.as_secs_f32())
+                    .min(1.);
                     card.mode_from + (target - card.mode_from) * ease_out_strong(p)
                 }
                 None => target,
@@ -1037,7 +1160,11 @@ impl KeelWindow {
         };
         let w = pane_w.unwrap_or_else(|| {
             let (w, _) = card.size.get();
-            if w > 0. { w } else { f32::from(window.viewport_size().width) }
+            if w > 0. {
+                w
+            } else {
+                f32::from(window.viewport_size().width)
+            }
         });
         if w > 0. {
             // The column box beside the card at its tightest (card at EDGE).
@@ -1051,7 +1178,10 @@ impl KeelWindow {
                 card.cut_out = false;
             }
         }
-        if card.mode_at.is_some_and(|at| now.saturating_duration_since(at) >= MODE_GLIDE) {
+        if card
+            .mode_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= MODE_GLIDE)
+        {
             card.mode_at = None;
             card.slide_mode = false;
             card.cut_out = false;
@@ -1078,8 +1208,22 @@ impl KeelWindow {
 
         let z = |v: f32| f32::from(zpx(v));
 
-        let (l0_full, r0_full, _) = full_layout(w0, col, z(CARD_W), z(COLUMN_GAP - ROW_INSET), z(EDGE), min_left);
-        let (l1_full, r1_full, _) = full_layout(w1, col, z(CARD_W), z(COLUMN_GAP - ROW_INSET), z(EDGE), min_left);
+        let (l0_full, r0_full, _) = full_layout(
+            w0,
+            col,
+            z(CARD_W),
+            z(COLUMN_GAP - ROW_INSET),
+            z(EDGE),
+            min_left,
+        );
+        let (l1_full, r1_full, _) = full_layout(
+            w1,
+            col,
+            z(CARD_W),
+            z(COLUMN_GAP - ROW_INSET),
+            z(EDGE),
+            min_left,
+        );
 
         let (l0_pill, r0_pill, _) = pill_layout(w0, col, min_left);
         let (l1_pill, r1_pill, _) = pill_layout(w1, col, min_left);
@@ -1100,7 +1244,11 @@ impl KeelWindow {
     /// right, the column centered in the available reading region), under the pill a top
     /// strip. Mid-glide, in between (eased, so the column, the composer and
     /// the card slide together). Returns (left, right, strip).
-    pub(super) fn card_room(&mut self, window: &mut Window, cx: &mut Context<Self>) -> (f32, f32, f32) {
+    pub(super) fn card_room(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (f32, f32, f32) {
         self.card_sync_chat(cx);
         if self.session_card.chat.is_none() {
             (self.session_card.room_l, self.session_card.room_x) = (0., 0.);
@@ -1119,15 +1267,23 @@ impl KeelWindow {
         let now = Instant::now();
 
         if self.sidebar_toggling() || self.right_panel_toggling() {
-            let key = (self.sidebar_anim.map_or(0, |(_, n)| n), self.right_panel_anim.map_or(0, |(_, n)| n));
+            let key = (
+                self.sidebar_anim.map_or(0, |(_, n)| n),
+                self.right_panel_anim.map_or(0, |(_, n)| n),
+            );
             if self.column_slide.map(|s| s.key) != Some(key) {
-                let right_moves = self.right_panel_toggling() && self.column_slide.map(|s| s.key.1) != Some(key.1);
+                let right_moves = self.right_panel_toggling()
+                    && self.column_slide.map(|s| s.key.1) != Some(key.1);
                 // Where it lands: the settled layout once the slide is over,
                 // card mode included (decided now, with the same hysteresis).
                 let side_end = full_sidebar_w * self.sidebar_target();
                 let end_w = (viewport_w - side_end - right_w).max(1.);
                 let overhead = z(EDGE + CARD_W + COLUMN_GAP - ROW_INSET);
-                let compact = next_compact(self.session_card.compact, end_w - overhead, col.min(z(MIN_COLUMN)));
+                let compact = next_compact(
+                    self.session_card.compact,
+                    end_w - overhead,
+                    col.min(z(MIN_COLUMN)),
+                );
                 let reduced = self.reduced();
                 let card = &mut self.session_card;
                 if compact != card.compact {
@@ -1138,17 +1294,36 @@ impl KeelWindow {
                 }
                 card.slide_mode = card.mode_at.is_some();
                 let k = if compact { 1. } else { 0. };
-                let (l, r, strip) =
-                    Self::calc_card_room_endpoints(viewport_w, full_sidebar_w, right_w, self.sidebar_target(), col, min_left, k, card_top);
+                let (l, r, strip) = Self::calc_card_room_endpoints(
+                    viewport_w,
+                    full_sidebar_w,
+                    right_w,
+                    self.sidebar_target(),
+                    col,
+                    min_left,
+                    k,
+                    card_top,
+                );
                 let to_w = (end_w - l - r).max(1.);
-                let to = ColumnGeo { x: side_end + l, w: to_w, strip, dock_w: to_w };
-                let mut from = if self.column_last.w > 0. { self.column_last } else { to };
+                let to = ColumnGeo {
+                    x: side_end + l,
+                    w: to_w,
+                    strip,
+                    dock_w: to_w,
+                };
+                let mut from = if self.column_last.w > 0. {
+                    self.column_last
+                } else {
+                    to
+                };
                 if from.dock_w <= 0. {
                     from.dock_w = from.w;
                 }
                 self.column_slide = Some(ColumnSlide { key, from, to });
             }
-            let Some(slide) = self.column_slide else { return (0., 0., 0.) };
+            let Some(slide) = self.column_slide else {
+                return (0., 0., 0.);
+            };
             let p = self.slide_progress();
             let lerp = |a: f32, b: f32| a + (b - a) * p;
             let pane_left = full_sidebar_w * self.sidebar_open_now();
@@ -1157,7 +1332,12 @@ impl KeelWindow {
             let room_r = (pane_w - room_l - slide.to.w).max(0.);
             let strip = lerp(slide.from.strip, slide.to.strip).max(0.);
             let dock_w = lerp(slide.from.dock_w, slide.to.dock_w).max(1.);
-            self.column_last = ColumnGeo { x: pane_left + room_l, w: slide.to.w, strip, dock_w };
+            self.column_last = ColumnGeo {
+                x: pane_left + room_l,
+                w: slide.to.w,
+                strip,
+                dock_w,
+            };
             let card = &mut self.session_card;
             card.room_l = room_l;
             card.room_x = room_r;
@@ -1169,13 +1349,30 @@ impl KeelWindow {
         // After a slide the column is already at its end room; the card's
         // glide finishing must not drag it.
         let card = &self.session_card;
-        let k_room = if card.slide_mode && card.mode_at.is_some() { if card.compact { 1. } else { 0. } } else { k };
+        let k_room = if card.slide_mode && card.mode_at.is_some() {
+            if card.compact { 1. } else { 0. }
+        } else {
+            k
+        };
         let open = self.sidebar_open_now();
-        let (room_l, room_r, strip) =
-            Self::calc_card_room_endpoints(viewport_w, full_sidebar_w, right_w, open, col, min_left, k_room, card_top);
+        let (room_l, room_r, strip) = Self::calc_card_room_endpoints(
+            viewport_w,
+            full_sidebar_w,
+            right_w,
+            open,
+            col,
+            min_left,
+            k_room,
+            card_top,
+        );
         let pane_left = full_sidebar_w * open;
         let w = (viewport_w - pane_left - right_w - room_l - room_r).max(0.);
-        self.column_last = ColumnGeo { x: pane_left + room_l, w, strip, dock_w: w };
+        self.column_last = ColumnGeo {
+            x: pane_left + room_l,
+            w,
+            strip,
+            dock_w: w,
+        };
         let card = &mut self.session_card;
         card.room_l = room_l;
         card.room_x = room_r;
@@ -1219,7 +1416,11 @@ impl KeelWindow {
         let side_end = full_sidebar_w * self.sidebar_target();
         let avail_w = (viewport_w - side_end - right_w).max(1.);
         let overhead = z(EDGE + CARD_W + COLUMN_GAP - ROW_INSET);
-        let compact = next_compact(self.session_card.compact, avail_w - overhead, col.min(z(MIN_COLUMN)));
+        let compact = next_compact(
+            self.session_card.compact,
+            avail_w - overhead,
+            col.min(z(MIN_COLUMN)),
+        );
         let k = if compact { 1. } else { 0. };
         let (room_l, room_r, _) = Self::calc_card_room_endpoints(
             viewport_w,
@@ -1281,7 +1482,15 @@ impl KeelWindow {
                 div()
                     .relative()
                     .child(div().opacity(p).child(fade.now.clone()))
-                    .child(div().absolute().top_0().right_0().whitespace_nowrap().opacity(1. - p).child(fade.prev.clone()))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .whitespace_nowrap()
+                            .opacity(1. - p)
+                            .child(fade.prev.clone()),
+                    )
                     .into_any_element()
             }
         }
@@ -1295,17 +1504,24 @@ impl KeelWindow {
         card.browser = match (activity, card.browser.take()) {
             (Some(label), Some((_, since, _))) => Some((label, since, now)),
             (Some(label), None) => Some((label, now_ms, now)),
-            (None, Some(prev)) if now.saturating_duration_since(prev.2) < BROWSER_GRACE => Some(prev),
+            (None, Some(prev)) if now.saturating_duration_since(prev.2) < BROWSER_GRACE => {
+                Some(prev)
+            }
             (None, _) => None,
         };
-        let browser = card.browser.as_ref().map(|(label, since, _)| (label.clone(), *since));
+        let browser = card
+            .browser
+            .as_ref()
+            .map(|(label, since, _)| (label.clone(), *since));
         let rows = process_rows(&chat, self.subagents.values(), browser);
         let card = &mut self.session_card;
         // Rows there when the chat opened arrive with the card, not one by one.
         let settled = now.checked_sub(crate::motion::ROW_ENTER).unwrap_or(now);
         let opening = card.opened_at.elapsed() < ENTER;
         for row in &rows {
-            card.entered.entry(row.key.clone()).or_insert(if opening { settled } else { now });
+            card.entered
+                .entry(row.key.clone())
+                .or_insert(if opening { settled } else { now });
         }
         for old in std::mem::take(&mut card.shown) {
             if !rows.iter().any(|r| r.key == old.key) {
@@ -1313,7 +1529,10 @@ impl KeelWindow {
                 card.leaving.push((old, now));
             }
         }
-        card.leaving.retain(|(row, at)| now.saturating_duration_since(*at) < crate::motion::ROW_EXIT && !rows.iter().any(|r| r.key == row.key));
+        card.leaving.retain(|(row, at)| {
+            now.saturating_duration_since(*at) < crate::motion::ROW_EXIT
+                && !rows.iter().any(|r| r.key == row.key)
+        });
         card.shown = rows.clone();
         rows
     }
@@ -1334,13 +1553,24 @@ impl KeelWindow {
         if self.session_card.switching.is_some() {
             return Some(BRANCH_SWITCHING);
         }
-        let chat = self.session_card.chat.as_ref().and_then(|id| self.state.chats.get(id))?;
-        let busy = |status: ChatStatus| matches!(status, ChatStatus::Running | ChatStatus::AwaitingInput);
+        let chat = self
+            .session_card
+            .chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))?;
+        let busy =
+            |status: ChatStatus| matches!(status, ChatStatus::Running | ChatStatus::AwaitingInput);
         if busy(chat.status) {
             return Some(BRANCH_BUSY);
         }
         let other = !chat.checkout_id.is_empty()
-            && self.state.chats.values().any(|o| o.id != chat.id && !o.archived && !o.tombstoned && o.checkout_id == chat.checkout_id && busy(o.status));
+            && self.state.chats.values().any(|o| {
+                o.id != chat.id
+                    && !o.archived
+                    && !o.tombstoned
+                    && o.checkout_id == chat.checkout_id
+                    && busy(o.status)
+            });
         other.then_some(BRANCH_BUSY_OTHER)
     }
 
@@ -1365,13 +1595,19 @@ impl KeelWindow {
 
     /// The branch menu's listing while the card opened it.
     pub(super) fn card_branch_menu(&self) -> Option<CardBranches> {
-        self.session_card.picking.then(|| self.session_card.branches.clone().unwrap_or(CardBranches { loading: true, ..Default::default() }))
+        self.session_card.picking.then(|| {
+            self.session_card.branches.clone().unwrap_or(CardBranches {
+                loading: true,
+                ..Default::default()
+            })
+        })
     }
 
     /// Fetch this chat's branches. The checked-out one shows at once (from
     /// the card's git line) while the listing loads.
     fn card_load_branches(&mut self, cx: &mut Context<Self>) {
-        let (Some(chat), Some(client)) = (self.session_card.chat.clone(), self.client.clone()) else {
+        let (Some(chat), Some(client)) = (self.session_card.chat.clone(), self.client.clone())
+        else {
             return;
         };
         let card = &mut self.session_card;
@@ -1389,7 +1625,9 @@ impl KeelWindow {
         }
         list.loading = list.branches.is_empty();
         cx.spawn(async move |this, cx| {
-            let res = client.call("chat_branches", serde_json::json!({ "chat_id": chat })).await;
+            let res = client
+                .call("chat_branches", serde_json::json!({ "chat_id": chat }))
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let card = &mut this.session_card;
                 if card.branch_gen != generation || card.chat.as_deref() != Some(chat.as_str()) {
@@ -1413,7 +1651,11 @@ impl KeelWindow {
     /// running turn; the reason shows under the branch.
     pub(super) fn card_pick_branch(&mut self, branch: String, cx: &mut Context<Self>) {
         self.set_picker(None, cx);
-        let current = self.session_card.branches.as_ref().and_then(|b| b.current.clone());
+        let current = self
+            .session_card
+            .branches
+            .as_ref()
+            .and_then(|b| b.current.clone());
         if current.as_deref() == Some(branch.as_str()) {
             return;
         }
@@ -1422,7 +1664,8 @@ impl KeelWindow {
             cx.notify();
             return;
         }
-        let (Some(chat), Some(client)) = (self.session_card.chat.clone(), self.client.clone()) else {
+        let (Some(chat), Some(client)) = (self.session_card.chat.clone(), self.client.clone())
+        else {
             return;
         };
         self.session_card.switching = Some(branch.clone());
@@ -1455,38 +1698,70 @@ impl KeelWindow {
     }
 
     /// The card (or the pill), placed over the transcript's top right.
-    pub(super) fn render_session_card(&mut self, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_session_card(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let chat_id = self.session_card.chat.clone()?;
         let now = Instant::now();
         let now_ms = crate::trace_view::now_ms();
         let reduced = self.reduced();
         let k = self.card_compactness(now, window);
-        let enter = (now.saturating_duration_since(self.session_card.opened_at).as_secs_f32() / ENTER.as_secs_f32()).min(1.);
+        let enter = (now
+            .saturating_duration_since(self.session_card.opened_at)
+            .as_secs_f32()
+            / ENTER.as_secs_f32())
+        .min(1.);
         if enter < 1. {
             window.request_animation_frame();
         }
         let enter = ease_out_strong(enter);
         // Reduced motion keeps the fade and drops the drop.
-        let drop = if reduced { 0. } else { -ENTER_DROP * (1. - enter) };
-        let usage = self.state.chats.get(&chat_id).map(|c| c.usage.clone()).unwrap_or_default();
+        let drop = if reduced {
+            0.
+        } else {
+            -ENTER_DROP * (1. - enter)
+        };
+        let usage = self
+            .state
+            .chats
+            .get(&chat_id)
+            .map(|c| c.usage.clone())
+            .unwrap_or_default();
         let fill = usage.fill();
         let ring_to = fill.unwrap_or(0.);
         let ring_now = match self.session_card.ring {
             Some(r) if (r.to - ring_to).abs() < 1e-4 => r.at(now),
             prev => {
-                let from = if reduced { ring_to } else { prev.map_or(0., |r| r.at(now)) };
-                let r = Ring { from, to: ring_to, at: now };
+                let from = if reduced {
+                    ring_to
+                } else {
+                    prev.map_or(0., |r| r.at(now))
+                };
+                let r = Ring {
+                    from,
+                    to: ring_to,
+                    at: now,
+                };
                 self.session_card.ring = Some(r);
                 r.at(now)
             }
         };
-        if !reduced && self.session_card.ring.is_some_and(|r| now.saturating_duration_since(r.at) < SWEEP) {
+        if !reduced
+            && self
+                .session_card
+                .ring
+                .is_some_and(|r| now.saturating_duration_since(r.at) < SWEEP)
+        {
             window.request_animation_frame();
         }
         let rows = self.card_proc_rows(now, now_ms);
         let open = self.open_picker() == Some(Picker::Branch) && self.session_card.picking;
         let menu = if self.session_card.picking {
-            self.menu_phase(Picker::Branch.menu_id(), open, cx).map(|leaving| self.render_picker_menu(Picker::Branch, leaving, false, t, cx))
+            self.menu_phase(Picker::Branch.menu_id(), open, cx)
+                .map(|leaving| self.render_picker_menu(Picker::Branch, leaving, false, t, cx))
         } else {
             None
         };
@@ -1498,10 +1773,18 @@ impl KeelWindow {
         let max_h = (h - top - f32::from(zpx(16.))).max(f32::from(zpx(80.)));
         // The picker hangs under whichever form is (mostly) showing.
         let (mut full_menu, mut pill_menu) = (None, None);
-        if k < 0.5 { full_menu = menu } else { pill_menu = menu }
+        if k < 0.5 {
+            full_menu = menu
+        } else {
+            pill_menu = menu
+        }
         // The wheel over the card scrolls the card (when it overflows),
         // never the transcript under it.
-        let swallow = |d: gpui::Div| d.on_scroll_wheel(|_: &gpui::ScrollWheelEvent, _, cx: &mut gpui::App| cx.stop_propagation());
+        let swallow = |d: gpui::Div| {
+            d.on_scroll_wheel(|_: &gpui::ScrollWheelEvent, _, cx: &mut gpui::App| {
+                cx.stop_propagation()
+            })
+        };
         // Cut: the outgoing form is gone at once, the incoming one glides.
         let cut = self.session_card.cut_out && self.session_card.mode_at.is_some();
         let (full_k, pill_k) = match (cut, self.session_card.compact) {
@@ -1509,7 +1792,9 @@ impl KeelWindow {
             (true, false) => (k, 0.),
             _ => (k, k),
         };
-        self.geo_trace.card_look.set((k, enter * (1. - full_k), enter * pill_k));
+        self.geo_trace
+            .card_look
+            .set((k, enter * (1. - full_k), enter * pill_k));
         let task_steps = self.card_task_steps();
         let git_k = match &self.session_card.git {
             Git::Unknown => 0.,
@@ -1517,13 +1802,34 @@ impl KeelWindow {
             Git::Repo(_) => 2.,
         };
         self.geo_trace.card_meta.set((
-            if self.session_card.steps_pending { 1. } else { 0. },
-            if self.session_card.held_steps.is_some() { 1. } else { 0. },
+            if self.session_card.steps_pending {
+                1.
+            } else {
+                0.
+            },
+            if self.session_card.held_steps.is_some() {
+                1.
+            } else {
+                0.
+            },
             git_k,
         ));
         let mut layers: Vec<AnyElement> = Vec::new();
         if full_k < 1. {
-            let card = self.render_card_full(&chat_id, &usage, ring_now, &git, folder.clone(), &rows, full_menu, now, now_ms, t, window, cx);
+            let card = self.render_card_full(
+                &chat_id,
+                &usage,
+                ring_now,
+                &git,
+                folder.clone(),
+                &rows,
+                full_menu,
+                now,
+                now_ms,
+                t,
+                window,
+                cx,
+            );
             let mut col = swallow(div())
                 .id("session-card-column")
                 .absolute()
@@ -1552,7 +1858,16 @@ impl KeelWindow {
             layers.push(col.into_any_element());
         }
         if pill_k > 0. {
-            let pill = self.render_card_pill(ring_now, &usage, &git, folder.is_some(), rows.len(), pill_menu, t, cx);
+            let pill = self.render_card_pill(
+                ring_now,
+                &usage,
+                &git,
+                folder.is_some(),
+                rows.len(),
+                pill_menu,
+                t,
+                cx,
+            );
             layers.push(
                 swallow(div())
                     .absolute()
@@ -1564,7 +1879,13 @@ impl KeelWindow {
                     .into_any_element(),
             );
         }
-        Some(div().absolute().inset_0().children(layers).into_any_element())
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .children(layers)
+                .into_any_element(),
+        )
     }
 
     fn render_connected_tree_repo(
@@ -1581,13 +1902,16 @@ impl KeelWindow {
         let is_open = !self.session_card.closed_repos.contains(&repo.id);
         let is_expanded = self.session_card.expanded_more.contains(&repo.id);
         let sample_cap = if is_expanded { 12 } else { CARD_FILE_ROWS };
-        let visible_files: Vec<&GitFileChange> = repo.file_details.iter().take(sample_cap).collect();
+        let visible_files: Vec<&GitFileChange> =
+            repo.file_details.iter().take(sample_cap).collect();
         let more_count = (repo.files_count as usize).saturating_sub(visible_files.len());
         let show_more_pill = is_expanded || more_count > 0;
 
-        let is_copied = self.session_card.branch_copied.as_ref().is_some_and(|(id, at)| {
-            id == &repo.id && at.elapsed() < Duration::from_millis(1600)
-        });
+        let is_copied = self
+            .session_card
+            .branch_copied
+            .as_ref()
+            .is_some_and(|(id, at)| id == &repo.id && at.elapsed() < Duration::from_millis(1600));
         let tip_text: String = if is_copied {
             "Copied!".to_string()
         } else {
@@ -1596,7 +1920,9 @@ impl KeelWindow {
 
         // Header: Repo Icon, Name, Middle Dot, Branch Trigger, Leader Line, Diff Badge
         let mut header = div()
-            .id(ElementId::Name(format!("tree-repo-header-{}", repo.id).into()))
+            .id(ElementId::Name(
+                format!("tree-repo-header-{}", repo.id).into(),
+            ))
             .flex()
             .flex_row()
             .items_center()
@@ -1680,7 +2006,11 @@ impl KeelWindow {
                         .text_size(px(10.5))
                         .text_color(if is_copied { c(t.accent) } else { text })
                         .truncate()
-                        .child(if is_copied { "Copied!".to_string() } else { repo.branch_display.clone() }),
+                        .child(if is_copied {
+                            "Copied!".to_string()
+                        } else {
+                            repo.branch_display.clone()
+                        }),
                 )
                 .tooltip(move |_, cx| cx.new(|_| Tip::new(tip_text.clone(), t)).into())
                 .tooltip_show_delay(crate::view::tooltip::delay())
@@ -1693,9 +2023,16 @@ impl KeelWindow {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(branch.clone()));
                         let repo_id_spawn = repo_id.clone();
                         cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_millis(1600)).await;
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1600))
+                                .await;
                             let _ = this.update(cx, |this, cx| {
-                                if this.session_card.branch_copied.as_ref().is_some_and(|(id, _)| id == &repo_id_spawn) {
+                                if this
+                                    .session_card
+                                    .branch_copied
+                                    .as_ref()
+                                    .is_some_and(|(id, _)| id == &repo_id_spawn)
+                                {
                                     this.session_card.branch_copied = None;
                                     cx.notify();
                                 }
@@ -1714,13 +2051,18 @@ impl KeelWindow {
             header = header.child(leader_line(c(t.border).opacity(0.6)));
 
             let badge_tip = if repo.total_additions > 0 || repo.total_deletions > 0 {
-                format!("{} files changed · +{} / -{}", repo.files_count, repo.total_additions, repo.total_deletions)
+                format!(
+                    "{} files changed · +{} / -{}",
+                    repo.files_count, repo.total_additions, repo.total_deletions
+                )
             } else {
                 format!("{} files changed", repo.files_count)
             };
 
             let mut b = div()
-                .id(ElementId::Name(format!("tree-repo-badge-{}", repo.id).into()))
+                .id(ElementId::Name(
+                    format!("tree-repo-badge-{}", repo.id).into(),
+                ))
                 .flex_none()
                 .flex()
                 .flex_row()
@@ -1786,251 +2128,279 @@ impl KeelWindow {
                 .pl(zpx(10.));
 
             for (ix, file) in visible_files.iter().enumerate() {
-                    let is_last = !show_more_pill && (ix + 1 == visible_files.len());
-                    let group_id = SharedString::from(format!("tree-file-{}-{ix}", repo.id));
-                    let file_target = if repo.target_prefix.is_empty() {
-                        file.path.clone()
-                    } else {
-                        format!("{}/{}", repo.target_prefix, file.path)
-                    };
+                let is_last = !show_more_pill && (ix + 1 == visible_files.len());
+                let group_id = SharedString::from(format!("tree-file-{}-{ix}", repo.id));
+                let file_target = if repo.target_prefix.is_empty() {
+                    file.path.clone()
+                } else {
+                    format!("{}/{}", repo.target_prefix, file.path)
+                };
 
-                    let (bg_color, text_color) = match file.status {
-                        'A' => (alpha(c(t.success), 0.14), c(t.success)),
-                        'D' => (alpha(c(t.danger), 0.14), c(t.danger)),
-                        _ => (alpha(c(t.warning), 0.14), c(t.warning)),
-                    };
+                let (bg_color, text_color) = match file.status {
+                    'A' => (alpha(c(t.success), 0.14), c(t.success)),
+                    'D' => (alpha(c(t.danger), 0.14), c(t.danger)),
+                    _ => (alpha(c(t.warning), 0.14), c(t.warning)),
+                };
 
-                    let (dir, base) = match file.path.rfind('/') {
-                        Some(idx) => (&file.path[..=idx], &file.path[idx + 1..]),
-                        None => ("", file.path.as_str()),
-                    };
+                let (dir, base) = match file.path.rfind('/') {
+                    Some(idx) => (&file.path[..=idx], &file.path[idx + 1..]),
+                    None => ("", file.path.as_str()),
+                };
 
-                    let status_char = match file.status {
-                        '?' => 'U',
-                        other => other,
-                    };
+                let status_char = match file.status {
+                    '?' => 'U',
+                    other => other,
+                };
 
-                    let item = div()
-                        .id(ElementId::Name(format!("tree-item-{}-{ix}", repo.id).into()))
-                        .group(group_id.clone())
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .h(zpx(23.))
-                        .child(tree_connector(is_last, spine_color))
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("tree-file-link-{}-{ix}", repo.id).into()))
-                                .relative()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .px(zpx(4.))
-                                .rounded(RADIUS_SM)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(alpha(c(t.hover), 0.5)))
-                                .on_click(cx.listener({
-                                    let target = file_target.clone();
-                                    move |this, _: &ClickEvent, window, cx| {
-                                        this.show_file_diff(target.clone(), window, cx);
-                                    }
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(zpx(4.))
-                                        .min_w_0()
-                                        .mr(zpx(6.))
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .size(zpx(15.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .pb(px(1.))
-                                                .rounded(px(3.))
-                                                .bg(bg_color)
-                                                .text_color(text_color)
-                                                .font_family(MONO)
-                                                .text_size(px(10.))
-                                                .line_height(px(10.))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .child(status_char.to_string()),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .text_color(muted)
-                                                .child(Icon::File.el(zpx(11.))),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .flex()
-                                                .flex_row()
-                                                .items_baseline()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .when(!dir.is_empty(), |d| {
-                                                    d.child(
-                                                        div()
-                                                            .flex_shrink(1.)
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .font_family(MONO)
-                                                            .text_size(px(11.))
-                                                            .text_color(c(t.text_faint))
-                                                            .child(dir.to_string()),
-                                                    )
-                                                })
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .min_w_0()
-                                                        .font_family(MONO)
-                                                        .text_size(px(11.))
-                                                        .font_weight(medium)
-                                                        .text_color(text)
-                                                        .truncate()
-                                                        .child(base.to_string()),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .when(file.added.is_some() || file.removed.is_some(), |d| {
-                                            d.child(
-                                                tnum(
-                                                    div()
-                                                        .flex()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap(zpx(3.))
-                                                        .font_family(MONO)
-                                                        .text_size(px(10.5)),
-                                                )
-                                                .when_some(file.added.filter(|&a| a > 0), |d, a| {
-                                                    d.child(div().text_color(c(t.success)).font_weight(medium).child(format!("+{a}")))
-                                                })
-                                                .when_some(file.removed.filter(|&r| r > 0), |d, r| {
-                                                    d.child(div().text_color(c(t.danger)).font_weight(medium).child(format!("-{r}")))
-                                                }),
-                                            )
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .right(zpx(2.))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(zpx(2.))
-                                        .opacity(0.)
-                                        .group_hover(group_id.clone(), |s| s.opacity(1.))
-                                        .bg(c(t.floating))
-                                        .pl(zpx(4.))
-                                        .child(
-                                            div()
-                                                .id(ElementId::Name(format!("tree-diff-btn-{}-{ix}", repo.id).into()))
-                                                .size(zpx(18.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(RADIUS_SM)
-                                                .border_1()
-                                                .border_color(c(t.border))
-                                                .bg(c(t.floating))
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(c(t.hover)).border_color(c(t.text_muted)))
-                                                .child(Icon::FileDiff.el(zpx(10.)))
-                                                .tooltip(move |_, cx| cx.new(|_| Tip::new("View Diff", t)).into())
-                                                .tooltip_show_delay(crate::view::tooltip::delay())
-                                                .on_click(cx.listener({
-                                                    let target = file_target.clone();
-                                                    move |this, _: &ClickEvent, window, cx| {
-                                                        cx.stop_propagation();
-                                                        this.show_file_diff(target.clone(), window, cx);
-                                                    }
-                                                })),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(ElementId::Name(format!("tree-open-btn-{}-{ix}", repo.id).into()))
-                                                .size(zpx(18.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(RADIUS_SM)
-                                                .border_1()
-                                                .border_color(c(t.border))
-                                                .bg(c(t.floating))
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(c(t.hover)).border_color(c(t.text_muted)))
-                                                .child(Icon::Forward.el(zpx(10.)))
-                                                .tooltip(move |_, cx| cx.new(|_| Tip::new("Open in diff panel", t)).into())
-                                                .tooltip_show_delay(crate::view::tooltip::delay())
-                                                .on_click(cx.listener({
-                                                    let target = file_target.clone();
-                                                    move |this, _: &ClickEvent, window, cx| {
-                                                        cx.stop_propagation();
-                                                        this.show_file_diff(target.clone(), window, cx);
-                                                    }
-                                                })),
-                                        ),
-                                ),
-                        );
-                    children_col = children_col.child(item);
-                }
-
-                if show_more_pill {
-                    children_col = children_col.child(
+                let item = div()
+                    .id(ElementId::Name(
+                        format!("tree-item-{}-{ix}", repo.id).into(),
+                    ))
+                    .group(group_id.clone())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(zpx(23.))
+                    .child(tree_connector(is_last, spine_color))
+                    .child(
                         div()
+                            .id(ElementId::Name(
+                                format!("tree-file-link-{}-{ix}", repo.id).into(),
+                            ))
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .h(zpx(22.))
-                            .child(tree_connector(true, spine_color))
+                            .justify_between()
+                            .px(zpx(4.))
+                            .rounded(RADIUS_SM)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(alpha(c(t.hover), 0.5)))
+                            .on_click(cx.listener({
+                                let target = file_target.clone();
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.show_file_diff(target.clone(), window, cx);
+                                }
+                            }))
                             .child(
                                 div()
-                                    .id(ElementId::Name(format!("tree-more-{}", repo.id).into()))
-                                    .cursor_pointer()
-                                    .px(zpx(8.))
-                                    .py(zpx(1.5))
-                                    .rounded_full()
-                                    .bg(c(t.code).opacity(0.4))
-                                    .hover(|s| s.bg(c(t.hover)).text_color(text))
-                                    .t_caption()
-                                    .font_weight(medium)
-                                    .text_color(muted)
-                                    .child(if is_expanded {
-                                        format!("Collapse sample · {more_count} more")
-                                    } else {
-                                        format!("+{more_count} more files")
-                                    })
-                                    .on_click(cx.listener({
-                                        let repo_id = repo.id.clone();
-                                        move |this, _: &ClickEvent, _, cx| {
-                                            if this.session_card.expanded_more.contains(&repo_id) {
-                                                this.session_card.expanded_more.remove(&repo_id);
-                                            } else {
-                                                this.session_card.expanded_more.insert(repo_id.clone());
-                                            }
-                                            cx.notify();
-                                        }
-                                    })),
+                                    .flex_1()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(zpx(4.))
+                                    .min_w_0()
+                                    .mr(zpx(6.))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .size(zpx(15.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .pb(px(1.))
+                                            .rounded(px(3.))
+                                            .bg(bg_color)
+                                            .text_color(text_color)
+                                            .font_family(MONO)
+                                            .text_size(px(10.))
+                                            .line_height(px(10.))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(status_char.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(muted)
+                                            .child(Icon::File.el(zpx(11.))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .flex()
+                                            .flex_row()
+                                            .items_baseline()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .when(!dir.is_empty(), |d| {
+                                                d.child(
+                                                    div()
+                                                        .flex_shrink(1.)
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .font_family(MONO)
+                                                        .text_size(px(11.))
+                                                        .text_color(c(t.text_faint))
+                                                        .child(dir.to_string()),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .min_w_0()
+                                                    .font_family(MONO)
+                                                    .text_size(px(11.))
+                                                    .font_weight(medium)
+                                                    .text_color(text)
+                                                    .truncate()
+                                                    .child(base.to_string()),
+                                            ),
+                                    ),
+                            )
+                            .child(div().flex_none().when(
+                                file.added.is_some() || file.removed.is_some(),
+                                |d| {
+                                    d.child(
+                                        tnum(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(zpx(3.))
+                                                .font_family(MONO)
+                                                .text_size(px(10.5)),
+                                        )
+                                        .when_some(file.added.filter(|&a| a > 0), |d, a| {
+                                            d.child(
+                                                div()
+                                                    .text_color(c(t.success))
+                                                    .font_weight(medium)
+                                                    .child(format!("+{a}")),
+                                            )
+                                        })
+                                        .when_some(
+                                            file.removed.filter(|&r| r > 0),
+                                            |d, r| {
+                                                d.child(
+                                                    div()
+                                                        .text_color(c(t.danger))
+                                                        .font_weight(medium)
+                                                        .child(format!("-{r}")),
+                                                )
+                                            },
+                                        ),
+                                    )
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(zpx(2.))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(zpx(2.))
+                                    .opacity(0.)
+                                    .group_hover(group_id.clone(), |s| s.opacity(1.))
+                                    .bg(c(t.floating))
+                                    .pl(zpx(4.))
+                                    .child(
+                                        div()
+                                            .id(ElementId::Name(
+                                                format!("tree-diff-btn-{}-{ix}", repo.id).into(),
+                                            ))
+                                            .size(zpx(18.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(RADIUS_SM)
+                                            .border_1()
+                                            .border_color(c(t.border))
+                                            .bg(c(t.floating))
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(c(t.hover)).border_color(c(t.text_muted))
+                                            })
+                                            .child(Icon::FileDiff.el(zpx(10.)))
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| Tip::new("View Diff", t)).into()
+                                            })
+                                            .tooltip_show_delay(crate::view::tooltip::delay())
+                                            .on_click(cx.listener({
+                                                let target = file_target.clone();
+                                                move |this, _: &ClickEvent, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.show_file_diff(target.clone(), window, cx);
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(ElementId::Name(
+                                                format!("tree-open-btn-{}-{ix}", repo.id).into(),
+                                            ))
+                                            .size(zpx(18.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(RADIUS_SM)
+                                            .border_1()
+                                            .border_color(c(t.border))
+                                            .bg(c(t.floating))
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(c(t.hover)).border_color(c(t.text_muted))
+                                            })
+                                            .child(Icon::Forward.el(zpx(10.)))
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| Tip::new("Open in diff panel", t)).into()
+                                            })
+                                            .tooltip_show_delay(crate::view::tooltip::delay())
+                                            .on_click(cx.listener({
+                                                let target = file_target.clone();
+                                                move |this, _: &ClickEvent, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.show_file_diff(target.clone(), window, cx);
+                                                }
+                                            })),
+                                    ),
                             ),
                     );
-                }
+                children_col = children_col.child(item);
+            }
+
+            if show_more_pill {
+                children_col = children_col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .h(zpx(22.))
+                        .child(tree_connector(true, spine_color))
+                        .child(
+                            div()
+                                .id(ElementId::Name(format!("tree-more-{}", repo.id).into()))
+                                .cursor_pointer()
+                                .px(zpx(8.))
+                                .py(zpx(1.5))
+                                .rounded_full()
+                                .bg(c(t.code).opacity(0.4))
+                                .hover(|s| s.bg(c(t.hover)).text_color(text))
+                                .t_caption()
+                                .font_weight(medium)
+                                .text_color(muted)
+                                .child(if is_expanded {
+                                    format!("Collapse sample · {more_count} more")
+                                } else {
+                                    format!("+{more_count} more files")
+                                })
+                                .on_click(cx.listener({
+                                    let repo_id = repo.id.clone();
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        if this.session_card.expanded_more.contains(&repo_id) {
+                                            this.session_card.expanded_more.remove(&repo_id);
+                                        } else {
+                                            this.session_card.expanded_more.insert(repo_id.clone());
+                                        }
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                );
+            }
 
             group_el = group_el.child(children_col);
         }
@@ -2061,12 +2431,23 @@ impl KeelWindow {
         let reduced = self.reduced();
 
         // Context: the model on the label line; used / total and %; the bar; the split.
-        let model = self.state.chats.get(chat_id).and_then(|chat| match self.model_name(&chat.harness, &chat.model) {
-            Some(name) => Some(name),
-            None => (!chat.model.is_empty()).then(|| chat.model.clone()),
+        let model = self.state.chats.get(chat_id).and_then(|chat| {
+            match self.model_name(&chat.harness, &chat.model) {
+                Some(name) => Some(name),
+                None => (!chat.model.is_empty()).then(|| chat.model.clone()),
+            }
         });
-        let used = self.card_fade("used", if usage.context_used > 0 { compact(usage.context_used) } else { "0".into() }, now);
-        let pct = fill.map(|f| self.card_fade("pct", format!("{}%", (f * 100.).round() as u32), now));
+        let used = self.card_fade(
+            "used",
+            if usage.context_used > 0 {
+                compact(usage.context_used)
+            } else {
+                "0".into()
+            },
+            now,
+        );
+        let pct =
+            fill.map(|f| self.card_fade("pct", format!("{}%", (f * 100.).round() as u32), now));
         let tip = context_tip(usage);
         let split = token_split(usage);
         let tone = fill.map_or(muted, |f| fill_color(f, t));
@@ -2079,33 +2460,73 @@ impl KeelWindow {
             .flex()
             .flex_col()
             .gap(zpx(LINE_GAP))
-            .child(section_label("Context", model.map(|m| div().min_w_0().truncate().font_weight(gpui::FontWeight::NORMAL).child(m).into_any_element()), t))
+            .child(section_label(
+                "Context",
+                model.map(|m| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .child(m)
+                        .into_any_element()
+                }),
+                t,
+            ))
             .child(
-                tnum(div().flex().flex_row().items_baseline().whitespace_nowrap().t_body())
-                    .child(div().font_weight(medium).text_color(text).child(Self::fade_el(&used, now, window)))
-                    .child(div().text_color(muted).child(match fill {
-                        Some(_) => format!(" / {}", compact(usage.context_window)),
-                        None => " used".into(),
-                    }))
-                    .child(div().flex_1().min_w(zpx(8.)))
-                    .when_some(pct, |d, p| d.child(div().font_weight(medium).text_color(pct_color).child(Self::fade_el(&p, now, window)))),
+                tnum(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .whitespace_nowrap()
+                        .t_body(),
+                )
+                .child(
+                    div()
+                        .font_weight(medium)
+                        .text_color(text)
+                        .child(Self::fade_el(&used, now, window)),
+                )
+                .child(div().text_color(muted).child(match fill {
+                    Some(_) => format!(" / {}", compact(usage.context_window)),
+                    None => " used".into(),
+                }))
+                .child(div().flex_1().min_w(zpx(8.)))
+                .when_some(pct, |d, p| {
+                    d.child(
+                        div()
+                            .font_weight(medium)
+                            .text_color(pct_color)
+                            .child(Self::fade_el(&p, now, window)),
+                    )
+                }),
             )
             .when(fill.is_some(), |d| d.child(bar(bar_now, c(t.border), tone)))
-            .child(tnum(div().t_small().text_color(muted).truncate()).child(match (&split, fill) {
-                (Some(s), _) => s.clone(),
-                (None, Some(_)) => "No tokens used yet".into(),
-                (None, None) => "This agent doesn't report its context window".into(),
-            }))
-            .tooltip(move |_, cx| cx.new(|_| Tip::new(tip.clone(), t)).into()).tooltip_show_delay(crate::view::tooltip::delay());
+            .child(
+                tnum(div().t_small().text_color(muted).truncate()).child(match (&split, fill) {
+                    (Some(s), _) => s.clone(),
+                    (None, Some(_)) => "No tokens used yet".into(),
+                    (None, None) => "This agent doesn't report its context window".into(),
+                }),
+            )
+            .tooltip(move |_, cx| cx.new(|_| Tip::new(tip.clone(), t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay());
 
         // Project: connected tree hierarchy for projects and non-project folders.
         if let Some(id) = self.projects.chat_project_id(chat_id) {
             self.refresh_project_folders(&id, cx);
         }
         let project_branches = self.projects.card_branches(chat_id);
-        let mut project = div().flex().flex_col().gap(zpx(LINE_GAP)).child(section_label("Project", None, t));
+        let mut project = div()
+            .flex()
+            .flex_col()
+            .gap(zpx(LINE_GAP))
+            .child(section_label("Project", None, t));
         match folder {
-            None => project = project.child(div().t_small().text_color(muted).child("No project folder")),
+            None => {
+                project =
+                    project.child(div().t_small().text_color(muted).child("No project folder"))
+            }
             Some((_, name)) => {
                 if let Some((project_name, lines)) = &project_branches {
                     project = project.child(
@@ -2114,8 +2535,21 @@ impl KeelWindow {
                             .flex_row()
                             .items_center()
                             .gap(zpx(6.))
-                            .child(div().flex_none().text_color(muted).child(Icon::Folder.el(zpx(13.))))
-                            .child(div().t_body().font_weight(medium).text_color(text).min_w_0().truncate().child(project_name.clone())),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(muted)
+                                    .child(Icon::Folder.el(zpx(13.))),
+                            )
+                            .child(
+                                div()
+                                    .t_body()
+                                    .font_weight(medium)
+                                    .text_color(text)
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(project_name.clone()),
+                            ),
                     );
 
                     let mut tree_stack = div().flex().flex_col().gap(zpx(6.));
@@ -2153,17 +2587,30 @@ impl KeelWindow {
                             file_details: details,
                             target_prefix: format!("@{}", line.alias),
                         };
-                        tree_stack = tree_stack.child(self.render_connected_tree_repo(&repo_item, t, cx));
+                        tree_stack =
+                            tree_stack.child(self.render_connected_tree_repo(&repo_item, t, cx));
                     }
                     project = project.child(tree_stack);
                 } else {
                     // Non-project session: single repo tree
                     match git {
                         Git::Unknown => {
-                            project = project.child(div().h(zpx(BRANCH_H)).child(div().t_small().text_color(muted).child("Loading git status…")));
+                            project = project.child(
+                                div().h(zpx(BRANCH_H)).child(
+                                    div()
+                                        .t_small()
+                                        .text_color(muted)
+                                        .child("Loading git status…"),
+                                ),
+                            );
                         }
                         Git::NoRepo => {
-                            project = project.child(div().t_small().text_color(muted).child("Not a git repository"));
+                            project = project.child(
+                                div()
+                                    .t_small()
+                                    .text_color(muted)
+                                    .child("Not a git repository"),
+                            );
                         }
                         Git::Repo(info) => {
                             let branch_str = info.branch_label();
@@ -2178,13 +2625,19 @@ impl KeelWindow {
                                 file_details: info.file_details.clone(),
                                 target_prefix: String::new(),
                             };
-                            project = project.child(self.render_connected_tree_repo(&repo_item, t, cx));
+                            project =
+                                project.child(self.render_connected_tree_repo(&repo_item, t, cx));
                         }
                     }
                 }
 
                 if let Some((why, at)) = self.session_card.notice.clone() {
-                    let p = if reduced { 1. } else { (now.saturating_duration_since(at).as_secs_f32() / FADE.as_secs_f32()).min(1.) };
+                    let p = if reduced {
+                        1.
+                    } else {
+                        (now.saturating_duration_since(at).as_secs_f32() / FADE.as_secs_f32())
+                            .min(1.)
+                    };
                     if p < 1. {
                         window.request_animation_frame();
                     }
@@ -2197,7 +2650,12 @@ impl KeelWindow {
                             .opacity(ease_out_strong(p))
                             .t_small()
                             .text_color(c(t.warning))
-                            .child(div().flex_none().pt(zpx(2.)).child(Icon::Alert.el(zpx(12.))))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .pt(zpx(2.))
+                                    .child(Icon::Alert.el(zpx(12.))),
+                            )
                             .child(div().flex_1().min_w_0().child(why)),
                     );
                 }
@@ -2213,49 +2671,70 @@ impl KeelWindow {
             .iter()
             .take(MAX_ROWS)
             .map(|r| {
-                let at = self.session_card.entered.get(&r.key).copied().unwrap_or(now);
+                let at = self
+                    .session_card
+                    .entered
+                    .get(&r.key)
+                    .copied()
+                    .unwrap_or(now);
                 (r.clone(), row_enter(at, now, reduced))
             })
             .collect();
-        items.extend(leaving.into_iter().map(|(r, at)| (r, row_exit(now.saturating_duration_since(at), reduced))));
+        items.extend(
+            leaving
+                .into_iter()
+                .map(|(r, at)| (r, row_exit(now.saturating_duration_since(at), reduced))),
+        );
         let clock = (now_ms.rem_euclid(1_600_000)) as f32;
         let mut lines: Vec<AnyElement> = Vec::new();
         for (row, look) in items {
             if look.is_some() {
                 window.request_animation_frame();
             }
-            let look = look.unwrap_or(crate::motion::RowLook { opacity: 1., dy: 0., height: 1. });
+            let look = look.unwrap_or(crate::motion::RowLook {
+                opacity: 1.,
+                dy: 0.,
+                height: 1.,
+            });
             let key = format!("row-{}", row.key);
             let waiting = row.label.ends_with(" · waiting");
             // The dot breathes like a running trace step.
             if !reduced {
                 window.request_animation_frame();
             }
-            let breathe = if reduced { 1. } else { 0.55 + 0.45 * (crate::trace_view::dot_opacity(clock, 0.) - 0.35) / 0.65 };
+            let breathe = if reduced {
+                1.
+            } else {
+                0.55 + 0.45 * (crate::trace_view::dot_opacity(clock, 0.) - 0.35) / 0.65
+            };
             let (enabled, tip): (bool, &'static str) = match &row.stop {
                 Stop::Browser { .. } => (true, BROWSER_STOP),
                 Stop::Unavailable(why) => (false, why),
             };
             let stop = row.stop.clone();
-            let button = div()
-                .id(ElementId::Name(format!("card-stop-{}", row.key).into()))
-                .flex_none()
-                .size(zpx(22.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(RADIUS_SM)
-                .border_1()
-                .border_color(c(t.border))
-                .text_color(if enabled { text } else { muted })
-                .when(!enabled, |b| b.opacity(0.55))
-                .child(Icon::Stop.el(zpx(10.)))
-                .tooltip(move |_, cx| cx.new(|_| Tip::new(tip, t)).into()).tooltip_show_delay(crate::view::tooltip::delay())
-                .when(enabled, |b| {
-                    b.cursor_pointer()
-                        .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.card_stop(&stop, cx)))
-                });
+            let button =
+                div()
+                    .id(ElementId::Name(format!("card-stop-{}", row.key).into()))
+                    .flex_none()
+                    .size(zpx(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(RADIUS_SM)
+                    .border_1()
+                    .border_color(c(t.border))
+                    .text_color(if enabled { text } else { muted })
+                    .when(!enabled, |b| b.opacity(0.55))
+                    .child(Icon::Stop.el(zpx(10.)))
+                    .tooltip(move |_, cx| cx.new(|_| Tip::new(tip, t)).into())
+                    .tooltip_show_delay(crate::view::tooltip::delay())
+                    .when(enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.card_stop(&stop, cx)
+                            }))
+                    });
             let icon = match row.kind {
                 ProcKind::Subagent => Icon::Agent,
                 ProcKind::Browser => Icon::Globe,
@@ -2296,18 +2775,46 @@ impl KeelWindow {
                                 .opacity(breathe),
                         )
                         .child(div().flex_none().text_color(muted).child(icon.el(zpx(12.))))
-                        .child(div().flex_1().min_w_0().truncate().text_color(text).child(row.label.clone()))
-                        .child(div().flex_none().text_color(muted).child(elapsed(now_ms, row.started_ms)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(text)
+                                .child(row.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(elapsed(now_ms, row.started_ms)),
+                        )
                         .child(button),
                     )
                     .into_any_element(),
             );
         }
         if rows.len() > MAX_ROWS {
-            lines.push(tnum(div().h(zpx(20.)).flex().items_center().t_small().text_color(muted)).child(more_label(rows.len())).into_any_element());
+            lines.push(
+                tnum(
+                    div()
+                        .h(zpx(20.))
+                        .flex()
+                        .items_center()
+                        .t_small()
+                        .text_color(muted),
+                )
+                .child(more_label(rows.len()))
+                .into_any_element(),
+            );
         }
         let running = rows.len();
-        let note = (running > 0).then(|| tnum(div()).font_weight(gpui::FontWeight::NORMAL).child(format!("{running} running")).into_any_element());
+        let note = (running > 0).then(|| {
+            tnum(div())
+                .font_weight(gpui::FontWeight::NORMAL)
+                .child(format!("{running} running"))
+                .into_any_element()
+        });
         let background = div()
             .flex()
             .flex_col()
@@ -2374,9 +2881,22 @@ impl KeelWindow {
                 .rounded_full()
                 .font_family(MONO)
                 .text_size(zpx(11.))
-                .when(state == "now", |d| d.bg(c(t.accent)).text_color(c(t.text_on_accent)).child((ix + 1).to_string()))
-                .when(state == "done", |d| d.bg(c(t.success).opacity(0.15)).text_color(c(t.success)).child(Icon::Check.el(zpx(11.))))
-                .when(state == "later", |d| d.border_1().border_color(c(t.border)).text_color(c(t.text_faint)).child((ix + 1).to_string()));
+                .when(state == "now", |d| {
+                    d.bg(c(t.accent))
+                        .text_color(c(t.text_on_accent))
+                        .child((ix + 1).to_string())
+                })
+                .when(state == "done", |d| {
+                    d.bg(c(t.success).opacity(0.15))
+                        .text_color(c(t.success))
+                        .child(Icon::Check.el(zpx(11.)))
+                })
+                .when(state == "later", |d| {
+                    d.border_1()
+                        .border_color(c(t.border))
+                        .text_color(c(t.text_faint))
+                        .child((ix + 1).to_string())
+                });
 
             div()
                 .min_h(zpx(36.))
@@ -2393,7 +2913,11 @@ impl KeelWindow {
                         .flex_1()
                         .min_w_0()
                         .text_size(zpx(12.5))
-                        .text_color(c(if state == "later" { t.text_muted } else { t.text }))
+                        .text_color(c(if state == "later" {
+                            t.text_muted
+                        } else {
+                            t.text
+                        }))
                         .child(label.clone()),
                 )
                 .when(state == "now", |d| {
@@ -2429,7 +2953,17 @@ impl KeelWindow {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_card_pill(&mut self, ring_now: f32, usage: &ChatUsage, git: &Git, has_folder: bool, running: usize, menu: Option<AnyElement>, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+    fn render_card_pill(
+        &mut self,
+        ring_now: f32,
+        usage: &ChatUsage,
+        git: &Git,
+        has_folder: bool,
+        running: usize,
+        menu: Option<AnyElement>,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = c(t.text_muted);
         let fill = usage.fill();
         let context = match (fill, usage.context_used) {
@@ -2471,9 +3005,15 @@ impl KeelWindow {
                 .flex_row()
                 .items_center()
                 .gap(zpx(6.))
-                .child(ring(RING, ring_now, c(t.border), fill.map_or(muted, |f| fill_color(f, t))))
+                .child(ring(
+                    RING,
+                    ring_now,
+                    c(t.border),
+                    fill.map_or(muted, |f| fill_color(f, t)),
+                ))
                 .child(div().text_color(c(t.text)).child(context))
-                .tooltip(move |_, cx| cx.new(|_| Tip::new(tip.clone(), t)).into()).tooltip_show_delay(crate::view::tooltip::delay()),
+                .tooltip(move |_, cx| cx.new(|_| Tip::new(tip.clone(), t)).into())
+                .tooltip_show_delay(crate::view::tooltip::delay()),
         );
         if has_folder && let Git::Repo(info) = git {
             let tip: &'static str = blocked.unwrap_or(BRANCH_TIP);
@@ -2502,12 +3042,22 @@ impl KeelWindow {
                     .rounded(RADIUS_SM)
                     .text_color(c(t.text))
                     .child(div().text_color(muted).child(Icon::Branch.el(zpx(12.))))
-                    .child(div().min_w_0().truncate().child(self.session_card.switching.clone().unwrap_or_else(|| info.branch_label())))
-                    .tooltip(move |_, cx| cx.new(|_| Tip::new(tip, t)).into()).tooltip_show_delay(crate::view::tooltip::delay())
+                    .child(
+                        div().min_w_0().truncate().child(
+                            self.session_card
+                                .switching
+                                .clone()
+                                .unwrap_or_else(|| info.branch_label()),
+                        ),
+                    )
+                    .tooltip(move |_, cx| cx.new(|_| Tip::new(tip, t)).into())
+                    .tooltip_show_delay(crate::view::tooltip::delay())
                     .when(blocked.is_none(), |d| {
                         d.cursor_pointer()
                             .hover(|s| s.bg(c(t.hover)))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.card_open_branches(window, cx)))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.card_open_branches(window, cx)
+                            }))
                     }),
             );
             if info.added + info.removed > 0 {
@@ -2516,8 +3066,16 @@ impl KeelWindow {
                         .flex()
                         .flex_row()
                         .gap(zpx(4.))
-                        .child(div().text_color(c(t.success)).child(format!("+{}", info.added)))
-                        .child(div().text_color(c(t.danger)).child(format!("−{}", info.removed))),
+                        .child(
+                            div()
+                                .text_color(c(t.success))
+                                .child(format!("+{}", info.added)),
+                        )
+                        .child(
+                            div()
+                                .text_color(c(t.danger))
+                                .child(format!("−{}", info.removed)),
+                        ),
                 );
             }
         }
@@ -2531,17 +3089,33 @@ impl KeelWindow {
                     .gap(zpx(4.))
                     .child(div().size(zpx(6.)).rounded_full().bg(c(t.accent)))
                     .child(running.to_string())
-                    .tooltip(move |_, cx| cx.new(|_| Tip::new(format!("{running} running · widen the window to manage"), t)).into()).tooltip_show_delay(crate::view::tooltip::delay()),
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| {
+                            Tip::new(format!("{running} running · widen the window to manage"), t)
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(crate::view::tooltip::delay()),
             );
         }
-        div().relative().flex().flex_col().items_end().child(pill).children(menu).into_any_element()
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .items_end()
+            .child(pill)
+            .children(menu)
+            .into_any_element()
     }
 }
 
 /// The context row's tooltip: this chat's token totals and their split.
 fn context_tip(usage: &ChatUsage) -> String {
     let split = |m: &ModelTokens| {
-        let mut parts = vec![format!("in {}", compact(m.input)), format!("out {}", compact(m.output))];
+        let mut parts = vec![
+            format!("in {}", compact(m.input)),
+            format!("out {}", compact(m.output)),
+        ];
         if m.cache_read + m.cache_write > 0 {
             parts.push(format!("cache {}", compact(m.cache_read + m.cache_write)));
         }
@@ -2574,15 +3148,33 @@ mod tests {
     fn git_replies_parse() {
         assert_eq!(parse_git(&json!({ "repo": false })), Git::NoRepo);
         assert_eq!(parse_git(&json!({})), Git::NoRepo);
-        let Git::Repo(info) = parse_git(&json!({ "repo": true, "branch": "main", "detached": null, "files": 3, "untracked": 1, "added": 12, "removed": 4 })) else {
+        let Git::Repo(info) = parse_git(
+            &json!({ "repo": true, "branch": "main", "detached": null, "files": 3, "untracked": 1, "added": 12, "removed": 4 }),
+        ) else {
             panic!("repo");
         };
-        assert_eq!((info.branch_label(), info.files, info.added, info.removed, info.untracked), ("main".into(), 3, 12, 4, 1));
-        let Git::Repo(detached) = parse_git(&json!({ "repo": true, "branch": "", "detached": "abc1234", "files": 0 })) else {
+        assert_eq!(
+            (
+                info.branch_label(),
+                info.files,
+                info.added,
+                info.removed,
+                info.untracked
+            ),
+            ("main".into(), 3, 12, 4, 1)
+        );
+        let Git::Repo(detached) =
+            parse_git(&json!({ "repo": true, "branch": "", "detached": "abc1234", "files": 0 }))
+        else {
             panic!("repo");
         };
-        assert_eq!((detached.branch_label(), changes_parts(&detached)), ("HEAD at abc1234".into(), None));
-        let Git::Repo(one) = parse_git(&json!({ "repo": true, "files": 1 })) else { panic!("repo") };
+        assert_eq!(
+            (detached.branch_label(), changes_parts(&detached)),
+            ("HEAD at abc1234".into(), None)
+        );
+        let Git::Repo(one) = parse_git(&json!({ "repo": true, "files": 1 })) else {
+            panic!("repo")
+        };
         assert_eq!(one.files, 1);
     }
 
@@ -2640,21 +3232,42 @@ mod tests {
             json!({ "id": "s4", "name": "failed", "status": "error", "created_at": 600 }),
             json!({ "id": "s5", "status": "running", "created_at": 3_000 }),
         ];
-        let rows = process_rows("chat-1", subs.iter(), Some(("click · github.com".into(), 4_000)));
-        let view: Vec<_> = rows.iter().map(|r| (r.key.as_str(), r.kind, r.label.as_str(), r.started_ms)).collect();
+        let rows = process_rows(
+            "chat-1",
+            subs.iter(),
+            Some(("click · github.com".into(), 4_000)),
+        );
+        let view: Vec<_> = rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.kind, r.label.as_str(), r.started_ms))
+            .collect();
         assert_eq!(
             view,
             vec![
                 ("browser", ProcKind::Browser, "click · github.com", 4_000),
-                ("sub:s1", ProcKind::Subagent, "Find the bug · waiting", 1_000),
+                (
+                    "sub:s1",
+                    ProcKind::Subagent,
+                    "Find the bug · waiting",
+                    1_000
+                ),
                 ("sub:s2", ProcKind::Subagent, "research", 2_000),
                 ("sub:s5", ProcKind::Subagent, "subagent", 3_000),
             ]
         );
         // Stop wiring: the browser row cancels this chat's browser work;
         // subagents have no per-item stop and say why.
-        assert_eq!(rows[0].stop, Stop::Browser { chat: "chat-1".into() });
-        assert!(rows[1..].iter().all(|r| r.stop == Stop::Unavailable(SUBAGENT_NO_STOP)));
+        assert_eq!(
+            rows[0].stop,
+            Stop::Browser {
+                chat: "chat-1".into()
+            }
+        );
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|r| r.stop == Stop::Unavailable(SUBAGENT_NO_STOP))
+        );
         assert!(process_rows("c", std::iter::empty(), None).is_empty());
     }
 
@@ -2667,8 +3280,14 @@ mod tests {
         fade.set("3 files", t0, true);
         assert_eq!(fade.at, None);
         fade.set("4 files", t0, true);
-        assert_eq!((fade.prev.as_str(), fade.now.as_str()), ("3 files", "4 files"));
-        assert!(fade.progress(t0 + Duration::from_millis(80)).is_some_and(|p| p > 0. && p < 1.));
+        assert_eq!(
+            (fade.prev.as_str(), fade.now.as_str()),
+            ("3 files", "4 files")
+        );
+        assert!(
+            fade.progress(t0 + Duration::from_millis(80))
+                .is_some_and(|p| p > 0. && p < 1.)
+        );
         assert_eq!(fade.progress(t0 + FADE), None);
         fade.set("5 files", t0, false);
         assert_eq!((fade.now.as_str(), fade.at), ("5 files", None));
@@ -2676,29 +3295,73 @@ mod tests {
 
     #[test]
     fn changes_line_counts_untracked_apart_and_clean_is_none() {
-        let info = |files, untracked, added, removed| GitInfo { files, untracked, added, removed, ..GitInfo::default() };
+        let info = |files, untracked, added, removed| GitInfo {
+            files,
+            untracked,
+            added,
+            removed,
+            ..GitInfo::default()
+        };
         assert_eq!(changes_parts(&info(0, 0, 0, 0)), None);
-        assert_eq!(changes_parts(&info(4, 1, 12, 3)), Some((Some(("+12".into(), "−3".into())), "3 files changed · 1 untracked".into())));
-        assert_eq!(changes_parts(&info(1, 0, 0, 0)), Some((None, "1 file changed".into())));
-        assert_eq!(changes_parts(&info(2, 2, 0, 0)), Some((None, "2 untracked".into())));
+        assert_eq!(
+            changes_parts(&info(4, 1, 12, 3)),
+            Some((
+                Some(("+12".into(), "−3".into())),
+                "3 files changed · 1 untracked".into()
+            ))
+        );
+        assert_eq!(
+            changes_parts(&info(1, 0, 0, 0)),
+            Some((None, "1 file changed".into()))
+        );
+        assert_eq!(
+            changes_parts(&info(2, 2, 0, 0)),
+            Some((None, "2 untracked".into()))
+        );
     }
 
     #[test]
     fn branch_listing_pins_the_checked_out_branch() {
-        let list = CardBranches::from_reply(&json!({ "branches": ["a", "main", "b"], "current": "main", "detached": "abc" }));
-        assert_eq!((list.branches.clone(), list.current.as_deref(), list.detached.as_deref()), (vec!["main".to_string(), "a".into(), "b".into()], Some("main"), None));
-        let mut list = CardBranches::from_reply(&json!({ "branches": ["a", "b"], "current": null, "detached": "abc1234" }));
+        let list = CardBranches::from_reply(
+            &json!({ "branches": ["a", "main", "b"], "current": "main", "detached": "abc" }),
+        );
+        assert_eq!(
+            (
+                list.branches.clone(),
+                list.current.as_deref(),
+                list.detached.as_deref()
+            ),
+            (
+                vec!["main".to_string(), "a".into(), "b".into()],
+                Some("main"),
+                None
+            )
+        );
+        let mut list = CardBranches::from_reply(
+            &json!({ "branches": ["a", "b"], "current": null, "detached": "abc1234" }),
+        );
         assert_eq!(list.detached.as_deref(), Some("abc1234"));
         list.checked_out("b");
-        assert_eq!((list.branches, list.current.as_deref(), list.detached), (vec!["b".to_string(), "a".into()], Some("b"), None));
+        assert_eq!(
+            (list.branches, list.current.as_deref(), list.detached),
+            (vec!["b".to_string(), "a".into()], Some("b"), None)
+        );
     }
 
     #[test]
     fn token_split_reads_in_out_cached() {
         let mut usage = ChatUsage::default();
         assert_eq!(token_split(&usage), None);
-        usage.models.push(ModelTokens { model: "m".into(), input: 1200, output: 300, cache_read: 0, cache_write: 0 });
-        assert!(token_split(&usage).is_some_and(|s| s.starts_with("In ") && s.contains(" · Out ") && !s.contains("Cached")));
+        usage.models.push(ModelTokens {
+            model: "m".into(),
+            input: 1200,
+            output: 300,
+            cache_read: 0,
+            cache_write: 0,
+        });
+        assert!(token_split(&usage).is_some_and(|s| s.starts_with("In ")
+            && s.contains(" · Out ")
+            && !s.contains("Cached")));
     }
 
     #[test]

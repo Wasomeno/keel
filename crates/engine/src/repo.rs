@@ -64,7 +64,11 @@ fn git_command(cwd: &Path, args: &[&str]) -> std::process::Command {
     cmd
 }
 
-fn finish(status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+fn finish(
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<String, String> {
     if !status.success() {
         let stderr = String::from_utf8_lossy(stderr);
         return Err(format!("git command failed: {}", stderr.trim()));
@@ -73,13 +77,24 @@ fn finish(status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> Res
 }
 
 /// Run a git command with timeout. The child is killed when the future is dropped.
-pub async fn run_git_cmd(cwd: &Path, args: &[&str], timeout_duration: Duration) -> Result<String, String> {
+pub async fn run_git_cmd(
+    cwd: &Path,
+    args: &[&str],
+    timeout_duration: Duration,
+) -> Result<String, String> {
     let mut cmd = tokio::process::Command::from(git_command(cwd, args));
     cmd.kill_on_drop(true);
-    let child = cmd.spawn().map_err(|e| format!("failed to spawn git: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn git: {e}"))?;
     let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
         Ok(res) => res.map_err(|e| format!("git execution error: {e}"))?,
-        Err(_) => return Err(format!("git command timed out after {:?}", timeout_duration)),
+        Err(_) => {
+            return Err(format!(
+                "git command timed out after {:?}",
+                timeout_duration
+            ));
+        }
     };
     finish(output.status, &output.stdout, &output.stderr)
 }
@@ -101,8 +116,18 @@ pub fn run_git_cmd_sync(cwd: &Path, args: &[&str]) -> Result<String, String> {
             buf
         })
     };
-    let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let out = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
     let deadline = std::time::Instant::now() + GIT_TIMEOUT;
     let status = loop {
         match child.try_wait() {
@@ -215,13 +240,22 @@ fn not_a_repo() -> GitRepoStatus {
 /// else the normalized `origin` URL; else a hash of the device id plus the
 /// absolute `git rev-parse --git-common-dir`.
 pub fn repository_identity(device_id: &str, checkout: &Path) -> String {
-    let git = |args: &[&str]| run_git_cmd_sync(checkout, args).ok().filter(|out| !out.is_empty());
+    let git = |args: &[&str]| {
+        run_git_cmd_sync(checkout, args)
+            .ok()
+            .filter(|out| !out.is_empty())
+    };
     // Trunk: origin's HEAD, then the usual names, then the current HEAD.
     let mut trunks = Vec::new();
     if let Some(head) = git(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]) {
         trunks.push(head);
     }
-    for name in ["refs/heads/main", "refs/heads/master", "refs/heads/trunk", "HEAD"] {
+    for name in [
+        "refs/heads/main",
+        "refs/heads/master",
+        "refs/heads/trunk",
+        "HEAD",
+    ] {
         trunks.push(name.to_string());
     }
     // A shallow clone's boundary commit is not the real root.
@@ -232,8 +266,15 @@ pub fn repository_identity(device_id: &str, checkout: &Path) -> String {
             continue;
         }
         // Several roots (merged histories): the smallest id is stable across clones.
-        if let Some(root) = git(&["rev-list", "--max-parents=0", trunk.as_str()])
-            .and_then(|roots| roots.lines().map(str::trim).filter(|r| r.len() >= 40).min().map(str::to_string))
+        if let Some(root) =
+            git(&["rev-list", "--max-parents=0", trunk.as_str()]).and_then(|roots| {
+                roots
+                    .lines()
+                    .map(str::trim)
+                    .filter(|r| r.len() >= 40)
+                    .min()
+                    .map(str::to_string)
+            })
         {
             return root;
         }
@@ -278,10 +319,16 @@ pub fn scan_git_repo_sync(device_id: &str, cwd: &Path) -> GitRepoStatus {
 }
 
 /// Capture patch bytes capped at DIFF_CAP (3 MiB) and write to profile patches dir.
-pub async fn capture_patch(cwd: &Path, checkout_id: &str, profile_dir: &Path) -> Result<PathBuf, String> {
+pub async fn capture_patch(
+    cwd: &Path,
+    checkout_id: &str,
+    profile_dir: &Path,
+) -> Result<PathBuf, String> {
     let patch_text = match run_git_cmd(cwd, &["diff", "HEAD"], GIT_TIMEOUT).await {
         Ok(out) => out,
-        Err(_) => run_git_cmd(cwd, &["diff"], GIT_TIMEOUT).await.unwrap_or_default(),
+        Err(_) => run_git_cmd(cwd, &["diff"], GIT_TIMEOUT)
+            .await
+            .unwrap_or_default(),
     };
 
     let mut bytes = patch_text.into_bytes();
@@ -317,9 +364,27 @@ enum WatchMsg {
 /// dropped in the notify callback (FSEvents watches a tree; it cannot skip
 /// subtrees, so filtering is all we can do).
 const IGNORED_DIRS: &[&str] = &[
-    "node_modules", "target", "dist", "build", "out", ".next", ".nuxt", ".turbo", ".cache",
-    ".parcel-cache", ".svelte-kit", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".gradle", "DerivedData", "Pods", ".idea", ".vscode",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    ".svelte-kit",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".gradle",
+    "DerivedData",
+    "Pods",
+    ".idea",
+    ".vscode",
 ];
 
 /// Whether an event at `path` (under a watched root) can change what a
@@ -461,7 +526,9 @@ impl RepoWatcher {
         let spaces_for_events = watched_spaces.clone();
         let watcher_res = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             let Ok(event) = res else { return };
-            let Ok(spaces) = spaces_for_events.lock() else { return };
+            let Ok(spaces) = spaces_for_events.lock() else {
+                return;
+            };
             let mut hit: Vec<&String> = Vec::new();
             for path in &event.paths {
                 for (sid, root) in spaces.iter() {
@@ -575,7 +642,11 @@ pub fn read_head_file(cwd: &Path) -> Option<Head> {
     } else {
         let text = std::fs::read_to_string(&dot).ok()?;
         let target = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
-        if target.is_absolute() { target } else { cwd.join(target) }
+        if target.is_absolute() {
+            target
+        } else {
+            cwd.join(target)
+        }
     };
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
@@ -607,7 +678,11 @@ pub fn list_branches_with_head_sync(cwd: &Path) -> Result<BranchList, String> {
     {
         branches.insert(0, name.clone());
     }
-    Ok(BranchList { branches, current, detached })
+    Ok(BranchList {
+        branches,
+        current,
+        detached,
+    })
 }
 
 /// Uncommitted changes to tracked files (staged or not). Untracked files
@@ -625,7 +700,10 @@ pub fn checkout_branch_sync(cwd: &Path, branch: &str) -> Result<(), String> {
         return Err(format!("not a branch name: {branch:?}"));
     }
     if has_uncommitted_changes_sync(cwd)? {
-        let folder = cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| cwd.display().to_string());
+        let folder = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.display().to_string());
         return Err(format!(
             "Uncommitted changes in {folder} — commit or stash them, or use a worktree, to switch to {branch}"
         ));
@@ -637,7 +715,8 @@ pub fn checkout_branch_sync(cwd: &Path, branch: &str) -> Result<(), String> {
     let remote = format!("refs/remotes/origin/{branch}");
     if run_git_cmd_sync(cwd, &["rev-parse", "--verify", "--quiet", &remote]).is_ok() {
         let upstream = format!("origin/{branch}");
-        return run_git_cmd_sync(cwd, &["checkout", "-b", branch, "--track", &upstream]).map(|_| ());
+        return run_git_cmd_sync(cwd, &["checkout", "-b", branch, "--track", &upstream])
+            .map(|_| ());
     }
     Err(format!("branch {branch} not found"))
 }
@@ -650,8 +729,16 @@ const PATH_LIMIT: usize = 20_000;
 /// ignored ones; anything else is walked, skipping hidden entries and
 /// dependency/build folders.
 pub fn list_paths_sync(cwd: &Path) -> Result<Vec<String>, String> {
-    let files: Vec<String> = match run_git_cmd_sync(cwd, &["ls-files", "--cached", "--others", "--exclude-standard"]) {
-        Ok(out) => out.lines().map(str::to_string).filter(|l| !l.is_empty()).take(PATH_LIMIT).collect(),
+    let files: Vec<String> = match run_git_cmd_sync(
+        cwd,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    ) {
+        Ok(out) => out
+            .lines()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+            .take(PATH_LIMIT)
+            .collect(),
         Err(_) => walk_files(cwd)?,
     };
     let mut paths = std::collections::BTreeSet::new();
@@ -680,7 +767,9 @@ fn walk_files(root: &Path) -> Result<Vec<String>, String> {
                 continue;
             }
             let path = entry.path();
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_dir() {
                 stack.push(path);
             } else if let Ok(rel) = path.strip_prefix(root) {
@@ -695,17 +784,30 @@ fn walk_files(root: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Adds a git worktree at `worktree_path` for the repository at `repo_path`.
-pub async fn add_worktree(repo_path: &Path, worktree_path: &Path, branch: Option<&str>) -> Result<(), String> {
-    let (repo, wt, branch) = (repo_path.to_path_buf(), worktree_path.to_path_buf(), branch.map(str::to_string));
+pub async fn add_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch: Option<&str>,
+) -> Result<(), String> {
+    let (repo, wt, branch) = (
+        repo_path.to_path_buf(),
+        worktree_path.to_path_buf(),
+        branch.map(str::to_string),
+    );
     tokio::task::spawn_blocking(move || add_worktree_sync(&repo, &wt, branch.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
 
 /// Synchronous addition of a git worktree at `worktree_path`.
-pub fn add_worktree_sync(repo_path: &Path, worktree_path: &Path, branch: Option<&str>) -> Result<(), String> {
+pub fn add_worktree_sync(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch: Option<&str>,
+) -> Result<(), String> {
     if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create worktree parent dir: {e}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create worktree parent dir: {e}"))?;
     }
     let path_str = worktree_path.to_string_lossy().to_string();
 
@@ -718,10 +820,15 @@ pub fn add_worktree_sync(repo_path: &Path, worktree_path: &Path, branch: Option<
         if run_git_cmd_sync(repo_path, &["worktree", "add", "-b", b, &path_str]).is_ok() {
             return Ok(());
         }
-        return run_git_cmd_sync(repo_path, &["worktree", "add", "--detach", &path_str, b]).map(|_| ());
+        return run_git_cmd_sync(repo_path, &["worktree", "add", "--detach", &path_str, b])
+            .map(|_| ());
     }
 
-    run_git_cmd_sync(repo_path, &["worktree", "add", "--detach", &path_str, "HEAD"]).map(|_| ())
+    run_git_cmd_sync(
+        repo_path,
+        &["worktree", "add", "--detach", &path_str, "HEAD"],
+    )
+    .map(|_| ())
 }
 
 /// Removes a git worktree at `worktree_path`.
@@ -745,7 +852,10 @@ pub fn remove_worktree_sync(repo_path: &Path, worktree_path: &Path) -> Result<()
 /// True when `cwd` is strictly inside `{data_dir}/worktrees/`, compared on
 /// canonical paths component-wise.
 pub fn is_engine_worktree(data_dir: &Path, cwd: &Path) -> bool {
-    let (Ok(root), Ok(cwd)) = (data_dir.join("worktrees").canonicalize(), cwd.canonicalize()) else {
+    let (Ok(root), Ok(cwd)) = (
+        data_dir.join("worktrees").canonicalize(),
+        cwd.canonicalize(),
+    ) else {
         return false;
     };
     cwd != root && cwd.starts_with(&root)
@@ -762,12 +872,27 @@ mod tests {
         std::fs::create_dir_all(root.join("src/ui")).unwrap();
         std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
         std::fs::create_dir_all(root.join(".hidden")).unwrap();
-        for file in ["README.md", "src/main.rs", "src/ui/view.rs", "node_modules/x/i.js", ".hidden/h"] {
+        for file in [
+            "README.md",
+            "src/main.rs",
+            "src/ui/view.rs",
+            "node_modules/x/i.js",
+            ".hidden/h",
+        ] {
             std::fs::write(root.join(file), "").unwrap();
         }
         let paths = list_paths_sync(&root).unwrap();
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(paths, ["README.md", "src/", "src/main.rs", "src/ui/", "src/ui/view.rs"]);
+        assert_eq!(
+            paths,
+            [
+                "README.md",
+                "src/",
+                "src/main.rs",
+                "src/ui/",
+                "src/ui/view.rs"
+            ]
+        );
     }
 
     #[test]
@@ -813,7 +938,12 @@ mod tests {
         // 2. Initialize a git repo
         let _ = run_git_cmd(&temp, &["init"], GIT_TIMEOUT).await;
         let _ = run_git_cmd(&temp, &["config", "user.name", "Keel Test"], GIT_TIMEOUT).await;
-        let _ = run_git_cmd(&temp, &["config", "user.email", "test@keel.dev"], GIT_TIMEOUT).await;
+        let _ = run_git_cmd(
+            &temp,
+            &["config", "user.email", "test@keel.dev"],
+            GIT_TIMEOUT,
+        )
+        .await;
 
         let status_empty = scan_git_repo("dev_test", &temp).await;
         assert!(status_empty.is_repo);
@@ -846,8 +976,18 @@ mod tests {
         std::fs::create_dir_all(&repo_dir).unwrap();
 
         let _ = run_git_cmd(&repo_dir, &["init"], GIT_TIMEOUT).await;
-        let _ = run_git_cmd(&repo_dir, &["config", "user.name", "Keel Test"], GIT_TIMEOUT).await;
-        let _ = run_git_cmd(&repo_dir, &["config", "user.email", "test@keel.dev"], GIT_TIMEOUT).await;
+        let _ = run_git_cmd(
+            &repo_dir,
+            &["config", "user.name", "Keel Test"],
+            GIT_TIMEOUT,
+        )
+        .await;
+        let _ = run_git_cmd(
+            &repo_dir,
+            &["config", "user.email", "test@keel.dev"],
+            GIT_TIMEOUT,
+        )
+        .await;
 
         std::fs::write(repo_dir.join("main.rs"), b"fn main() {}\n").unwrap();
         let _ = run_git_cmd(&repo_dir, &["add", "main.rs"], GIT_TIMEOUT).await;
@@ -860,7 +1000,10 @@ mod tests {
         let status = scan_git_repo("dev1", &repo_dir).await;
         assert!(status.is_repo);
 
-        let wt_path = data_dir.join("worktrees").join(&status.repository_id).join("chat-123");
+        let wt_path = data_dir
+            .join("worktrees")
+            .join(&status.repository_id)
+            .join("chat-123");
         // Add worktree
         add_worktree(&repo_dir, &wt_path, Some("feat-test"))
             .await
@@ -896,7 +1039,10 @@ mod tests {
         assert!(Path::new(&common).is_absolute());
         let mut hasher = Sha256::new();
         hasher.update(format!("dev:{common}").as_bytes());
-        assert_eq!(repository_identity("dev", &dir), format!("{:x}", hasher.finalize()));
+        assert_eq!(
+            repository_identity("dev", &dir),
+            format!("{:x}", hasher.finalize())
+        );
 
         git(&["commit", "--allow-empty", "-m", "root"]);
         let main_root = git(&["rev-parse", "HEAD"]);
@@ -943,10 +1089,18 @@ mod tests {
         let dir = repo_with_branches("headfile");
         let git = run_git_cmd_sync(&dir, &["symbolic-ref", "--short", "HEAD"]).unwrap();
         assert_eq!(read_head_file(&dir), Some(Head::Branch(git)));
-        let wt = std::env::temp_dir().join(format!("keel-branch-headfile-wt-{}", uuid::Uuid::new_v4()));
-        run_git_cmd_sync(&dir, &["worktree", "add", "-b", "wt/side", wt.to_str().unwrap()]).unwrap();
+        let wt =
+            std::env::temp_dir().join(format!("keel-branch-headfile-wt-{}", uuid::Uuid::new_v4()));
+        run_git_cmd_sync(
+            &dir,
+            &["worktree", "add", "-b", "wt/side", wt.to_str().unwrap()],
+        )
+        .unwrap();
         assert_eq!(read_head_file(&wt), Some(Head::Branch("wt/side".into())));
-        assert_eq!(current_head_sync(&wt).unwrap(), Head::Branch("wt/side".into()));
+        assert_eq!(
+            current_head_sync(&wt).unwrap(),
+            Head::Branch("wt/side".into())
+        );
         run_git_cmd_sync(&dir, &["checkout", "--detach"]).unwrap();
         assert_eq!(read_head_file(&dir), None);
         let _ = std::fs::remove_dir_all(wt);
@@ -982,8 +1136,15 @@ mod tests {
         // Untracked files don't block a switch.
         std::fs::write(dir.join("scratch.txt"), b"x").unwrap();
         checkout_branch_sync(&dir, "feat").unwrap();
-        assert_eq!(current_head_sync(&dir).unwrap(), Head::Branch("feat".into()));
-        assert!(checkout_branch_sync(&dir, "nope").unwrap_err().contains("not found"));
+        assert_eq!(
+            current_head_sync(&dir).unwrap(),
+            Head::Branch("feat".into())
+        );
+        assert!(
+            checkout_branch_sync(&dir, "nope")
+                .unwrap_err()
+                .contains("not found")
+        );
         assert!(checkout_branch_sync(&dir, "--force").is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -992,11 +1153,28 @@ mod tests {
     fn checkout_creates_a_tracking_branch_from_origin() {
         let origin = repo_with_branches("origin");
         run_git_cmd_sync(&origin, &["branch", "remote-only"]).unwrap();
-        let clone = std::env::temp_dir().join(format!("keel-branch-clone-{}", uuid::Uuid::new_v4()));
-        run_git_cmd_sync(&std::env::temp_dir(), &["clone", "-q", &origin.to_string_lossy(), &clone.to_string_lossy()]).unwrap();
+        let clone =
+            std::env::temp_dir().join(format!("keel-branch-clone-{}", uuid::Uuid::new_v4()));
+        run_git_cmd_sync(
+            &std::env::temp_dir(),
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        )
+        .unwrap();
         checkout_branch_sync(&clone, "remote-only").unwrap();
-        assert_eq!(current_head_sync(&clone).unwrap(), Head::Branch("remote-only".into()));
-        let upstream = run_git_cmd_sync(&clone, &["rev-parse", "--abbrev-ref", "remote-only@{upstream}"]).unwrap();
+        assert_eq!(
+            current_head_sync(&clone).unwrap(),
+            Head::Branch("remote-only".into())
+        );
+        let upstream = run_git_cmd_sync(
+            &clone,
+            &["rev-parse", "--abbrev-ref", "remote-only@{upstream}"],
+        )
+        .unwrap();
         assert_eq!(upstream, "origin/remote-only");
         let _ = std::fs::remove_dir_all(origin);
         let _ = std::fs::remove_dir_all(clone);
@@ -1009,7 +1187,10 @@ mod tests {
         let err = checkout_branch_sync(&dir, "feat").unwrap_err();
         assert!(err.starts_with("Uncommitted changes in "), "{err}");
         assert!(err.contains("worktree"), "{err}");
-        assert_eq!(current_head_sync(&dir).unwrap(), Head::Branch("main".into()));
+        assert_eq!(
+            current_head_sync(&dir).unwrap(),
+            Head::Branch("main".into())
+        );
         // Staged changes count too.
         run_git_cmd_sync(&dir, &["add", "a.txt"]).unwrap();
         assert!(checkout_branch_sync(&dir, "feat").is_err());

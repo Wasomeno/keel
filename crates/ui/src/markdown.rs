@@ -93,7 +93,11 @@ impl InlineBuf {
             last.range.end = end;
             return;
         }
-        self.spans.push(InlineSpan { range: start..end, style, link: link.cloned() });
+        self.spans.push(InlineSpan {
+            range: start..end,
+            style,
+            link: link.cloned(),
+        });
     }
 
     /// The text without surrounding whitespace, spans clipped to it.
@@ -130,14 +134,20 @@ fn autolink(text: &str, spans: &mut Vec<InlineSpan>) {
     while let Some(at) = text[from..].find("http").map(|i| from + i) {
         let rest = &text[at..];
         // A word that merely ends in "http" (`xhttp://`) is not a URL.
-        let boundary = text[..at].chars().next_back().is_none_or(|ch| !ch.is_alphanumeric());
+        let boundary = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric());
         if !boundary || !(rest.starts_with("https://") || rest.starts_with("http://")) {
             from = at + 4;
             continue;
         }
-        let mut url = &rest[..rest.find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '`')).unwrap_or(rest.len())];
+        let mut url = &rest[..rest
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '`'))
+            .unwrap_or(rest.len())];
         loop {
-            let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"', ']', '}', '*', '_']);
+            let trimmed =
+                url.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"', ']', '}', '*', '_']);
             let trimmed = match trimmed.strip_suffix(')') {
                 Some(t) if trimmed.matches(')').count() > trimmed.matches('(').count() => t,
                 _ => trimmed,
@@ -149,10 +159,18 @@ fn autolink(text: &str, spans: &mut Vec<InlineSpan>) {
         }
         let range = at..at + url.len();
         from = range.end.max(at + 4);
-        if url.split_once("://").is_some_and(|(_, host)| !host.is_empty())
-            && !spans.iter().any(|s| s.range.start < range.end && range.start < s.range.end)
+        if url
+            .split_once("://")
+            .is_some_and(|(_, host)| !host.is_empty())
+            && !spans
+                .iter()
+                .any(|s| s.range.start < range.end && range.start < s.range.end)
         {
-            found.push(InlineSpan { range, style: InlineStyle::default(), link: Some(url.to_string()) });
+            found.push(InlineSpan {
+                range,
+                style: InlineStyle::default(),
+                link: Some(url.to_string()),
+            });
         }
     }
     if !found.is_empty() {
@@ -179,7 +197,11 @@ impl ImageRef {
                 items
                     .iter()
                     .map(|a| ImageRef {
-                        name: a.get("name").and_then(|v| v.as_str()).unwrap_or("image").to_string(),
+                        name: a
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("image")
+                            .to_string(),
                         path: a.get("path").and_then(|v| v.as_str()).map(str::to_string),
                     })
                     .collect()
@@ -223,7 +245,12 @@ pub struct ToolEntry {
 impl ToolEntry {
     /// One `tools` / `parts` entry of a session message view.
     pub fn from_json(t: &serde_json::Value) -> Self {
-        let s = |k: &str| t.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let s = |k: &str| {
+            t.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
         let images = t
             .get("images")
             .and_then(|v| v.as_array())
@@ -231,7 +258,9 @@ impl ToolEntry {
                 items
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .filter(|p| std::path::Path::new(p).is_absolute() && std::path::Path::new(p).is_file())
+                    .filter(|p| {
+                        std::path::Path::new(p).is_absolute() && std::path::Path::new(p).is_file()
+                    })
                     .map(str::to_string)
                     .collect()
             })
@@ -241,7 +270,14 @@ impl ToolEntry {
         // A legacy `kind` that isn't a part type is still accepted.
         let kind = match s("tool_kind") {
             k if !k.is_empty() => k,
-            _ => Some(s("kind")).filter(|k| !matches!(k.as_str(), "" | "tool" | "text" | "reasoning" | "subagent" | "ui" | "plan")).unwrap_or_default(),
+            _ => Some(s("kind"))
+                .filter(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "" | "tool" | "text" | "reasoning" | "subagent" | "ui" | "plan"
+                    )
+                })
+                .unwrap_or_default(),
         };
         ToolEntry {
             tool_id: s("tool_id"),
@@ -272,12 +308,7 @@ impl ToolEntry {
     pub fn parse_list(view: &serde_json::Value) -> Vec<Self> {
         view.get("tools")
             .and_then(|v| v.as_array())
-            .map(|tools| {
-                tools
-                    .iter()
-                    .map(ToolEntry::from_json)
-                    .collect()
-            })
+            .map(|tools| tools.iter().map(ToolEntry::from_json).collect())
             .unwrap_or_default()
     }
 }
@@ -294,13 +325,21 @@ fn parse_diff(value: Option<&serde_json::Value>) -> Option<ToolDiffView> {
     };
     let text = |k: &str| value.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let path = text("path").filter(|p| !p.is_empty())?;
-    Some(ToolDiffView { path, old_text: text("old_text"), new_text: text("new_text").unwrap_or_default() })
+    Some(ToolDiffView {
+        path,
+        old_text: text("old_text"),
+        new_text: text("new_text").unwrap_or_default(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptBlock {
     /// Paragraph text with its inline styles and links.
-    Paragraph { id: String, content: String, spans: Vec<InlineSpan> },
+    Paragraph {
+        id: String,
+        content: String,
+        spans: Vec<InlineSpan>,
+    },
     /// Fenced or indented code block
     Code {
         id: String,
@@ -316,13 +355,27 @@ pub enum TranscriptBlock {
         run: Option<crate::runnable::Run>,
     },
     /// Heading (h1-h6)
-    Heading { id: String, level: u8, content: String, spans: Vec<InlineSpan> },
+    Heading {
+        id: String,
+        level: u8,
+        content: String,
+        spans: Vec<InlineSpan>,
+    },
     /// Blockquote: its paragraphs as lines.
-    Quote { id: String, content: String, spans: Vec<InlineSpan> },
+    Quote {
+        id: String,
+        content: String,
+        spans: Vec<InlineSpan>,
+    },
     /// Horizontal rule.
     Rule { id: String },
     /// GFM table. `header` cells may all be empty (`| | |`).
-    Table { id: String, align: Vec<ColumnAlign>, header: Vec<Inline>, rows: Vec<Vec<Inline>> },
+    Table {
+        id: String,
+        align: Vec<ColumnAlign>,
+        header: Vec<Inline>,
+        rows: Vec<Vec<Inline>>,
+    },
     /// Ordered or bullet list; each item renders as its own line with a marker.
     List { id: String, items: Vec<ListItem> },
     /// The images a user message carries, as one row of thumbnails.
@@ -331,9 +384,16 @@ pub enum TranscriptBlock {
     /// assistant text): absolute paths, each a clickable preview.
     Shots { id: String, paths: Vec<String> },
     /// Files an assistant turn produced, as one row of clickable chips.
-    Files { id: String, items: Vec<crate::files::FileRef> },
+    Files {
+        id: String,
+        items: Vec<crate::files::FileRef>,
+    },
     /// One message's thinking, folded into a single row.
-    Reasoning { id: String, content: String, expanded: bool },
+    Reasoning {
+        id: String,
+        content: String,
+        expanded: bool,
+    },
     /// One message's tool calls, folded into a single row.
     ToolGroup {
         id: String,
@@ -344,9 +404,19 @@ pub enum TranscriptBlock {
         overrides: Vec<(String, bool)>,
     },
     /// The agent's plan, as a line with its entries nested.
-    Plan { id: String, entries: Vec<crate::trace::PlanItem>, live: bool, expanded: Option<bool> },
+    Plan {
+        id: String,
+        entries: Vec<crate::trace::PlanItem>,
+        live: bool,
+        expanded: Option<bool>,
+    },
     /// A turn's steps folded into one expandable line ("Show works" / "Hide works").
-    TurnSummary { id: String, label: String, failed: bool, expanded: bool },
+    TurnSummary {
+        id: String,
+        label: String,
+        failed: bool,
+        expanded: bool,
+    },
     /// A spawned subagent: one clickable indicator row.
     Subagent {
         id: String,
@@ -357,24 +427,55 @@ pub enum TranscriptBlock {
     },
     /// A chart the engine's generative UI chose for the message.
     /// `replaces` is the table it stands in for, still what Copy copies.
-    Chart { id: String, chart: crate::chart::Chart, replaces: Option<Box<TranscriptBlock>> },
+    Chart {
+        id: String,
+        chart: crate::chart::Chart,
+        replaces: Option<Box<TranscriptBlock>>,
+    },
     /// Buttons for the options the agent asked the user to pick from.
-    Choices { id: String, choices: crate::choices::Choices },
+    Choices {
+        id: String,
+        choices: crate::choices::Choices,
+    },
     /// A test run's result card.
-    Tests { id: String, run: crate::test_run::TestRun },
+    Tests {
+        id: String,
+        run: crate::test_run::TestRun,
+    },
     /// A merge request card; `message_id` and `part_id` name its `ui` part
     /// (a merge rewrites it).
-    MrCard { id: String, card: crate::mr_card::MrCard, message_id: String, part_id: String },
+    MrCard {
+        id: String,
+        card: crate::mr_card::MrCard,
+        message_id: String,
+        part_id: String,
+    },
     /// Before → after figures as tiles.
-    Stats { id: String, items: Vec<crate::stats::Stat> },
+    Stats {
+        id: String,
+        items: Vec<crate::stats::Stat>,
+    },
     /// The files a turn changed, with line counts.
-    FileChanges { id: String, card: crate::file_changes::FileChanges, expanded: bool },
+    FileChanges {
+        id: String,
+        card: crate::file_changes::FileChanges,
+        expanded: bool,
+    },
     /// Numbered steps, with the one in progress marked.
-    Steps { id: String, steps: crate::steps::Steps },
+    Steps {
+        id: String,
+        steps: crate::steps::Steps,
+    },
     /// One sentence pulled out of the reply.
-    Callout { id: String, callout: crate::callout::Callout },
+    Callout {
+        id: String,
+        callout: crate::callout::Callout,
+    },
     /// Side-by-side claims.
-    Compare { id: String, columns: Vec<crate::compare::Column> },
+    Compare {
+        id: String,
+        columns: Vec<crate::compare::Column>,
+    },
 }
 
 impl TranscriptBlock {
@@ -443,33 +544,75 @@ impl TranscriptBlock {
             | Self::Heading { content, spans, .. }
             | Self::Quote { content, spans, .. } => content.len() + spans.len(),
             Self::Rule { .. } => 1,
-            Self::Table { header, rows, .. } => {
-                header.iter().chain(rows.iter().flatten()).map(|cell| cell.text.len() + cell.spans.len() + 1).sum()
+            Self::Table { header, rows, .. } => header
+                .iter()
+                .chain(rows.iter().flatten())
+                .map(|cell| cell.text.len() + cell.spans.len() + 1)
+                .sum(),
+            Self::List { items, .. } => {
+                items.iter().map(|i| i.text.len() + i.spans.len() + 1).sum()
             }
-            Self::List { items, .. } => items.iter().map(|i| i.text.len() + i.spans.len() + 1).sum(),
             Self::Images { items, .. } => items.len(),
             Self::Shots { paths, .. } => paths.iter().map(|p| p.len() + 1).sum(),
             Self::Files { items, .. } => items.iter().map(|f| f.path.len() + 1).sum(),
-            Self::Reasoning { content, expanded, .. } => content.len() + usize::from(*expanded),
-            Self::ToolGroup { tools, expanded, overrides, .. } => {
-                tools.iter().map(|t| t.name.len() + t.summary.len() + t.state.len() + t.output_tail.len() + t.kind.len()).sum::<usize>()
+            Self::Reasoning {
+                content, expanded, ..
+            } => content.len() + usize::from(*expanded),
+            Self::ToolGroup {
+                tools,
+                expanded,
+                overrides,
+                ..
+            } => {
+                tools
+                    .iter()
+                    .map(|t| {
+                        t.name.len()
+                            + t.summary.len()
+                            + t.state.len()
+                            + t.output_tail.len()
+                            + t.kind.len()
+                    })
+                    .sum::<usize>()
                     + usize::from(*expanded)
-                    + overrides.iter().map(|(id, open)| id.len() + usize::from(*open) + 1).sum::<usize>()
+                    + overrides
+                        .iter()
+                        .map(|(id, open)| id.len() + usize::from(*open) + 1)
+                        .sum::<usize>()
             }
-            Self::Plan { entries, expanded, .. } => {
-                entries.iter().map(|e| e.content.len() + e.status.len() + 1).sum::<usize>() + expanded.map_or(0, |o| 1 + usize::from(o))
+            Self::Plan {
+                entries, expanded, ..
+            } => {
+                entries
+                    .iter()
+                    .map(|e| e.content.len() + e.status.len() + 1)
+                    .sum::<usize>()
+                    + expanded.map_or(0, |o| 1 + usize::from(o))
             }
-            Self::TurnSummary { label, expanded, .. } => label.len() + usize::from(*expanded),
-            Self::Subagent { name, summary, state, .. } => name.len() + summary.len() + state.len(),
+            Self::TurnSummary {
+                label, expanded, ..
+            } => label.len() + usize::from(*expanded),
+            Self::Subagent {
+                name,
+                summary,
+                state,
+                ..
+            } => name.len() + summary.len() + state.len(),
             Self::Chart { chart, .. } => chart.content_len(),
             Self::Choices { choices, .. } => choices.content_len(),
             Self::Tests { run, .. } => run.content_len(),
             Self::MrCard { card, .. } => card.content_len(),
-            Self::Stats { items, .. } => items.iter().map(|s| s.label.len() + s.after.len() + 1).sum(),
+            Self::Stats { items, .. } => items
+                .iter()
+                .map(|s| s.label.len() + s.after.len() + 1)
+                .sum(),
             Self::FileChanges { card, expanded, .. } => card.content_len() + usize::from(*expanded),
             Self::Steps { steps, .. } => steps.content_len(),
             Self::Callout { callout, .. } => callout.content_len(),
-            Self::Compare { columns, .. } => columns.iter().map(|c| c.title.len() + c.points.iter().map(|p| p.len() + 1).sum::<usize>()).sum(),
+            Self::Compare { columns, .. } => columns
+                .iter()
+                .map(|c| c.title.len() + c.points.iter().map(|p| p.len() + 1).sum::<usize>())
+                .sum(),
         }
     }
 }
@@ -534,7 +677,12 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
     };
 
     for (event, range) in Parser::new_ext(text, options()).into_offset_iter() {
-        let style = InlineStyle { bold: bold > 0, italic: italic > 0, strike: strike > 0, code: false };
+        let style = InlineStyle {
+            bold: bold > 0,
+            italic: italic > 0,
+            strike: strike > 0,
+            code: false,
+        };
         match event {
             Event::Start(tag) => {
                 if depth == 0 {
@@ -586,7 +734,9 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
                         buf.raw(" ");
                     }
                     Tag::FootnoteDefinition(label) => buf.raw(&format!("[^{label}] ")),
-                    Tag::Paragraph if (!lists.is_empty() || quote > 0) && !buf.is_empty() => buf.raw("\n"),
+                    Tag::Paragraph if (!lists.is_empty() || quote > 0) && !buf.is_empty() => {
+                        buf.raw("\n")
+                    }
                     Tag::Emphasis => italic += 1,
                     Tag::Strong => bold += 1,
                     Tag::Strikethrough => strike += 1,
@@ -650,14 +800,20 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
                 if depth == 0 {
                     let block = match tag_end {
                         TagEnd::CodeBlock => {
-                            let content = buf.text.strip_suffix('\n').unwrap_or(&buf.text).to_string();
+                            let content =
+                                buf.text.strip_suffix('\n').unwrap_or(&buf.text).to_string();
                             let raw = text[start..range.end].trim_end();
                             let fence = raw.ends_with("```") || raw.ends_with("~~~");
                             code_block(lang.take(), content, fence && raw.lines().count() > 1)
                         }
                         TagEnd::Heading(level) => {
                             let (content, spans) = buf.take_trimmed();
-                            TranscriptBlock::Heading { id: String::new(), level: level as u8, content, spans }
+                            TranscriptBlock::Heading {
+                                id: String::new(),
+                                level: level as u8,
+                                content,
+                                spans,
+                            }
                         }
                         TagEnd::List(_) => TranscriptBlock::List {
                             id: String::new(),
@@ -665,7 +821,11 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
                         },
                         TagEnd::BlockQuote(_) => {
                             let (content, spans) = buf.take_trimmed();
-                            TranscriptBlock::Quote { id: String::new(), content, spans }
+                            TranscriptBlock::Quote {
+                                id: String::new(),
+                                content,
+                                spans,
+                            }
                         }
                         TagEnd::Table => TranscriptBlock::Table {
                             id: String::new(),
@@ -673,13 +833,19 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
                             header: std::mem::take(&mut header),
                             rows: std::mem::take(&mut rows),
                         },
-                        TagEnd::Paragraph if !images.is_empty() && !other_text => TranscriptBlock::Shots {
-                            id: String::new(),
-                            paths: std::mem::take(&mut images),
-                        },
+                        TagEnd::Paragraph if !images.is_empty() && !other_text => {
+                            TranscriptBlock::Shots {
+                                id: String::new(),
+                                paths: std::mem::take(&mut images),
+                            }
+                        }
                         _ => {
                             let (content, spans) = buf.take_trimmed();
-                            TranscriptBlock::Paragraph { id: String::new(), content, spans }
+                            TranscriptBlock::Paragraph {
+                                id: String::new(),
+                                content,
+                                spans,
+                            }
                         }
                     };
                     buf.clear();
@@ -696,21 +862,44 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
             Event::Html(t) | Event::InlineHtml(t) => buf.raw(&html_text(&t)),
             // Kept as written: a streamed reference parses before its definition
             // arrives and stays `[^a]` text, so the full parse must match it.
-            Event::FootnoteReference(label) => buf.push(&format!("[^{label}]"), style, links.last()),
+            Event::FootnoteReference(label) => {
+                buf.push(&format!("[^{label}]"), style, links.last())
+            }
             Event::InlineMath(t) => {
                 other_text = true;
-                buf.push(&t, InlineStyle { code: true, ..style }, links.last())
+                buf.push(
+                    &t,
+                    InlineStyle {
+                        code: true,
+                        ..style
+                    },
+                    links.last(),
+                )
             }
             Event::DisplayMath(t) => {
                 other_text = true;
                 if !buf.is_empty() {
                     buf.raw("\n");
                 }
-                buf.push(t.trim(), InlineStyle { code: true, ..style }, links.last());
+                buf.push(
+                    t.trim(),
+                    InlineStyle {
+                        code: true,
+                        ..style
+                    },
+                    links.last(),
+                );
             }
             Event::Code(code) => {
                 other_text = true;
-                buf.push(&code, InlineStyle { code: true, ..style }, links.last())
+                buf.push(
+                    &code,
+                    InlineStyle {
+                        code: true,
+                        ..style
+                    },
+                    links.last(),
+                )
             }
             Event::SoftBreak | Event::HardBreak => buf.raw("\n"),
             Event::TaskListMarker(checked) => {
@@ -720,7 +909,9 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
                     last.task = Some(checked);
                 }
             }
-            Event::Rule if depth == 0 => out.push((range, TranscriptBlock::Rule { id: String::new() })),
+            Event::Rule if depth == 0 => {
+                out.push((range, TranscriptBlock::Rule { id: String::new() }))
+            }
             _ => {}
         }
     }
@@ -741,7 +932,14 @@ fn html_text(html: &str) -> String {
         if let Some(end) = rest.starts_with("<!--").then(|| rest.find("-->")).flatten() {
             rest = &rest[end + 3..];
         } else if let Some(end) = rest.find('>')
-            && matches!(rest[1..end].trim_end_matches('/').trim().to_ascii_lowercase().as_str(), "br")
+            && matches!(
+                rest[1..end]
+                    .trim_end_matches('/')
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "br"
+            )
         {
             out.push('\n');
             rest = &rest[end + 1..];
@@ -777,19 +975,27 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Some(b) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(b) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
         out.push(bytes[i]);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
 
-pub(crate) fn code_block(language: Option<String>, content: String, closed: bool) -> TranscriptBlock {
+pub(crate) fn code_block(
+    language: Option<String>,
+    content: String,
+    closed: bool,
+) -> TranscriptBlock {
     let line_count = content.lines().count().max(1);
     let spans = crate::syntax::highlight(&content, language.as_deref());
     TranscriptBlock::Code {
@@ -905,7 +1111,11 @@ impl MessageBlockState {
         let mut open_start = None;
         for (ix, (range, mut b)) in parsed.into_iter().enumerate() {
             if ix < commit {
-                b.set_id(format!("{}#{}", self.message_id, self.completed_blocks.len()));
+                b.set_id(format!(
+                    "{}#{}",
+                    self.message_id,
+                    self.completed_blocks.len()
+                ));
                 self.completed_blocks.push(b);
             } else {
                 open_start.get_or_insert(range.start);
@@ -951,19 +1161,45 @@ mod tests {
         let links = |text: &str| {
             let mut spans = Vec::new();
             autolink(text, &mut spans);
-            spans.into_iter().map(|s| (text[s.range.clone()].to_string(), s.link.unwrap())).collect::<Vec<_>>()
+            spans
+                .into_iter()
+                .map(|s| (text[s.range.clone()].to_string(), s.link.unwrap()))
+                .collect::<Vec<_>>()
         };
         let one = |u: &str| vec![(u.to_string(), u.to_string())];
-        assert_eq!(links("see https://example.com/a?b=1."), one("https://example.com/a?b=1"));
-        assert_eq!(links("(http://localhost:3000)"), one("http://localhost:3000"));
-        assert_eq!(links("https://en.wikipedia.org/wiki/Rust_(language), ok"), one("https://en.wikipedia.org/wiki/Rust_(language)"));
+        assert_eq!(
+            links("see https://example.com/a?b=1."),
+            one("https://example.com/a?b=1")
+        );
+        assert_eq!(
+            links("(http://localhost:3000)"),
+            one("http://localhost:3000")
+        );
+        assert_eq!(
+            links("https://en.wikipedia.org/wiki/Rust_(language), ok"),
+            one("https://en.wikipedia.org/wiki/Rust_(language)")
+        );
         assert_eq!(links("a https://x.dev b http://y.io").len(), 2);
         assert!(links("xhttp://nope and https:// and plain http").is_empty());
         // Inside a markdown link or code it stays as parsed.
-        let blocks = parse_markdown_blocks("m", "[docs](https://a.dev) and `https://b.dev` and https://c.dev");
-        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[0] else { panic!("{:?}", blocks[0]) };
-        let linked: Vec<_> = spans.iter().filter_map(|s| s.link.as_deref().map(|l| (&content[s.range.clone()], l))).collect();
-        assert_eq!(linked, vec![("docs", "https://a.dev"), ("https://c.dev", "https://c.dev")]);
+        let blocks = parse_markdown_blocks(
+            "m",
+            "[docs](https://a.dev) and `https://b.dev` and https://c.dev",
+        );
+        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[0] else {
+            panic!("{:?}", blocks[0])
+        };
+        let linked: Vec<_> = spans
+            .iter()
+            .filter_map(|s| s.link.as_deref().map(|l| (&content[s.range.clone()], l)))
+            .collect();
+        assert_eq!(
+            linked,
+            vec![
+                ("docs", "https://a.dev"),
+                ("https://c.dev", "https://c.dev")
+            ]
+        );
     }
 
     #[test]
@@ -974,7 +1210,10 @@ mod tests {
         };
         assert!(closed("```mermaid\ngraph TD\n  A --> B\n```"));
         assert!(closed("~~~mermaid\ngraph TD\n~~~\n\nafter"));
-        assert!(!closed("```mermaid\ngraph TD\n  A --> B"), "still streaming");
+        assert!(
+            !closed("```mermaid\ngraph TD\n  A --> B"),
+            "still streaming"
+        );
         assert!(!closed("```mermaid"));
     }
 
@@ -982,17 +1221,34 @@ mod tests {
     fn local_markdown_images_become_shot_rows() {
         let text = "Here it is:\n\n![Google](/Users/k/screenshots/a.png)\n\n![b](file:///tmp/my%20shot.png) ![c](~/x.jpg)\n\nSee ![inline](/tmp/i.png) above.\n\n![web](https://e.com/x.png)";
         let blocks = parse_markdown_blocks("m", text);
-        assert!(matches!(&blocks[0], TranscriptBlock::Paragraph { content, .. } if content == "Here it is:"));
-        assert_eq!(blocks[1], TranscriptBlock::Shots { id: "m#1".into(), paths: vec!["/Users/k/screenshots/a.png".into()] });
+        assert!(
+            matches!(&blocks[0], TranscriptBlock::Paragraph { content, .. } if content == "Here it is:")
+        );
+        assert_eq!(
+            blocks[1],
+            TranscriptBlock::Shots {
+                id: "m#1".into(),
+                paths: vec!["/Users/k/screenshots/a.png".into()]
+            }
+        );
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
             blocks[2],
-            TranscriptBlock::Shots { id: "m#2".into(), paths: vec!["/tmp/my shot.png".into(), format!("{home}/x.jpg")] }
+            TranscriptBlock::Shots {
+                id: "m#2".into(),
+                paths: vec!["/tmp/my shot.png".into(), format!("{home}/x.jpg")]
+            }
         );
         // Mixed with text: a paragraph whose alt text links to the file.
-        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[3] else { panic!("{:?}", blocks[3]) };
+        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[3] else {
+            panic!("{:?}", blocks[3])
+        };
         assert_eq!(content, "See inline above.");
-        assert!(spans.iter().any(|s| s.link.as_deref() == Some("file:///tmp/i.png")));
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.link.as_deref() == Some("file:///tmp/i.png"))
+        );
         // Remote images are not local files: a plain paragraph.
         assert!(matches!(&blocks[4], TranscriptBlock::Paragraph { .. }));
         assert_eq!(blocks.len(), 5);
@@ -1008,7 +1264,12 @@ mod tests {
         assert_eq!(blocks[2].id(), "m1#2");
         assert_eq!(blocks[3].id(), "m1#3");
 
-        if let TranscriptBlock::Code { line_count, language, .. } = &blocks[2] {
+        if let TranscriptBlock::Code {
+            line_count,
+            language,
+            ..
+        } = &blocks[2]
+        {
             assert_eq!(*line_count, 1);
             assert_eq!(language.as_deref(), Some("rust"));
         } else {
@@ -1079,7 +1340,11 @@ mod tests {
         assert_stream_matches_full(text);
         let blocks = parse_markdown_blocks("m", text);
         match &blocks[1] {
-            TranscriptBlock::Code { content, line_count, .. } => {
+            TranscriptBlock::Code {
+                content,
+                line_count,
+                ..
+            } => {
                 assert_eq!(content, "a = 1\n\n\nb = 2");
                 assert_eq!(*line_count, 4);
             }
@@ -1091,10 +1356,17 @@ mod tests {
     fn list_items_are_separate_with_markers() {
         let blocks = parse_markdown_blocks("m", "- a\n- b\n  - c\n\n3. x\n4. y");
         assert_eq!(blocks.len(), 2);
-        let TranscriptBlock::List { items, .. } = &blocks[0] else { panic!() };
-        let got: Vec<_> = items.iter().map(|i| (i.marker.as_str(), i.depth, i.text.as_str())).collect();
+        let TranscriptBlock::List { items, .. } = &blocks[0] else {
+            panic!()
+        };
+        let got: Vec<_> = items
+            .iter()
+            .map(|i| (i.marker.as_str(), i.depth, i.text.as_str()))
+            .collect();
         assert_eq!(got, vec![("•", 0, "a"), ("•", 0, "b"), ("•", 1, "c")]);
-        let TranscriptBlock::List { items, .. } = &blocks[1] else { panic!() };
+        let TranscriptBlock::List { items, .. } = &blocks[1] else {
+            panic!()
+        };
         assert_eq!(items[0].marker, "3.");
         assert_eq!(items[1].marker, "4.");
         assert_stream_matches_full("- a\n- b\n\npara");
@@ -1105,13 +1377,24 @@ mod tests {
         let text = "| | |\n|---|:-:|\n| MR | [!12](https://gitlab.com/a/b/-/merge_requests/12) |\n| Branch | `feat/x` |\n\nafter";
         let blocks = parse_markdown_blocks("m", text);
         assert_eq!(blocks.len(), 2, "{blocks:?}");
-        let TranscriptBlock::Table { align, header, rows, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        let TranscriptBlock::Table {
+            align,
+            header,
+            rows,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("{blocks:?}")
+        };
         assert_eq!(align, &[ColumnAlign::None, ColumnAlign::Center]);
         assert!(header.iter().all(|c| c.text.is_empty()));
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0].text, "MR");
         assert_eq!(rows[0][1].text, "!12");
-        assert_eq!(rows[0][1].spans[0].link.as_deref(), Some("https://gitlab.com/a/b/-/merge_requests/12"));
+        assert_eq!(
+            rows[0][1].spans[0].link.as_deref(),
+            Some("https://gitlab.com/a/b/-/merge_requests/12")
+        );
         assert_eq!(rows[1][1].text, "feat/x");
         assert!(rows[1][1].spans[0].style.code);
         assert_stream_matches_full(text);
@@ -1119,40 +1402,117 @@ mod tests {
 
     #[test]
     fn inline_styles_become_spans_without_markers() {
-        let blocks = parse_markdown_blocks("m", "Use **bold**, *it*, ~~old~~ and `code` [here](https://x.dev).");
-        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[0] else { panic!() };
+        let blocks = parse_markdown_blocks(
+            "m",
+            "Use **bold**, *it*, ~~old~~ and `code` [here](https://x.dev).",
+        );
+        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[0] else {
+            panic!()
+        };
         assert_eq!(content, "Use bold, it, old and code here.");
-        let styled: Vec<_> = spans.iter().map(|s| (&content[s.range.clone()], s.style, s.link.is_some())).collect();
-        assert_eq!(styled[0], ("bold", InlineStyle { bold: true, ..Default::default() }, false));
-        assert_eq!(styled[1], ("it", InlineStyle { italic: true, ..Default::default() }, false));
-        assert_eq!(styled[2], ("old", InlineStyle { strike: true, ..Default::default() }, false));
-        assert_eq!(styled[3], ("code", InlineStyle { code: true, ..Default::default() }, false));
+        let styled: Vec<_> = spans
+            .iter()
+            .map(|s| (&content[s.range.clone()], s.style, s.link.is_some()))
+            .collect();
+        assert_eq!(
+            styled[0],
+            (
+                "bold",
+                InlineStyle {
+                    bold: true,
+                    ..Default::default()
+                },
+                false
+            )
+        );
+        assert_eq!(
+            styled[1],
+            (
+                "it",
+                InlineStyle {
+                    italic: true,
+                    ..Default::default()
+                },
+                false
+            )
+        );
+        assert_eq!(
+            styled[2],
+            (
+                "old",
+                InlineStyle {
+                    strike: true,
+                    ..Default::default()
+                },
+                false
+            )
+        );
+        assert_eq!(
+            styled[3],
+            (
+                "code",
+                InlineStyle {
+                    code: true,
+                    ..Default::default()
+                },
+                false
+            )
+        );
         assert_eq!(styled[4], ("here", InlineStyle::default(), true));
     }
 
     #[test]
     fn quotes_rules_headings_and_tasks() {
-        let blocks = parse_markdown_blocks("m", "> quoted **line**\n> next\n\n---\n\n###### small\n\n- [x] done\n- [ ] todo");
-        assert!(matches!(&blocks[0], TranscriptBlock::Quote { content, spans, .. } if content == "quoted line\nnext" && spans.len() == 1));
+        let blocks = parse_markdown_blocks(
+            "m",
+            "> quoted **line**\n> next\n\n---\n\n###### small\n\n- [x] done\n- [ ] todo",
+        );
+        assert!(
+            matches!(&blocks[0], TranscriptBlock::Quote { content, spans, .. } if content == "quoted line\nnext" && spans.len() == 1)
+        );
         assert!(matches!(&blocks[1], TranscriptBlock::Rule { .. }));
-        assert!(matches!(&blocks[2], TranscriptBlock::Heading { level: 6, content, .. } if content == "small"));
-        let TranscriptBlock::List { items, .. } = &blocks[3] else { panic!() };
-        assert_eq!((items[0].task, items[0].text.as_str()), (Some(true), "done"));
+        assert!(
+            matches!(&blocks[2], TranscriptBlock::Heading { level: 6, content, .. } if content == "small")
+        );
+        let TranscriptBlock::List { items, .. } = &blocks[3] else {
+            panic!()
+        };
+        assert_eq!(
+            (items[0].task, items[0].text.as_str()),
+            (Some(true), "done")
+        );
         assert_eq!(items[1].task, Some(false));
     }
 
     #[test]
     fn quoted_lists_footnotes_math_and_html() {
-        let blocks = parse_markdown_blocks("m", "> 1. one\n> 2. two\n>    - sub\n\nline<br>next<!-- gone --> <Composer>\n\nSee[^a]. Costs $5 and $10, $x^2$.\n\n$$\na+b\n$$\n\n[^a]: The note.");
-        let TranscriptBlock::Quote { content, .. } = &blocks[0] else { panic!() };
+        let blocks = parse_markdown_blocks(
+            "m",
+            "> 1. one\n> 2. two\n>    - sub\n\nline<br>next<!-- gone --> <Composer>\n\nSee[^a]. Costs $5 and $10, $x^2$.\n\n$$\na+b\n$$\n\n[^a]: The note.",
+        );
+        let TranscriptBlock::Quote { content, .. } = &blocks[0] else {
+            panic!()
+        };
         assert_eq!(content, "1. one\n2. two\n  • sub");
-        let TranscriptBlock::Paragraph { content, .. } = &blocks[1] else { panic!() };
+        let TranscriptBlock::Paragraph { content, .. } = &blocks[1] else {
+            panic!()
+        };
         assert_eq!(content, "line\nnext <Composer>");
-        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[2] else { panic!() };
+        let TranscriptBlock::Paragraph { content, spans, .. } = &blocks[2] else {
+            panic!()
+        };
         assert_eq!(content, "See[^a]. Costs $5 and $10, x^2.");
-        assert!(spans.iter().any(|s| s.style.code && &content[s.range.clone()] == "x^2"));
-        assert!(matches!(&blocks[3], TranscriptBlock::Paragraph { content, .. } if content == "a+b"));
-        assert!(matches!(&blocks[4], TranscriptBlock::Paragraph { content, .. } if content == "[^a] The note."));
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.code && &content[s.range.clone()] == "x^2")
+        );
+        assert!(
+            matches!(&blocks[3], TranscriptBlock::Paragraph { content, .. } if content == "a+b")
+        );
+        assert!(
+            matches!(&blocks[4], TranscriptBlock::Paragraph { content, .. } if content == "[^a] The note.")
+        );
         assert_stream_matches_full("> 1. one\n> 2. two\n\nSee[^a] $x$.\n\n[^a]: note");
     }
 
@@ -1162,7 +1522,10 @@ mod tests {
         s.append_delta("hello");
         s.set_text("hello world\n\nnext");
         s.reparse_tail();
-        assert_eq!(s.all_blocks(), parse_markdown_blocks("m", "hello world\n\nnext"));
+        assert_eq!(
+            s.all_blocks(),
+            parse_markdown_blocks("m", "hello world\n\nnext")
+        );
         // A lagging persisted prefix does not roll the live text back.
         s.set_text("hello wor");
         assert_eq!(s.full_text, "hello world\n\nnext");

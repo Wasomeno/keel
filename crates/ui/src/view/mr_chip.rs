@@ -19,8 +19,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnimationExt as _, AnyElement, App, Bounds, ClickEvent, Context, ElementId, MouseButton, MouseDownEvent, Pixels,
-    Task, Window, div, prelude::*, px,
+    AnimationExt as _, AnyElement, App, Bounds, ClickEvent, Context, ElementId, MouseButton,
+    MouseDownEvent, Pixels, Task, Window, div, prelude::*, px,
 };
 use keel_theme::Tokens;
 
@@ -28,10 +28,12 @@ use super::sidebar::{filled_button, text_button};
 use super::{KeelWindow, menu_item, menu_motion, menu_panel, menu_separator};
 use crate::icons::Icon;
 use crate::motion;
-use crate::mr::{Mention, MrRef, MrSnapshot, MrStatus, find_mr_urls, parse_input, parse_remote, status_color, truncate};
+use crate::mr::{
+    Mention, MrRef, MrSnapshot, MrStatus, find_mr_urls, parse_input, parse_remote, status_color,
+    truncate,
+};
 use crate::style::{HEADER_HEIGHT, KeelStyled, MONO, RADIUS_MD, RADIUS_SM, c, zpx};
 use crate::timer::now_ms;
-
 
 type BoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
 
@@ -39,7 +41,11 @@ type BoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum InlineMr {
     /// "!42 Title · Track / Ignore" (Track reads "Replace !41" when one is tracked).
-    Offer { mr: MrRef, title: String, replace: Option<String> },
+    Offer {
+        mr: MrRef,
+        title: String,
+        replace: Option<String>,
+    },
     /// The agent's own MR was just tracked: Undo.
     Undo { mr: MrRef },
     /// "!42 merged · 3:12 PM".
@@ -112,12 +118,19 @@ const TITLE_CHARS: usize = 28;
 
 /// Filled, or a ring for a draft.
 fn fill(d: gpui::Div, color: u32, hollow: bool) -> gpui::Div {
-    if hollow { d.border_1().border_color(c(color)) } else { d.bg(c(color)) }
+    if hollow {
+        d.border_1().border_color(c(color))
+    } else {
+        d.bg(c(color))
+    }
 }
 
 /// "3:12 PM", local time.
 fn clock() -> Option<String> {
-    let out = std::process::Command::new("date").arg("+%-I:%M %p").output().ok()?;
+    let out = std::process::Command::new("date")
+        .arg("+%-I:%M %p")
+        .output()
+        .ok()?;
     let text = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!text.is_empty()).then_some(text)
 }
@@ -159,7 +172,10 @@ impl KeelWindow {
     pub(super) fn mr_start(&mut self, cx: &mut Context<Self>) {
         if let Some(client) = self.client.clone() {
             cx.spawn(async move |this, cx| {
-                let v = client.call("list_connections", serde_json::json!({})).await.unwrap_or_default();
+                let v = client
+                    .call("list_connections", serde_json::json!({}))
+                    .await
+                    .unwrap_or_default();
                 let hosts: Vec<String> = v["connections"]
                     .as_array()
                     .into_iter()
@@ -185,13 +201,21 @@ impl KeelWindow {
     }
 
     fn mr_host_ok(&self, host: &str) -> bool {
-        self.connections.iter().any(|c| c.kind == "gitlab" && c.host == host)
-            || self.mr_ui.hosts.as_ref().is_none_or(|hosts| hosts.iter().any(|h| h == host))
+        self.connections
+            .iter()
+            .any(|c| c.kind == "gitlab" && c.host == host)
+            || self
+                .mr_ui
+                .hosts
+                .as_ref()
+                .is_none_or(|hosts| hosts.iter().any(|h| h == host))
     }
 
     /// The chat whose header is on screen (not under Settings or GitLab).
     fn mr_visible_chat(&self) -> Option<String> {
-        self.current_chat.clone().filter(|_| !self.settings_open && !self.gitlab_open)
+        self.current_chat
+            .clone()
+            .filter(|_| !self.settings_open && !self.gitlab_open)
     }
 
     /// A turn's rows were published: MR links in its text are offered, or
@@ -230,7 +254,12 @@ impl KeelWindow {
             .sessions
             .iter()
             .filter(|(id, _)| current.as_ref() != Some(*id))
-            .filter(|(id, _)| self.state.chats.get(*id).is_some_and(|c| !c.archived && !c.tombstoned))
+            .filter(|(id, _)| {
+                self.state
+                    .chats
+                    .get(*id)
+                    .is_some_and(|c| !c.archived && !c.tombstoned)
+            })
             .filter_map(|(id, s)| s.tracked.as_ref().map(|t| (id, t)))
             .find(|(id, t)| {
                 !t.status().is_some_and(MrStatus::is_done)
@@ -307,7 +336,8 @@ impl KeelWindow {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let params = serde_json::json!({ "host": mr.host, "project": mr.project, "iid": mr.iid });
+            let params =
+                serde_json::json!({ "host": mr.host, "project": mr.project, "iid": mr.iid });
             let res = client.call("gitlab_mr", params).await;
             let _ = this.update(cx, |this, cx| {
                 this.mr_ui.in_flight.remove(&key);
@@ -320,7 +350,11 @@ impl KeelWindow {
 
     fn mr_apply(&mut self, chat: &str, mr: &MrRef, res: Result<serde_json::Value, String>) {
         let now = now_ms();
-        let auto = self.mr_ui.undo.as_ref().is_some_and(|(c, m, _)| c == chat && m == mr);
+        let auto = self
+            .mr_ui
+            .undo
+            .as_ref()
+            .is_some_and(|(c, m, _)| c == chat && m == mr);
         let session = self.mr.entry(chat);
         let (mut changed, mut stop, mut drop_offer) = (false, false, false);
         if let Some(t) = session.tracked.as_mut().filter(|t| t.mr == *mr) {
@@ -457,7 +491,9 @@ impl KeelWindow {
                 })
                 .unwrap_or(false);
             if here {
-                cx.background_executor().timer(LEAVE + Duration::from_millis(20)).await;
+                cx.background_executor()
+                    .timer(LEAVE + Duration::from_millis(20))
+                    .await;
                 let _ = this.update(cx, |this, cx| this.mr_finish(&chat, cx));
             }
         }));
@@ -469,7 +505,11 @@ impl KeelWindow {
         if let Some(t) = self.mr.tracked(chat)
             && let Some(status) = t.status().filter(|s| s.is_done())
         {
-            let verb = if status == MrStatus::Merged { "merged" } else { "closed" };
+            let verb = if status == MrStatus::Merged {
+                "merged"
+            } else {
+                "closed"
+            };
             let text = match clock() {
                 Some(at) => format!("{} {verb} · {at}", t.mr.label()),
                 None => format!("{} {verb}", t.mr.label()),
@@ -500,7 +540,10 @@ impl KeelWindow {
         };
         let text = self.mr_input.read(cx).value().to_string();
         let default = self.mr_default_project(&chat);
-        match parse_input(&text, default.as_ref().map(|(h, p)| (h.as_str(), p.as_str()))) {
+        match parse_input(
+            &text,
+            default.as_ref().map(|(h, p)| (h.as_str(), p.as_str())),
+        ) {
             Ok(mr) => {
                 self.mr_ui.prompt = false;
                 self.mr_track(chat, mr, cx);
@@ -516,12 +559,25 @@ impl KeelWindow {
     /// folder's `origin` remote.
     fn mr_default_project(&self, chat: &str) -> Option<(String, String)> {
         let session = self.mr.get(chat);
-        let known = session.and_then(|s| s.tracked.as_ref().map(|t| &t.mr).or(s.offer.as_ref().map(|o| &o.mr)));
+        let known = session.and_then(|s| {
+            s.tracked
+                .as_ref()
+                .map(|t| &t.mr)
+                .or(s.offer.as_ref().map(|o| &o.mr))
+        });
         if let Some(mr) = known {
             return Some((mr.host.clone(), mr.project.clone()));
         }
-        let path = self.state.chats.get(chat).and_then(|c| self.state.spaces.get(&c.space_id)).map(|s| s.path.clone())?;
-        let out = std::process::Command::new("git").args(["-C", &path, "remote", "get-url", "origin"]).output().ok()?;
+        let path = self
+            .state
+            .chats
+            .get(chat)
+            .and_then(|c| self.state.spaces.get(&c.space_id))
+            .map(|s| s.path.clone())?;
+        let out = std::process::Command::new("git")
+            .args(["-C", &path, "remote", "get-url", "origin"])
+            .output()
+            .ok()?;
         parse_remote(&String::from_utf8_lossy(&out.stdout))
     }
 
@@ -536,7 +592,11 @@ impl KeelWindow {
     // ── Rendering ───────────────────────────────────────────────────────
 
     /// The header chip, after the chat title. `None`: nothing tracked.
-    pub(super) fn render_mr_chip(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_mr_chip(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let chat = self.current_chat.clone()?;
         self.mr_ensure(&chat, cx);
         let tracked = self.mr.tracked(&chat).cloned();
@@ -555,14 +615,22 @@ impl KeelWindow {
         let snap = tracked.snap.clone().unwrap_or_default();
         let color = status_color(status, t);
         if let Some(status) = status {
-            let prev = self.mr_ui.last_status.insert(chat.clone(), (tracked.mr.key(), status));
+            let prev = self
+                .mr_ui
+                .last_status
+                .insert(chat.clone(), (tracked.mr.key(), status));
             if let Some((prev_key, prev_status)) = prev
                 && prev_key == tracked.mr.key()
                 && prev_status != status
             {
                 self.mr_ui.change_gen += 1;
                 let old = status_color(Some(prev_status), t);
-                self.mr_ui.change = Some((self.mr_ui.change_gen, old, Instant::now(), status.is_meaningful()));
+                self.mr_ui.change = Some((
+                    self.mr_ui.change_gen,
+                    old,
+                    Instant::now(),
+                    status.is_meaningful(),
+                ));
             }
         }
         let done = status.is_some_and(MrStatus::is_done);
@@ -570,7 +638,11 @@ impl KeelWindow {
             self.mr_hold_done(&chat, tracked.mr.key(), cx);
         }
         let hovered = self.mr_ui.hover;
-        let url = if snap.web_url.is_empty() { tracked.mr.web_url() } else { snap.web_url.clone() };
+        let url = if snap.web_url.is_empty() {
+            tracked.mr.web_url()
+        } else {
+            snap.web_url.clone()
+        };
         let dot = self.mr_dot(color, status, snap.draft, tracked.error.is_some(), reduced);
         let title = truncate(&snap.title, TITLE_CHARS);
         let close = div()
@@ -597,18 +669,41 @@ impl KeelWindow {
             .items_center()
             .gap(zpx(7.))
             .child(dot)
-            .child(div().t_body().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(tracked.mr.label()))
+            .child(
+                div()
+                    .t_body()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(c(t.text))
+                    .child(tracked.mr.label()),
+            )
             .map(|d| {
                 if done {
-                    d.child(div().t_body().text_color(c(color)).child(if status == Some(MrStatus::Merged) { "Merged" } else { "Closed" }))
+                    d.child(div().t_body().text_color(c(color)).child(
+                        if status == Some(MrStatus::Merged) {
+                            "Merged"
+                        } else {
+                            "Closed"
+                        },
+                    ))
                 } else if title.is_empty() {
                     d
                 } else {
-                    d.child(div().t_body().text_color(c(t.text_muted)).when(snap.draft, |d| d.opacity(0.6)).child(title))
+                    d.child(
+                        div()
+                            .t_body()
+                            .text_color(c(t.text_muted))
+                            .when(snap.draft, |d| d.opacity(0.6))
+                            .child(title),
+                    )
                 }
             })
             .when(hovered, |d| {
-                d.child(div().text_color(c(t.text_faint)).child(Icon::External.el(zpx(12.)))).child(close)
+                d.child(
+                    div()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::External.el(zpx(12.))),
+                )
+                .child(close)
             });
         let record = self.mr_ui.content_w.clone();
         let measured = div()
@@ -617,7 +712,14 @@ impl KeelWindow {
             .flex_none()
             .whitespace_nowrap()
             .child(content)
-            .child(gpui::canvas(move |b, _, _| record.set(f32::from(b.size.width)), |_, _, _, _| {}).absolute().inset_0());
+            .child(
+                gpui::canvas(
+                    move |b, _, _| record.set(f32::from(b.size.width)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         let painted = self.mr_ui.painted.clone();
         let pill = div()
             .id("mr-chip")
@@ -631,7 +733,11 @@ impl KeelWindow {
             .border_1()
             .border_color(c(t.border))
             .cursor_pointer()
-            .child(gpui::canvas(move |b, _, _| painted.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
+            .child(
+                gpui::canvas(move |b, _, _| painted.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
             .child(measured)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.mr_hover(*hovered, cx)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -654,20 +760,26 @@ impl KeelWindow {
             _ if reduced => pill.into_any_element(),
             (Some((n, _)), _) => {
                 let from = w.get() + chrome;
-                pill.with_animation(("mr-leave", n as usize), gpui::Animation::new(LEAVE).with_easing(motion::ease_in), move |el, d| {
-                    el.w(px(from * (1. - d))).opacity(1. - d)
-                })
+                pill.with_animation(
+                    ("mr-leave", n as usize),
+                    gpui::Animation::new(LEAVE).with_easing(motion::ease_in),
+                    move |el, d| el.w(px(from * (1. - d))).opacity(1. - d),
+                )
                 .into_any_element()
             }
             (None, Some((n, at))) if at.elapsed() < ENTER + CONTENT_LAG => {
                 let total = (ENTER + CONTENT_LAG).as_secs_f32();
                 let (grow_for, lag) = (ENTER.as_secs_f32(), CONTENT_LAG.as_secs_f32());
-                pill.with_animation(("mr-enter", n as usize), gpui::Animation::new(ENTER + CONTENT_LAG), move |el, d| {
-                    let s = d * total;
-                    let grow = motion::ease_out((s / grow_for).min(1.));
-                    let fade = motion::ease_out(((s - lag) / grow_for).clamp(0., 1.));
-                    el.w(px((w.get() + chrome) * grow)).opacity(fade)
-                })
+                pill.with_animation(
+                    ("mr-enter", n as usize),
+                    gpui::Animation::new(ENTER + CONTENT_LAG),
+                    move |el, d| {
+                        let s = d * total;
+                        let grow = motion::ease_out((s / grow_for).min(1.));
+                        let fade = motion::ease_out(((s - lag) / grow_for).clamp(0., 1.));
+                        el.w(px((w.get() + chrome) * grow)).opacity(fade)
+                    },
+                )
                 .into_any_element()
             }
             _ => pill.into_any_element(),
@@ -677,36 +789,74 @@ impl KeelWindow {
 
     /// The status dot: color crossfades on a change; one soft ring for a
     /// change that matters; a slow thin ring while a pipeline runs.
-    fn mr_dot(&self, color: u32, status: Option<MrStatus>, draft: bool, stale: bool, reduced: bool) -> AnyElement {
+    fn mr_dot(
+        &self,
+        color: u32,
+        status: Option<MrStatus>,
+        draft: bool,
+        stale: bool,
+        reduced: bool,
+    ) -> AnyElement {
         const BOX: f32 = 12.;
         const DOT: f32 = 7.;
         let at = (BOX - DOT) / 2.;
-        let dot = move |color: u32| fill(div().absolute().left(zpx(at)).top(zpx(at)).size(zpx(DOT)).rounded_full(), color, draft);
-        let mut layer = div().relative().flex_none().size(zpx(BOX)).when(stale, |d| d.opacity(0.4));
+        let dot = move |color: u32| {
+            fill(
+                div()
+                    .absolute()
+                    .left(zpx(at))
+                    .top(zpx(at))
+                    .size(zpx(DOT))
+                    .rounded_full(),
+                color,
+                draft,
+            )
+        };
+        let mut layer = div()
+            .relative()
+            .flex_none()
+            .size(zpx(BOX))
+            .when(stale, |d| d.opacity(0.4));
         let change = self.mr_ui.change.filter(|_| !reduced);
         match change {
             Some((n, from, when, _)) if when.elapsed() < CROSSFADE => {
-                layer = layer.child(dot(from)).child(
-                    dot(color).with_animation(("mr-dot-fade", n as usize), gpui::Animation::new(CROSSFADE), |el, d| el.opacity(d)),
-                );
+                layer = layer.child(dot(from)).child(dot(color).with_animation(
+                    ("mr-dot-fade", n as usize),
+                    gpui::Animation::new(CROSSFADE),
+                    |el, d| el.opacity(d),
+                ));
             }
             _ => layer = layer.child(dot(color)),
         }
         if status == Some(MrStatus::Running) {
-            let ring = div().absolute().left_0().top_0().size(zpx(BOX)).rounded_full().border_1().border_color(c(color));
+            let ring = div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .size(zpx(BOX))
+                .rounded_full()
+                .border_1()
+                .border_color(c(color));
             layer = layer.child(motion::breathe(ring, "mr-run-ring", reduced));
         }
         if let Some((n, _, when, true)) = change
             && when.elapsed() < RING
         {
-            let ring = div().absolute().rounded_full().border_1().border_color(c(color));
+            let ring = div()
+                .absolute()
+                .rounded_full()
+                .border_1()
+                .border_color(c(color));
             layer = layer.child(ring.with_animation(
                 ("mr-dot-ring", n as usize),
                 gpui::Animation::new(RING).with_easing(motion::ease_out),
                 move |el, d| {
                     let size = DOT + 12. * d;
                     let off = (BOX - size) / 2.;
-                    el.left(zpx(off)).top(zpx(off)).size(zpx(size)).opacity(0.7 * (1. - d))
+                    el.left(zpx(off))
+                        .top(zpx(off))
+                        .size(zpx(size))
+                        .opacity(0.7 * (1. - d))
                 },
             ));
         }
@@ -725,29 +875,51 @@ impl KeelWindow {
                 .flex_row()
                 .items_center()
                 .gap(zpx(3.))
-                .child(div().text_color(c(t.text_faint)).child(Icon::GitLab.el(zpx(10.))))
-                .child(fill(div().size(zpx(6.)).rounded_full(), color, draft).when(tracked.error.is_some(), |d| d.opacity(0.4)))
+                .child(
+                    div()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::GitLab.el(zpx(10.))),
+                )
+                .child(
+                    fill(div().size(zpx(6.)).rounded_full(), color, draft)
+                        .when(tracked.error.is_some(), |d| d.opacity(0.4)),
+                )
                 .into_any_element(),
         )
     }
 
     /// Hover card under the chip: full title, status, branches, freshness.
-    pub(super) fn render_mr_card(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_mr_card(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let leaving = self.menu_phase("mr-card", self.mr_ui.card && !self.mr_ui.menu, cx)?;
         let tracked = self.mr.tracked(self.current_chat.as_ref()?)?;
         let chip = self.mr_ui.painted.get()?;
         let snap = tracked.snap.clone().unwrap_or_default();
         let color = status_color(tracked.status(), t);
         let status = match (&tracked.error, tracked.snap.is_some()) {
-            (Some(_), _) if tracked.ok_ms > 0 => format!("Couldn't refresh · checked {}", ago_ms(tracked.ok_ms)),
+            (Some(_), _) if tracked.ok_ms > 0 => {
+                format!("Couldn't refresh · checked {}", ago_ms(tracked.ok_ms))
+            }
             (Some(_), _) => "Couldn't load".to_string(),
             (None, true) => snap.status_text(),
             (None, false) => "Loading…".to_string(),
         };
-        let title = if snap.title.is_empty() { tracked.mr.label() } else { snap.title.clone() };
-        let branches = (!snap.source_branch.is_empty()).then(|| format!("{} → {}", snap.source_branch, snap.target_branch));
+        let title = if snap.title.is_empty() {
+            tracked.mr.label()
+        } else {
+            snap.title.clone()
+        };
+        let branches = (!snap.source_branch.is_empty())
+            .then(|| format!("{} → {}", snap.source_branch, snap.target_branch));
         let foot = match ago_iso(&snap.updated_at) {
-            Some(age) => format!("{}{} · updated {age}", tracked.mr.project, tracked.mr.label()),
+            Some(age) => format!(
+                "{}{} · updated {age}",
+                tracked.mr.project,
+                tracked.mr.label()
+            ),
             None => format!("{}{}", tracked.mr.project, tracked.mr.label()),
         };
         let card = div()
@@ -758,7 +930,12 @@ impl KeelWindow {
             .flex_col()
             .gap_1p5()
             .floating_surface(t)
-            .child(div().t_body().font_weight(gpui::FontWeight::MEDIUM).child(title))
+            .child(
+                div()
+                    .t_body()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(title),
+            )
             .child(
                 div()
                     .flex()
@@ -767,14 +944,38 @@ impl KeelWindow {
                     .gap_1p5()
                     .t_small()
                     .text_color(c(t.text_muted))
-                    .child(fill(div().size(zpx(7.)).flex_none().rounded_full(), color, snap.draft))
+                    .child(fill(
+                        div().size(zpx(7.)).flex_none().rounded_full(),
+                        color,
+                        snap.draft,
+                    ))
                     .child(status),
             )
-            .children(tracked.error.clone().map(|err| div().t_caption().text_color(c(t.text_faint)).child(err)))
+            .children(
+                tracked
+                    .error
+                    .clone()
+                    .map(|err| div().t_caption().text_color(c(t.text_faint)).child(err)),
+            )
             .children(branches.map(|b| {
-                div().t_caption().font_family(MONO).text_color(c(t.text_muted)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(b)
+                div()
+                    .t_caption()
+                    .font_family(MONO)
+                    .text_color(c(t.text_muted))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(b)
             }))
-            .child(div().t_caption().text_color(c(t.text_faint)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(foot));
+            .child(
+                div()
+                    .t_caption()
+                    .text_color(c(t.text_faint))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(foot),
+            );
         let card = menu_motion(card, "mr-card", false, leaving, self.reduced());
         Some(
             gpui::deferred(
@@ -790,11 +991,20 @@ impl KeelWindow {
     }
 
     /// Right-click on the chip: Open, Refresh, Stop tracking.
-    pub(super) fn render_mr_menu(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_mr_menu(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let leaving = self.menu_phase("mr-menu", self.mr_ui.menu, cx)?;
         let tracked = self.mr.tracked(self.current_chat.as_ref()?)?;
         let chip = self.mr_ui.painted.get()?;
-        let url = tracked.snap.as_ref().map(|s| s.web_url.clone()).filter(|u| !u.is_empty()).unwrap_or_else(|| tracked.mr.web_url());
+        let url = tracked
+            .snap
+            .as_ref()
+            .map(|s| s.web_url.clone())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| tracked.mr.web_url());
         let items = vec![
             menu_item("mr-menu-open", t, true, false)
                 .child("Open in Browser")
@@ -818,7 +1028,8 @@ impl KeelWindow {
             this.mr_ui.menu = false;
             cx.notify();
         });
-        let panel = menu_panel("mr-menu", t, 184., false, items).when(leaving.is_none(), |d| d.on_mouse_down_out(dismiss));
+        let panel = menu_panel("mr-menu", t, 184., false, items)
+            .when(leaving.is_none(), |d| d.on_mouse_down_out(dismiss));
         let menu = menu_motion(panel, "mr-menu", false, leaving, self.reduced());
         Some(
             gpui::deferred(
@@ -834,13 +1045,20 @@ impl KeelWindow {
     }
 
     /// "Track merge request…": paste a link or `!42`.
-    pub(super) fn render_mr_prompt(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_mr_prompt(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.mr_ui.prompt {
             return None;
         }
         let hint = match &self.mr_ui.prompt_error {
             Some(err) => div().t_small().text_color(c(t.danger)).child(err.clone()),
-            None => div().t_small().text_color(c(t.text_faint)).child("Paste a merge request link, or !42 for this chat's repo."),
+            None => div()
+                .t_small()
+                .text_color(c(t.text_faint))
+                .child("Paste a merge request link, or !42 for this chat's repo."),
         };
         let card = div()
             .id("mr-prompt")
@@ -855,7 +1073,12 @@ impl KeelWindow {
                 this.mr_ui.prompt = false;
                 cx.notify();
             }))
-            .child(div().t_body().font_weight(gpui::FontWeight::MEDIUM).child("Track merge request"))
+            .child(
+                div()
+                    .t_body()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("Track merge request"),
+            )
             .child(
                 div()
                     .px_2()
@@ -874,13 +1097,18 @@ impl KeelWindow {
                     .flex_row()
                     .justify_end()
                     .gap_1()
-                    .child(text_button("mr-prompt-cancel", "Cancel", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.mr_ui.prompt = false;
-                        cx.notify();
-                    })))
                     .child(
-                        filled_button("mr-prompt-track", "Track", t.accent, t)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.mr_submit_prompt(cx))),
+                        text_button("mr-prompt-cancel", "Cancel", t).on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.mr_ui.prompt = false;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        filled_button("mr-prompt-track", "Track", t.accent, t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.mr_submit_prompt(cx)),
+                        ),
                     ),
             );
         Some(
@@ -891,7 +1119,13 @@ impl KeelWindow {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(motion::appear(card, "mr-prompt-appear", motion::FAST, -4., self.reduced()))
+                .child(motion::appear(
+                    card,
+                    "mr-prompt-appear",
+                    motion::FAST,
+                    -4.,
+                    self.reduced(),
+                ))
                 .into_any_element(),
         )
     }
@@ -913,7 +1147,9 @@ impl KeelWindow {
                     placed = true;
                 }
                 if let Some(ix) = note.msg_id.as_deref().and_then(last_ix) {
-                    out.entry(ix).or_default().push(InlineMr::Note { text: note.text.clone() });
+                    out.entry(ix).or_default().push(InlineMr::Note {
+                        text: note.text.clone(),
+                    });
                 }
             }
             let replace = session.tracked.as_ref().map(|t| t.mr.label());
@@ -927,25 +1163,43 @@ impl KeelWindow {
             if let Some(offer) = session.offer.as_ref().filter(|offer| !carded(offer))
                 && let Some(ix) = last_ix(&offer.msg_id)
             {
-                let title = offer.snap.as_ref().map(|s| truncate(&s.title, 48)).unwrap_or_default();
-                out.entry(ix).or_default().push(InlineMr::Offer { mr: offer.mr.clone(), title, replace });
+                let title = offer
+                    .snap
+                    .as_ref()
+                    .map(|s| truncate(&s.title, 48))
+                    .unwrap_or_default();
+                out.entry(ix).or_default().push(InlineMr::Offer {
+                    mr: offer.mr.clone(),
+                    title,
+                    replace,
+                });
             }
             if let Some((c, mr, msg)) = &self.mr_ui.undo
                 && *c == chat
                 && session.tracked.as_ref().is_some_and(|t| t.mr == *mr)
                 && let Some(ix) = last_ix(msg)
             {
-                out.entry(ix).or_default().push(InlineMr::Undo { mr: mr.clone() });
+                out.entry(ix)
+                    .or_default()
+                    .push(InlineMr::Undo { mr: mr.clone() });
             }
             if placed {
                 self.mr.save(&self.state.data_dir);
             }
         }
-        let mut sig: Vec<(usize, String)> = out.iter().map(|(ix, lines)| (*ix, format!("{lines:?}"))).collect();
+        let mut sig: Vec<(usize, String)> = out
+            .iter()
+            .map(|(ix, lines)| (*ix, format!("{lines:?}")))
+            .collect();
         sig.sort();
         if sig != self.mr_ui.inline_sig {
             let len = self.transcript.items.len();
-            let rows: HashSet<usize> = sig.iter().chain(self.mr_ui.inline_sig.iter()).map(|(ix, _)| *ix).filter(|ix| *ix < len).collect();
+            let rows: HashSet<usize> = sig
+                .iter()
+                .chain(self.mr_ui.inline_sig.iter())
+                .map(|(ix, _)| *ix)
+                .filter(|ix| *ix < len)
+                .collect();
             for ix in rows {
                 self.transcript.list_state.remeasure_items(ix..ix + 1);
             }
@@ -963,7 +1217,12 @@ impl KeelWindow {
 }
 
 /// One line under a transcript turn.
-pub(super) fn render_inline(line: &InlineMr, t: Tokens, reduced: bool, on: &OnMrAction) -> AnyElement {
+pub(super) fn render_inline(
+    line: &InlineMr,
+    t: Tokens,
+    reduced: bool,
+    on: &OnMrAction,
+) -> AnyElement {
     let button = |id: String, label: String, color: u32, action: MrAction| {
         let on = on.clone();
         div()
@@ -991,7 +1250,12 @@ pub(super) fn render_inline(line: &InlineMr, t: Tokens, reduced: bool, on: &OnMr
             .border_color(c(t.border))
             .bg(c(t.surface))
             .t_small()
-            .child(div().flex_none().text_color(c(t.text_muted)).child(Icon::GitLab.el(zpx(12.))))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(t.text_muted))
+                    .child(Icon::GitLab.el(zpx(12.))),
+            )
     };
     let (el, id) = match line {
         InlineMr::Note { text } => {
@@ -1010,27 +1274,64 @@ pub(super) fn render_inline(line: &InlineMr, t: Tokens, reduced: bool, on: &OnMr
         }
         InlineMr::Offer { mr, title, replace } => (
             chip()
-                .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(mr.label()))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(t.text))
+                        .child(mr.label()),
+                )
                 .when(!title.is_empty(), |d| {
-                    d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(c(t.text_muted)).child(title.clone()))
+                    d.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(c(t.text_muted))
+                            .child(title.clone()),
+                    )
                 })
                 .child(div().text_color(c(t.text_faint)).child("·"))
                 .child(button(
                     format!("mr-offer-track-{}", mr.key()),
-                    replace.as_ref().map_or_else(|| "Track".to_string(), |old| format!("Replace {old}")),
+                    replace
+                        .as_ref()
+                        .map_or_else(|| "Track".to_string(), |old| format!("Replace {old}")),
                     t.accent,
                     MrAction::Track(mr.clone()),
                 ))
-                .child(button(format!("mr-offer-ignore-{}", mr.key()), "Ignore".into(), t.text_faint, MrAction::Ignore)),
+                .child(button(
+                    format!("mr-offer-ignore-{}", mr.key()),
+                    "Ignore".into(),
+                    t.text_faint,
+                    MrAction::Ignore,
+                )),
             format!("mr-offer-in-{}", mr.key()),
         ),
         InlineMr::Undo { mr } => (
             chip()
-                .child(div().text_color(c(t.text_muted)).child(format!("Tracking {} in the header", mr.label())))
+                .child(
+                    div()
+                        .text_color(c(t.text_muted))
+                        .child(format!("Tracking {} in the header", mr.label())),
+                )
                 .child(div().text_color(c(t.text_faint)).child("·"))
-                .child(button(format!("mr-undo-{}", mr.key()), "Undo".into(), t.accent, MrAction::Undo)),
+                .child(button(
+                    format!("mr-undo-{}", mr.key()),
+                    "Undo".into(),
+                    t.accent,
+                    MrAction::Undo,
+                )),
             format!("mr-undo-in-{}", mr.key()),
         ),
     };
-    motion::appear(div().pt_1().pb_2().flex().flex_row().child(el), ElementId::Name(id.into()), motion::FAST, 4., reduced).into_any_element()
+    motion::appear(
+        div().pt_1().pb_2().flex().flex_row().child(el),
+        ElementId::Name(id.into()),
+        motion::FAST,
+        4.,
+        reduced,
+    )
+    .into_any_element()
 }

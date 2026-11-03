@@ -25,7 +25,9 @@ impl NotifyEvent {
             (a, b) if a == b => None,
             (_, ChatStatus::AwaitingInput) => Some(Self::NeedsInput),
             (ChatStatus::Running, ChatStatus::Idle) => Some(Self::Finished),
-            (ChatStatus::Running | ChatStatus::AwaitingInput, ChatStatus::Aborted) => Some(Self::Error),
+            (ChatStatus::Running | ChatStatus::AwaitingInput, ChatStatus::Aborted) => {
+                Some(Self::Error)
+            }
             _ => None,
         }
     }
@@ -50,7 +52,12 @@ impl NotifyEvent {
 
 /// Alert only when you aren't already looking at the chat: another chat is
 /// open, or Keel isn't the focused window.
-pub fn should_alert(event: NotifyEvent, settings: &NotifySettings, viewing_chat: bool, window_active: bool) -> bool {
+pub fn should_alert(
+    event: NotifyEvent,
+    settings: &NotifySettings,
+    viewing_chat: bool,
+    window_active: bool,
+) -> bool {
     event.enabled(settings) && !(viewing_chat && window_active)
 }
 
@@ -127,7 +134,10 @@ impl SoundGate {
 
     /// True when a sound may play now; it then counts as played.
     pub fn allow(&mut self, now: Instant) -> bool {
-        if self.last.is_some_and(|at| now.saturating_duration_since(at) < Self::WINDOW) {
+        if self
+            .last
+            .is_some_and(|at| now.saturating_duration_since(at) < Self::WINDOW)
+        {
             return false;
         }
         self.last = Some(now);
@@ -137,7 +147,9 @@ impl SoundGate {
 
 /// Should the sound play for an alert, given where you are.
 pub fn should_play_sound(settings: &NotifySettings, app_active: bool) -> bool {
-    !matches!(settings.sound, keel_proto::SoundChoice::None) && settings.volume > 0. && !(settings.sound_in_background_only && app_active)
+    !matches!(settings.sound, keel_proto::SoundChoice::None)
+        && settings.volume > 0.
+        && !(settings.sound_in_background_only && app_active)
 }
 
 /// The banner's payload key for the chat it is about.
@@ -151,7 +163,9 @@ pub fn banner_payload(chat_id: &str) -> [(&'static str, String); 1] {
 /// The chat a clicked banner (via `lookup` into its payload) or a
 /// `keel://open-chat?id=…` / `keel://chat/…` link points at.
 pub fn chat_from_payload(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    lookup(BANNER_CHAT_KEY).map(|id| id.trim().to_string()).filter(|id| !id.is_empty())
+    lookup(BANNER_CHAT_KEY)
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
 }
 
 pub fn chat_from_url(url: &str) -> Option<String> {
@@ -162,7 +176,11 @@ pub fn chat_from_url(url: &str) -> Option<String> {
         rest.strip_prefix("chat/")?
     };
     let id = id.trim_end_matches('/');
-    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).then(|| id.to_string())
+    (!id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then(|| id.to_string())
 }
 
 /// What clicking a banner does: Keel comes to the front and, when the chat
@@ -175,23 +193,43 @@ pub enum BannerAction {
 }
 
 pub fn banner_action(chat_id: &str, known: impl Fn(&str) -> bool) -> BannerAction {
-    if known(chat_id) { BannerAction::OpenChat(chat_id.to_string()) } else { BannerAction::Activate }
+    if known(chat_id) {
+        BannerAction::OpenChat(chat_id.to_string())
+    } else {
+        BannerAction::Activate
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn banner_click_routes_to_its_chat() {
-        use super::{BannerAction, banner_action, banner_payload, chat_from_payload, chat_from_url};
+        use super::{
+            BannerAction, banner_action, banner_payload, chat_from_payload, chat_from_url,
+        };
         let payload = banner_payload("chat-1");
-        let lookup = |key: &str| payload.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone());
+        let lookup = |key: &str| {
+            payload
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+        };
         let id = chat_from_payload(lookup).unwrap();
-        assert_eq!(banner_action(&id, |c| c == "chat-1"), BannerAction::OpenChat("chat-1".into()));
+        assert_eq!(
+            banner_action(&id, |c| c == "chat-1"),
+            BannerAction::OpenChat("chat-1".into())
+        );
         assert_eq!(banner_action(&id, |_| false), BannerAction::Activate);
         assert_eq!(chat_from_payload(|_| Some("  ".into())), None);
         assert_eq!(chat_from_payload(|_| None), None);
-        assert_eq!(chat_from_url("keel://open-chat?id=ab-12"), Some("ab-12".into()));
-        assert_eq!(chat_from_url("keel://open-chat?x=1&id=ab"), Some("ab".into()));
+        assert_eq!(
+            chat_from_url("keel://open-chat?id=ab-12"),
+            Some("ab-12".into())
+        );
+        assert_eq!(
+            chat_from_url("keel://open-chat?x=1&id=ab"),
+            Some("ab".into())
+        );
         assert_eq!(chat_from_url("keel://chat/ab_1/"), Some("ab_1".into()));
         assert_eq!(chat_from_url("keel://chat/a b"), None);
         assert_eq!(chat_from_url("https://chat/ab"), None);
@@ -203,22 +241,43 @@ mod tests {
     #[test]
     fn status_changes_map_to_events() {
         use ChatStatus::*;
-        assert_eq!(NotifyEvent::from_status_change(Running, Idle), Some(NotifyEvent::Finished));
-        assert_eq!(NotifyEvent::from_status_change(Running, AwaitingInput), Some(NotifyEvent::NeedsInput));
-        assert_eq!(NotifyEvent::from_status_change(Idle, AwaitingInput), Some(NotifyEvent::NeedsInput));
-        assert_eq!(NotifyEvent::from_status_change(Running, Aborted), Some(NotifyEvent::Error));
+        assert_eq!(
+            NotifyEvent::from_status_change(Running, Idle),
+            Some(NotifyEvent::Finished)
+        );
+        assert_eq!(
+            NotifyEvent::from_status_change(Running, AwaitingInput),
+            Some(NotifyEvent::NeedsInput)
+        );
+        assert_eq!(
+            NotifyEvent::from_status_change(Idle, AwaitingInput),
+            Some(NotifyEvent::NeedsInput)
+        );
+        assert_eq!(
+            NotifyEvent::from_status_change(Running, Aborted),
+            Some(NotifyEvent::Error)
+        );
         assert_eq!(NotifyEvent::from_status_change(Idle, Running), None);
         assert_eq!(NotifyEvent::from_status_change(Running, Running), None);
         assert_eq!(NotifyEvent::from_status_change(Idle, Aborted), None);
-        assert_eq!(NotifyEvent::from_status_change(AwaitingInput, Running), None);
+        assert_eq!(
+            NotifyEvent::from_status_change(AwaitingInput, Running),
+            None
+        );
     }
 
     #[test]
     fn alerts_skip_the_chat_you_are_looking_at() {
         let mut s = NotifySettings::default();
         assert!(!should_alert(NotifyEvent::Finished, &s, true, true));
-        assert!(should_alert(NotifyEvent::Finished, &s, true, false), "Keel in the background");
-        assert!(should_alert(NotifyEvent::Finished, &s, false, true), "another chat open");
+        assert!(
+            should_alert(NotifyEvent::Finished, &s, true, false),
+            "Keel in the background"
+        );
+        assert!(
+            should_alert(NotifyEvent::Finished, &s, false, true),
+            "another chat open"
+        );
         s.on_finished = false;
         assert!(!should_alert(NotifyEvent::Finished, &s, false, false));
         assert!(should_alert(NotifyEvent::Error, &s, false, false));
@@ -235,7 +294,10 @@ mod tests {
         assert_eq!(u.dock_label(BadgeStyle::Count).as_deref(), Some("2"));
         assert_eq!(u.dock_label(BadgeStyle::Dot).as_deref(), Some("•"));
         assert_eq!(u.dock_label(BadgeStyle::None), None);
-        assert_eq!(u.row_badge("a", BadgeStyle::Count), Some(RowBadge::Count(2)));
+        assert_eq!(
+            u.row_badge("a", BadgeStyle::Count),
+            Some(RowBadge::Count(2))
+        );
         assert_eq!(u.row_badge("a", BadgeStyle::Dot), Some(RowBadge::Dot));
         assert_eq!(u.row_badge("a", BadgeStyle::None), None);
         assert_eq!(u.latest("a"), Some(NotifyEvent::NeedsInput));

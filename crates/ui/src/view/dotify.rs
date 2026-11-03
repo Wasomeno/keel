@@ -3,16 +3,22 @@
 //! motion follow `docs/dotify-ui-spec.md`, with every curve a pure function
 //! of time in `crate::dotify`. The engine holds the token and does the HTTP.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, KeyDownEvent, Task, Window};
-use keel_proto::dotify::{DotifyError, Entry, Pending, Project, Status, Summary, SyncChange, Tracker, hours_on, local_day_start, reconcile, should_nudge};
+use keel_proto::dotify::{
+    DotifyError, Entry, Pending, Project, Status, Summary, SyncChange, Tracker, hours_on,
+    local_day_start, reconcile, should_nudge,
+};
 
 use super::KeelWindow;
-use crate::dotify::{Confirm, ConfirmStep, Flow, Memory, Prefill, Row, StatsSeen, Tween, View, list_rows, local_offset_s, prefill_description, repo_key, repo_label, step_highlight};
+use crate::dotify::{
+    Confirm, ConfirmStep, Flow, Memory, Prefill, Row, StatsSeen, Tween, View, list_rows,
+    local_offset_s, prefill_description, repo_key, repo_label, step_highlight,
+};
 use crate::timer::now_ms;
 
 /// Background sync while connected.
@@ -57,7 +63,10 @@ pub(super) enum PrimaryPhase {
 
 impl Primary {
     pub fn busy(&self) -> bool {
-        matches!(self.phase, PrimaryPhase::Loading(_) | PrimaryPhase::Success(_))
+        matches!(
+            self.phase,
+            PrimaryPhase::Loading(_) | PrimaryPhase::Success(_)
+        )
     }
 }
 
@@ -281,7 +290,8 @@ impl KeelWindow {
         if std::env::var("KEEL_DOTIFY").map_or(false, |v| v == "0" || v == "false") {
             return false;
         }
-        self.dotify_mode() || std::env::var("KEEL_DOTIFY").map_or(false, |v| v == "1" || v == "true")
+        self.dotify_mode()
+            || std::env::var("KEEL_DOTIFY").map_or(false, |v| v == "1" || v == "true")
     }
 
     /// Stats as the popover shows them now (for the bars' gating).
@@ -314,11 +324,16 @@ impl KeelWindow {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let conn = v["connections"].as_array().into_iter().flatten().find(|c| c["kind"] == "dotify").map(|c| DotifyConn {
-                    base: c["host"].as_str().unwrap_or_default().to_string(),
-                    name: c["name"].as_str().unwrap_or_default().to_string(),
-                    email: c["username"].as_str().unwrap_or_default().to_string(),
-                });
+                let conn = v["connections"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|c| c["kind"] == "dotify")
+                    .map(|c| DotifyConn {
+                        base: c["host"].as_str().unwrap_or_default().to_string(),
+                        name: c["name"].as_str().unwrap_or_default().to_string(),
+                        email: c["username"].as_str().unwrap_or_default().to_string(),
+                    });
                 this.dotify_set_conn(conn, cx);
             });
         })
@@ -331,7 +346,12 @@ impl KeelWindow {
         if self.dotify.conn.is_none() {
             let memory = std::mem::take(&mut self.dotify.memory);
             let demo_settings_disconnected = self.dotify.demo_settings_disconnected;
-            self.dotify = DotifyUi { memory, memory_loaded: true, demo_settings_disconnected, ..Default::default() };
+            self.dotify = DotifyUi {
+                memory,
+                memory_loaded: true,
+                demo_settings_disconnected,
+                ..Default::default()
+            };
             self.ensure_timer_tick(cx);
             cx.notify();
             return;
@@ -372,7 +392,13 @@ impl KeelWindow {
         if !self.dotify_visible() {
             return;
         }
-        if self.window_active && self.dotify_mode() && self.dotify.synced_at.is_none_or(|at| at.elapsed() > FOCUS_SYNC_AFTER) {
+        if self.window_active
+            && self.dotify_mode()
+            && self
+                .dotify
+                .synced_at
+                .is_none_or(|at| at.elapsed() > FOCUS_SYNC_AFTER)
+        {
             self.dotify_sync(cx);
         }
         self.dotify_ensure_tick(cx);
@@ -398,8 +424,14 @@ impl KeelWindow {
                         return None;
                     }
                     let breathing = !this.reduced()
-                        && crate::dotify::pill_look(&this.dotify.tracker, this.dotify.pending.as_ref(), this.dotify.sync_error.as_ref(), this.dotify.overtime, false)
-                            .breathes();
+                        && crate::dotify::pill_look(
+                            &this.dotify.tracker,
+                            this.dotify.pending.as_ref(),
+                            this.dotify.sync_error.as_ref(),
+                            this.dotify.overtime,
+                            false,
+                        )
+                        .breathes();
                     Some(if breathing {
                         40
                     } else {
@@ -413,7 +445,9 @@ impl KeelWindow {
                 let Ok(Some(wait)) = wait else {
                     break;
                 };
-                cx.background_executor().timer(Duration::from_millis(wait)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -422,7 +456,10 @@ impl KeelWindow {
     }
 
     fn dotify_tick_wanted(&self) -> bool {
-        self.dotify_mode() && !self.timer.hidden && self.window_active && matches!(self.dotify.tracker, Tracker::Running(_))
+        self.dotify_mode()
+            && !self.timer.hidden
+            && self.window_active
+            && matches!(self.dotify.tracker, Tracker::Running(_))
     }
 
     /// `check-status` → the pill. Totals too when stale or the popover is open.
@@ -434,7 +471,11 @@ impl KeelWindow {
             return;
         }
         self.dotify.syncing = true;
-        let totals = self.dotify.open || self.dotify.totals_at.is_none_or(|at| at.elapsed() > TOTALS_EVERY);
+        let totals = self.dotify.open
+            || self
+                .dotify
+                .totals_at
+                .is_none_or(|at| at.elapsed() > TOTALS_EVERY);
         cx.spawn(async move |this, cx| {
             let res = client.call("dotify", serde_json::json!({ "op": "status" })).await;
             let _ = this.update(cx, |this, cx| {
@@ -493,7 +534,10 @@ impl KeelWindow {
     fn dotify_apply_status(&mut self, status: &Status) {
         let (next, change) = reconcile(&self.dotify.tracker, self.dotify.pending.as_ref(), status);
         if self.dotify.pending.is_none() {
-            self.dotify_set_overtime(status.overtime, change != SyncChange::None || self.dotify.overtime_at.is_some());
+            self.dotify_set_overtime(
+                status.overtime,
+                change != SyncChange::None || self.dotify.overtime_at.is_some(),
+            );
         }
         if change != SyncChange::None {
             tracing::info!(target: "keel_ui::dotify", ?change, running = matches!(next, Tracker::Running(_)), "dotify state");
@@ -502,7 +546,11 @@ impl KeelWindow {
             self.dotify.confirm_out.cancel();
         }
         self.dotify.tracker = next;
-        if self.dotify.hold_view_until.is_none_or(|h| Instant::now() >= h) {
+        if self
+            .dotify
+            .hold_view_until
+            .is_none_or(|h| Instant::now() >= h)
+        {
             let before = self.dotify.flow.view;
             self.dotify.flow.tracker_changed(&self.dotify.tracker);
             if before != self.dotify.flow.view {
@@ -538,17 +586,28 @@ impl KeelWindow {
         };
         self.dotify.totals_at = Some(Instant::now());
         cx.spawn(async move |this, cx| {
-            let summary = client.call("dotify", serde_json::json!({ "op": "summary" })).await;
-            let entries = client.call("dotify", serde_json::json!({ "op": "entries" })).await;
+            let summary = client
+                .call("dotify", serde_json::json!({ "op": "summary" }))
+                .await;
+            let entries = client
+                .call("dotify", serde_json::json!({ "op": "entries" }))
+                .await;
             let _ = this.update(cx, |this, cx| {
-                if let Ok(s) = summary.and_then(|v| serde_json::from_value::<Summary>(v).map_err(|e| e.to_string())) {
+                if let Ok(s) = summary
+                    .and_then(|v| serde_json::from_value::<Summary>(v).map_err(|e| e.to_string()))
+                {
                     this.dotify.summary = Some(s);
                 }
                 if let Ok(v) = entries {
-                    let all: Vec<Entry> = serde_json::from_value(v["entries"].clone()).unwrap_or_default();
+                    let all: Vec<Entry> =
+                        serde_json::from_value(v["entries"].clone()).unwrap_or_default();
                     let today = local_day_start(now_ms(), local_offset_s());
-                    this.dotify.today_entries = all.into_iter().filter(|e| e.end_ms.unwrap_or(i64::MAX) >= today).collect();
-                    this.dotify.today_h = Some(hours_on(&this.dotify.today_entries, today, now_ms()));
+                    this.dotify.today_entries = all
+                        .into_iter()
+                        .filter(|e| e.end_ms.unwrap_or(i64::MAX) >= today)
+                        .collect();
+                    this.dotify.today_h =
+                        Some(hours_on(&this.dotify.today_entries, today, now_ms()));
                 }
                 cx.notify();
             });
@@ -560,7 +619,13 @@ impl KeelWindow {
     pub(super) fn dotify_today_h(&self) -> Option<f64> {
         let base = self.dotify.today_h?;
         let today = local_day_start(now_ms(), local_offset_s());
-        let finished: Vec<Entry> = self.dotify.today_entries.iter().filter(|e| e.end_ms.is_some()).cloned().collect();
+        let finished: Vec<Entry> = self
+            .dotify
+            .today_entries
+            .iter()
+            .filter(|e| e.end_ms.is_some())
+            .cloned()
+            .collect();
         let mut h = hours_on(&finished, today, now_ms());
         if let Tracker::Running(e) = &self.dotify.tracker {
             h += hours_on(std::slice::from_ref(e), today, now_ms());
@@ -574,12 +639,26 @@ impl KeelWindow {
 
     fn dotify_nudge_check(&mut self) {
         let now = now_ms();
-        let busy = self.state.chats.values().any(|c| c.status == keel_proto::ChatStatus::Running);
-        self.dotify.busy_since = if busy { Some(self.dotify.busy_since.unwrap_or(now)) } else { None };
+        let busy = self
+            .state
+            .chats
+            .values()
+            .any(|c| c.status == keel_proto::ChatStatus::Running);
+        self.dotify.busy_since = if busy {
+            Some(self.dotify.busy_since.unwrap_or(now))
+        } else {
+            None
+        };
         if !self.state.ui_settings.dotify_nudge || self.dotify.demo {
             return;
         }
-        if should_nudge(&self.dotify.tracker, self.dotify.busy_since, self.dotify.memory.last_nudge_ms, now, local_offset_s()) {
+        if should_nudge(
+            &self.dotify.tracker,
+            self.dotify.busy_since,
+            self.dotify.memory.last_nudge_ms,
+            now,
+            local_offset_s(),
+        ) {
             let posted = crate::platform_notify::show_banner(
                 "Not clocked in to Dotify",
                 "Keel has been working for 15 minutes. Clock in from the timer pill.",
@@ -604,7 +683,9 @@ impl KeelWindow {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
         let key = repo_key(folder, &origin);
-        self.dotify.repo_keys.insert(folder.to_string(), key.clone());
+        self.dotify
+            .repo_keys
+            .insert(folder.to_string(), key.clone());
         key
     }
 
@@ -612,7 +693,12 @@ impl KeelWindow {
     /// any running chat.
     fn dotify_working_chat(&self) -> Option<&crate::state::ChatItem> {
         let running = |c: &&crate::state::ChatItem| c.status == keel_proto::ChatStatus::Running;
-        let active = self.state.active_tab.as_ref().and_then(|id| self.state.chats.get(id)).filter(running);
+        let active = self
+            .state
+            .active_tab
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))
+            .filter(running);
         active.or_else(|| self.state.chats.values().find(running))
     }
 
@@ -621,8 +707,13 @@ impl KeelWindow {
     /// in the background).
     pub(super) fn dotify_switch_check(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
-        let chat = self.dotify_working_chat().map(|c| (c.space_id.clone(), c.title.clone(), c.branch.clone()));
-        let folder = chat.as_ref().and_then(|(space, ..)| self.state.spaces.get(space)).map(|s| s.path.clone());
+        let chat = self
+            .dotify_working_chat()
+            .map(|c| (c.space_id.clone(), c.title.clone(), c.branch.clone()));
+        let folder = chat
+            .as_ref()
+            .and_then(|(space, ..)| self.state.spaces.get(space))
+            .map(|s| s.path.clone());
         let repo = folder.as_deref().map(|f| self.dotify_repo(f));
         self.dotify.work = match (repo, self.dotify.work.take()) {
             (Some(r), Some((w, since))) if r == w => Some((w, since)),
@@ -637,36 +728,60 @@ impl KeelWindow {
             self.dotify.switch = None;
             cx.notify();
         }
-        if !self.state.ui_settings.dotify_nudge || self.dotify.demo || self.dotify.switch.is_some() || self.dotify.pending.is_some() {
+        if !self.state.ui_settings.dotify_nudge
+            || self.dotify.demo
+            || self.dotify.switch.is_some()
+            || self.dotify.pending.is_some()
+        {
             return;
         }
-        let (Some((repo, since)), Some((_, title, branch)), Some(folder)) = (self.dotify.work.clone(), chat, folder) else {
+        let (Some((repo, since)), Some((_, title, branch)), Some(folder)) =
+            (self.dotify.work.clone(), chat, folder)
+        else {
             return;
         };
-        let Some(project) = self.dotify.memory.switch_suggestion(&self.dotify.tracker, &repo, since, now) else {
+        let Some(project) =
+            self.dotify
+                .memory
+                .switch_suggestion(&self.dotify.tracker, &repo, since, now)
+        else {
             return;
         };
         let running = match &self.dotify.tracker {
-            Tracker::Running(e) => e.project.as_ref().map_or("another project".to_string(), |p| p.name.clone()),
+            Tracker::Running(e) => e
+                .project
+                .as_ref()
+                .map_or("another project".to_string(), |p| p.name.clone()),
             _ => String::new(),
         };
         let posted = !crate::platform_notify::app_active()
             && crate::platform_notify::show_banner(
                 &format!("Working on {}?", project.name),
-                &format!("Keel is working in {}, but Dotify is tracking {running}. Open Keel to switch.", repo_label(&repo)),
+                &format!(
+                    "Keel is working in {}, but Dotify is tracking {running}. Open Keel to switch.",
+                    repo_label(&repo)
+                ),
                 None,
             );
         tracing::info!(target: "keel_ui::dotify", repo = %repo, from = %running, to = %project.name, posted, "switch suggested");
         self.dotify.memory.switch_asked.insert(repo.clone(), now);
         self.dotify.memory.save(&self.state.data_dir);
         let description = prefill_description(&title, &branch).text;
-        self.dotify.switch = Some(SwitchOffer { repo, folder, project, description, busy: None });
+        self.dotify.switch = Some(SwitchOffer {
+            repo,
+            folder,
+            project,
+            description,
+            busy: None,
+        });
         cx.notify();
     }
 
     /// Not now (cooldown already set) or Don't ask for this repo.
     pub(super) fn dotify_switch_dismiss(&mut self, forever: bool, cx: &mut Context<Self>) {
-        let Some(o) = self.dotify.switch.take() else { return };
+        let Some(o) = self.dotify.switch.take() else {
+            return;
+        };
         if forever && !self.dotify.memory.repo_ignored.contains(&o.repo) {
             self.dotify.memory.repo_ignored.push(o.repo.clone());
             self.dotify.memory.save(&self.state.data_dir);
@@ -677,13 +792,17 @@ impl KeelWindow {
 
     /// Clock out of the running project, clock in to the repo's.
     pub(super) fn dotify_switch_accept(&mut self, cx: &mut Context<Self>) {
-        let Some(o) = self.dotify.switch.as_mut().filter(|o| o.busy.is_none()) else { return };
+        let Some(o) = self.dotify.switch.as_mut().filter(|o| o.busy.is_none()) else {
+            return;
+        };
         if self.dotify.pending.is_some() || !matches!(self.dotify.tracker, Tracker::Running(_)) {
             return;
         }
         o.busy = Some(Instant::now());
         let o = o.clone();
-        let Tracker::Running(running) = self.dotify.tracker.clone() else { return };
+        let Tracker::Running(running) = self.dotify.tracker.clone() else {
+            return;
+        };
         self.dotify.pending = Some(Pending::ClockOut);
         self.dotify.pending_at = Some(Instant::now());
         self.dotify.rejected = None;
@@ -761,7 +880,11 @@ impl KeelWindow {
     pub(super) fn dotify_toggle_popover(&mut self, cx: &mut Context<Self>) {
         if self.dotify.open && self.dotify.close_at.is_none() {
             self.dotify_close_popover(cx);
-        } else if self.dotify.closed_by_outside.is_some_and(|at| at.elapsed() < Duration::from_millis(350)) {
+        } else if self
+            .dotify
+            .closed_by_outside
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(350))
+        {
             // The press that closed it was on the pill: stay closed.
             self.dotify.closed_by_outside = None;
         } else {
@@ -790,15 +913,24 @@ impl KeelWindow {
         self.dotify.sync_label.snap(&label);
         self.dotify.rows_at = None;
         self.dotify.scrolled_highlight = None;
-        self.dotify.list_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
-        self.dotify.bench = Bench { on: std::env::var_os("KEEL_DOTIFY_FRAMELOG").is_some(), ..Default::default() };
+        self.dotify
+            .list_scroll
+            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+        self.dotify.bench = Bench {
+            on: std::env::var_os("KEEL_DOTIFY_FRAMELOG").is_some(),
+            ..Default::default()
+        };
         self.dotify.stats_anim = None;
         self.dotify.height = AnimW::default();
         self.dotify.receipt = None;
         self.timer_ui_close_menu_only();
         self.dotify_load_projects(cx);
         self.dotify_sync(cx);
-        if self.dotify.totals_at.is_none_or(|at| at.elapsed() > Duration::from_secs(30)) {
+        if self
+            .dotify
+            .totals_at
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(30))
+        {
             self.dotify_load_totals(cx);
         }
         cx.notify();
@@ -839,11 +971,22 @@ impl KeelWindow {
         };
         let need_all = !self.dotify.projects_loaded;
         cx.spawn(async move |this, cx| {
-            let favs = client.call("dotify", serde_json::json!({ "op": "favorites" })).await;
-            let all = if need_all { Some(client.call("dotify", serde_json::json!({ "op": "projects" })).await) } else { None };
+            let favs = client
+                .call("dotify", serde_json::json!({ "op": "favorites" }))
+                .await;
+            let all = if need_all {
+                Some(
+                    client
+                        .call("dotify", serde_json::json!({ "op": "projects" }))
+                        .await,
+                )
+            } else {
+                None
+            };
             let _ = this.update(cx, |this, cx| {
                 if let Ok(v) = favs {
-                    let list: Vec<Project> = serde_json::from_value(v["projects"].clone()).unwrap_or_default();
+                    let list: Vec<Project> =
+                        serde_json::from_value(v["projects"].clone()).unwrap_or_default();
                     this.dotify.fav_ids = list.iter().map(|p| p.id).collect();
                     // Only refresh the sections if the popover hasn't shown rows yet.
                     if ms_since(this.dotify.open_at) < 400. || this.dotify.fav_snapshot.is_empty() {
@@ -852,10 +995,14 @@ impl KeelWindow {
                     this.dotify.favorites = list;
                 }
                 if let Some(Ok(v)) = all {
-                    this.dotify.all_projects = serde_json::from_value(v["projects"].clone()).unwrap_or_default();
+                    this.dotify.all_projects =
+                        serde_json::from_value(v["projects"].clone()).unwrap_or_default();
                     this.dotify.projects_loaded = true;
                     // Late rows enter on their own timeline (from now), over the skeleton.
-                    if this.dotify.open && ms_since(this.dotify.open_at) > crate::dotify::section_delay(crate::dotify::LIST_SECTION) {
+                    if this.dotify.open
+                        && ms_since(this.dotify.open_at)
+                            > crate::dotify::section_delay(crate::dotify::LIST_SECTION)
+                    {
                         this.dotify.rows_at = Some(Instant::now());
                     }
                 }
@@ -874,7 +1021,11 @@ impl KeelWindow {
     pub(super) fn dotify_rows_and_ranges(&self) -> (Rc<Vec<Row>>, Rc<Vec<Vec<(usize, usize)>>>) {
         use std::hash::{Hash, Hasher};
         let query = self.dotify.query.trim();
-        let results = if query.is_empty() { None } else { self.dotify.results.as_deref() };
+        let results = if query.is_empty() {
+            None
+        } else {
+            self.dotify.results.as_deref()
+        };
         let mut h = std::collections::hash_map::DefaultHasher::new();
         query.hash(&mut h);
         let ids = |ps: &[Project], h: &mut std::collections::hash_map::DefaultHasher| {
@@ -889,28 +1040,66 @@ impl KeelWindow {
         ids(&self.dotify.all_projects, &mut h);
         results.map(|r| ids(r, &mut h));
         let key = h.finish();
-        if let Some(c) = self.dotify.rows_cache.borrow().as_ref().filter(|c| c.key == key) {
+        if let Some(c) = self
+            .dotify
+            .rows_cache
+            .borrow()
+            .as_ref()
+            .filter(|c| c.key == key)
+        {
             return (c.rows.clone(), c.ranges.clone());
         }
-        let rows = Rc::new(list_rows(&self.dotify.fav_snapshot, &self.dotify.memory.recent, &self.dotify.all_projects, results));
-        let ranges: Rc<Vec<Vec<(usize, usize)>>> = Rc::new(rows.iter().map(|r| if query.is_empty() { Vec::new() } else { crate::dotify::match_ranges(&r.project.name, query) }).collect());
-        *self.dotify.rows_cache.borrow_mut() = Some(RowsCache { key, rows: rows.clone(), ranges: ranges.clone() });
+        let rows = Rc::new(list_rows(
+            &self.dotify.fav_snapshot,
+            &self.dotify.memory.recent,
+            &self.dotify.all_projects,
+            results,
+        ));
+        let ranges: Rc<Vec<Vec<(usize, usize)>>> = Rc::new(
+            rows.iter()
+                .map(|r| {
+                    if query.is_empty() {
+                        Vec::new()
+                    } else {
+                        crate::dotify::match_ranges(&r.project.name, query)
+                    }
+                })
+                .collect(),
+        );
+        *self.dotify.rows_cache.borrow_mut() = Some(RowsCache {
+            key,
+            rows: rows.clone(),
+            ranges: ranges.clone(),
+        });
         (rows, ranges)
     }
 
     /// The header's sync label text.
     pub(super) fn dotify_sync_label_text(&self) -> String {
-        match (self.dotify.manual_spin.is_some() && self.dotify.syncing, self.dotify.synced_wall_ms) {
+        match (
+            self.dotify.manual_spin.is_some() && self.dotify.syncing,
+            self.dotify.synced_wall_ms,
+        ) {
             (true, _) => "Syncing…".to_string(),
-            (false, Some(ms)) => format!("Synced {}", keel_proto::dotify::local_hm(ms, local_offset_s())),
+            (false, Some(ms)) => format!(
+                "Synced {}",
+                keel_proto::dotify::local_hm(ms, local_offset_s())
+            ),
             (false, None) => String::new(),
         }
     }
 
     /// The folder the active chat works in: where the last project is kept.
     fn dotify_folder(&self) -> Option<String> {
-        let chat = self.state.active_tab.as_ref().and_then(|id| self.state.chats.get(id))?;
-        self.state.spaces.get(&chat.space_id).map(|s| s.path.clone())
+        let chat = self
+            .state
+            .active_tab
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))?;
+        self.state
+            .spaces
+            .get(&chat.space_id)
+            .map(|s| s.path.clone())
     }
 
     /// Inputs get their starting text when the popover opens (needs the window).
@@ -918,11 +1107,28 @@ impl KeelWindow {
         if std::mem::take(&mut self.dotify.prefill) {
             let editing = self.dotify.flow.view == View::Edit;
             let (prefill, picked) = match (&self.dotify.flow.result, editing) {
-                (Some(e), true) => (Prefill { text: e.description.clone(), from_branch: false }, e.project.clone()),
+                (Some(e), true) => (
+                    Prefill {
+                        text: e.description.clone(),
+                        from_branch: false,
+                    },
+                    e.project.clone(),
+                ),
                 _ => {
-                    let chat = self.state.active_tab.as_ref().and_then(|id| self.state.chats.get(id));
-                    let prefill = chat.map(|c| prefill_description(&c.title, &c.branch)).unwrap_or_default();
-                    (prefill, self.dotify.memory.project_for(self.dotify_folder().as_deref()))
+                    let chat = self
+                        .state
+                        .active_tab
+                        .as_ref()
+                        .and_then(|id| self.state.chats.get(id));
+                    let prefill = chat
+                        .map(|c| prefill_description(&c.title, &c.branch))
+                        .unwrap_or_default();
+                    (
+                        prefill,
+                        self.dotify
+                            .memory
+                            .project_for(self.dotify_folder().as_deref()),
+                    )
                 }
             };
             if picked != self.dotify.picked {
@@ -931,12 +1137,16 @@ impl KeelWindow {
             self.dotify.picked = picked;
             let text = prefill.text.clone();
             self.dotify.prefill_text = prefill;
-            self.dotify_desc.update(cx, |i, cx| i.set_value(text, window, cx));
-            self.dotify_search.update(cx, |i, cx| i.set_value("", window, cx));
+            self.dotify_desc
+                .update(cx, |i, cx| i.set_value(text, window, cx));
+            self.dotify_search
+                .update(cx, |i, cx| i.set_value("", window, cx));
             self.dotify.query.clear();
             self.dotify.results = None;
         }
-        if std::mem::take(&mut self.dotify.focus_search) && matches!(self.dotify.flow.view, View::Idle | View::Edit) {
+        if std::mem::take(&mut self.dotify.focus_search)
+            && matches!(self.dotify.flow.view, View::Idle | View::Edit)
+        {
             self.dotify_search.update(cx, |i, cx| i.focus(window, cx));
         }
     }
@@ -965,7 +1175,12 @@ impl KeelWindow {
         self.dotify.searching = true;
         self.dotify.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-            let res = client.call("dotify", serde_json::json!({ "op": "projects", "search": query })).await;
+            let res = client
+                .call(
+                    "dotify",
+                    serde_json::json!({ "op": "projects", "search": query }),
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.dotify.search_gen != n {
                     return;
@@ -973,7 +1188,8 @@ impl KeelWindow {
                 this.dotify.searching = false;
                 match res {
                     Ok(v) => {
-                        this.dotify.results = Some(serde_json::from_value(v["projects"].clone()).unwrap_or_default());
+                        this.dotify.results =
+                            Some(serde_json::from_value(v["projects"].clone()).unwrap_or_default());
                         this.dotify.results_at = Some(Instant::now());
                     }
                     Err(err) => this.dotify_fail(err),
@@ -985,7 +1201,8 @@ impl KeelWindow {
     }
 
     pub(super) fn dotify_clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dotify_search.update(cx, |i, cx| i.set_value("", window, cx));
+        self.dotify_search
+            .update(cx, |i, cx| i.set_value("", window, cx));
         self.dotify_search_changed(cx);
     }
 
@@ -1001,7 +1218,12 @@ impl KeelWindow {
         }
     }
 
-    pub(super) fn dotify_pick(&mut self, project: Project, index: Option<usize>, cx: &mut Context<Self>) {
+    pub(super) fn dotify_pick(
+        &mut self,
+        project: Project,
+        index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         if self.dotify.picked.as_ref().map(|p| p.id) != Some(project.id) {
             self.dotify.picked_at = Some(Instant::now());
         }
@@ -1039,7 +1261,12 @@ impl KeelWindow {
         };
         let id = project.id;
         cx.spawn(async move |this, cx| {
-            let res = client.call("dotify", serde_json::json!({ "op": "favorite", "project_id": id, "on": on })).await;
+            let res = client
+                .call(
+                    "dotify",
+                    serde_json::json!({ "op": "favorite", "project_id": id, "on": on }),
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(err) = res {
                     // Put the star back.
@@ -1060,22 +1287,37 @@ impl KeelWindow {
         let Some(project) = self.dotify.picked.clone() else {
             return;
         };
-        if self.dotify.pending.is_some() || self.dotify.clock_in_btn.busy() || matches!(self.dotify.tracker, Tracker::Running(_)) {
+        if self.dotify.pending.is_some()
+            || self.dotify.clock_in_btn.busy()
+            || matches!(self.dotify.tracker, Tracker::Running(_))
+        {
             return;
         }
         let description = self.dotify_desc.read(cx).value().trim().to_string();
         let now = Instant::now();
-        self.dotify.pending = Some(Pending::ClockIn { started_ms: now_ms() });
+        self.dotify.pending = Some(Pending::ClockIn {
+            started_ms: now_ms(),
+        });
         self.dotify.pending_at = Some(now);
         self.dotify.clock_in_btn.phase = super::dotify::PrimaryPhase::Loading(now);
         self.dotify.rejected = None;
         cx.notify();
         let folder = self.dotify_folder();
         if self.dotify.demo {
-            let entry = Entry { id: -1, description, project: Some(project.clone()), start_ms: now_ms(), ..Default::default() };
+            let entry = Entry {
+                id: -1,
+                description,
+                project: Some(project.clone()),
+                start_ms: now_ms(),
+                ..Default::default()
+            };
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(700)).await;
-                let _ = this.update(cx, |this, cx| this.dotify_clocked_in(entry, &project, folder, cx));
+                cx.background_executor()
+                    .timer(Duration::from_millis(700))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.dotify_clocked_in(entry, &project, folder, cx)
+                });
             })
             .detach();
             return;
@@ -1108,7 +1350,13 @@ impl KeelWindow {
         .detach();
     }
 
-    fn dotify_clocked_in(&mut self, entry: Entry, project: &Project, folder: Option<String>, cx: &mut Context<Self>) {
+    fn dotify_clocked_in(
+        &mut self,
+        entry: Entry,
+        project: &Project,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let now = Instant::now();
         self.dotify.pending = None;
         self.dotify.tracker = Tracker::Running(entry);
@@ -1117,7 +1365,12 @@ impl KeelWindow {
         self.dotify.memory.remember(folder.as_deref(), project);
         let repo = folder.as_deref().map(|f| self.dotify_repo(f));
         self.dotify.memory.map_repo(repo.as_deref(), project);
-        if self.dotify.switch.as_ref().is_some_and(|o| o.busy.is_none()) {
+        if self
+            .dotify
+            .switch
+            .as_ref()
+            .is_some_and(|o| o.busy.is_none())
+        {
             self.dotify.switch = None;
         }
         self.dotify.memory.save(&self.state.data_dir);
@@ -1176,10 +1429,18 @@ impl KeelWindow {
         cx.notify();
         let stopped_at = now_ms();
         if self.dotify.demo {
-            let entry = Entry { end_ms: Some(stopped_at), duration_h: running.elapsed_ms(stopped_at) as f64 / 3_600_000., ..running };
+            let entry = Entry {
+                end_ms: Some(stopped_at),
+                duration_h: running.elapsed_ms(stopped_at) as f64 / 3_600_000.,
+                ..running
+            };
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(700)).await;
-                let _ = this.update(cx, |this, cx| this.dotify_clocked_out(entry, stopped_at, from_menu, cx));
+                cx.background_executor()
+                    .timer(Duration::from_millis(700))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.dotify_clocked_out(entry, stopped_at, from_menu, cx)
+                });
             })
             .detach();
             return;
@@ -1188,9 +1449,13 @@ impl KeelWindow {
             return;
         };
         cx.spawn(async move |this, cx| {
-            let res = client.call("dotify", serde_json::json!({ "op": "clock_out" })).await;
+            let res = client
+                .call("dotify", serde_json::json!({ "op": "clock_out" }))
+                .await;
             let _ = this.update(cx, |this, cx| {
-                match res.and_then(|v| serde_json::from_value::<Entry>(v["entry"].clone()).map_err(|e| e.to_string())) {
+                match res.and_then(|v| {
+                    serde_json::from_value::<Entry>(v["entry"].clone()).map_err(|e| e.to_string())
+                }) {
                     Ok(entry) => {
                         tracing::info!(target: "keel_ui::dotify", "clocked out");
                         this.dotify_clocked_out(entry, stopped_at, from_menu, cx);
@@ -1210,15 +1475,31 @@ impl KeelWindow {
         .detach();
     }
 
-    fn dotify_clocked_out(&mut self, entry: Entry, stopped_at: i64, from_menu: bool, cx: &mut Context<Self>) {
+    fn dotify_clocked_out(
+        &mut self,
+        entry: Entry,
+        stopped_at: i64,
+        from_menu: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.dotify.pending = None;
         self.dotify.out_busy = None;
         self.dotify.tracker = Tracker::Idle;
         self.dotify.totals_at = None;
-        let hours = if entry.duration_h > 0. { entry.duration_h } else { entry.elapsed_ms(stopped_at) as f64 / 3_600_000. };
+        let hours = if entry.duration_h > 0. {
+            entry.duration_h
+        } else {
+            entry.elapsed_ms(stopped_at) as f64 / 3_600_000.
+        };
         let text = format!("Clocked out · {}", keel_proto::dotify::hours_label(hours));
         if from_menu || !self.dotify.open || self.dotify.close_at.is_some() {
-            self.dotify.receipt = Some(Receipt { text, entry, shown: Instant::now(), paused: Duration::ZERO, hover_since: None });
+            self.dotify.receipt = Some(Receipt {
+                text,
+                entry,
+                shown: Instant::now(),
+                paused: Duration::ZERO,
+                hover_since: None,
+            });
         } else {
             self.dotify.flow.clocked_out(entry);
             self.dotify.view_at = Some(Instant::now());
@@ -1248,7 +1529,9 @@ impl KeelWindow {
 
     /// Save the edit: project and description (its times stay).
     pub(super) fn dotify_save_edit(&mut self, cx: &mut Context<Self>) {
-        let (Some(entry), Some(project)) = (self.dotify.flow.result.clone(), self.dotify.picked.clone()) else {
+        let (Some(entry), Some(project)) =
+            (self.dotify.flow.result.clone(), self.dotify.picked.clone())
+        else {
             return;
         };
         let Some(end) = entry.end_ms else {
@@ -1262,9 +1545,15 @@ impl KeelWindow {
         self.dotify.rejected = None;
         cx.notify();
         if self.dotify.demo {
-            let saved = Entry { description, project: Some(project), ..entry };
+            let saved = Entry {
+                description,
+                project: Some(project),
+                ..entry
+            };
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(600)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
                 let _ = this.update(cx, |this, cx| this.dotify_saved(saved, cx));
             })
             .detach();
@@ -1312,7 +1601,12 @@ impl KeelWindow {
     // ── Keys ─────────────────────────────────────────────────────────────
 
     /// The popover's keys, ahead of everything else. True when used.
-    pub(super) fn dotify_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn dotify_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.dotify.open || self.dotify.close_at.is_some() {
             return false;
         }
@@ -1320,7 +1614,8 @@ impl KeelWindow {
         let m = event.keystroke.modifiers;
         let view = self.dotify.flow.view;
         let picking = matches!(view, View::Idle | View::Edit);
-        let in_search = gpui::Focusable::focus_handle(self.dotify_search.read(cx), cx).is_focused(window);
+        let in_search =
+            gpui::Focusable::focus_handle(self.dotify_search.read(cx), cx).is_focused(window);
         match key {
             "escape" => {
                 if !self.dotify.query.is_empty() {
@@ -1344,8 +1639,14 @@ impl KeelWindow {
             }
             "enter" if picking && in_search && !m.shift => {
                 let rows = self.dotify_rows();
-                match self.dotify.highlight.and_then(|i| rows.get(i).map(|r| (i, r.project.clone()))) {
-                    Some((i, p)) if self.dotify.picked.as_ref().map(|q| q.id) != Some(p.id) => self.dotify_pick(p, Some(i), cx),
+                match self
+                    .dotify
+                    .highlight
+                    .and_then(|i| rows.get(i).map(|r| (i, r.project.clone())))
+                {
+                    Some((i, p)) if self.dotify.picked.as_ref().map(|q| q.id) != Some(p.id) => {
+                        self.dotify_pick(p, Some(i), cx)
+                    }
                     _ if view == View::Edit => self.dotify_save_edit(cx),
                     _ => self.dotify_clock_in(cx),
                 }
@@ -1353,7 +1654,11 @@ impl KeelWindow {
             }
             "d" if picking && m.secondary() => {
                 let rows = self.dotify_rows();
-                let target = self.dotify.highlight.and_then(|i| rows.get(i).map(|r| r.project.clone())).or_else(|| self.dotify.picked.clone());
+                let target = self
+                    .dotify
+                    .highlight
+                    .and_then(|i| rows.get(i).map(|r| r.project.clone()))
+                    .or_else(|| self.dotify.picked.clone());
                 if let Some(p) = target {
                     self.dotify_toggle_favorite(p, cx);
                 }
@@ -1363,7 +1668,11 @@ impl KeelWindow {
                 self.dotify_desc.update(cx, |i, cx| i.focus(window, cx));
                 true
             }
-            "/" if picking && !in_search && !gpui::Focusable::focus_handle(self.dotify_desc.read(cx), cx).is_focused(window) => {
+            "/" if picking
+                && !in_search
+                && !gpui::Focusable::focus_handle(self.dotify_desc.read(cx), cx)
+                    .is_focused(window) =>
+            {
                 self.dotify_search.update(cx, |i, cx| i.focus(window, cx));
                 true
             }
@@ -1385,7 +1694,8 @@ impl KeelWindow {
         if self.dotify.connect_btn.busy() {
             return;
         }
-        self.dotify_token.update(cx, |i, cx| i.set_value("", window, cx));
+        self.dotify_token
+            .update(cx, |i, cx| i.set_value("", window, cx));
         self.dotify_connect_token(token, cx);
     }
 
@@ -1397,7 +1707,9 @@ impl KeelWindow {
         self.dotify.connect_error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let res = client.call("connect_dotify", serde_json::json!({ "token": token })).await;
+            let res = client
+                .call("connect_dotify", serde_json::json!({ "token": token }))
+                .await;
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(_) => {
@@ -1421,7 +1733,9 @@ impl KeelWindow {
                         this.dotify.connect_btn.phase = PrimaryPhase::Error(Instant::now());
                         this.dotify.connect_error = Some(match DotifyError::from_wire(&err) {
                             DotifyError::Auth(_) => "Dotify didn't accept this token.".to_string(),
-                            DotifyError::Offline(_) => "Couldn't reach Dotify. Check your connection.".to_string(),
+                            DotifyError::Offline(_) => {
+                                "Couldn't reach Dotify. Check your connection.".to_string()
+                            }
                             other => other.text().to_string(),
                         });
                         this.dotify.connect_error_at = Some(Instant::now());
@@ -1445,10 +1759,14 @@ impl KeelWindow {
         self.dotify.test_result = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let res = client.call("dotify", serde_json::json!({ "op": "status" })).await;
+            let res = client
+                .call("dotify", serde_json::json!({ "op": "status" }))
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.dotify.test_busy = None;
-                let result = match res.and_then(|v| serde_json::from_value::<Status>(v).map_err(|e| e.to_string())) {
+                let result = match res
+                    .and_then(|v| serde_json::from_value::<Status>(v).map_err(|e| e.to_string()))
+                {
                     Ok(s) => {
                         if !this.dotify.demo {
                             this.dotify_apply_status(&s);
@@ -1457,7 +1775,9 @@ impl KeelWindow {
                         Ok("Connection OK".to_string())
                     }
                     Err(err) => Err(match DotifyError::from_wire(&err) {
-                        DotifyError::Auth(_) => "Dotify token expired. Paste a new one.".to_string(),
+                        DotifyError::Auth(_) => {
+                            "Dotify token expired. Paste a new one.".to_string()
+                        }
                         DotifyError::Offline(_) => "Couldn't reach Dotify".to_string(),
                         e => e.text().to_string(),
                     }),
@@ -1467,9 +1787,13 @@ impl KeelWindow {
                 cx.notify();
                 // "Connection OK" leaves after 3 s.
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_millis(3200)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(3200))
+                        .await;
                     let _ = this.update(cx, |this, cx| {
-                        if this.dotify.test_result.as_ref().is_some_and(|(r, at)| r.is_ok() && at.elapsed() >= Duration::from_secs(3)) {
+                        if this.dotify.test_result.as_ref().is_some_and(|(r, at)| {
+                            r.is_ok() && at.elapsed() >= Duration::from_secs(3)
+                        }) {
                             this.dotify.test_result = None;
                             cx.notify();
                         }
@@ -1500,7 +1824,12 @@ impl KeelWindow {
             return;
         };
         cx.spawn(async move |this, cx| {
-            let res = client.call("disconnect", serde_json::json!({ "kind": "dotify", "host": conn.base })).await;
+            let res = client
+                .call(
+                    "disconnect",
+                    serde_json::json!({ "kind": "dotify", "host": conn.base }),
+                )
+                .await;
             let _ = this.update(cx, |this, cx| {
                 match res {
                     Ok(_) => {
@@ -1521,16 +1850,22 @@ impl KeelWindow {
     pub(super) fn dotify_paste_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
             let text = text.trim().to_string();
-            self.dotify_token.update(cx, |i, cx| i.set_value(text, window, cx));
+            self.dotify_token
+                .update(cx, |i, cx| i.set_value(text, window, cx));
             self.dotify.connect_error = None;
         }
         cx.notify();
     }
 
-    pub(super) fn dotify_toggle_token_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dotify_toggle_token_shown(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.dotify.token_shown = !self.dotify.token_shown;
         let masked = !self.dotify.token_shown;
-        self.dotify_token.update(cx, |i, cx| i.set_masked(masked, window, cx));
+        self.dotify_token
+            .update(cx, |i, cx| i.set_masked(masked, window, cx));
         cx.notify();
     }
 
@@ -1667,7 +2002,12 @@ impl KeelWindow {
     fn dotify_demo(&mut self, demo: &str, cx: &mut Context<Self>) {
         self.timer.hidden = false;
         let fake = |this: &Self, ago_s: i64| {
-            let project = this.dotify.all_projects.get(3).cloned().unwrap_or(Project::new(0, "Keel"));
+            let project = this
+                .dotify
+                .all_projects
+                .get(3)
+                .cloned()
+                .unwrap_or(Project::new(0, "Keel"));
             Entry {
                 id: -1,
                 description: "feat/dotify-timer · pill and popover polish".into(),
@@ -1702,7 +2042,11 @@ impl KeelWindow {
                 self.dotify.overtime_wall_ms = Some(now_ms() - 24 * 60_000);
             }
             "result" => {
-                let entry = Entry { end_ms: Some(now_ms()), duration_h: 4.25, ..fake(self, 4 * 3600 + 15 * 60) };
+                let entry = Entry {
+                    end_ms: Some(now_ms()),
+                    duration_h: 4.25,
+                    ..fake(self, 4 * 3600 + 15 * 60)
+                };
                 self.dotify.tracker = Tracker::Idle;
                 self.dotify_open_popover(cx);
                 self.dotify.flow.clocked_out(entry);
@@ -1713,7 +2057,10 @@ impl KeelWindow {
                 self.dotify_open_popover(cx);
             }
             "switch" | "switch-accept" => {
-                self.dotify.tracker = Tracker::Running(Entry { project: Some(Project::new(222, "DLTX Solutions")), ..fake(self, 2 * 3600 + 14 * 60) });
+                self.dotify.tracker = Tracker::Running(Entry {
+                    project: Some(Project::new(222, "DLTX Solutions")),
+                    ..fake(self, 2 * 3600 + 14 * 60)
+                });
                 let project = Project::new(178, "Resona - Web Revamp");
                 self.dotify.switch = Some(SwitchOffer {
                     repo: "gitlab.dot.co.id/resona/web-revamp".into(),
@@ -1743,18 +2090,50 @@ impl KeelWindow {
         if self.dotify.all_projects.is_empty() {
             // Dotify unreachable: sample names.
             let names = [
-                "ANALYST", "Analyst (Intern)", "Bikin Konten", "Boilerplate - BE", "Boilerplate - FE", "Boilerplate - Mobile", "Design System", "Dotify",
-                "Internal Tools", "Keel", "Mobile App", "Research", "Website Revamp",
+                "ANALYST",
+                "Analyst (Intern)",
+                "Bikin Konten",
+                "Boilerplate - BE",
+                "Boilerplate - FE",
+                "Boilerplate - Mobile",
+                "Design System",
+                "Dotify",
+                "Internal Tools",
+                "Keel",
+                "Mobile App",
+                "Research",
+                "Website Revamp",
             ];
-            self.dotify.all_projects = names.iter().enumerate().map(|(i, n)| Project::new(-(i as i64) - 1, *n)).collect();
+            self.dotify.all_projects = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| Project::new(-(i as i64) - 1, *n))
+                .collect();
             self.dotify.projects_loaded = true;
         }
-        self.dotify.memory.recent = self.dotify.all_projects.iter().skip(10).take(3).cloned().collect();
-        self.dotify.fav_snapshot = self.dotify.all_projects.iter().skip(4).take(2).cloned().collect();
+        self.dotify.memory.recent = self
+            .dotify
+            .all_projects
+            .iter()
+            .skip(10)
+            .take(3)
+            .cloned()
+            .collect();
+        self.dotify.fav_snapshot = self
+            .dotify
+            .all_projects
+            .iter()
+            .skip(4)
+            .take(2)
+            .cloned()
+            .collect();
         self.dotify.fav_ids = self.dotify.fav_snapshot.iter().map(|p| p.id).collect();
         // Replay the entry with the sections in place.
         self.dotify.open_fresh = true;
-        self.dotify.bench = Bench { on: std::env::var_os("KEEL_DOTIFY_FRAMELOG").is_some(), ..Default::default() };
+        self.dotify.bench = Bench {
+            on: std::env::var_os("KEEL_DOTIFY_FRAMELOG").is_some(),
+            ..Default::default()
+        };
         if demo == "selected" {
             self.dotify.picked = self.dotify.all_projects.get(10).cloned();
             self.dotify.picked_at = Some(Instant::now());

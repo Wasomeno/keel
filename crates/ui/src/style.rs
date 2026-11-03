@@ -20,11 +20,20 @@ pub const MONO: &str = "SF Mono";
 // ponytail: macOS-only path; bundle a mono font if Keel ever runs elsewhere.
 pub fn load_mono(cx: &gpui::App) {
     const DIR: &str = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts";
-    let faces: Vec<std::borrow::Cow<'static, [u8]>> = ["Regular", "RegularItalic", "Medium", "MediumItalic", "Semibold", "SemiboldItalic", "Bold", "BoldItalic"]
-        .iter()
-        .filter_map(|w| std::fs::read(format!("{DIR}/SF-Mono-{w}.otf")).ok())
-        .map(std::borrow::Cow::Owned)
-        .collect();
+    let faces: Vec<std::borrow::Cow<'static, [u8]>> = [
+        "Regular",
+        "RegularItalic",
+        "Medium",
+        "MediumItalic",
+        "Semibold",
+        "SemiboldItalic",
+        "Bold",
+        "BoldItalic",
+    ]
+    .iter()
+    .filter_map(|w| std::fs::read(format!("{DIR}/SF-Mono-{w}.otf")).ok())
+    .map(std::borrow::Cow::Owned)
+    .collect();
     if faces.is_empty() || cx.text_system().add_fonts(faces).is_err() {
         eprintln!("keel: SF Mono not found in Terminal.app; code falls back to the system font");
     }
@@ -62,9 +71,16 @@ pub fn set_zoom(factor: f32) {
 /// The zoom step after (`up`) or before `current`, staying at the ends.
 pub fn zoom_step(current: f32, up: bool) -> f32 {
     let next = if up {
-        ZOOM_STEPS.iter().copied().find(|step| *step > current + 0.001)
+        ZOOM_STEPS
+            .iter()
+            .copied()
+            .find(|step| *step > current + 0.001)
     } else {
-        ZOOM_STEPS.iter().rev().copied().find(|step| *step < current - 0.001)
+        ZOOM_STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|step| *step < current - 0.001)
     };
     next.unwrap_or(current)
 }
@@ -84,12 +100,36 @@ pub struct TypeStep {
 }
 
 /// Desktop-dense ramp. Body is 13 px like native macOS lists.
-pub const CAPTION: TypeStep = TypeStep { size: 11., line: 14., weight: FontWeight::NORMAL };
-pub const SMALL: TypeStep = TypeStep { size: 12., line: 16., weight: FontWeight::NORMAL };
-pub const BODY: TypeStep = TypeStep { size: 13., line: 18., weight: FontWeight::NORMAL };
-pub const READING: TypeStep = TypeStep { size: 14., line: 22., weight: FontWeight::NORMAL };
-pub const TITLE: TypeStep = TypeStep { size: 15., line: 20., weight: FontWeight::SEMIBOLD };
-pub const CODE: TypeStep = TypeStep { size: 12.5, line: 18., weight: FontWeight::NORMAL };
+pub const CAPTION: TypeStep = TypeStep {
+    size: 11.,
+    line: 14.,
+    weight: FontWeight::NORMAL,
+};
+pub const SMALL: TypeStep = TypeStep {
+    size: 12.,
+    line: 16.,
+    weight: FontWeight::NORMAL,
+};
+pub const BODY: TypeStep = TypeStep {
+    size: 13.,
+    line: 18.,
+    weight: FontWeight::NORMAL,
+};
+pub const READING: TypeStep = TypeStep {
+    size: 14.,
+    line: 22.,
+    weight: FontWeight::NORMAL,
+};
+pub const TITLE: TypeStep = TypeStep {
+    size: 15.,
+    line: 20.,
+    weight: FontWeight::SEMIBOLD,
+};
+pub const CODE: TypeStep = TypeStep {
+    size: 12.5,
+    line: 18.,
+    weight: FontWeight::NORMAL,
+};
 
 /// Type and surface shorthands on any styled element.
 pub trait KeelStyled: Styled + Sized {

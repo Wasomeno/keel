@@ -15,9 +15,9 @@ mod agent;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable as _, IntoElement,
-    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Window,
-    div, prelude::*, px, relative,
+    AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle,
+    Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Window, div, prelude::*, px, relative,
 };
 use gpui_base::input::InputState;
 use keel_theme::Tokens;
@@ -25,10 +25,10 @@ use keel_theme::Tokens;
 use super::{KeelWindow, icon_button};
 use crate::browser::agent::ConsoleLog;
 use crate::browser::{PageState, normalize_address};
-use agent::AgentTab;
 use crate::icons::Icon;
 use crate::motion::{BASE, SLOW, SPATIAL, ease_in, ease_out};
 use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_LG, RADIUS_MD, c, zpx};
+use agent::AgentTab;
 
 /// Default share of the window, and the bounds a drag keeps it in.
 const DEFAULT_SHARE: f32 = 0.42;
@@ -146,12 +146,17 @@ impl BrowserTab {
             return self.page.title.trim().to_string();
         }
         if let Some(path) = &self.preview {
-            return path.file_name().map_or_else(|| "File".into(), |n| n.to_string_lossy().into_owned());
+            return path
+                .file_name()
+                .map_or_else(|| "File".into(), |n| n.to_string_lossy().into_owned());
         }
         match self.page.url.as_deref() {
             Some(url) => {
                 let rest = url.split_once("://").map_or(url, |(_, r)| r);
-                rest.split(['/', '?', '#']).next().unwrap_or(rest).to_string()
+                rest.split(['/', '?', '#'])
+                    .next()
+                    .unwrap_or(rest)
+                    .to_string()
             }
             None => "New Tab".into(),
         }
@@ -215,7 +220,8 @@ impl BrowserPanel {
             expanded: false,
             expand_from: 0.,
             expand_anim: None,
-            address: cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter address")),
+            address: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Search or enter address")),
             focus: cx.focus_handle(),
             tabs: vec![BrowserTab::new(0)],
             active: 0,
@@ -249,7 +255,9 @@ impl BrowserPanel {
 
     /// Tabs the strip shows: the user's, and the open chat's agent tab.
     fn visible_in_strip(&self, tab: &BrowserTab, chat: Option<&str>) -> bool {
-        tab.agent.as_ref().is_none_or(|a| a.chat.is_empty() || Some(a.chat.as_str()) == chat)
+        tab.agent
+            .as_ref()
+            .is_none_or(|a| a.chat.is_empty() || Some(a.chat.as_str()) == chat)
     }
 
     /// A new empty tab after the others; its index.
@@ -265,7 +273,6 @@ impl BrowserPanel {
             native.focus_parent();
         }
     }
-
 }
 
 /// How visible the pane is at `k` of its width, respecting entrance vs exit.
@@ -277,15 +284,26 @@ impl KeelWindow {
     /// The pane belongs to an open chat session only: never the new-chat
     /// screen, Settings, or GitLab. `was_hero` is this frame's hero state.
     pub(super) fn browser_allowed(&self) -> bool {
-        !self.was_hero && !self.settings_open && !self.gitlab_open && self.confirming_delete_chats.is_none() && self.state.confirming_delete_space.is_none()
+        !self.was_hero
+            && !self.settings_open
+            && !self.gitlab_open
+            && self.confirming_delete_chats.is_none()
+            && self.state.confirming_delete_space.is_none()
     }
 
     /// An agent's page is alive with the pane closed: the header's globe
     /// carries a dot (bright while a request is recent).
     pub(super) fn browser_in_background(&self) -> Option<bool> {
         let b = &self.browser;
-        let alive = b.tabs.iter().any(|tab| tab.agent.is_some() && tab.native.as_ref().is_some_and(|n| n.background()) && tab.page.url.is_some());
-        (alive && !b.open).then(|| b.agent_at.is_some_and(|at| at.elapsed() < Duration::from_secs(20)))
+        let alive = b.tabs.iter().any(|tab| {
+            tab.agent.is_some()
+                && tab.native.as_ref().is_some_and(|n| n.background())
+                && tab.page.url.is_some()
+        });
+        (alive && !b.open).then(|| {
+            b.agent_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(20))
+        })
     }
 
     /// ⌘⇧B and the header button: slide the pane in or out.
@@ -331,7 +349,9 @@ impl KeelWindow {
         }
         let settle = self.right_panel_duration();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(settle + Duration::from_millis(20)).await;
+            cx.background_executor()
+                .timer(settle + Duration::from_millis(20))
+                .await;
             let _ = this.update(cx, |_, cx| {
                 cx.notify();
             });
@@ -398,7 +418,12 @@ impl KeelWindow {
 
     /// ⌘W in the pane and a tab's ×: close it (its page and process go
     /// with it). The last tab goes back to the start screen instead.
-    pub(super) fn browser_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn browser_close_tab(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ix >= self.browser.tabs.len() {
             return;
         }
@@ -427,7 +452,9 @@ impl KeelWindow {
     fn schedule_browser_park(&mut self, cx: &mut Context<Self>) {
         self.browser.idle_since = Some(Instant::now());
         self.browser.park_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PARK_AFTER + Duration::from_millis(50)).await;
+            cx.background_executor()
+                .timer(PARK_AFTER + Duration::from_millis(50))
+                .await;
             let _ = this.update(cx, |this, cx| this.park_browser_if_idle(cx));
         }));
     }
@@ -459,7 +486,12 @@ impl KeelWindow {
             self.start_park(ix);
         }
         // Agent tabs idle on their own clocks: look again later.
-        if self.browser.tabs.iter().any(|t| t.native.is_some() && t.agent.is_some()) {
+        if self
+            .browser
+            .tabs
+            .iter()
+            .any(|t| t.native.is_some() && t.agent.is_some())
+        {
             self.schedule_browser_park(cx);
         }
         cx.notify();
@@ -501,12 +533,22 @@ impl KeelWindow {
     /// Show a local file (a transcript chip) in the pane, in its own tab
     /// (the one already showing it, if any): `html` is a self-contained
     /// page for it. Opens the pane if it is closed.
-    pub(super) fn browser_preview(&mut self, path: std::path::PathBuf, html: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn browser_preview(
+        &mut self,
+        path: std::path::PathBuf,
+        html: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.browser_allowed() {
             return;
         }
         let b = &mut self.browser;
-        let ix = match b.tabs.iter().position(|t| t.preview.as_ref() == Some(&path)) {
+        let ix = match b
+            .tabs
+            .iter()
+            .position(|t| t.preview.as_ref() == Some(&path))
+        {
             Some(ix) => ix,
             // An empty tab that isn't the agent's is taken as is.
             None if b.tab().page.url.is_none() && b.tab().agent.is_none() => b.active,
@@ -520,7 +562,9 @@ impl KeelWindow {
             native.load_html(&html);
         }
         tab.preview = Some(path);
-        tab.loading(crate::files::file_url(tab.preview.as_ref().expect("set above")));
+        tab.loading(crate::files::file_url(
+            tab.preview.as_ref().expect("set above"),
+        ));
         self.pump_load(ix, window, cx);
         if !self.browser.open {
             self.toggle_browser(window, cx);
@@ -531,7 +575,12 @@ impl KeelWindow {
 
     /// Tab `ix`'s native page, created on first use. False (with the tab
     /// showing why) when it can't start.
-    pub(super) fn ensure_native_page(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn ensure_native_page(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let tab = &mut self.browser.tabs[ix];
         if tab.native.is_some() {
             return true;
@@ -543,7 +592,12 @@ impl KeelWindow {
                 tab.native = Some(std::rc::Rc::new(native));
                 tab._events = Some(cx.spawn_in(window, async move |this, cx| {
                     while let Some(event) = rx.recv().await {
-                        if this.update_in(cx, |this, window, cx| this.on_browser_event(id, event, window, cx)).is_err() {
+                        if this
+                            .update_in(cx, |this, window, cx| {
+                                this.on_browser_event(id, event, window, cx)
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -568,16 +622,25 @@ impl KeelWindow {
         self.browser.tabs[ix]._pump = Some(cx.spawn_in(window, async move |this, cx| {
             // About 20s. After that the external timer keeps the loop alive.
             for _ in 0..1200 {
-                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
                 native.spin_soon();
-                let keep_going = this.update(cx, |this, _| {
-                    crate::dev_control::redraw();
-                    this.browser.tabs.get(ix).map(|t| t.page.loading).unwrap_or(false)
-                })
-                .unwrap_or(false);
+                let keep_going = this
+                    .update(cx, |this, _| {
+                        crate::dev_control::redraw();
+                        this.browser
+                            .tabs
+                            .get(ix)
+                            .map(|t| t.page.loading)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
                 if !keep_going {
                     for _ in 0..30 {
-                        cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(16))
+                            .await;
                         native.spin_soon();
                         let _ = this.update(cx, |_, _| {
                             crate::dev_control::redraw();
@@ -590,8 +653,15 @@ impl KeelWindow {
     }
 
     /// Load `url` in the shown tab (the user typed it or picked a chip).
-    pub(super) fn browser_load(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.address.update(cx, |s, cx| s.set_value(url.clone(), window, cx));
+    pub(super) fn browser_load(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser
+            .address
+            .update(cx, |s, cx| s.set_value(url.clone(), window, cx));
         self.browser.tab_mut().preview = None;
         let ix = self.browser.active;
         if !self.ensure_native_page(ix, window, cx) {
@@ -611,7 +681,13 @@ impl KeelWindow {
         cx.notify();
     }
 
-    fn on_browser_event(&mut self, tab_id: u64, event: crate::browser::NativeEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_browser_event(
+        &mut self,
+        tab_id: u64,
+        event: crate::browser::NativeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::browser::NativeEvent;
         let Some(ix) = self.browser.tab_ix(tab_id) else {
             return;
@@ -679,7 +755,10 @@ impl KeelWindow {
                     address.update(cx, |s, cx| s.set_value(url, window, cx));
                 }
                 if tab.preview.is_none()
-                    && let Some(url) = state.url.as_deref().filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                    && let Some(url) = state
+                        .url
+                        .as_deref()
+                        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
                 {
                     tab.web_url = Some(url.to_string());
                 }
@@ -740,7 +819,9 @@ impl KeelWindow {
                     return;
                 };
                 let y = raw.and_then(|body| {
-                    parse_json_object(&body).and_then(|v| v["y"].as_f64()).ok_or_else(|| format!("the page scroll script returned {body:?}"))
+                    parse_json_object(&body)
+                        .and_then(|v| v["y"].as_f64())
+                        .ok_or_else(|| format!("the page scroll script returned {body:?}"))
                 });
                 match y {
                     Ok(y) => {
@@ -806,8 +887,17 @@ impl KeelWindow {
                 let full = shot.full;
                 cx.spawn(async move |_, cx| {
                     let result = match (raw, full) {
-                        (_, Some(full)) => cx.background_spawn(async move { stitch(&frames, full).and_then(|img| shot_image_files(img, &dir, Some(full))) }).await,
-                        (Some(Ok((png, width))), None) => cx.background_spawn(async move { shot_files(&png, width, &dir, None) }).await,
+                        (_, Some(full)) => {
+                            cx.background_spawn(async move {
+                                stitch(&frames, full)
+                                    .and_then(|img| shot_image_files(img, &dir, Some(full)))
+                            })
+                            .await
+                        }
+                        (Some(Ok((png, width))), None) => {
+                            cx.background_spawn(async move { shot_files(&png, width, &dir, None) })
+                                .await
+                        }
                         (Some(Err(err)), None) => Err(err),
                         (None, None) => Err("no screenshot".into()),
                     };
@@ -828,7 +918,11 @@ impl KeelWindow {
                 self.shot_handed_off(ix, window, cx);
             }
             // Handled on the agent side.
-            NativeEvent::Eval(..) | NativeEvent::Dialog { .. } | NativeEvent::FilePicker(_) | NativeEvent::Console(_) | NativeEvent::Blocked(_) => {}
+            NativeEvent::Eval(..)
+            | NativeEvent::Dialog { .. }
+            | NativeEvent::FilePicker(_)
+            | NativeEvent::Console(_)
+            | NativeEvent::Blocked(_) => {}
         }
     }
 
@@ -877,11 +971,19 @@ impl KeelWindow {
     /// the window, always leaving the chat its minimum.
     pub(super) fn browser_width(&self, window: &Window) -> f32 {
         let viewport = f32::from(window.viewport_size().width);
-        let sidebar = if self.state.ui_settings.sidebar_collapsed { 0. } else { self.state.sidebar_width() };
+        let sidebar = if self.state.ui_settings.sidebar_collapsed {
+            0.
+        } else {
+            self.state.sidebar_width()
+        };
         let max = (viewport - sidebar - MIN_CHAT).max(MIN_WIDTH);
         // Whole pixels. A fractional width snaps back and forth in the
         // compositor and the edge shivers while you drag.
-        self.browser.width.unwrap_or(viewport * DEFAULT_SHARE).clamp(MIN_WIDTH, max).round()
+        self.browser
+            .width
+            .unwrap_or(viewport * DEFAULT_SHARE)
+            .clamp(MIN_WIDTH, max)
+            .round()
     }
 
     /// Dev: set the pane width (None: the default share); returns the old one.
@@ -950,7 +1052,11 @@ impl KeelWindow {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(duration).await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.expand_anim.is_some_and(|(_, n)| n == generation) {
+                if this
+                    .browser
+                    .expand_anim
+                    .is_some_and(|(_, n)| n == generation)
+                {
                     this.browser.expand_anim = None;
                     for tab in &this.browser.tabs {
                         if let Some(page) = &tab.native {
@@ -987,22 +1093,38 @@ impl KeelWindow {
 
     /// Whether the browser pane is currently animating between side panel and fullscreen.
     pub(super) fn browser_expanding(&self) -> bool {
-        !self.reduced() && self.browser.expand_anim.is_some_and(|(at, _)| self.slide_elapsed(at) < self.browser_expand_duration())
+        !self.reduced()
+            && self
+                .browser
+                .expand_anim
+                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.browser_expand_duration())
     }
 
     /// Two pieces: an in-flow spacer that makes room beside the chat, and the
     /// pane itself, absolute over the window's right edge. Splitting them lets
     /// the pane grow over everything without the chat reflowing underneath.
-    pub(super) fn render_browser_panel(&mut self, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_browser_panel(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         self.follow_chat_tab(window, cx);
         // Outside a chat session the pane and its native page stay hidden;
         // `open` is kept, so returning to the chat brings it back.
         let allowed = self.browser_allowed();
         let open = self.browser.open && allowed;
-        let toggling = !self.reduced() && self.browser.anim.is_some_and(|(at, _)| self.slide_elapsed(at) < self.right_panel_duration());
+        let toggling = !self.reduced()
+            && self
+                .browser
+                .anim
+                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.right_panel_duration());
         for (ix, tab) in self.browser.tabs.iter().enumerate() {
             if let Some(native) = &tab.native {
-                let shown = ix == self.browser.active && (open || toggling) && tab.page.url.is_some() && tab.error.is_none();
+                let shown = ix == self.browser.active
+                    && (open || toggling)
+                    && tab.page.url.is_some()
+                    && tab.error.is_none();
                 native.set_shown(shown);
             }
         }
@@ -1020,18 +1142,26 @@ impl KeelWindow {
         // Expanded, the toolbar clears the traffic lights it now sits under.
         let (pad_side, pad_full) = (10., f32::from(self.traffic_lights_inset()));
         let pad_left = (pad_side + (pad_full - pad_side) * fraction).round();
-        let toolbar = self.render_browser_toolbar(t, window, cx).pl(px(pad_left)).into_any_element();
+        let toolbar = self
+            .render_browser_toolbar(t, window, cx)
+            .pl(px(pad_left))
+            .into_any_element();
 
         // Sliding, the body keeps its settled width and is clipped (nothing
         // reflows); growing, it fills the pane so the page reflows with it.
-        let panel_entering = !self.right_panel_toggling() || self.right_panel_target() >= self.right_panel_from;
+        let panel_entering =
+            !self.right_panel_toggling() || self.right_panel_target() >= self.right_panel_from;
         let body = div()
             .size_full()
             .flex()
             .flex_col()
             .bg(c(t.window))
             .border_l_1()
-            .border_color(if expanded && !expanding { gpui::transparent_black() } else { c(t.border) })
+            .border_color(if expanded && !expanding {
+                gpui::transparent_black()
+            } else {
+                c(t.border)
+            })
             .child(toolbar)
             .children(self.render_browser_tabs(t, cx))
             .child(self.render_browser_page(t, panel_entering, cx));
@@ -1045,21 +1175,22 @@ impl KeelWindow {
             .right_0()
             .w(px(current_w))
             .child(body)
-            .when(!expanded && !expanding, |d| d.child(self.render_browser_edge(t, cx)));
+            .when(!expanded && !expanding, |d| {
+                d.child(self.render_browser_edge(t, cx))
+            });
 
         let anim = self.browser.anim.filter(|_| toggling);
         let pane = if let Some((_, n)) = anim {
             use gpui::AnimationExt as _;
             let (from, to) = (self.right_panel_from, self.right_panel_target());
             let entering = to >= from;
-            let curve = gpui::Animation::new(self.right_panel_duration()).with_easing(crate::motion::glide_curve);
-            pane
-                .with_animation(("browser-slide", n as usize), curve, move |el, delta| {
-                    let k = from + (to - from) * delta;
-                    el.right(px(-full * (1.0 - k)))
-                        .opacity(reveal(k, entering))
-                })
-                .into_any_element()
+            let curve = gpui::Animation::new(self.right_panel_duration())
+                .with_easing(crate::motion::glide_curve);
+            pane.with_animation(("browser-slide", n as usize), curve, move |el, delta| {
+                let k = from + (to - from) * delta;
+                el.right(px(-full * (1.0 - k))).opacity(reveal(k, entering))
+            })
+            .into_any_element()
         } else if open {
             pane.right_0().into_any_element()
         } else {
@@ -1068,7 +1199,11 @@ impl KeelWindow {
 
         let spacer = if anim.is_some() {
             // Full width at once; the pane sliding over it is the motion.
-            div().h_full().flex_none().w(px(full * self.right_panel_target())).into_any_element()
+            div()
+                .h_full()
+                .flex_none()
+                .w(px(full * self.right_panel_target()))
+                .into_any_element()
         } else if open {
             div().h_full().flex_none().w(px(full)).into_any_element()
         } else {
@@ -1079,7 +1214,11 @@ impl KeelWindow {
     }
 
     /// The drag handle on the pane's left edge.
-    pub(super) fn render_browser_edge(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_browser_edge(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let active = self.browser.resizing;
         div()
             .id("browser-resize-handle")
@@ -1096,22 +1235,37 @@ impl KeelWindow {
                     .when(active, |d| d.bg(c(t.accent)))
                     .when(!active, |d| d.hover(|s| s.bg(c(t.border)))),
             )
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                if event.click_count >= 2 {
-                    this.browser.width = None;
-                } else {
-                    this.begin_browser_resize(f32::from(event.position.x), window);
-                }
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if event.click_count >= 2 {
+                        this.browser.width = None;
+                    } else {
+                        this.begin_browser_resize(f32::from(event.position.x), window);
+                    }
+                    cx.notify();
+                }),
+            )
     }
 
-    fn render_browser_toolbar(&mut self, t: Tokens, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_browser_toolbar(
+        &mut self,
+        t: Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let page = &self.browser.tab().page;
         let has_page = page.url.is_some();
-        let nav = |id: &'static str, icon: Icon, enabled: bool| icon_button(id, icon, t).when(!enabled, |b| b.opacity(0.35).cursor_default());
-        let address_focused = self.browser.address.read(cx).focus_handle(cx).is_focused(window);
+        let nav = |id: &'static str, icon: Icon, enabled: bool| {
+            icon_button(id, icon, t).when(!enabled, |b| b.opacity(0.35).cursor_default())
+        };
+        let address_focused = self
+            .browser
+            .address
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
         let address = div()
             .flex_1()
             .min_w_0()
@@ -1126,8 +1280,24 @@ impl KeelWindow {
             .border_1()
             .border_color(c(if address_focused { t.focus } else { t.border }))
             .t_small()
-            .child(self.tip_target(div().id("browser-address-globe").flex_none().text_color(c(t.text_faint)).child(Icon::Globe.el(zpx(12.))), "browser-address-globe", cx))
-            .child(div().flex_1().min_w_0().overflow_hidden().child(self.browser.address.clone()));
+            .child(
+                self.tip_target(
+                    div()
+                        .id("browser-address-globe")
+                        .flex_none()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::Globe.el(zpx(12.))),
+                    "browser-address-globe",
+                    cx,
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(self.browser.address.clone()),
+            );
         div()
             .relative()
             .h(HEADER_HEIGHT)
@@ -1137,53 +1307,118 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(self.tip_target(nav("browser-back", Icon::Back, page.can_back).on_click(cx.listener(|this, _: &ClickEvent, _, _| this.browser_history(false))), "browser-back", cx))
-            .child(self.tip_target(nav("browser-forward", Icon::Forward, page.can_forward).on_click(cx.listener(|this, _: &ClickEvent, _, _| this.browser_history(true))), "browser-forward", cx))
             .child(self.tip_target(
-                nav("browser-reload", if page.loading { Icon::Close } else { Icon::Reload }, has_page)
+                nav("browser-back", Icon::Back, page.can_back).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, _| this.browser_history(false)),
+                ),
+                "browser-back",
+                cx,
+            ))
+            .child(
+                self.tip_target(
+                    nav("browser-forward", Icon::Forward, page.can_forward).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, _| this.browser_history(true)),
+                    ),
+                    "browser-forward",
+                    cx,
+                ),
+            )
+            .child(
+                self.tip_target(
+                    nav(
+                        "browser-reload",
+                        if page.loading {
+                            Icon::Close
+                        } else {
+                            Icon::Reload
+                        },
+                        has_page,
+                    )
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.browser_reload(cx))),
-                "browser-reload",
-                cx,
-            ))
+                    "browser-reload",
+                    cx,
+                ),
+            )
             .child(address)
-            .child(self.tip_target(icon_button("browser-new-tab", Icon::Plus, t).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.browser_new_tab(window, cx))), "browser-new-tab", cx))
-            .child(self.tip_target(nav("browser-external", Icon::External, has_page).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                if let Some(path) = this.browser.tab().preview.clone() {
-                    cx.open_with_system(&path);
-                } else if let Some(url) = this.browser.tab().page.url.clone() {
-                    cx.open_url(&url);
-                }
-            })), "browser-external", cx))
             .child(self.tip_target(
+                icon_button("browser-new-tab", Icon::Plus, t).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.browser_new_tab(window, cx)
+                    }),
+                ),
+                "browser-new-tab",
+                cx,
+            ))
+            .child(self.tip_target(
+                nav("browser-external", Icon::External, has_page).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| {
+                        if let Some(path) = this.browser.tab().preview.clone() {
+                            cx.open_with_system(&path);
+                        } else if let Some(url) = this.browser.tab().page.url.clone() {
+                            cx.open_url(&url);
+                        }
+                    },
+                )),
+                "browser-external",
+                cx,
+            ))
+            .child(
+                self.tip_target(
+                    div()
+                        .id("browser-end")
+                        .size(zpx(26.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(RADIUS_MD)
+                        .text_color(c(t.text_muted))
+                        .when(!has_page, |b| b.opacity(0.35).cursor_default())
+                        .when(has_page, |b| {
+                            b.cursor_pointer()
+                                .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.end_browser_session(window, cx)
+                                }))
+                        })
+                        .child(Icon::Close.el(zpx(15.))),
+                    "browser-end",
+                    cx,
+                ),
+            )
+            .child(
                 div()
-                    .id("browser-end")
-                    .size(zpx(26.))
+                    .h(zpx(14.))
+                    .w(zpx(1.))
+                    .mx(zpx(2.))
                     .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(RADIUS_MD)
-                    .text_color(c(t.text_muted))
-                    .when(!has_page, |b| b.opacity(0.35).cursor_default())
-                    .when(has_page, |b| {
-                        b.cursor_pointer()
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.end_browser_session(window, cx)))
-                    })
-                    .child(Icon::Close.el(zpx(15.))),
-                "browser-end",
-                cx,
-            ))
-            .child(div().h(zpx(14.)).w(zpx(1.)).mx(zpx(2.)).flex_none().bg(c(t.border)))
+                    .bg(c(t.border)),
+            )
+            .child(
+                self.tip_target(
+                    icon_button(
+                        "browser-expand",
+                        if self.browser.expanded {
+                            Icon::Shrink
+                        } else {
+                            Icon::Expand
+                        },
+                        t,
+                    )
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_browser_expand(cx)),
+                    ),
+                    "browser-expand",
+                    cx,
+                ),
+            )
             .child(self.tip_target(
-                icon_button("browser-expand", if self.browser.expanded { Icon::Shrink } else { Icon::Expand }, t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_browser_expand(cx))),
-                "browser-expand",
+                icon_button("browser-close", Icon::SidebarClose, t).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_browser(window, cx)),
+                ),
+                "browser-close",
                 cx,
             ))
-            .child(self.tip_target(icon_button("browser-close", Icon::SidebarClose, t).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.toggle_browser(window, cx)
-            })), "browser-close", cx))
             .children(self.render_browser_bar(t))
             .children(self.render_browser_tip(t, window))
     }
@@ -1225,7 +1460,12 @@ impl KeelWindow {
     /// A toolbar button that shows a tooltip on hover: its bounds are
     /// recorded for placing it, and hover and press feed [`HoverTips`].
     /// Disabled buttons too: they still say what they'd do.
-    fn tip_target(&self, button: gpui::Stateful<gpui::Div>, id: &'static str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn tip_target(
+        &self,
+        button: gpui::Stateful<gpui::Div>,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let bounds = self.browser.tips.bounds.clone();
         button
             .relative()
@@ -1256,10 +1496,13 @@ impl KeelWindow {
                 }
                 cx.notify();
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                this.browser.tips.press(id, Instant::now());
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.browser.tips.press(id, Instant::now());
+                    cx.notify();
+                }),
+            )
     }
 
     /// A thin accent line under the toolbar: glides to each progress step,
@@ -1271,15 +1514,29 @@ impl KeelWindow {
         }
         let (from, to, n) = b.bar;
         let done = b.bar_done;
-        let line = div().absolute().left_0().bottom_0().h(px(2.)).rounded_r(px(1.)).bg(c(t.accent));
+        let line = div()
+            .absolute()
+            .left_0()
+            .bottom_0()
+            .h(px(2.))
+            .rounded_r(px(1.))
+            .bg(c(t.accent));
         if self.reduced() {
             return (!done).then(|| line.w(relative(to)).into_any_element());
         }
         let duration = if done { BASE * 2 } else { SLOW };
         Some(
-            line.with_animation(ElementId::Name(format!("browser-bar-{}-{n}", b.id).into()), gpui::Animation::new(duration).with_easing(ease_out), move |el, d| {
-                el.w(relative(from + (to - from) * d)).opacity(if done { 1. - ease_in(d) } else { 1. })
-            })
+            line.with_animation(
+                ElementId::Name(format!("browser-bar-{}-{n}", b.id).into()),
+                gpui::Animation::new(duration).with_easing(ease_out),
+                move |el, d| {
+                    el.w(relative(from + (to - from) * d)).opacity(if done {
+                        1. - ease_in(d)
+                    } else {
+                        1.
+                    })
+                },
+            )
             .into_any_element(),
         )
     }
@@ -1292,65 +1549,85 @@ impl KeelWindow {
         let reduced = self.reduced();
         let b = &self.browser;
         let chat = self.current_chat.as_deref();
-        if b.tabs.iter().filter(|t| b.visible_in_strip(t, chat)).count() < 2 {
+        if b.tabs
+            .iter()
+            .filter(|t| b.visible_in_strip(t, chat))
+            .count()
+            < 2
+        {
             return None;
         }
-        let tabs = b.tabs.iter().enumerate().filter(|(_, tab)| b.visible_in_strip(tab, chat)).map(|(ix, tab)| {
-            let (id, active) = (tab.id, ix == b.active);
-            let group = format!("browser-tab-{id}");
-            let close = div()
-                .id(("browser-tab-close", id as usize))
-                .flex_none()
-                .size(zpx(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(zpx(4.))
-                .text_color(c(t.text_faint))
-                .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-                .when(!active, |d| d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)))
-                .child(Icon::Close.el(zpx(10.)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    if let Some(ix) = this.browser.tab_ix(id) {
-                        this.browser_close_tab(ix, window, cx);
-                    }
-                }));
-            let dot = tab.agent.is_some().then(|| div().flex_none().size(zpx(6.)).rounded_full().bg(c(t.info)));
-            let el = div()
-                .id(("browser-tab", id as usize))
-                .group(group)
-                .flex_1()
-                .min_w_0()
-                .max_w(zpx(TAB_MAX_W))
-                .h(zpx(24.))
-                .pl_2()
-                .pr_1()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(zpx(6.))
-                .rounded(RADIUS_MD)
-                .border_1()
-                .t_small()
-                .map(|d| {
-                    if active {
-                        d.bg(c(t.surface)).border_color(c(t.border)).text_color(c(t.text))
-                    } else {
-                        d.border_color(gpui::transparent_black()).text_color(c(t.text_muted)).cursor_pointer().hover(|s| s.bg(c(t.hover)))
-                    }
-                })
-                .children(dot)
-                .child(div().flex_1().min_w_0().truncate().child(tab.label()))
-                .child(close)
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    if let Some(ix) = this.browser.tab_ix(id) {
-                        this.activate_tab(ix, window, cx);
-                    }
-                }));
-            crate::motion::stagger_in(el, ("browser-tab-in", id as usize), 0, reduced)
-        });
+        let tabs = b
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| b.visible_in_strip(tab, chat))
+            .map(|(ix, tab)| {
+                let (id, active) = (tab.id, ix == b.active);
+                let group = format!("browser-tab-{id}");
+                let close = div()
+                    .id(("browser-tab-close", id as usize))
+                    .flex_none()
+                    .size(zpx(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(zpx(4.))
+                    .text_color(c(t.text_faint))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                    .when(!active, |d| {
+                        d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
+                    })
+                    .child(Icon::Close.el(zpx(10.)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(ix) = this.browser.tab_ix(id) {
+                            this.browser_close_tab(ix, window, cx);
+                        }
+                    }));
+                let dot = tab
+                    .agent
+                    .is_some()
+                    .then(|| div().flex_none().size(zpx(6.)).rounded_full().bg(c(t.info)));
+                let el = div()
+                    .id(("browser-tab", id as usize))
+                    .group(group)
+                    .flex_1()
+                    .min_w_0()
+                    .max_w(zpx(TAB_MAX_W))
+                    .h(zpx(24.))
+                    .pl_2()
+                    .pr_1()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(6.))
+                    .rounded(RADIUS_MD)
+                    .border_1()
+                    .t_small()
+                    .map(|d| {
+                        if active {
+                            d.bg(c(t.surface))
+                                .border_color(c(t.border))
+                                .text_color(c(t.text))
+                        } else {
+                            d.border_color(gpui::transparent_black())
+                                .text_color(c(t.text_muted))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(c(t.hover)))
+                        }
+                    })
+                    .children(dot)
+                    .child(div().flex_1().min_w_0().truncate().child(tab.label()))
+                    .child(close)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if let Some(ix) = this.browser.tab_ix(id) {
+                            this.activate_tab(ix, window, cx);
+                        }
+                    }));
+                crate::motion::stagger_in(el, ("browser-tab-in", id as usize), 0, reduced)
+            });
         Some(
             div()
                 .flex_none()
@@ -1367,7 +1644,12 @@ impl KeelWindow {
     }
 
     /// The page card: the live page, or a start screen until there's an address.
-    fn render_browser_page(&mut self, t: Tokens, _entering: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_browser_page(
+        &mut self,
+        t: Tokens,
+        _entering: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let card = div()
             .id("browser-page")
             .relative()
@@ -1416,51 +1698,69 @@ impl KeelWindow {
                                 }
                             }
                         }))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            window.focus(&this.browser.focus, cx);
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_down(event.position, MouseButton::Left);
-                            }
-                        }))
-                        .on_mouse_down(MouseButton::Right, cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            window.focus(&this.browser.focus, cx);
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_down(event.position, MouseButton::Right);
-                            }
-                        }))
-                        .on_mouse_down(MouseButton::Middle, cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            window.focus(&this.browser.focus, cx);
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_down(event.position, MouseButton::Middle);
-                            }
-                        }))
-                        .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_up(event.position, MouseButton::Left);
-                            }
-                        }))
-                        .on_mouse_up(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_up(event.position, MouseButton::Right);
-                            }
-                        }))
-                        .on_mouse_up(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_up(event.position, MouseButton::Middle);
-                            }
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                window.focus(&this.browser.focus, cx);
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_mouse_down(event.position, MouseButton::Left);
+                                }
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                window.focus(&this.browser.focus, cx);
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_mouse_down(event.position, MouseButton::Right);
+                                }
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Middle,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                window.focus(&this.browser.focus, cx);
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_mouse_down(event.position, MouseButton::Middle);
+                                }
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_mouse_up(event.position, MouseButton::Left);
+                                }
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Right,
+                            cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_mouse_up(event.position, MouseButton::Right);
+                                }
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Middle,
+                            cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_mouse_up(event.position, MouseButton::Middle);
+                                }
+                            }),
+                        )
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, _cx| {
                             if let Some(tab) = this.browser.tabs.get(this.browser.active)
                                 && let Some(native) = &tab.native
@@ -1468,13 +1768,15 @@ impl KeelWindow {
                                 native.handle_mouse_move(event.position);
                             }
                         }))
-                        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_scroll_wheel(event.position, event.delta);
-                            }
-                        }))
+                        .on_scroll_wheel(cx.listener(
+                            |this, event: &ScrollWheelEvent, _window, _cx| {
+                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
+                                    && let Some(native) = &tab.native
+                                {
+                                    native.handle_scroll_wheel(event.position, event.delta);
+                                }
+                            },
+                        ))
                         .child(
                             gpui::canvas(
                                 move |bounds, window, _cx| {
@@ -1490,7 +1792,13 @@ impl KeelWindow {
                                             let _ = window.drop_image(old);
                                         }
                                         if let Some(img) = page.render_frame() {
-                                            let _ = window.paint_image(bounds, Default::default(), img, 0, false);
+                                            let _ = window.paint_image(
+                                                bounds,
+                                                Default::default(),
+                                                img,
+                                                0,
+                                                false,
+                                            );
                                         }
                                     }
                                 },
@@ -1505,7 +1813,12 @@ impl KeelWindow {
         card
     }
 
-    fn render_browser_empty(&mut self, t: Tokens, error: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_browser_empty(
+        &mut self,
+        t: Tokens,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let chips = QUICK.iter().enumerate().map(|(i, addr)| {
             div()
                 .id(("browser-quick", i))
@@ -1536,9 +1849,20 @@ impl KeelWindow {
             .justify_center()
             .gap_3()
             .child(
-                div().text_color(c(if error.is_some() { t.warning } else { t.text_faint })).child(
-                    if error.is_some() { Icon::Alert } else { Icon::Globe }.el(zpx(26.)),
-                ),
+                div()
+                    .text_color(c(if error.is_some() {
+                        t.warning
+                    } else {
+                        t.text_faint
+                    }))
+                    .child(
+                        if error.is_some() {
+                            Icon::Alert
+                        } else {
+                            Icon::Globe
+                        }
+                        .el(zpx(26.)),
+                    ),
             )
             .child(
                 div()
@@ -1546,9 +1870,19 @@ impl KeelWindow {
                     .text_center()
                     .t_body()
                     .text_color(c(t.text_muted))
-                    .child(error.unwrap_or_else(|| "Open a page, or the app your agent is building.".into())),
+                    .child(error.unwrap_or_else(|| {
+                        "Open a page, or the app your agent is building.".into()
+                    })),
             )
-            .child(div().flex().flex_row().flex_wrap().justify_center().gap_2().children(chips))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap_2()
+                    .children(chips),
+            )
     }
 }
 
@@ -1570,14 +1904,22 @@ pub(super) fn expand_duration(from: f32, target: f32) -> Duration {
 /// [`crate::browser::cef`]'s page-size JSON → the capture, its height
 /// capped at [`FULL_PAGE_MAX`].
 fn parse_page_size(body: &str) -> Result<FullPage, String> {
-    let value = parse_json_object(body).ok_or_else(|| format!("the page size script returned {body:?}"))?;
+    let value =
+        parse_json_object(body).ok_or_else(|| format!("the page size script returned {body:?}"))?;
     let num = |k: &str| value[k].as_f64().filter(|n| n.is_finite()).unwrap_or(0.);
     let (w, total) = (num("w").round(), num("h").round());
     if w < 1. || total < 1. {
         return Err(format!("the page has no size ({w}x{total})"));
     }
     let vh = num("vh").round().max(1.);
-    Ok(FullPage { w, h: total.min(FULL_PAGE_MAX), total, vh, sx: num("sx"), sy: num("sy") })
+    Ok(FullPage {
+        w,
+        h: total.min(FULL_PAGE_MAX),
+        total,
+        vh,
+        sx: num("sx"),
+        sy: num("sy"),
+    })
 }
 
 /// A script's result: a JSON object, possibly JSON-encoded as a string.
@@ -1598,9 +1940,11 @@ fn stitch(frames: &[(Vec<u8>, f64)], full: FullPage) -> Result<image::DynamicIma
     let mut placed: Vec<(image::RgbaImage, u32)> = Vec::new();
     let mut bottom = 0u32;
     for (png, y) in frames {
-        let mut img = image::load_from_memory_with_format(png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let mut img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
         if img.width() != width {
-            let h = ((u64::from(img.height()) * u64::from(width)) / u64::from(img.width().max(1))).max(1) as u32;
+            let h = ((u64::from(img.height()) * u64::from(width)) / u64::from(img.width().max(1)))
+                .max(1) as u32;
             img = img.resize_exact(width, h, image::imageops::FilterType::Triangle);
         }
         let y = y.max(0.).round() as u32;
@@ -1633,15 +1977,30 @@ impl ShotFiles {
         let copy = if self.agent_size == (self.width, self.height) {
             String::new()
         } else {
-            format!("; you get a {}x{} {} copy", self.agent_size.0, self.agent_size.1, if self.agent_mime == "image/jpeg" { "JPEG" } else { "PNG" })
+            format!(
+                "; you get a {}x{} {} copy",
+                self.agent_size.0,
+                self.agent_size.1,
+                if self.agent_mime == "image/jpeg" {
+                    "JPEG"
+                } else {
+                    "PNG"
+                }
+            )
         };
         match full {
             Some(f) if f.total > f.h => format!(
                 "{}x{} PNG of the full page, cut at {} of its {} CSS px height{copy}",
                 self.width, self.height, f.h as u64, f.total as u64
             ),
-            Some(_) => format!("{}x{} PNG of the full page (1 px = 1 CSS px){copy}", self.width, self.height),
-            None => format!("{}x{} PNG of the visible page (1 px = 1 CSS px when width matches the viewport){copy}", self.width, self.height),
+            Some(_) => format!(
+                "{}x{} PNG of the full page (1 px = 1 CSS px){copy}",
+                self.width, self.height
+            ),
+            None => format!(
+                "{}x{} PNG of the visible page (1 px = 1 CSS px when width matches the viewport){copy}",
+                self.width, self.height
+            ),
         }
     }
 }
@@ -1654,22 +2013,45 @@ const AGENT_SIDE_MAX: u32 = 7_900;
 /// Retina PNG → a 1 CSS px per pixel PNG under `dir` (cut to the capture's
 /// height), plus the agent's copy: the PNG when small enough, else a
 /// downscaled JPEG.
-fn shot_files(png: &[u8], width: u32, dir: &std::path::Path, full: Option<FullPage>) -> Result<ShotFiles, String> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+fn shot_files(
+    png: &[u8],
+    width: u32,
+    dir: &std::path::Path,
+    full: Option<FullPage>,
+) -> Result<ShotFiles, String> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     shot_image_files_sized(img, width, dir, full)
 }
 
 /// A stitched full page (already 1 px per CSS px) → [`ShotFiles`].
-fn shot_image_files(img: image::DynamicImage, dir: &std::path::Path, full: Option<FullPage>) -> Result<ShotFiles, String> {
+fn shot_image_files(
+    img: image::DynamicImage,
+    dir: &std::path::Path,
+    full: Option<FullPage>,
+) -> Result<ShotFiles, String> {
     let width = img.width();
     shot_image_files_sized(img, width, dir, full)
 }
 
-fn shot_image_files_sized(mut img: image::DynamicImage, width: u32, dir: &std::path::Path, full: Option<FullPage>) -> Result<ShotFiles, String> {
+fn shot_image_files_sized(
+    mut img: image::DynamicImage,
+    width: u32,
+    dir: &std::path::Path,
+    full: Option<FullPage>,
+) -> Result<ShotFiles, String> {
     use base64::Engine as _;
-    let target = width.clamp(1, if full.is_some() { u32::MAX } else { MAX_SHOT_WIDTH });
+    let target = width.clamp(
+        1,
+        if full.is_some() {
+            u32::MAX
+        } else {
+            MAX_SHOT_WIDTH
+        },
+    );
     if img.width() > target {
-        let height = ((u64::from(img.height()) * u64::from(target)) / u64::from(img.width())).max(1) as u32;
+        let height =
+            ((u64::from(img.height()) * u64::from(target)) / u64::from(img.width())).max(1) as u32;
         img = img.resize_exact(target, height, image::imageops::FilterType::Triangle);
     }
     if let Some(f) = full {
@@ -1679,26 +2061,57 @@ fn shot_image_files_sized(mut img: image::DynamicImage, width: u32, dir: &std::p
         }
     }
     let mut bytes = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    img.write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     let bytes = bytes.into_inner();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let path = dir.join(format!("{stamp}{}.png", if full.is_some() { "-full" } else { "" }));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = dir.join(format!(
+        "{stamp}{}.png",
+        if full.is_some() { "-full" } else { "" }
+    ));
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     let b64 = base64::engine::general_purpose::STANDARD;
     let (width, height) = (img.width(), img.height());
     if width.max(height) <= AGENT_SIDE_MAX && bytes.len() * 4 / 3 + 4 <= AGENT_IMAGE_MAX {
-        return Ok(ShotFiles { path, width, height, agent_base64: b64.encode(&bytes), agent_mime: "image/png", agent_size: (width, height) });
+        return Ok(ShotFiles {
+            path,
+            width,
+            height,
+            agent_base64: b64.encode(&bytes),
+            agent_mime: "image/png",
+            agent_size: (width, height),
+        });
     }
     let mut scale = (f64::from(AGENT_SIDE_MAX) / f64::from(width.max(height))).min(1.);
     loop {
-        let (w, h) = (((f64::from(width) * scale).round() as u32).max(1), ((f64::from(height) * scale).round() as u32).max(1));
-        let small = if (w, h) == (width, height) { img.to_rgb8() } else { img.resize_exact(w, h, image::imageops::FilterType::Triangle).to_rgb8() };
+        let (w, h) = (
+            ((f64::from(width) * scale).round() as u32).max(1),
+            ((f64::from(height) * scale).round() as u32).max(1),
+        );
+        let small = if (w, h) == (width, height) {
+            img.to_rgb8()
+        } else {
+            img.resize_exact(w, h, image::imageops::FilterType::Triangle)
+                .to_rgb8()
+        };
         let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 72).encode_image(&small).map_err(|e| e.to_string())?;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 72)
+            .encode_image(&small)
+            .map_err(|e| e.to_string())?;
         let data = b64.encode(&jpeg);
         if data.len() <= AGENT_IMAGE_MAX || w <= 160 {
-            return Ok(ShotFiles { path, width, height, agent_base64: data, agent_mime: "image/jpeg", agent_size: (w, h) });
+            return Ok(ShotFiles {
+                path,
+                width,
+                height,
+                agent_base64: data,
+                agent_mime: "image/jpeg",
+                agent_size: (w, h),
+            });
         }
         scale *= 0.75;
     }
@@ -1714,19 +2127,26 @@ mod host_tests {
     fn png(w: u32, h: u32, noisy: bool) -> Vec<u8> {
         let img = image::RgbImage::from_fn(w, h, |x, y| {
             if noisy {
-                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).wrapping_mul(2_246_822_519);
+                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503))
+                    .wrapping_mul(2_246_822_519);
                 image::Rgb([(v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8])
             } else {
                 image::Rgb([200, 210, 220])
             }
         });
         let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
         out.into_inner()
     }
 
     fn tmp() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("keel-shot-files-{}-{}", std::process::id(), std::time::Instant::now().elapsed().as_nanos()))
+        std::env::temp_dir().join(format!(
+            "keel-shot-files-{}-{}",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        ))
     }
 
     #[test]
@@ -1738,7 +2158,11 @@ mod host_tests {
         assert!(files.path.starts_with(&dir) && files.path.is_file());
         let saved = image::open(&files.path).unwrap();
         assert_eq!((saved.width(), saved.height()), (100, 50));
-        assert!(files.describe(None).starts_with("100x50 PNG of the visible page"));
+        assert!(
+            files
+                .describe(None)
+                .starts_with("100x50 PNG of the visible page")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1747,17 +2171,40 @@ mod host_tests {
     #[test]
     fn full_page_saves_png_and_sends_a_small_jpeg() {
         let dir = tmp();
-        let full = parse_page_size(r#""{\"w\":400,\"h\":20000,\"vh\":800,\"sx\":0,\"sy\":1200}""#).unwrap();
-        assert_eq!(full, FullPage { w: 400., h: FULL_PAGE_MAX, total: 20000., vh: 800., sx: 0., sy: 1200. });
+        let full = parse_page_size(r#""{\"w\":400,\"h\":20000,\"vh\":800,\"sx\":0,\"sy\":1200}""#)
+            .unwrap();
+        assert_eq!(
+            full,
+            FullPage {
+                w: 400.,
+                h: FULL_PAGE_MAX,
+                total: 20000.,
+                vh: 800.,
+                sx: 0.,
+                sy: 1200.
+            }
+        );
         // Retina: twice the CSS width, a little taller than the cap.
-        let files = shot_files(&png(800, 2 * 9000, true), 400, &dir, Some(FullPage { h: 8000., ..full })).unwrap();
+        let files = shot_files(
+            &png(800, 2 * 9000, true),
+            400,
+            &dir,
+            Some(FullPage { h: 8000., ..full }),
+        )
+        .unwrap();
         assert_eq!((files.width, files.height), (400, 8000));
         assert_eq!(files.agent_mime, "image/jpeg");
         assert!(files.agent_base64.len() <= AGENT_IMAGE_MAX);
         assert!(files.agent_size.1 <= AGENT_SIDE_MAX);
         let saved = image::open(&files.path).unwrap();
         assert_eq!((saved.width(), saved.height()), (400, 8000));
-        assert!(files.describe(Some(FullPage { h: 8000., ..full })).contains("cut at 8000 of its 20000"), "{}", files.describe(Some(full)));
+        assert!(
+            files
+                .describe(Some(FullPage { h: 8000., ..full }))
+                .contains("cut at 8000 of its 20000"),
+            "{}",
+            files.describe(Some(full))
+        );
         assert!(parse_page_size("null").is_err());
         assert!(parse_page_size(r#"{"w":0,"h":10}"#).is_err());
         let _ = std::fs::remove_dir_all(dir);
@@ -1770,19 +2217,38 @@ mod host_tests {
         let frame = |shade: u8| {
             let img = image::RgbImage::from_pixel(100, 40, image::Rgb([shade, shade, shade]));
             let mut out = std::io::Cursor::new(Vec::new());
-            image::DynamicImage::ImageRgb8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut out, image::ImageFormat::Png)
+                .unwrap();
             out.into_inner()
         };
-        let full = FullPage { w: 100., h: 100., total: 100., vh: 40., sx: 0., sy: 0. };
+        let full = FullPage {
+            w: 100.,
+            h: 100.,
+            total: 100.,
+            vh: 40.,
+            sx: 0.,
+            sy: 0.,
+        };
         // 0, 40, then the bottom clamps the third frame to 60.
-        let img = stitch(&[(frame(10), 0.), (frame(20), 40.), (frame(30), 60.)], full).unwrap().to_rgba8();
+        let img = stitch(&[(frame(10), 0.), (frame(20), 40.), (frame(30), 60.)], full)
+            .unwrap()
+            .to_rgba8();
         assert_eq!(img.dimensions(), (100, 100));
         assert_eq!(img.get_pixel(5, 5)[0], 10);
         assert_eq!(img.get_pixel(5, 45)[0], 20);
         assert_eq!(img.get_pixel(5, 65)[0], 30);
         assert_eq!(img.get_pixel(5, 99)[0], 30);
         // Retina frames scale to the CSS width; a cap cuts the height.
-        let img = stitch(&[(frame(10), 0.)], FullPage { w: 50., h: 15., ..full }).unwrap();
+        let img = stitch(
+            &[(frame(10), 0.)],
+            FullPage {
+                w: 50.,
+                h: 15.,
+                ..full
+            },
+        )
+        .unwrap();
         assert_eq!((img.width(), img.height()), (50, 15));
         assert!(stitch(&[], full).is_err());
     }
@@ -1806,7 +2272,10 @@ mod host_tests {
         let partial = expand_duration(0.5, 0.);
         assert!(partial < SPATIAL);
         assert!((partial.as_secs_f32() - SPATIAL.mul_f32(0.7).as_secs_f32()).abs() < 1e-4);
-        assert!((expand_duration(0.5, 0.5).as_secs_f32() - SPATIAL.mul_f32(0.4).as_secs_f32()).abs() < 1e-4);
+        assert!(
+            (expand_duration(0.5, 0.5).as_secs_f32() - SPATIAL.mul_f32(0.4).as_secs_f32()).abs()
+                < 1e-4
+        );
     }
 
     #[test]
@@ -1815,7 +2284,10 @@ mod host_tests {
         // Expanding from 0 to 1:
         assert_eq!(expand_progress(0., 1., Duration::ZERO, dur), 0.);
         assert_eq!(expand_progress(0., 1., dur, dur), 1.);
-        assert_eq!(expand_progress(0., 1., dur + Duration::from_millis(50), dur), 1.);
+        assert_eq!(
+            expand_progress(0., 1., dur + Duration::from_millis(50), dur),
+            1.
+        );
 
         // Mid-flight reversal from 0.4 back to 0.0 starts EXACTLY at 0.4 (no sudden jump):
         assert_eq!(expand_progress(0.4, 0., Duration::ZERO, dur), 0.4);

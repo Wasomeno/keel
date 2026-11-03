@@ -36,12 +36,19 @@ impl Steps {
         if items.len() < 2 {
             return None;
         }
-        let current = spec["current"].as_u64().map(|ix| ix as usize).filter(|&ix| ix < items.len());
+        let current = spec["current"]
+            .as_u64()
+            .map(|ix| ix as usize)
+            .filter(|&ix| ix < items.len());
         let kind = match spec["kind"].as_str() {
             Some("guide") => StepKind::Guide,
             _ => StepKind::Task,
         };
-        Some(Self { items, current, kind })
+        Some(Self {
+            items,
+            current,
+            kind,
+        })
     }
 
     /// How many steps are done: everything before `current`, or all of them.

@@ -1,11 +1,11 @@
 //! Slash commands and skills Keel's Pi picks up from disk, for the
 //! composer's `/` menu. The entry carries the exact text to put in the
 //! message, and Pi expands it when the message arrives: `prompts/*.md` as
-//! `/name` (a subfolder namespaces the name, `a/b.md` → `/a:b`) and
-//! `skills/*/SKILL.md` as `/skill:name`, under Keel's Pi folder and the
-//! project's `.pi/`.
+//! `/name` (a subfolder namespaces the name, `a/b.md` → `/a:b`). Skills
+//! come from the same scan as Settings (`skills`): enabled ones only,
+//! including manual-only skills, since `/skill:name` is how those run.
 //!
-//! A project entry wins over a user one with the same name.
+//! A project command wins over a user one with the same name.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -31,32 +31,66 @@ const MAX_ENTRIES: usize = 500;
 const MAX_DEPTH: usize = 4;
 
 /// The commands and skills Pi would pick up in `cwd` with `agent` as its
-/// folder, project ones first, each group by name.
+/// folder. Commands are project then user; skills follow, enabled only.
 pub fn list_commands_sync(cwd: Option<&Path>, agent: &Path) -> Vec<CommandEntry> {
-    // (folder, kind, scope, invoke prefix)
-    let mut sources: Vec<(PathBuf, &'static str, &'static str, &'static str)> = Vec::new();
-    for (rel, kind, prefix) in [("prompts", "command", "/"), ("skills", "skill", "/skill:")] {
-        if let Some(cwd) = cwd {
-            sources.push((cwd.join(".pi").join(rel), kind, "project", prefix));
-        }
-        sources.push((agent.join(rel), kind, "user", prefix));
+    list_commands_at(cwd, agent, &crate::skills::home_dir())
+}
+
+pub(crate) fn list_commands_at(cwd: Option<&Path>, agent: &Path, home: &Path) -> Vec<CommandEntry> {
+    let mut sources: Vec<(PathBuf, &'static str)> = Vec::new();
+    if let Some(cwd) = cwd {
+        sources.push((cwd.join(".pi").join("prompts"), "project"));
     }
+    sources.push((agent.join("prompts"), "user"));
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for (dir, kind, scope, prefix) in sources {
-        let mut found = if kind == "skill" { skills_in(&dir) } else { commands_in(&dir) };
+    for (dir, scope) in sources {
+        let mut found = commands_in(&dir);
         found.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, description) in found {
             if out.len() >= MAX_ENTRIES {
                 return out;
             }
-            // Same kind and name: the project's shadows the user's.
-            if seen.insert((kind, name.clone())) {
-                out.push(CommandEntry { insert: format!("{prefix}{name}"), name, description, kind, scope });
+            if seen.insert(name.clone()) {
+                out.push(CommandEntry {
+                    insert: format!("/{name}"),
+                    name,
+                    description,
+                    kind: "command",
+                    scope,
+                });
+            }
+        }
+    }
+    if let Ok(skills) = crate::skills::list_skills_at(cwd, agent, home) {
+        for skill in skills.into_iter().filter(|skill| skill.enabled) {
+            if out.len() >= MAX_ENTRIES {
+                break;
+            }
+            let scope: &'static str = if skill.scope == "project" {
+                "project"
+            } else {
+                "user"
+            };
+            if seen.insert(format!("skill:{}", skill.name)) {
+                out.push(CommandEntry {
+                    name: skill.name,
+                    insert: skill.insert,
+                    description: clip_menu(&skill.description),
+                    kind: "skill",
+                    scope,
+                });
             }
         }
     }
     out
+}
+
+fn clip_menu(text: &str) -> String {
+    match text.char_indices().nth(140) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
 }
 
 /// `*.md` under `dir`, a subfolder joining the name with `:`.
@@ -77,30 +111,22 @@ fn walk_md(root: &Path, dir: &Path, depth: usize, out: &mut Vec<(String, String)
                 walk_md(root, &path, depth + 1, out);
             }
         } else if path.extension().is_some_and(|e| e == "md") {
-            let Ok(rel) = path.with_extension("").strip_prefix(root).map(Path::to_path_buf) else {
+            let Ok(rel) = path
+                .with_extension("")
+                .strip_prefix(root)
+                .map(Path::to_path_buf)
+            else {
                 continue;
             };
-            let name = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join(":");
+            let name = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(":");
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             out.push((name, describe(&text).1));
         }
     }
-}
-
-/// Each `*/SKILL.md` under `dir`: its front matter `name` (else the folder's).
-fn skills_in(dir: &Path) -> Vec<(String, String)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let text = std::fs::read_to_string(entry.path().join("SKILL.md")).ok()?;
-            let (name, description) = describe(&text);
-            let name = name.unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
-            Some((name, description))
-        })
-        .collect()
 }
 
 /// A markdown file's front matter `name` and `description`; without a
@@ -152,26 +178,63 @@ mod tests {
     fn finds_pi_commands_and_skills_project_first() {
         let tmp = std::env::temp_dir().join(format!("keel-commands-{}", uuid::Uuid::new_v4()));
         let (agent, project) = (tmp.join("agent"), tmp.join("project"));
-        write(&agent.join("prompts/review.md"), "---\ndescription: Review the diff\n---\nBody");
-        write(&agent.join("prompts/deploy.md"), "# Deploy to staging\nsteps");
+        write(
+            &agent.join("prompts/review.md"),
+            "---\ndescription: Review the diff\n---\nBody",
+        );
+        write(
+            &agent.join("prompts/deploy.md"),
+            "# Deploy to staging\nsteps",
+        );
         write(&project.join(".pi/prompts/review.md"), "Project review");
-        write(&project.join(".pi/prompts/frontend/component.md"), "Make a component");
-        write(&agent.join("skills/pdf/SKILL.md"), "---\nname: pdf-tools\ndescription: \"Work with PDFs\"\n---\n");
+        write(
+            &project.join(".pi/prompts/frontend/component.md"),
+            "Make a component",
+        );
+        write(&project.join(".git"), "");
+        write(
+            &agent.join("skills/pdf/SKILL.md"),
+            "---\nname: pdf-tools\ndescription: \"Work with PDFs\"\n---\n",
+        );
         write(&agent.join("skills/bare/SKILL.md"), "Just text");
 
-        let got = list_commands_sync(Some(&project), &agent);
-        let names: Vec<(&str, &str, &str)> = got.iter().map(|c| (c.insert.as_str(), c.scope, c.description.as_str())).collect();
+        let got = list_commands_at(Some(&project), &agent, &tmp.join("home"));
+        let names: Vec<(&str, &str, &str)> = got
+            .iter()
+            .map(|c| (c.insert.as_str(), c.scope, c.description.as_str()))
+            .collect();
         assert_eq!(
             names,
             [
                 ("/frontend:component", "project", "Make a component"),
                 ("/review", "project", "Project review"),
                 ("/deploy", "user", "Deploy to staging"),
-                ("/skill:bare", "user", "Just text"),
                 ("/skill:pdf-tools", "user", "Work with PDFs"),
             ]
         );
-        assert_eq!(got.iter().map(|c| c.kind).collect::<Vec<_>>(), ["command", "command", "command", "skill", "skill"]);
+        assert_eq!(
+            got.iter().map(|c| c.kind).collect::<Vec<_>>(),
+            ["command", "command", "command", "skill"]
+        );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn indonesian_natural_is_not_listed_as_a_command_or_skill() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let agent = repo_root.join("target/nonexistent-agent");
+        let got = list_commands_at(
+            Some(repo_root),
+            &agent,
+            &repo_root.join("target/nonexistent-home"),
+        );
+        assert!(
+            !got.iter().any(|c| c.name.contains("indonesian-natural")
+                || c.insert.contains("indonesian-natural"))
+        );
     }
 }

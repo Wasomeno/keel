@@ -3,8 +3,9 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId, IntoElement, LayoutId,
-    Pixels, SharedString, StyleRefinement, Styled, Svg, Transformation, Window, svg,
+    App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
+    IntoElement, LayoutId, Pixels, SharedString, StyleRefinement, Styled, Svg, Transformation,
+    Window, svg,
 };
 
 macro_rules! icons {
@@ -67,6 +68,7 @@ icons! {
     FileJson => "file-json",
     FileText => "file-text",
     Brain => "brain",
+    Puzzle => "puzzle",
     // The effort chip: one sparkle per level lit.
     Sparkle => "sparkle",
     SparkleFilled => "sparkle-filled",
@@ -109,6 +111,8 @@ icons! {
     FolderTree => "folder-tree",
     Dialog => "message-square-warning",
     AgentOff => "bot-off",
+    Play => "play",
+    Volume2 => "volume-2",
     // Provider logos: Lobe Icons (MIT); Command Code from commandcode.ai.
     LogoClaude => "logo-claude",
     LogoOpenAi => "logo-openai",
@@ -155,10 +159,14 @@ impl Icon {
         if path.ends_with('/') {
             return Icon::Folder;
         }
-        let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        let ext = path
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
         match ext.as_str() {
-            "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "py" | "go" | "rb" | "java" | "kt" | "swift" | "c" | "h" | "cpp" | "cs"
-            | "php" | "vue" | "svelte" | "html" | "css" | "scss" | "sh" | "sql" => Icon::FileCode,
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "py" | "go" | "rb" | "java" | "kt"
+            | "swift" | "c" | "h" | "cpp" | "cs" | "php" | "vue" | "svelte" | "html" | "css"
+            | "scss" | "sh" | "sql" => Icon::FileCode,
             "json" | "yaml" | "yml" | "toml" | "xml" | "csv" | "lock" | "env" => Icon::FileJson,
             "md" | "mdx" | "txt" | "rst" | "pdf" => Icon::FileText,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" => Icon::Image,
@@ -229,7 +237,8 @@ impl Element for IconSvg {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        self.0.prepaint(id, inspector_id, bounds, layout, window, cx)
+        self.0
+            .prepaint(id, inspector_id, bounds, layout, window, cx)
     }
 
     fn paint(
@@ -246,7 +255,8 @@ impl Element for IconSvg {
         if style.text.color.is_none() {
             style.text.color = Some(window.text_style().color);
         }
-        self.0.paint(id, inspector_id, bounds, layout, hitbox, window, cx)
+        self.0
+            .paint(id, inspector_id, bounds, layout, hitbox, window, cx)
     }
 }
 
@@ -283,7 +293,10 @@ mod tests {
     #[test]
     fn every_icon_loads_as_svg() {
         for icon in Icon::ALL {
-            let bytes = Assets.load(icon.path()).unwrap().unwrap_or_else(|| panic!("{icon:?} missing"));
+            let bytes = Assets
+                .load(icon.path())
+                .unwrap()
+                .unwrap_or_else(|| panic!("{icon:?} missing"));
             assert!(bytes.starts_with(b"<svg"), "{icon:?} is not an svg");
         }
         assert!(Assets.load("icons/nope.svg").unwrap().is_none());

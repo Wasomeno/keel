@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnimationExt as _, AnyElement, Bounds, ClickEvent, Context, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Task, div, prelude::*, px,
+    AnimationExt as _, AnyElement, Bounds, ClickEvent, Context, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Task, div, prelude::*, px,
 };
 use keel_theme::Tokens;
 
@@ -94,7 +94,12 @@ impl KeelWindow {
 
     /// Rest the pill at `dock`, gliding from `from` (a window-space origin;
     /// default: where it was last painted).
-    fn timer_place(&mut self, dock: TimerDock, from: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+    fn timer_place(
+        &mut self,
+        dock: TimerDock,
+        from: Option<Point<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let from = from.or_else(|| self.timer_ui.painted.get().map(|b| b.origin));
         if dock != self.timer.dock {
             // The old slot's bounds would aim the glide at the wrong place.
@@ -122,12 +127,15 @@ impl KeelWindow {
         self.timer_ui.tick = Some(cx.spawn(async move |this, cx| {
             loop {
                 let wait = this.update(cx, |this, _| {
-                    (this.timer.running() && !this.timer.hidden && !this.dotify_mode()).then(|| this.timer.ms_to_next_second(now_ms()))
+                    (this.timer.running() && !this.timer.hidden && !this.dotify_mode())
+                        .then(|| this.timer.ms_to_next_second(now_ms()))
                 });
                 let Ok(Some(wait)) = wait else {
                     break;
                 };
-                cx.background_executor().timer(Duration::from_millis(wait + 5)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait + 5))
+                    .await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -136,13 +144,25 @@ impl KeelWindow {
     }
 
     fn timer_press(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let origin = self.timer_ui.painted.get().map_or(event.position, |b| b.origin);
-        self.timer_ui.press = Some(Press { at: event.position, grab: event.position - origin });
+        let origin = self
+            .timer_ui
+            .painted
+            .get()
+            .map_or(event.position, |b| b.origin);
+        self.timer_ui.press = Some(Press {
+            at: event.position,
+            grab: event.position - origin,
+        });
         self.timer_ui.menu = false;
         cx.notify();
     }
 
-    fn timer_pointer_move(&mut self, position: Point<Pixels>, pressed: Option<MouseButton>, cx: &mut Context<Self>) {
+    fn timer_pointer_move(
+        &mut self,
+        position: Point<Pixels>,
+        pressed: Option<MouseButton>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(press) = self.timer_ui.press else {
             return;
         };
@@ -180,7 +200,12 @@ impl KeelWindow {
     /// else the pane's nearest corner.
     fn timer_drop_target(&self, position: Point<Pixels>) -> TimerDock {
         let area = self.timer_ui.area.get().map(|b| {
-            (f32::from(b.left()), f32::from(b.top()), f32::from(b.right()), f32::from(b.bottom()))
+            (
+                f32::from(b.left()),
+                f32::from(b.top()),
+                f32::from(b.right()),
+                f32::from(b.bottom()),
+            )
         });
         TimerDock::for_drop(f32::from(position.x), f32::from(position.y), area)
     }
@@ -193,25 +218,45 @@ impl KeelWindow {
 
     /// The header slot beside the navigation pill: the pill when docked
     /// there, a drop hint while a drag would dock it.
-    pub(super) fn render_timer_header(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_timer_header(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.timer.hidden || !self.dotify_visible() {
             return None;
         }
         if let Some(pointer) = self.timer_ui.drag {
-            return (self.timer_drop_target(pointer) == TimerDock::Header)
-                .then(|| div().flex_none().ml(zpx(6.)).child(self.timer_drop_hint(t)).into_any_element());
+            return (self.timer_drop_target(pointer) == TimerDock::Header).then(|| {
+                div()
+                    .flex_none()
+                    .ml(zpx(6.))
+                    .child(self.timer_drop_hint(t))
+                    .into_any_element()
+            });
         }
         if self.timer.dock != TimerDock::Header {
             return None;
         }
         let pill = self.timer_pill(t, cx);
-        Some(div().flex_none().ml(zpx(6.)).child(self.timer_rest_slot(pill)).into_any_element())
+        Some(
+            div()
+                .flex_none()
+                .ml(zpx(6.))
+                .child(self.timer_rest_slot(pill))
+                .into_any_element(),
+        )
     }
 
     /// The corner layer over the chat pane (below the header, above the
     /// composer: the caller places it). Always there while the timer shows,
     /// so a drag knows the corners even when the pill is in the header.
-    pub(super) fn render_timer_corners(&mut self, t: Tokens, top: Pixels, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_timer_corners(
+        &mut self,
+        t: Tokens,
+        top: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.timer.hidden || !self.dotify_visible() {
             return None;
         }
@@ -234,7 +279,14 @@ impl KeelWindow {
                 .left_0()
                 .right_0()
                 .bottom_0()
-                .child(gpui::canvas(move |bounds, _, _| record.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0())
+                .child(
+                    gpui::canvas(
+                        move |bounds, _, _| record.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .children(corner)
                 .into_any_element(),
         )
@@ -254,21 +306,36 @@ impl KeelWindow {
             return base.into_any_element();
         }
         let collapsed = self.state.ui_settings.sidebar_collapsed;
-        let (peek, leaving) = (collapsed && self.sidebar_peek, collapsed && self.peek_closing);
+        let (peek, leaving) = (
+            collapsed && self.sidebar_peek,
+            collapsed && self.peek_closing,
+        );
         if !peek && !leaving {
             return base.left(edge).into_any_element();
         }
         // The peek floats 8px in from the window's left edge.
-        let (rest, out) = (f32::from(edge), f32::from(edge) + 8. + self.state.sidebar_width());
+        let (rest, out) = (
+            f32::from(edge),
+            f32::from(edge) + 8. + self.state.sidebar_width(),
+        );
         if self.reduced() {
-            return base.left(px(if peek { out } else { rest })).into_any_element();
+            return base
+                .left(px(if peek { out } else { rest }))
+                .into_any_element();
         }
-        let (duration, easing): (Duration, fn(f32) -> f32) =
-            if leaving { (motion::FAST, motion::ease_in) } else { (motion::BASE, motion::ease_out) };
-        base.with_animation(("timer-nudge", self.peek_gen as usize), gpui::Animation::new(duration).with_easing(easing), move |el, d| {
-            let shown = if leaving { 1. - d } else { d };
-            el.left(px(rest + (out - rest) * shown))
-        })
+        let (duration, easing): (Duration, fn(f32) -> f32) = if leaving {
+            (motion::FAST, motion::ease_in)
+        } else {
+            (motion::BASE, motion::ease_out)
+        };
+        base.with_animation(
+            ("timer-nudge", self.peek_gen as usize),
+            gpui::Animation::new(duration).with_easing(easing),
+            move |el, d| {
+                let shown = if leaving { 1. - d } else { d };
+                el.left(px(rest + (out - rest) * shown))
+            },
+        )
         .into_any_element()
     }
 
@@ -277,10 +344,14 @@ impl KeelWindow {
     fn timer_rest_slot(&self, pill: AnyElement) -> AnyElement {
         let rest = self.timer_ui.rest.clone();
         let record = rest.clone();
-        let slot = div()
-            .relative()
-            .flex_none()
-            .child(gpui::canvas(move |bounds, _, _| record.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0());
+        let slot = div().relative().flex_none().child(
+            gpui::canvas(
+                move |bounds, _, _| record.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
         match self.timer_ui.glide {
             Some((n, from)) if !self.reduced() => slot
                 .child(div().child(pill).with_animation(
@@ -319,7 +390,11 @@ impl KeelWindow {
 
     /// The pill under the pointer while dragging, plus the window-wide
     /// listeners a press needs (the release can land anywhere). Painted last.
-    pub(super) fn render_timer_drag(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_timer_drag(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.dotify_visible() || self.timer_ui.press.is_none() {
             return None;
         }
@@ -330,7 +405,9 @@ impl KeelWindow {
                 let on_move = weak.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if phase == gpui::DispatchPhase::Bubble {
-                        let _ = on_move.update(cx, |this, cx| this.timer_pointer_move(e.position, e.pressed_button, cx));
+                        let _ = on_move.update(cx, |this, cx| {
+                            this.timer_pointer_move(e.position, e.pressed_button, cx)
+                        });
                     }
                 });
                 let on_up = weak;
@@ -368,16 +445,28 @@ impl KeelWindow {
             }
             _ => None,
         };
-        Some(div().absolute().inset_0().child(listeners).children(ghost).into_any_element())
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(listeners)
+                .children(ghost)
+                .into_any_element(),
+        )
     }
 
     /// The right-click menu, anchored under the pill (over it, in a bottom
     /// corner). At the root so it never nests inside the header's lift.
-    pub(super) fn render_timer_menu(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_timer_menu(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.dotify_visible() {
             return None;
         }
-        let leaving = self.menu_phase("timer-menu", self.timer_ui.menu && !self.timer.hidden, cx)?;
+        let leaving =
+            self.menu_phase("timer-menu", self.timer_ui.menu && !self.timer.hidden, cx)?;
         let pill = self.timer_ui.painted.get()?;
         let up = self.timer.dock.is_bottom();
         let docked = self.timer.dock == TimerDock::Header;
@@ -402,13 +491,19 @@ impl KeelWindow {
             menu_item("timer-menu-dock", t, true, false)
                 .child(if docked { "Pop Out" } else { "Dock in Header" })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let dock = if docked { TimerDock::TopRight } else { TimerDock::Header };
+                    let dock = if docked {
+                        TimerDock::TopRight
+                    } else {
+                        TimerDock::Header
+                    };
                     this.timer_place(dock, None, cx);
                 }))
                 .into_any_element(),
             menu_item("timer-menu-hide", t, true, false)
                 .child("Hide")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.timer_set_hidden(true, cx)))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.timer_set_hidden(true, cx)),
+                )
                 .into_any_element(),
         ]);
         let dismiss = cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -418,14 +513,30 @@ impl KeelWindow {
         let (anchor, at) = if up {
             (gpui::Anchor::BottomLeft, pill.origin)
         } else {
-            (gpui::Anchor::TopLeft, gpui::point(pill.left(), pill.bottom()))
+            (
+                gpui::Anchor::TopLeft,
+                gpui::point(pill.left(), pill.bottom()),
+            )
         };
-        let panel = menu_panel("timer-menu", t, if self.dotify_mode() { 200. } else { 184. }, up, items).when(leaving.is_none(), |d| d.on_mouse_down_out(dismiss));
+        let panel = menu_panel(
+            "timer-menu",
+            t,
+            if self.dotify_mode() { 200. } else { 184. },
+            up,
+            items,
+        )
+        .when(leaving.is_none(), |d| d.on_mouse_down_out(dismiss));
         let menu = menu_motion(panel, "timer-menu", up, leaving, self.reduced());
         Some(
-            gpui::deferred(gpui::anchored().position(at).anchor(anchor).snap_to_window_with_margin(zpx(8.)).child(menu))
-                .with_priority(1)
-                .into_any_element(),
+            gpui::deferred(
+                gpui::anchored()
+                    .position(at)
+                    .anchor(anchor)
+                    .snap_to_window_with_margin(zpx(8.))
+                    .child(menu),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
@@ -441,7 +552,14 @@ impl KeelWindow {
             .relative()
             .flex_none()
             .cursor_pointer()
-            .child(gpui::canvas(move |bounds, _, _| painted.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0())
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| painted.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(content)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if this.timer_ui.hover != *hovered {
@@ -449,9 +567,15 @@ impl KeelWindow {
                     cx.notify();
                 }
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.timer_press(e, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| this.timer_press(e, cx)),
+            )
             // Also here, in case the release beats the window listeners' first paint.
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.timer_pointer_up(e.position, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseUpEvent, _, cx| this.timer_pointer_up(e.position, cx)),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -475,9 +599,16 @@ impl KeelWindow {
     /// down it reaches (its inset plus its height), so the session card can
     /// sit under it instead of on it.
     pub(super) fn timer_top_right_reach(&self) -> Option<f32> {
-        let rests = self.dotify_visible() && !self.timer.hidden && self.timer.dock == TimerDock::TopRight && self.timer_ui.drag.is_none();
+        let rests = self.dotify_visible()
+            && !self.timer.hidden
+            && self.timer.dock == TimerDock::TopRight
+            && self.timer_ui.drag.is_none();
         rests.then(|| {
-            let h = self.timer_ui.rest.get().map_or(f32::from(zpx(28.)), |b| f32::from(b.size.height));
+            let h = self
+                .timer_ui
+                .rest
+                .get()
+                .map_or(f32::from(zpx(28.)), |b| f32::from(b.size.height));
             f32::from(zpx(EDGE)) + h
         })
     }

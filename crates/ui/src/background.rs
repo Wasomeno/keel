@@ -25,7 +25,10 @@ pub fn sounds_dir(data_dir: &Path) -> PathBuf {
 }
 
 fn extension(path: &Path) -> String {
-    path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn invalid(msg: impl Into<String>) -> io::Error {
@@ -33,7 +36,9 @@ fn invalid(msg: impl Into<String>) -> io::Error {
 }
 
 fn stamp() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
 }
 
 /// Copies `src` into `backgrounds/`, scaled to at most [`MAX_EDGE`], and
@@ -46,8 +51,13 @@ pub fn import_background(data_dir: &Path, src: &Path) -> io::Result<String> {
     }
     let dir = backgrounds_dir(data_dir);
     fs::create_dir_all(&dir)?;
-    let bytes = if matches!(ext.as_str(), "heic" | "heif") { heic_to_jpeg(src, &dir)? } else { fs::read(src)? };
-    let image = image::load_from_memory(&bytes).map_err(|e| invalid(format!("couldn't read the picture: {e}")))?;
+    let bytes = if matches!(ext.as_str(), "heic" | "heif") {
+        heic_to_jpeg(src, &dir)?
+    } else {
+        fs::read(src)?
+    };
+    let image = image::load_from_memory(&bytes)
+        .map_err(|e| invalid(format!("couldn't read the picture: {e}")))?;
     let image = if image.width().max(image.height()) > MAX_EDGE {
         image.resize(MAX_EDGE, MAX_EDGE, image::imageops::FilterType::Lanczos3)
     } else {
@@ -55,13 +65,18 @@ pub fn import_background(data_dir: &Path, src: &Path) -> io::Result<String> {
     };
     let name = if image.color().has_alpha() {
         let name = format!("bg-{}.png", stamp());
-        image.save_with_format(dir.join(&name), image::ImageFormat::Png).map_err(|e| invalid(e.to_string()))?;
+        image
+            .save_with_format(dir.join(&name), image::ImageFormat::Png)
+            .map_err(|e| invalid(e.to_string()))?;
         name
     } else {
         let name = format!("bg-{}.jpg", stamp());
         let file = fs::File::create(dir.join(&name))?;
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(io::BufWriter::new(file), 90);
-        encoder.encode_image(&image.to_rgb8()).map_err(|e| invalid(e.to_string()))?;
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(io::BufWriter::new(file), 90);
+        encoder
+            .encode_image(&image.to_rgb8())
+            .map_err(|e| invalid(e.to_string()))?;
         name
     };
     remove_others(&dir, &name);
@@ -102,7 +117,11 @@ fn heic_to_jpeg(src: &Path, dir: &Path) -> io::Result<Vec<u8>> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()?;
-    let bytes = if status.success() { fs::read(&out) } else { Err(invalid("macOS couldn't convert the HEIC picture")) };
+    let bytes = if status.success() {
+        fs::read(&out)
+    } else {
+        Err(invalid("macOS couldn't convert the HEIC picture"))
+    };
     let _ = fs::remove_file(&out);
     bytes
 }
@@ -126,7 +145,13 @@ pub fn import_sound(data_dir: &Path, src: &Path) -> io::Result<String> {
         .and_then(|s| s.to_str())
         .unwrap_or("sound")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let name = format!("{stem}-{}.{ext}", stamp());
     fs::copy(src, dir.join(&name))?;
@@ -142,7 +167,9 @@ pub fn system_sounds() -> Vec<String> {
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            (extension(&path) == "aiff").then(|| path.file_stem()?.to_str().map(str::to_string)).flatten()
+            (extension(&path) == "aiff")
+                .then(|| path.file_stem()?.to_str().map(str::to_string))
+                .flatten()
         })
         .collect();
     names.sort();
@@ -154,8 +181,12 @@ pub fn sound_path(data_dir: &Path, choice: &SoundChoice) -> Option<PathBuf> {
     let path = match choice {
         SoundChoice::None => return None,
         SoundChoice::Default => Path::new(SYSTEM_SOUNDS).join(format!("{DEFAULT_SOUND}.aiff")),
-        SoundChoice::System(name) if !name.contains('/') => Path::new(SYSTEM_SOUNDS).join(format!("{name}.aiff")),
-        SoundChoice::Custom(name) if !name.contains('/') && !name.contains("..") => sounds_dir(data_dir).join(name),
+        SoundChoice::System(name) if !name.contains('/') => {
+            Path::new(SYSTEM_SOUNDS).join(format!("{name}.aiff"))
+        }
+        SoundChoice::Custom(name) if !name.contains('/') && !name.contains("..") => {
+            sounds_dir(data_dir).join(name)
+        }
         _ => return None,
     };
     path.is_file().then_some(path)
@@ -171,7 +202,11 @@ pub fn sound_label(choice: &SoundChoice) -> String {
             // "ding-1728450000000.wav" → "ding.wav"
             let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
             let stem = stem.rsplit_once('-').map_or(stem, |(s, _)| s);
-            if ext.is_empty() { stem.to_string() } else { format!("{stem}.{ext}") }
+            if ext.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{stem}.{ext}")
+            }
         }
     }
 }
@@ -181,7 +216,11 @@ mod tests {
     use super::*;
 
     fn tmp(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keel-bg-{label}-{}-{}", std::process::id(), stamp()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-bg-{label}-{}-{}",
+            std::process::id(),
+            stamp()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -191,7 +230,9 @@ mod tests {
     fn import_scales_down_copies_and_replaces_the_previous_one() {
         let dir = tmp("import");
         let src = dir.join("big.png");
-        image::RgbImage::from_pixel(4000, 2000, image::Rgb([10, 120, 110])).save(&src).unwrap();
+        image::RgbImage::from_pixel(4000, 2000, image::Rgb([10, 120, 110]))
+            .save(&src)
+            .unwrap();
         let first = import_background(&dir, &src).unwrap();
         assert!(first.ends_with(".jpg"), "{first}");
         let path = background_path(&dir, Some(&first)).expect("imported");
@@ -203,10 +244,15 @@ mod tests {
         // A second import replaces the first; a small one keeps its size and alpha.
         std::thread::sleep(std::time::Duration::from_millis(3));
         let small = dir.join("small.png");
-        image::RgbaImage::from_pixel(64, 32, image::Rgba([1, 2, 3, 128])).save(&small).unwrap();
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([1, 2, 3, 128]))
+            .save(&small)
+            .unwrap();
         let second = import_background(&dir, &small).unwrap();
         assert!(second.ends_with(".png"));
-        assert_eq!(image::image_dimensions(background_path(&dir, Some(&second)).unwrap()).unwrap(), (64, 32));
+        assert_eq!(
+            image::image_dimensions(background_path(&dir, Some(&second)).unwrap()).unwrap(),
+            (64, 32)
+        );
         assert!(background_path(&dir, Some(&first)).is_none());
         // Reset: back to the built-in picture.
         reset_background(&dir);
@@ -234,8 +280,14 @@ mod tests {
         let src = dir.join("My Ding.wav");
         fs::write(&src, b"RIFF....WAVE").unwrap();
         let name = import_sound(&dir, &src).unwrap();
-        assert!(name.starts_with("My-Ding-") && name.ends_with(".wav"), "{name}");
-        assert_eq!(sound_label(&SoundChoice::Custom(name.clone())), "My-Ding.wav");
+        assert!(
+            name.starts_with("My-Ding-") && name.ends_with(".wav"),
+            "{name}"
+        );
+        assert_eq!(
+            sound_label(&SoundChoice::Custom(name.clone())),
+            "My-Ding.wav"
+        );
         assert!(sound_path(&dir, &SoundChoice::Custom(name)).is_some());
         assert!(sound_path(&dir, &SoundChoice::None).is_none());
         assert!(sound_path(&dir, &SoundChoice::Custom("../x.wav".into())).is_none());

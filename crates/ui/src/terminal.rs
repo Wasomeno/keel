@@ -153,8 +153,14 @@ fn rgb(c: Rgb) -> u32 {
 impl Emulator {
     pub fn new(cols: usize, rows: usize) -> Self {
         let listener = Listener::default();
-        let config = Config { scrolling_history: SCROLLBACK, ..Config::default() };
-        let size = Size { cols: cols.max(2), rows: rows.max(2) };
+        let config = Config {
+            scrolling_history: SCROLLBACK,
+            ..Config::default()
+        };
+        let size = Size {
+            cols: cols.max(2),
+            rows: rows.max(2),
+        };
         Self {
             term: Term::new(config, &size, listener.clone()),
             parser: Processor::new(),
@@ -208,12 +214,21 @@ impl Emulator {
         let resolve = |color: Color| -> u32 {
             match color {
                 Color::Spec(c) => rgb(c),
-                Color::Indexed(ix) => colors[ix as usize].map(rgb).unwrap_or_else(|| palette.indexed(ix)),
-                Color::Named(named) => colors[named].map(rgb).unwrap_or_else(|| palette.named(named)),
+                Color::Indexed(ix) => colors[ix as usize]
+                    .map(rgb)
+                    .unwrap_or_else(|| palette.indexed(ix)),
+                Color::Named(named) => colors[named]
+                    .map(rgb)
+                    .unwrap_or_else(|| palette.named(named)),
             }
         };
         let offset = content.display_offset as i32;
-        let mut lines: Vec<Line> = (0..self.rows).map(|_| Line { text: String::new(), runs: Vec::new() }).collect();
+        let mut lines: Vec<Line> = (0..self.rows)
+            .map(|_| Line {
+                text: String::new(),
+                runs: Vec::new(),
+            })
+            .collect();
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + offset;
             let Some(line) = usize::try_from(row).ok().and_then(|r| lines.get_mut(r)) else {
@@ -230,7 +245,11 @@ impl Emulator {
             if cell.flags.contains(Flags::DIM) {
                 fg = blend(fg, palette.bg);
             }
-            let ch = if cell.flags.contains(Flags::HIDDEN) || cell.c == '\0' { ' ' } else { cell.c };
+            let ch = if cell.flags.contains(Flags::HIDDEN) || cell.c == '\0' {
+                ' '
+            } else {
+                cell.c
+            };
             let start = line.text.len();
             line.text.push(ch);
             let run = Run {
@@ -248,7 +267,10 @@ impl Emulator {
         let visible = content.mode.contains(TermMode::SHOW_CURSOR)
             && cursor_row >= 0
             && (cursor_row as usize) < self.rows;
-        Screen { lines, cursor: visible.then_some((cursor_point.column.0, cursor_row as usize)) }
+        Screen {
+            lines,
+            cursor: visible.then_some((cursor_point.column.0, cursor_row as usize)),
+        }
     }
 }
 
@@ -256,7 +278,8 @@ impl Emulator {
 fn push_run(runs: &mut Vec<Run>, run: Run) {
     if let Some(last) = runs.last_mut()
         && last.range.end == run.range.start
-        && (last.fg, last.bg, last.bold, last.italic, last.underline) == (run.fg, run.bg, run.bold, run.italic, run.underline)
+        && (last.fg, last.bg, last.bold, last.italic, last.underline)
+            == (run.fg, run.bg, run.bold, run.italic, run.underline)
     {
         last.range.end = run.range.end;
         return;
@@ -272,11 +295,25 @@ fn blend(a: u32, b: u32) -> u32 {
 
 /// The bytes a keystroke sends to the shell. `None`: not for the terminal
 /// (⌘ shortcuts stay with the app).
-pub fn encode_key(key: &str, key_char: Option<&str>, ctrl: bool, alt: bool, shift: bool, cmd: bool, app_cursor: bool) -> Option<String> {
+pub fn encode_key(
+    key: &str,
+    key_char: Option<&str>,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    cmd: bool,
+    app_cursor: bool,
+) -> Option<String> {
     if cmd {
         return None;
     }
-    let arrow = |code: char| Some(if app_cursor { format!("\x1bO{code}") } else { format!("\x1b[{code}") });
+    let arrow = |code: char| {
+        Some(if app_cursor {
+            format!("\x1bO{code}")
+        } else {
+            format!("\x1b[{code}")
+        })
+    };
     let seq = match key {
         "enter" => Some("\r".to_string()),
         "backspace" => Some(if alt { "\x1b\x7f" } else { "\x7f" }.to_string()),
@@ -309,7 +346,9 @@ pub fn encode_key(key: &str, key_char: Option<&str>, ctrl: bool, alt: bool, shif
             _ => None,
         };
     }
-    let text = key_char.map(str::to_string).or_else(|| (key == "space").then(|| " ".to_string()))?;
+    let text = key_char
+        .map(str::to_string)
+        .or_else(|| (key == "space").then(|| " ".to_string()))?;
     Some(if alt { format!("\x1b{text}") } else { text })
 }
 
@@ -335,7 +374,11 @@ mod tests {
         let screen = emu.screen(&Palette::DARK);
         assert!(screen.lines[0].text.starts_with("hi red"));
         assert!(screen.lines[1].text.starts_with("next"));
-        let red = screen.lines[0].runs.iter().find(|r| &screen.lines[0].text[r.range.clone()] == "red").expect("red run");
+        let red = screen.lines[0]
+            .runs
+            .iter()
+            .find(|r| &screen.lines[0].text[r.range.clone()] == "red")
+            .expect("red run");
         assert_eq!(red.fg, Palette::DARK.ansi[1]);
         assert_eq!(screen.cursor, Some((4, 1)));
     }
@@ -352,14 +395,38 @@ mod tests {
 
     #[test]
     fn keys_encode_like_a_terminal() {
-        assert_eq!(encode_key("c", Some("c"), true, false, false, false, false).as_deref(), Some("\x03"));
-        assert_eq!(encode_key("enter", None, false, false, false, false, false).as_deref(), Some("\r"));
-        assert_eq!(encode_key("up", None, false, false, false, false, false).as_deref(), Some("\x1b[A"));
-        assert_eq!(encode_key("up", None, false, false, false, false, true).as_deref(), Some("\x1bOA"));
-        assert_eq!(encode_key("a", Some("a"), false, true, false, false, false).as_deref(), Some("\x1ba"));
-        assert_eq!(encode_key("A", Some("A"), false, false, true, false, false).as_deref(), Some("A"));
-        assert_eq!(encode_key("tab", None, false, false, true, false, false).as_deref(), Some("\x1b[Z"));
-        assert_eq!(encode_key("v", Some("v"), false, false, false, true, false), None);
+        assert_eq!(
+            encode_key("c", Some("c"), true, false, false, false, false).as_deref(),
+            Some("\x03")
+        );
+        assert_eq!(
+            encode_key("enter", None, false, false, false, false, false).as_deref(),
+            Some("\r")
+        );
+        assert_eq!(
+            encode_key("up", None, false, false, false, false, false).as_deref(),
+            Some("\x1b[A")
+        );
+        assert_eq!(
+            encode_key("up", None, false, false, false, false, true).as_deref(),
+            Some("\x1bOA")
+        );
+        assert_eq!(
+            encode_key("a", Some("a"), false, true, false, false, false).as_deref(),
+            Some("\x1ba")
+        );
+        assert_eq!(
+            encode_key("A", Some("A"), false, false, true, false, false).as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            encode_key("tab", None, false, false, true, false, false).as_deref(),
+            Some("\x1b[Z")
+        );
+        assert_eq!(
+            encode_key("v", Some("v"), false, false, false, true, false),
+            None
+        );
         assert_eq!(encode_paste("a\nb", true), "\x1b[200~a\rb\x1b[201~");
     }
 

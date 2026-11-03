@@ -27,8 +27,14 @@ impl Choices {
         if options.len() < 2 {
             return None;
         }
-        let recommended = spec["recommended"].as_u64().map(|ix| ix as usize).filter(|&ix| ix < options.len());
-        Some(Self { options, recommended })
+        let recommended = spec["recommended"]
+            .as_u64()
+            .map(|ix| ix as usize)
+            .filter(|&ix| ix < options.len());
+        Some(Self {
+            options,
+            recommended,
+        })
     }
 
     /// For the transcript's height memo.
@@ -44,11 +50,19 @@ mod tests {
 
     #[test]
     fn spec_needs_two_options_and_a_recommendation_in_range() {
-        let choices = Choices::from_spec(&json!({ "component": "choices", "options": ["Redis", "Memory"], "recommended": 1 })).unwrap();
+        let choices = Choices::from_spec(
+            &json!({ "component": "choices", "options": ["Redis", "Memory"], "recommended": 1 }),
+        )
+        .unwrap();
         assert_eq!(choices.recommended, Some(1));
-        let out_of_range = Choices::from_spec(&json!({ "component": "choices", "options": ["a", "b"], "recommended": 5 })).unwrap();
+        let out_of_range = Choices::from_spec(
+            &json!({ "component": "choices", "options": ["a", "b"], "recommended": 5 }),
+        )
+        .unwrap();
         assert_eq!(out_of_range.recommended, None);
-        assert!(Choices::from_spec(&json!({ "component": "choices", "options": ["a", " "] })).is_none());
+        assert!(
+            Choices::from_spec(&json!({ "component": "choices", "options": ["a", " "] })).is_none()
+        );
         assert!(Choices::from_spec(&json!({ "component": "chart" })).is_none());
     }
 }

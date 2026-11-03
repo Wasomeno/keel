@@ -40,7 +40,13 @@ pub struct Region {
 impl Region {
     fn snapped(self) -> Self {
         let q = |v: f32| (v * 4.).round() / 4.;
-        Self { x: q(self.x), y: q(self.y), w: q(self.w).max(0.25), h: q(self.h).max(0.25), ..self }
+        Self {
+            x: q(self.x),
+            y: q(self.y),
+            w: q(self.w).max(0.25),
+            h: q(self.h).max(0.25),
+            ..self
+        }
     }
 }
 
@@ -114,7 +120,9 @@ fn cached<T: Clone>(
 /// Natural size of the diagram, or `None` when merman can't draw it (the fence
 /// then stays a code block).
 pub fn size(source: &str) -> Option<(f32, f32)> {
-    cached(&SIZES, key(&[source]), || render_svg(source, None).as_deref().and_then(view_box))
+    cached(&SIZES, key(&[source]), || {
+        render_svg(source, None).as_deref().and_then(view_box)
+    })
 }
 
 /// Drawn size in a column `col` px wide: shrunk to fit the column and
@@ -130,13 +138,25 @@ pub fn renders(source: &str, t: &Tokens) -> bool {
 }
 
 fn doc(source: &str, t: &Tokens) -> Option<Arc<Doc>> {
-    let k = key(&[source, &t.code.to_string(), &t.surface.to_string(), &t.text.to_string()]);
+    let k = key(&[
+        source,
+        &t.code.to_string(),
+        &t.surface.to_string(),
+        &t.text.to_string(),
+    ]);
     cached(&DOCS, k, || {
         let svg = render_svg(source, Some(t))?;
         let (width, height) = view_box(&svg)?;
-        let options = resvg::usvg::Options { fontdb: FONTS.clone(), ..Default::default() };
+        let options = resvg::usvg::Options {
+            fontdb: FONTS.clone(),
+            ..Default::default()
+        };
         let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
-        Some(Arc::new(Doc { tree, width, height }))
+        Some(Arc::new(Doc {
+            tree,
+            width,
+            height,
+        }))
     })
 }
 
@@ -150,17 +170,25 @@ const NODE_IDS: [&str; 4] = ["flowchart-", "state-", "classId-", "entity-"];
 pub fn nodes(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
     type Rect = resvg::tiny_skia::Rect;
     fn shape(group: &resvg::usvg::Group) -> Option<Rect> {
-        group.children().iter().fold(None, |acc: Option<Rect>, node| {
-            let next = match node {
-                resvg::usvg::Node::Path(_) => Some(node.abs_bounding_box()),
-                resvg::usvg::Node::Group(inner) => shape(inner),
-                _ => None,
-            };
-            match (acc, next) {
-                (Some(a), Some(b)) => Rect::from_ltrb(a.left().min(b.left()), a.top().min(b.top()), a.right().max(b.right()), a.bottom().max(b.bottom())),
-                (a, b) => a.or(b),
-            }
-        })
+        group
+            .children()
+            .iter()
+            .fold(None, |acc: Option<Rect>, node| {
+                let next = match node {
+                    resvg::usvg::Node::Path(_) => Some(node.abs_bounding_box()),
+                    resvg::usvg::Node::Group(inner) => shape(inner),
+                    _ => None,
+                };
+                match (acc, next) {
+                    (Some(a), Some(b)) => Rect::from_ltrb(
+                        a.left().min(b.left()),
+                        a.top().min(b.top()),
+                        a.right().max(b.right()),
+                        a.bottom().max(b.bottom()),
+                    ),
+                    (a, b) => a.or(b),
+                }
+            })
     }
     fn walk(group: &resvg::usvg::Group, boxes: &mut Vec<Rect>, texts: &mut Vec<(String, Rect)>) {
         for node in group.children() {
@@ -172,7 +200,12 @@ pub fn nodes(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
                     walk(inner, boxes, texts);
                 }
                 resvg::usvg::Node::Text(text) => {
-                    let words: Vec<&str> = text.chunks().iter().map(|chunk| chunk.text().trim()).filter(|w| !w.is_empty()).collect();
+                    let words: Vec<&str> = text
+                        .chunks()
+                        .iter()
+                        .map(|chunk| chunk.text().trim())
+                        .filter(|w| !w.is_empty())
+                        .collect();
                     if !words.is_empty() {
                         texts.push((words.join(" "), node.abs_bounding_box()));
                     }
@@ -181,7 +214,9 @@ pub fn nodes(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
             }
         }
     }
-    let Some(doc) = doc(source, t) else { return Vec::new() };
+    let Some(doc) = doc(source, t) else {
+        return Vec::new();
+    };
     let (mut boxes, mut texts) = (Vec::new(), Vec::new());
     walk(doc.tree.root(), &mut boxes, &mut texts);
     boxes
@@ -191,7 +226,12 @@ pub fn nodes(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
                 let (cx, cy) = (r.x() + r.width() / 2., r.y() + r.height() / 2.);
                 cx >= b.left() && cx <= b.right() && cy >= b.top() && cy <= b.bottom()
             };
-            let label = texts.iter().filter(|(_, r)| inside(r)).map(|(text, _)| text.as_str()).collect::<Vec<_>>().join(" ");
+            let label = texts
+                .iter()
+                .filter(|(_, r)| inside(r))
+                .map(|(text, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
             (!label.is_empty()).then(|| (label, b.x(), b.y(), b.width(), b.height()))
         })
         .collect()
@@ -202,16 +242,32 @@ pub fn nodes(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
 /// who draws it (inline, lightbox): each keeps its own raster, or they would
 /// trade sizes every frame.
 pub fn raster(source: &str, t: &Tokens, device_w: f32, view: &str) -> Raster {
-    let Some((w, h)) = doc(source, t).map(|d| (d.width, d.height)) else { return Raster::NONE };
+    let Some((w, h)) = doc(source, t).map(|d| (d.width, d.height)) else {
+        return Raster::NONE;
+    };
     // Buckets of 64px: a window drag re-rasterizes a few times, not every frame.
     let pw = ((device_w / 64.).ceil() * 64.).clamp(64., 8192.) as u32;
     let ph = ((h * pw as f32 / w).ceil() as u32).clamp(1, 8192);
-    raster_region(source, t, Region { x: 0., y: 0., w, h, pw, ph }, view)
+    raster_region(
+        source,
+        t,
+        Region {
+            x: 0.,
+            y: 0.,
+            w,
+            h,
+            pw,
+            ph,
+        },
+        view,
+    )
 }
 
 /// `region` of the diagram, for a view that shows only part of it (zoomed in).
 pub fn raster_region(source: &str, t: &Tokens, region: Region, view: &str) -> Raster {
-    let Some(doc) = doc(source, t) else { return Raster::NONE };
+    let Some(doc) = doc(source, t) else {
+        return Raster::NONE;
+    };
     let want = region.snapped();
     let k = key(&[source, &t.code.to_string(), view]);
     RASTERS.with(|r| {
@@ -228,11 +284,18 @@ pub fn raster_region(source: &str, t: &Tokens, region: Region, view: &str) -> Ra
             let job = Arc::new(OnceLock::new());
             let out = job.clone();
             std::thread::spawn(move || {
-                let _ = out.set(draw(&doc, want).map(|px| Arc::new(RenderImage::new(vec![image::Frame::new(px)]))));
+                let _ = out.set(
+                    draw(&doc, want)
+                        .map(|px| Arc::new(RenderImage::new(vec![image::Frame::new(px)]))),
+                );
             });
             slot.job = Some((want, job));
         }
-        Raster { image: slot.shown.clone(), stale, pending: slot.job.is_some() }
+        Raster {
+            image: slot.shown.clone(),
+            stale,
+            pending: slot.job.is_some(),
+        }
     })
 }
 
@@ -243,7 +306,11 @@ pub fn shown(source: &str, t: &Tokens, view: &str) -> Option<(Region, Arc<Render
 }
 
 impl Raster {
-    pub const NONE: Self = Self { image: None, stale: None, pending: false };
+    pub const NONE: Self = Self {
+        image: None,
+        stale: None,
+        pending: false,
+    };
 }
 
 /// `region` as BGRA pixels (in an RGBA buffer: the order gpui uploads).
@@ -261,10 +328,16 @@ fn render_pixmap(doc: &Doc, region: Region, fill: Option<u32>) -> Option<resvg::
     let mut pixmap = resvg::tiny_skia::Pixmap::new(region.pw, region.ph)?;
     if let Some(v) = fill {
         let ch = |shift: u32| ((v >> shift) & 0xFF) as u8;
-        pixmap.fill(resvg::tiny_skia::Color::from_rgba8(ch(24), ch(16), ch(8), 255));
+        pixmap.fill(resvg::tiny_skia::Color::from_rgba8(
+            ch(24),
+            ch(16),
+            ch(8),
+            255,
+        ));
     }
     let (sx, sy) = (region.pw as f32 / region.w, region.ph as f32 / region.h);
-    let transform = resvg::tiny_skia::Transform::from_scale(sx, sy).pre_translate(-region.x, -region.y);
+    let transform =
+        resvg::tiny_skia::Transform::from_scale(sx, sy).pre_translate(-region.x, -region.y);
     resvg::render(&doc.tree, transform, &mut pixmap.as_mut());
     Some(pixmap)
 }
@@ -272,13 +345,26 @@ fn render_pixmap(doc: &Doc, region: Region, fill: Option<u32>) -> Option<resvg::
 /// The whole diagram as a PNG at 2x, on the fence's background so it reads
 /// wherever it is pasted. Slow (~1s for a big chart): call off the UI thread
 /// with what [`png_job`] returns.
-pub fn png_job(source: &str, t: &Tokens) -> Option<impl FnOnce() -> Option<Vec<u8>> + Send + 'static> {
+pub fn png_job(
+    source: &str,
+    t: &Tokens,
+) -> Option<impl FnOnce() -> Option<Vec<u8>> + Send + 'static> {
     let doc = doc(source, t)?;
     let bg = t.code;
     Some(move || {
         let scale = (2. as f32).min(8192. / doc.width).min(8192. / doc.height);
-        let (pw, ph) = ((doc.width * scale).ceil() as u32, (doc.height * scale).ceil() as u32);
-        let region = Region { x: 0., y: 0., w: doc.width, h: doc.height, pw, ph };
+        let (pw, ph) = (
+            (doc.width * scale).ceil() as u32,
+            (doc.height * scale).ceil() as u32,
+        );
+        let region = Region {
+            x: 0.,
+            y: 0.,
+            w: doc.width,
+            h: doc.height,
+            pw,
+            ph,
+        };
         let pixmap = render_pixmap(&doc, region, Some(bg))?;
         let rgba = image::RgbaImage::from_raw(pw, ph, pixmap.take())?;
         let mut png = std::io::Cursor::new(Vec::new());
@@ -306,7 +392,11 @@ fn render_svg(source: &str, t: Option<&Tokens>) -> Option<String> {
         renderer = renderer.with_engine(engine);
     }
 
-    match renderer.render(RenderRequest::svg(&source, OperationControl::new(), request)) {
+    match renderer.render(RenderRequest::svg(
+        &source,
+        OperationControl::new(),
+        request,
+    )) {
         Ok(RenderOutput::Svg(Some(svg))) => Some(post_process_svg(svg.into_parts().0, t)),
         _ => None,
     }
@@ -356,7 +446,11 @@ fn strip_init_directives(s: &str) -> String {
 /// Maps Keel's design tokens into Merman's native HostTheme presentation roles.
 fn host_theme(t: &Tokens) -> HostTheme {
     let dark = luminance(t.text) > luminance(t.code);
-    let app = if dark { HostThemeAppearance::Dark } else { HostThemeAppearance::Light };
+    let app = if dark {
+        HostThemeAppearance::Dark
+    } else {
+        HostThemeAppearance::Light
+    };
     let theme = HostTheme::new().with_appearance(app);
 
     let theme = theme
@@ -405,9 +499,18 @@ fn post_process_svg(svg: String, t: Option<&Tokens>) -> String {
     let mut svg = svg
         .replace("background-color:white", "background-color:transparent")
         .replace("background-color: white", "background-color: transparent")
-        .replace("\"trebuchet ms\",verdana,arial,sans-serif", "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif")
-        .replace("&quot;trebuchet ms&quot;,verdana,arial,sans-serif", "-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Roboto, sans-serif")
-        .replace("trebuchet ms, verdana, arial, sans-serif", "-apple-system, BlinkMacSystemFont, sans-serif")
+        .replace(
+            "\"trebuchet ms\",verdana,arial,sans-serif",
+            "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif",
+        )
+        .replace(
+            "&quot;trebuchet ms&quot;,verdana,arial,sans-serif",
+            "-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Roboto, sans-serif",
+        )
+        .replace(
+            "trebuchet ms, verdana, arial, sans-serif",
+            "-apple-system, BlinkMacSystemFont, sans-serif",
+        )
         .replace("data-look=\"neo\"", "data-look=\"classic\"");
 
     if let Some(tokens) = t {
@@ -416,13 +519,36 @@ fn post_process_svg(svg: String, t: Option<&Tokens>) -> String {
         let text_muted = blend(tokens.text_muted, tokens.code);
 
         svg = svg
-            .replace("#merman .cluster rect{fill:#F9F9FB;stroke:#BDBCCC;stroke-width:1px;}", &format!("#merman .cluster rect{{fill:{surface};stroke:{border};stroke-width:1px;}}"))
-            .replace("#merman .cluster-label text{fill:#000000;}", &format!("#merman .cluster-label text{{fill:{text_muted};}}"))
-            .replace("#merman .cluster-label span{color:#000000;}", &format!("#merman .cluster-label span{{color:{text_muted};}}"))
-            .replace("#merman .cluster text{fill:#000000;}", &format!("#merman .cluster text{{fill:{text_muted};}}"))
-            .replace("#merman .cluster span{color:#000000;}", &format!("#merman .cluster span{{color:{text_muted};}}"))
-            .replace("filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));", "filter:none;")
-            .replace("filter:drop-shadow(1px 2px 2px rgba(185,185,185,1));", "filter:none;");
+            .replace(
+                "#merman .cluster rect{fill:#F9F9FB;stroke:#BDBCCC;stroke-width:1px;}",
+                &format!(
+                    "#merman .cluster rect{{fill:{surface};stroke:{border};stroke-width:1px;}}"
+                ),
+            )
+            .replace(
+                "#merman .cluster-label text{fill:#000000;}",
+                &format!("#merman .cluster-label text{{fill:{text_muted};}}"),
+            )
+            .replace(
+                "#merman .cluster-label span{color:#000000;}",
+                &format!("#merman .cluster-label span{{color:{text_muted};}}"),
+            )
+            .replace(
+                "#merman .cluster text{fill:#000000;}",
+                &format!("#merman .cluster text{{fill:{text_muted};}}"),
+            )
+            .replace(
+                "#merman .cluster span{color:#000000;}",
+                &format!("#merman .cluster span{{color:{text_muted};}}"),
+            )
+            .replace(
+                "filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));",
+                "filter:none;",
+            )
+            .replace(
+                "filter:drop-shadow(1px 2px 2px rgba(185,185,185,1));",
+                "filter:none;",
+            );
 
         let precision_css = format!(
             "#merman .node polygon,#merman .node rect,#merman .node path{{stroke-linejoin:round;stroke-linecap:round;}}\
@@ -494,7 +620,10 @@ fn round_rects(svg: &str) -> String {
 fn view_box(svg: &str) -> Option<(f32, f32)> {
     let start = svg.find("viewBox=\"")? + "viewBox=\"".len();
     let end = start + svg[start..].find('"')?;
-    let n: Vec<f32> = svg[start..end].split_whitespace().filter_map(|v| v.parse().ok()).collect();
+    let n: Vec<f32> = svg[start..end]
+        .split_whitespace()
+        .filter_map(|v| v.parse().ok())
+        .collect();
     match n[..] {
         [_, _, w, h] if w > 0. && h > 0. => Some((w, h)),
         _ => None,
@@ -536,23 +665,47 @@ mod tests {
     #[test]
     fn subgraph_chart_renders_with_text_labels() {
         let svg = render_svg(CHART, Some(&Tokens::dark())).expect("renders");
-        assert!(!svg.contains("foreignObject"), "HTML labels would draw blank");
-        for label in ["Frontend (React 19 + TanStack Start)", "Pages &amp; Routes", "UI Layer", "Sessions"] {
+        assert!(
+            !svg.contains("foreignObject"),
+            "HTML labels would draw blank"
+        );
+        for label in [
+            "Frontend (React 19 + TanStack Start)",
+            "Pages &amp; Routes",
+            "UI Layer",
+            "Sessions",
+        ] {
             assert!(svg.contains(label), "missing {label}");
         }
         let (w, h) = view_box(&svg).unwrap();
         assert!(w > 100. && h > 100.);
-        assert_eq!(size(CHART).map(|s| s.0.round()), Some(w.round()), "theme must not change layout");
+        assert_eq!(
+            size(CHART).map(|s| s.0.round()),
+            Some(w.round()),
+            "theme must not change layout"
+        );
     }
 
     #[test]
     fn pele_styling_and_rounded_corners_applied() {
         let t = Tokens::dark();
         let svg = render_svg(CHART, Some(&t)).expect("renders");
-        assert!(!svg.contains("trebuchet ms"), "trebuchet ms font replaced by system sans-serif");
-        assert!(svg.contains("rx=\"6\" ry=\"6\""), "node rectangles get 6px rounded corners");
-        assert!(svg.contains("rx=\"8\" ry=\"8\""), "cluster rectangles get 8px rounded corners");
-        assert!(!svg.contains("background-color:white"), "white background replaced with transparent");
+        assert!(
+            !svg.contains("trebuchet ms"),
+            "trebuchet ms font replaced by system sans-serif"
+        );
+        assert!(
+            svg.contains("rx=\"6\" ry=\"6\""),
+            "node rectangles get 6px rounded corners"
+        );
+        assert!(
+            svg.contains("rx=\"8\" ry=\"8\""),
+            "cluster rectangles get 8px rounded corners"
+        );
+        assert!(
+            !svg.contains("background-color:white"),
+            "white background replaced with transparent"
+        );
     }
 
     #[test]
@@ -570,7 +723,8 @@ mod tests {
     fn resilience_handles_fences_double_inits_and_br_tags() {
         let t = Tokens::dark();
         let raw = "```mermaid\n%%{init: {'theme': 'dark'}}%%\nflowchart TD\n  A[Line 1<br>Line 2] --> B[Line 3<br/>Line 4]\n```";
-        let svg = render_svg(raw, Some(&t)).expect("renders despite fences, inner init, and br tags");
+        let svg =
+            render_svg(raw, Some(&t)).expect("renders despite fences, inner init, and br tags");
         assert!(svg.contains("Line 1"), "contains Line 1");
         assert!(svg.contains("Line 2"), "contains Line 2");
         assert!(svg.contains("Line 3"), "contains Line 3");
@@ -588,7 +742,15 @@ mod tests {
         }
         let (w, h) = size(source).unwrap();
         for (label, x, y, bw, bh) in &found {
-            assert!(*bw > 10. && *bh > 10. && *x >= -1. && *y >= -1. && x + bw <= w + 1. && y + bh <= h + 1., "{label} at {x},{y} {bw}x{bh} in {w}x{h}");
+            assert!(
+                *bw > 10.
+                    && *bh > 10.
+                    && *x >= -1.
+                    && *y >= -1.
+                    && x + bw <= w + 1.
+                    && y + bh <= h + 1.,
+                "{label} at {x},{y} {bw}x{bh} in {w}x{h}"
+            );
         }
     }
 
@@ -608,14 +770,24 @@ mod tests {
     fn raster_lands_in_the_background_and_swaps_sizes() {
         let t = Tokens::dark();
         let first = raster(CHART, &t, 800., "test");
-        assert!(first.pending && first.image.is_none(), "first paint never blocks");
+        assert!(
+            first.pending && first.image.is_none(),
+            "first paint never blocks"
+        );
         let (_, image) = settle(CHART, &t, 800.).image.expect("drawn");
         assert_eq!(image.size(0).width.0, 832, "64px bucket");
         let same = raster(CHART, &t, 810., "test");
-        assert!(!same.pending && same.image.unwrap().1.id == image.id, "same bucket, same raster");
+        assert!(
+            !same.pending && same.image.unwrap().1.id == image.id,
+            "same bucket, same raster"
+        );
         let resized = raster(CHART, &t, 1200., "test");
         assert!(resized.pending);
-        assert_eq!(resized.image.map(|i| i.1.id), Some(image.id), "old size stands in");
+        assert_eq!(
+            resized.image.map(|i| i.1.id),
+            Some(image.id),
+            "old size stands in"
+        );
         let mut stale = None;
         for _ in 0..500 {
             let r = raster(CHART, &t, 1200., "test");
@@ -625,26 +797,59 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(stale.map(|o| o.id), Some(image.id), "replaced raster handed back to free");
+        assert_eq!(
+            stale.map(|o| o.id),
+            Some(image.id),
+            "replaced raster handed back to free"
+        );
     }
 
     #[test]
     fn bare_canvas_is_transparent_not_white() {
         let doc = doc(CHART, &Tokens::dark()).unwrap();
-        let whole = Region { x: 0., y: 0., w: doc.width, h: doc.height, pw: 400, ph: 300 };
+        let whole = Region {
+            x: 0.,
+            y: 0.,
+            w: doc.width,
+            h: doc.height,
+            pw: 400,
+            ph: 300,
+        };
         let px = draw(&doc, whole).unwrap();
-        assert_eq!(&px.as_raw()[..4], [0, 0, 0, 0], "corner shows the fence, not white");
+        assert_eq!(
+            &px.as_raw()[..4],
+            [0, 0, 0, 0],
+            "corner shows the fence, not white"
+        );
     }
 
     #[test]
     fn region_draws_only_that_part_at_full_resolution() {
         let doc = doc(CHART, &Tokens::dark()).unwrap();
         // The top-left quarter into as many pixels as the whole would get.
-        let quarter = Region { x: 0., y: 0., w: doc.width / 2., h: doc.height / 2., pw: 400, ph: 300 };
-        let whole = Region { w: doc.width, h: doc.height, ..quarter };
-        assert_ne!(draw(&doc, quarter).unwrap().as_raw(), draw(&doc, whole).unwrap().as_raw());
+        let quarter = Region {
+            x: 0.,
+            y: 0.,
+            w: doc.width / 2.,
+            h: doc.height / 2.,
+            pw: 400,
+            ph: 300,
+        };
+        let whole = Region {
+            w: doc.width,
+            h: doc.height,
+            ..quarter
+        };
+        assert_ne!(
+            draw(&doc, quarter).unwrap().as_raw(),
+            draw(&doc, whole).unwrap().as_raw()
+        );
         let nudged = Region { x: 0.1, ..quarter }.snapped();
-        assert_eq!(nudged, quarter.snapped(), "sub-quarter-unit moves do not redraw");
+        assert_eq!(
+            nudged,
+            quarter.snapped(),
+            "sub-quarter-unit moves do not redraw"
+        );
     }
 
     #[test]
@@ -660,9 +865,21 @@ mod tests {
     #[test]
     fn inline_fit_caps_height_and_never_grows() {
         let col = 800. + PAD * 2.;
-        assert_eq!(fit((2560., 2180.), col).1, MAX_INLINE_H, "tall chart capped");
-        assert_eq!(fit((1600., 200.), col), (800., 100.), "wide chart fits the column");
-        assert_eq!(fit((300., 100.), col), (300., 100.), "small chart keeps its size");
+        assert_eq!(
+            fit((2560., 2180.), col).1,
+            MAX_INLINE_H,
+            "tall chart capped"
+        );
+        assert_eq!(
+            fit((1600., 200.), col),
+            (800., 100.),
+            "wide chart fits the column"
+        );
+        assert_eq!(
+            fit((300., 100.), col),
+            (300., 100.),
+            "small chart keeps its size"
+        );
     }
 
     #[test]

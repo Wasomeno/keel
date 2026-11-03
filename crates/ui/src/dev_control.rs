@@ -9,7 +9,8 @@
 //!
 //! Commands: `state`, `chats`, `open <chat id>`, `new`, `type <text>` (`\n`
 //! for a newline), `send`, `model <id>`, `picker model|branch|folder|repo|none`,
-//! `settings`, `scroll <px>` (the transcript, like the wheel: positive moves
+//! `settings`, `skills` (open the skills page; `skills <pack>` folds that pack),
+//! `scroll <px>` (the transcript, like the wheel: positive moves
 //! up), `redraw` (one fresh frame, for a screenshot).
 
 use std::io::{BufRead, BufReader, Write};
@@ -79,7 +80,9 @@ pub fn redraw() {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use objc2_app_kit::{NSApplication, NSView};
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     fn mark(view: &NSView) {
         view.setNeedsDisplay(true);
         let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
@@ -90,7 +93,9 @@ pub fn redraw() {
     for window in NSApplication::sharedApplication(mtm).windows().iter() {
         window.setSharingType(objc2_app_kit::NSWindowSharingType::ReadOnly);
         let _: () = unsafe { msg_send![&**window, orderWindow: -1isize, relativeTo: 0isize] };
-        let Some(content) = window.contentView() else { continue };
+        let Some(content) = window.contentView() else {
+            continue;
+        };
         mark(&content);
         for view in content.subviews().iter() {
             mark(&view);
@@ -111,5 +116,7 @@ fn ask(line: String) -> String {
     if !sent {
         return "error: no window".into();
     }
-    answer.recv_timeout(Duration::from_secs(10)).unwrap_or_else(|_| "error: no answer".into())
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| "error: no answer".into())
 }

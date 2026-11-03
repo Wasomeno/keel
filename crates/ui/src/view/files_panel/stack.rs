@@ -88,7 +88,11 @@ pub(super) fn closed_why(ch: &Change) -> Option<&'static str> {
     if LOCKFILES.contains(&name) {
         return Some("Lockfile");
     }
-    let generated = [".min.js", ".min.css", ".map", ".snap"].iter().any(|e| name.ends_with(e)) || ch.path.starts_with("dist/") || ch.path.contains("/dist/");
+    let generated = [".min.js", ".min.css", ".map", ".snap"]
+        .iter()
+        .any(|e| name.ends_with(e))
+        || ch.path.starts_with("dist/")
+        || ch.path.contains("/dist/");
     if generated {
         return Some("Generated");
     }
@@ -100,7 +104,9 @@ pub(super) fn closed_why(ch: &Change) -> Option<&'static str> {
 
 #[cfg(test)]
 pub(super) fn is_open(ch: &Change, open: &HashMap<String, bool>) -> bool {
-    open.get(&ch.path).copied().unwrap_or_else(|| closed_why(ch).is_none())
+    open.get(&ch.path)
+        .copied()
+        .unwrap_or_else(|| closed_why(ch).is_none())
 }
 
 /// `@web/src` reads as `web/src`. The `@` is how a path names its folder.
@@ -108,18 +114,27 @@ fn shown_dir(dir: &str) -> String {
     if dir.is_empty() {
         return String::new();
     }
-    dir.split('/').map(|part| part.strip_prefix('@').unwrap_or(part)).collect::<Vec<_>>().join("/")
+    dir.split('/')
+        .map(|part| part.strip_prefix('@').unwrap_or(part))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The alias of `@alias/rest`, or "" when the path is not in a named folder.
 fn change_alias(path: &str) -> &str {
-    path.strip_prefix('@').and_then(|rest| rest.split('/').next()).unwrap_or("")
+    path.strip_prefix('@')
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
 }
 
 /// One row of the flat changes list: a folder, or a file in it.
 #[derive(Clone)]
 enum ChangeFlat {
-    Head { alias: String, branch: String, n: usize },
+    Head {
+        alias: String,
+        branch: String,
+        n: usize,
+    },
     File(usize),
 }
 
@@ -155,10 +170,21 @@ pub(super) fn change_tree(list: &[Change], folded: &HashSet<String>) -> Vec<Chan
         removed: u32,
         count: usize,
     }
-    fn emit(node: &Node, prefix: &str, depth: usize, list: &[Change], folded: &HashSet<String>, out: &mut Vec<ChangeRow>) {
+    fn emit(
+        node: &Node,
+        prefix: &str,
+        depth: usize,
+        list: &[Change],
+        folded: &HashSet<String>,
+        out: &mut Vec<ChangeRow>,
+    ) {
         for (name, child) in &node.dirs {
             let mut label = name.clone();
-            let mut key = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let mut key = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
             let mut n = child;
             while n.files.is_empty() && n.dirs.len() == 1 {
                 let (k, c) = n.dirs.iter().next().expect("one child");
@@ -167,7 +193,16 @@ pub(super) fn change_tree(list: &[Change], folded: &HashSet<String>) -> Vec<Chan
                 n = c;
             }
             let open = !folded.contains(&key);
-            out.push(ChangeRow { key: key.clone(), name: label, depth, file: None, open, added: n.added, removed: n.removed, count: n.count });
+            out.push(ChangeRow {
+                key: key.clone(),
+                name: label,
+                depth,
+                file: None,
+                open,
+                added: n.added,
+                removed: n.removed,
+                count: n.count,
+            });
             if open {
                 emit(n, &key, depth + 1, list, folded, out);
             }
@@ -175,7 +210,16 @@ pub(super) fn change_tree(list: &[Change], folded: &HashSet<String>) -> Vec<Chan
         for &ix in &node.files {
             let ch = &list[ix];
             let name = ch.path.rsplit('/').next().unwrap_or(&ch.path).to_string();
-            out.push(ChangeRow { key: ch.path.clone(), name, depth, file: Some(ix), open: false, added: ch.added.unwrap_or(0), removed: ch.removed.unwrap_or(0), count: 1 });
+            out.push(ChangeRow {
+                key: ch.path.clone(),
+                name,
+                depth,
+                file: Some(ix),
+                open: false,
+                added: ch.added.unwrap_or(0),
+                removed: ch.removed.unwrap_or(0),
+                count: 1,
+            });
         }
     }
     let mut root = Node::default();
@@ -429,11 +473,20 @@ impl KeelWindow {
         let Some(link) = self.projects.store.chats.get(chat) else {
             return String::new();
         };
-        let Some(folder) = self.projects.store.project(&link.project).and_then(|p| p.folder(alias)) else {
+        let Some(folder) = self
+            .projects
+            .store
+            .project(&link.project)
+            .and_then(|p| p.folder(alias))
+        else {
             return String::new();
         };
         let branch = self.projects.folder_branch_label(&folder.path);
-        if branch == "…" { String::new() } else { branch }
+        if branch == "…" {
+            String::new()
+        } else {
+            branch
+        }
     }
 
     /// A folder in the changes tree folds or opens; its rows slide.
@@ -508,7 +561,12 @@ impl KeelWindow {
         s.docs.entry(path.clone()).or_insert(Load::Loading);
         let generation = s.generation;
         cx.spawn(async move |this, cx| {
-            let res = client.call("chat_diff", serde_json::json!({ "chat_id": chat, "path": path })).await;
+            let res = client
+                .call(
+                    "chat_diff",
+                    serde_json::json!({ "chat_id": chat, "path": path }),
+                )
+                .await;
             // Parsing a big patch stays off the UI thread.
             let doc = match res {
                 Ok(v) => {
@@ -546,7 +604,11 @@ impl KeelWindow {
 
     /// After a refresh: drop diffs of files no longer changed, and reload
     /// the ones whose counts or status moved (all of them on Refresh).
-    pub(super) fn files_reconcile_docs(&mut self, old: Option<Rc<Vec<Change>>>, cx: &mut Context<Self>) {
+    pub(super) fn files_reconcile_docs(
+        &mut self,
+        old: Option<Rc<Vec<Change>>>,
+        cx: &mut Context<Self>,
+    ) {
         let list = match &self.files.changes {
             Some(Load::Ready(list)) => list.clone(),
             _ => return,
@@ -558,11 +620,18 @@ impl KeelWindow {
         let now: HashSet<&str> = list.iter().map(|c| c.path.as_str()).collect();
         s.docs.retain(|p, _| now.contains(p.as_str()));
         s.queue.retain(|p| now.contains(p.as_str()));
-        let was: HashMap<&str, &Change> = old.as_ref().map(|o| o.iter().map(|c| (c.path.as_str(), c)).collect()).unwrap_or_default();
+        let was: HashMap<&str, &Change> = old
+            .as_ref()
+            .map(|o| o.iter().map(|c| (c.path.as_str(), c)).collect())
+            .unwrap_or_default();
         let stale: Vec<String> = list
             .iter()
             .filter(|ch| matches!(s.docs.get(&ch.path), Some(Load::Ready(_) | Load::Failed(_))))
-            .filter(|ch| all || was.get(ch.path.as_str()).is_none_or(|o| o.status != ch.status || o.added != ch.added || o.removed != ch.removed))
+            .filter(|ch| {
+                all || was.get(ch.path.as_str()).is_none_or(|o| {
+                    o.status != ch.status || o.added != ch.added || o.removed != ch.removed
+                })
+            })
             .map(|ch| ch.path.clone())
             .collect();
         s.dirty = true;
@@ -593,7 +662,13 @@ impl KeelWindow {
         };
         let doc = doc.clone();
         cx.spawn(async move |this, cx| {
-            let Ok(v) = client.call("chat_read_file", serde_json::json!({ "chat_id": chat, "path": path })).await else {
+            let Ok(v) = client
+                .call(
+                    "chat_read_file",
+                    serde_json::json!({ "chat_id": chat, "path": path }),
+                )
+                .await
+            else {
                 return;
             };
             let content = v["content"].as_str().unwrap_or_default().to_string();
@@ -612,7 +687,13 @@ impl KeelWindow {
                 if let Some(Load::Ready(now)) = s.docs.get(&path)
                     && Rc::ptr_eq(now, &doc)
                 {
-                    s.docs.insert(path.clone(), Load::Ready(Rc::new(DiffDoc { lines, truncated: doc.truncated })));
+                    s.docs.insert(
+                        path.clone(),
+                        Load::Ready(Rc::new(DiffDoc {
+                            lines,
+                            truncated: doc.truncated,
+                        })),
+                    );
                     s.remeasure.insert(path);
                     s.dirty = true;
                     cx.notify();
@@ -624,12 +705,30 @@ impl KeelWindow {
 
     /// The Changes tab: the list (or tree) beside the stack; a narrow pane
     /// shows one at a time.
-    pub(super) fn render_changes(&mut self, width: f32, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_changes(
+        &mut self,
+        width: f32,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let list = match &self.files.changes {
-            None | Some(Load::Loading) => return div().flex_1().flex().flex_col().child(self.render_list_skeleton("files-changes-skel", t)).into_any_element(),
-            Some(Load::Failed(err)) => return empty_state(Icon::Alert, "Couldn't read changes", err.clone(), t),
+            None | Some(Load::Loading) => {
+                return div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_list_skeleton("files-changes-skel", t))
+                    .into_any_element();
+            }
+            Some(Load::Failed(err)) => {
+                return empty_state(Icon::Alert, "Couldn't read changes", err.clone(), t);
+            }
             Some(Load::Ready(list)) if list.is_empty() => {
-                let rooted = !self.projects.file_roots(self.files.chat.as_deref()).is_empty();
+                let rooted = !self
+                    .projects
+                    .file_roots(self.files.chat.as_deref())
+                    .is_empty();
                 let body = if rooted {
                     "Nothing is changed in these folders."
                 } else {
@@ -640,7 +739,12 @@ impl KeelWindow {
             Some(Load::Ready(list)) => list.clone(),
         };
 
-        if let Some(selected) = self.files.selected.clone().filter(|p| !p.starts_with('@') || p.contains('/')) {
+        if let Some(selected) = self
+            .files
+            .selected
+            .clone()
+            .filter(|p| !p.starts_with('@') || p.contains('/'))
+        {
             if list.iter().any(|c| c.path == selected) {
                 return self.render_change_detail(&selected, &list, width, t, window, cx);
             }
@@ -651,12 +755,22 @@ impl KeelWindow {
 
     /// The changed files: a summary bar (how many, how many lines, list or
     /// tree), then the rows. The file at the top of the stack is lit.
-    fn render_change_list(&mut self, list: &Rc<Vec<Change>>, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if !Rc::ptr_eq(&self.files.stack.files, list) && self.files.stack.files.as_slice() != list.as_slice() {
+    fn render_change_list(
+        &mut self,
+        list: &Rc<Vec<Change>>,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !Rc::ptr_eq(&self.files.stack.files, list)
+            && self.files.stack.files.as_slice() != list.as_slice()
+        {
             self.files.stack.files = list.clone();
             self.files.stack.rows = None;
         }
-        let (added, removed) = list.iter().fold((0, 0), |(a, r), ch| (a + ch.added.unwrap_or(0), r + ch.removed.unwrap_or(0)));
+        let (added, removed) = list.iter().fold((0, 0), |(a, r), ch| {
+            (a + ch.added.unwrap_or(0), r + ch.removed.unwrap_or(0))
+        });
         let tree = self.files.stack.tree;
         let mode_seg = move |id: &'static str, icon: Icon, on: bool| {
             div()
@@ -669,7 +783,9 @@ impl KeelWindow {
                 .border_1()
                 .map(|d| {
                     if on {
-                        d.bg(c(t.window)).border_color(c(t.border)).text_color(c(t.text))
+                        d.bg(c(t.window))
+                            .border_color(c(t.border))
+                            .text_color(c(t.text))
                     } else {
                         d.border_color(gpui::transparent_black())
                             .text_color(c(t.text_faint))
@@ -680,82 +796,129 @@ impl KeelWindow {
                 })
                 .child(icon.el(zpx(13.)))
         };
-        let summary = div()
-            .flex_none()
-            .h(zpx(34.))
-            .pl_3()
-            .pr_1p5()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(c(t.border).opacity(0.7))
-            .t_caption()
-            .child(div().flex_none().text_color(c(t.text_muted)).child(if list.len() == 1 { "1 file".to_string() } else { format!("{} files", grouped(list.len() as u32)) }))
-            .child(diffstat(Some(added), Some(removed), t))
-            .child(div().flex_1())
-            .child(
-                seg_track(t)
-                    .child(mode_seg("files-list-flat", Icon::List, !tree).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if this.files.stack.tree {
-                            this.files.stack.tree = false;
-                            this.files.stack.mode_generation += 1;
-                            cx.notify();
-                        }
-                    })))
-                    .child(mode_seg("files-list-tree", Icon::ListTree, tree).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if !this.files.stack.tree {
-                            this.files.stack.tree = true;
-                            this.files.stack.mode_generation += 1;
-                            cx.notify();
-                        }
-                    }))),
-            );
-        let active = self.files.stack.active.clone();
-        let weak = cx.entity().downgrade();
-        let file_row = Rc::new(move |id: usize, ch: &Change, name: String, dir: Option<String>, depth: usize, tree: bool| -> AnyElement {
-            let on = active.as_deref() == Some(ch.path.as_str());
-            let path = ch.path.clone();
-            let weak = weak.clone();
-            let deleted = ch.status == 'D';
+        let summary =
             div()
-                .id(("files-change", id))
-                .h(zpx(ROW_H))
-                .w_full()
-                .pl(zpx(8. + depth as f32 * 12.))
-                .pr_2()
+                .flex_none()
+                .h(zpx(34.))
+                .pl_3()
+                .pr_1p5()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .rounded(RADIUS_MD)
-                .t_small()
-                .cursor_pointer()
-                .map(|d| if on { d.bg(c(t.selected)) } else { d.hover(|s| s.bg(c(t.hover))) })
-                .active(|s| s.bg(c(t.selected)))
-                .when(tree, |d| d.child(div().flex_none().w(zpx(10.))))
-                .child(div().flex_none().text_color(c(if on { t.text_muted } else { t.text_faint })).child(Icon::for_path(&name).el(zpx(13.))))
+                .border_b_1()
+                .border_color(c(t.border).opacity(0.7))
+                .t_caption()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_row()
-                        .items_baseline()
-                        .gap_1p5()
-                        .overflow_hidden()
-                        .child(div().flex_none().text_color(c(if deleted { t.text_muted } else { t.text })).when(deleted, |d| d.line_through()).child(name))
-                        .children(dir.map(|dir| div().flex_1().min_w_0().truncate().t_caption().text_color(c(t.text_faint)).child(dir))),
+                        .flex_none()
+                        .text_color(c(t.text_muted))
+                        .child(if list.len() == 1 {
+                            "1 file".to_string()
+                        } else {
+                            format!("{} files", grouped(list.len() as u32))
+                        }),
                 )
-                .child(diffstat(ch.added, ch.removed, t))
-                .child(status_chip(ch.status, t))
-                .on_click(move |_, _, cx| {
-                    let path = path.clone();
-                    let _ = weak.update(cx, |this, cx| this.files_open_change(path, cx));
-                })
-                .into_any_element()
-        });
+                .child(diffstat(Some(added), Some(removed), t))
+                .child(div().flex_1())
+                .child(
+                    seg_track(t)
+                        .child(mode_seg("files-list-flat", Icon::List, !tree).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.files.stack.tree {
+                                    this.files.stack.tree = false;
+                                    this.files.stack.mode_generation += 1;
+                                    cx.notify();
+                                }
+                            }),
+                        ))
+                        .child(mode_seg("files-list-tree", Icon::ListTree, tree).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if !this.files.stack.tree {
+                                    this.files.stack.tree = true;
+                                    this.files.stack.mode_generation += 1;
+                                    cx.notify();
+                                }
+                            }),
+                        )),
+                );
+        let active = self.files.stack.active.clone();
+        let weak = cx.entity().downgrade();
+        let file_row = Rc::new(
+            move |id: usize,
+                  ch: &Change,
+                  name: String,
+                  dir: Option<String>,
+                  depth: usize,
+                  tree: bool|
+                  -> AnyElement {
+                let on = active.as_deref() == Some(ch.path.as_str());
+                let path = ch.path.clone();
+                let weak = weak.clone();
+                let deleted = ch.status == 'D';
+                div()
+                    .id(("files-change", id))
+                    .h(zpx(ROW_H))
+                    .w_full()
+                    .pl(zpx(8. + depth as f32 * 12.))
+                    .pr_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_MD)
+                    .t_small()
+                    .cursor_pointer()
+                    .map(|d| {
+                        if on {
+                            d.bg(c(t.selected))
+                        } else {
+                            d.hover(|s| s.bg(c(t.hover)))
+                        }
+                    })
+                    .active(|s| s.bg(c(t.selected)))
+                    .when(tree, |d| d.child(div().flex_none().w(zpx(10.))))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(if on { t.text_muted } else { t.text_faint }))
+                            .child(Icon::for_path(&name).el(zpx(13.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap_1p5()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(c(if deleted { t.text_muted } else { t.text }))
+                                    .when(deleted, |d| d.line_through())
+                                    .child(name),
+                            )
+                            .children(dir.map(|dir| {
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .t_caption()
+                                    .text_color(c(t.text_faint))
+                                    .child(dir)
+                            })),
+                    )
+                    .child(diffstat(ch.added, ch.removed, t))
+                    .child(status_chip(ch.status, t))
+                    .on_click(move |_, _, cx| {
+                        let path = path.clone();
+                        let _ = weak.update(cx, |this, cx| this.files_open_change(path, cx));
+                    })
+                    .into_any_element()
+            },
+        );
         let rows: AnyElement = if tree {
             let now = self.frame_now.get().unwrap_or_else(Instant::now);
             let s = &mut self.files.stack;
@@ -769,68 +932,106 @@ impl KeelWindow {
             }
             let live = s.rows(list);
             // While a folder moves, the rows with it open, laid out slot by slot.
-            let moving = s.tree_fold.as_ref().map(|m| (m.key.clone(), m.motion.content(now), m.motion.chevron(now), m.start, m.children, m.rows.clone(), m.reveal(now, ROW_H)));
+            let moving = s.tree_fold.as_ref().map(|m| {
+                (
+                    m.key.clone(),
+                    m.motion.content(now),
+                    m.motion.chevron(now),
+                    m.start,
+                    m.children,
+                    m.rows.clone(),
+                    m.reveal(now, ROW_H),
+                )
+            });
             let rows = moving.as_ref().and_then(|m| m.5.clone()).unwrap_or(live);
             let list = list.clone();
             let weak = cx.entity().downgrade();
             uniform_list("files-changes-tree", rows.len(), move |range, _, _| {
                 let row_el = |ix: usize| -> AnyElement {
-                        let row = &rows[ix];
-                        if let Some(fi) = row.file {
-                            return file_row(ix, &list[fi], row.name.clone(), None, row.depth, true);
-                        }
-                        let key = row.key.clone();
-                        let weak = weak.clone();
-                        div()
-                            .id(("files-change-dir", ix))
-                            .h(zpx(ROW_H))
-                            .w_full()
-                            .pl(zpx(8. + row.depth as f32 * 12.))
-                            .pr_2()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .rounded(RADIUS_MD)
-                            .t_small()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(c(t.hover)))
-                            .active(|s| s.bg(c(t.selected)))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(zpx(10.))
-                                    .text_color(c(t.text_faint))
-                                    .child(Icon::ChevronDown.el(zpx(10.)).with_transformation(gpui::Transformation::rotate(gpui::percentage(chevron_turn(match &moving {
-                                        Some(m) if m.0 == row.key => m.2,
-                                        _ if row.open => 1.,
-                                        _ => 0.,
-                                    }))))),
-                            )
-                            .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::Folder.el(zpx(13.))))
-                            .child(div().flex_1().min_w_0().truncate().text_color(c(t.text_muted)).child(shown_dir(&row.name)))
-                            // Summed counts, quiet: the folder's weight, not a call to act.
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .flex_row()
-                                    .gap_1()
-                                    .t_caption()
-                                    .font_family(MONO)
-                                    .text_color(c(t.text_faint))
-                                    .when(row.added > 0, |d| d.child(format!("+{}", grouped(row.added))))
-                                    .when(row.removed > 0, |d| d.child(format!("\u{2212}{}", grouped(row.removed)))),
-                            )
-                            .on_click(move |_, _, cx| {
-                                let key = key.clone();
-                                let _ = weak.update(cx, |this, cx| this.files_toggle_change_dir(key, cx));
-                            })
-                            .into_any_element()
+                    let row = &rows[ix];
+                    if let Some(fi) = row.file {
+                        return file_row(ix, &list[fi], row.name.clone(), None, row.depth, true);
+                    }
+                    let key = row.key.clone();
+                    let weak = weak.clone();
+                    div()
+                        .id(("files-change-dir", ix))
+                        .h(zpx(ROW_H))
+                        .w_full()
+                        .pl(zpx(8. + row.depth as f32 * 12.))
+                        .pr_2()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .rounded(RADIUS_MD)
+                        .t_small()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c(t.hover)))
+                        .active(|s| s.bg(c(t.selected)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(zpx(10.))
+                                .text_color(c(t.text_faint))
+                                .child(Icon::ChevronDown.el(zpx(10.)).with_transformation(
+                                    gpui::Transformation::rotate(gpui::percentage(chevron_turn(
+                                        match &moving {
+                                            Some(m) if m.0 == row.key => m.2,
+                                            _ if row.open => 1.,
+                                            _ => 0.,
+                                        },
+                                    ))),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(c(t.text_faint))
+                                .child(Icon::Folder.el(zpx(13.))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(c(t.text_muted))
+                                .child(shown_dir(&row.name)),
+                        )
+                        // Summed counts, quiet: the folder's weight, not a call to act.
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .t_caption()
+                                .font_family(MONO)
+                                .text_color(c(t.text_faint))
+                                .when(row.added > 0, |d| {
+                                    d.child(format!("+{}", grouped(row.added)))
+                                })
+                                .when(row.removed > 0, |d| {
+                                    d.child(format!("\u{2212}{}", grouped(row.removed)))
+                                }),
+                        )
+                        .on_click(move |_, _, cx| {
+                            let key = key.clone();
+                            let _ =
+                                weak.update(cx, |this, cx| this.files_toggle_change_dir(key, cx));
+                        })
+                        .into_any_element()
                 };
                 range
                     .map(|ix| match &moving {
-                        Some((_, open, _, start, children, Some(_), reveal)) => slot(ix, slot_rows(ix, rows.len(), *start, *children, *reveal, ROW_H), *start..*start + *children, *open, ROW_H, &row_el),
+                        Some((_, open, _, start, children, Some(_), reveal)) => slot(
+                            ix,
+                            slot_rows(ix, rows.len(), *start, *children, *reveal, ROW_H),
+                            *start..*start + *children,
+                            *open,
+                            ROW_H,
+                            &row_el,
+                        ),
                         _ => row_el(ix),
                     })
                     .collect()
@@ -851,7 +1052,11 @@ impl KeelWindow {
                     while i < list.len() && change_alias(&list[i].path) == alias {
                         i += 1;
                     }
-                    flat.push(ChangeFlat::Head { alias: alias.clone(), branch: self.branch_of_alias(&alias), n: i - start });
+                    flat.push(ChangeFlat::Head {
+                        alias: alias.clone(),
+                        branch: self.branch_of_alias(&alias),
+                        n: i - start,
+                    });
                     flat.extend((start..i).map(ChangeFlat::File));
                 }
             } else {
@@ -872,7 +1077,13 @@ impl KeelWindow {
                             .items_center()
                             .gap_2()
                             .t_small()
-                            .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(alias.clone()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(c(t.text))
+                                    .child(alias.clone()),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -880,15 +1091,39 @@ impl KeelWindow {
                                     .truncate()
                                     .t_caption()
                                     .text_color(c(t.text_faint))
-                                    .child(if branch == "…" { String::new() } else { branch.clone() }),
+                                    .child(if branch == "…" {
+                                        String::new()
+                                    } else {
+                                        branch.clone()
+                                    }),
                             )
-                            .child(div().flex_none().t_caption().text_color(c(t.text_faint)).child(n.to_string()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .t_caption()
+                                    .text_color(c(t.text_faint))
+                                    .child(n.to_string()),
+                            )
                             .into_any_element(),
                         ChangeFlat::File(fi) => {
                             let ch = &list[*fi];
-                            let (dir, name) = ch.path.rsplit_once('/').map_or((None, ch.path.as_str()), |(d, n)| (Some(shown_dir(d)), n));
-                            let dir = dir.and_then(|d| d.split_once('/').map(|(_, rest)| rest.to_string()).filter(|rest| !rest.is_empty()));
-                            file_row(ix, ch, name.to_string(), dir, if grouped { 1 } else { 0 }, false)
+                            let (dir, name) = ch
+                                .path
+                                .rsplit_once('/')
+                                .map_or((None, ch.path.as_str()), |(d, n)| (Some(shown_dir(d)), n));
+                            let dir = dir.and_then(|d| {
+                                d.split_once('/')
+                                    .map(|(_, rest)| rest.to_string())
+                                    .filter(|rest| !rest.is_empty())
+                            });
+                            file_row(
+                                ix,
+                                ch,
+                                name.to_string(),
+                                dir,
+                                if grouped { 1 } else { 0 },
+                                false,
+                            )
                         }
                     })
                     .collect()
@@ -902,7 +1137,11 @@ impl KeelWindow {
         let reduced = self.reduced();
         let rows_wrapper = if mode_gen > 0 {
             let travel = if reduced { 0. } else { 1. };
-            let duration = if reduced { std::time::Duration::from_millis(1) } else { std::time::Duration::from_millis(160) };
+            let duration = if reduced {
+                std::time::Duration::from_millis(1)
+            } else {
+                std::time::Duration::from_millis(160)
+            };
             div()
                 .flex_1()
                 .min_h_0()
@@ -919,9 +1158,22 @@ impl KeelWindow {
                 )
                 .into_any_element()
         } else {
-            div().flex_1().min_h_0().flex().flex_col().child(rows).into_any_element()
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(rows)
+                .into_any_element()
         };
-        div().flex_1().min_h_0().flex().flex_col().child(summary).child(rows_wrapper).into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(summary)
+            .child(rows_wrapper)
+            .into_any_element()
     }
 
     fn render_change_detail(
@@ -939,14 +1191,23 @@ impl KeelWindow {
         let tab = self.files.change_detail_tab;
         let file = self.files.file.as_ref().filter(|f| f.path == path);
         let loaded = file.is_some();
-        let (dirty, saving, conflict, error) = file.map_or((false, false, false, None), |f| (f.dirty, f.saving, f.conflict, f.error.clone()));
-        let just_saved = file.and_then(|f| f.saved_at).filter(|at| at.elapsed() < SAVED_FOR).is_some();
-        let markdown = crate::files::FileKind::of(std::path::Path::new(path)) == crate::files::FileKind::Markdown;
+        let (dirty, saving, conflict, error) = file.map_or((false, false, false, None), |f| {
+            (f.dirty, f.saving, f.conflict, f.error.clone())
+        });
+        let just_saved = file
+            .and_then(|f| f.saved_at)
+            .filter(|at| at.elapsed() < SAVED_FOR)
+            .is_some();
+        let markdown = crate::files::FileKind::of(std::path::Path::new(path))
+            == crate::files::FileKind::Markdown;
         let preview = markdown && loaded && !self.files.viewer.md_source;
         let reduced = self.reduced();
 
         let back_btn = icon_button("changes-detail-back", Icon::Back, t)
-            .tooltip(move |_, cx| cx.new(|_| crate::view::dotify_ui::Tip::new("Back to changed files", t)).into())
+            .tooltip(move |_, cx| {
+                cx.new(|_| crate::view::dotify_ui::Tip::new("Back to changed files", t))
+                    .into()
+            })
             .tooltip_show_delay(crate::view::tooltip::delay())
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.files.selected = None;
@@ -955,138 +1216,233 @@ impl KeelWindow {
 
         let tab_toggle = seg_track(t)
             .child(
-                seg_item("change-tab-diff", "Diff", None, tab == ChangeDetailTab::Diff, t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.files.change_detail_tab = ChangeDetailTab::Diff;
-                        cx.notify();
-                    })),
+                seg_item(
+                    "change-tab-diff",
+                    "Diff",
+                    None,
+                    tab == ChangeDetailTab::Diff,
+                    t,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.files.change_detail_tab = ChangeDetailTab::Diff;
+                    cx.notify();
+                })),
             )
             .child(
-                seg_item("change-tab-file", "File", None, tab == ChangeDetailTab::File, t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.files.change_detail_tab = ChangeDetailTab::File;
-                        if let Some(selected) = &this.files.selected {
-                            let path = selected.clone();
-                            if viewer::is_image(&path) {
-                                this.files_locate(path, cx);
-                            } else {
-                                this.files_open_file(path, window, cx);
-                            }
+                seg_item(
+                    "change-tab-file",
+                    "File",
+                    None,
+                    tab == ChangeDetailTab::File,
+                    t,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.files.change_detail_tab = ChangeDetailTab::File;
+                    if let Some(selected) = &this.files.selected {
+                        let path = selected.clone();
+                        if viewer::is_image(&path) {
+                            this.files_locate(path, cx);
+                        } else {
+                            this.files_open_file(path, window, cx);
                         }
-                        cx.notify();
-                    })),
+                    }
+                    cx.notify();
+                })),
             );
 
-        let header = div()
-            .h(HEADER_HEIGHT)
-            .flex_none()
-            .pl_2()
-            .pr_2()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(c(t.border).opacity(0.7))
-            .child(back_btn)
-            .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::for_path(name).el(zpx(14.))))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .items_baseline()
-                    .gap_1p5()
-                    .overflow_hidden()
-                    .child(div().flex_none().t_small().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(name.to_string()))
-                    .child(div().flex_1().min_w_0().truncate().t_caption().text_color(c(t.text_faint)).child(clean_dir.to_string())),
-            )
-            .child(tab_toggle)
-            .when(tab == ChangeDetailTab::File && just_saved && !dirty, |d| {
-                d.child(appear(
-                    div().flex_none().flex().flex_row().items_center().gap_1().t_caption().text_color(c(t.success)).child(Icon::Check.el(zpx(12.))).child("Saved"),
-                    "files-saved",
-                    crate::motion::FAST,
-                    2.,
-                    reduced,
-                ))
-            })
-            .when(tab == ChangeDetailTab::File && dirty && !conflict, |d| {
-                d.child(div().flex_none().flex().flex_row().items_center().gap_1p5().t_caption().text_color(c(t.text_muted)).child(div().size(zpx(6.)).rounded_full().bg(c(t.warning))).child("Unsaved"))
-                    .child(text_button("files-discard", "Discard", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx))))
-                    .child(
-                        solid_button("files-save", if saving { "Saving…" } else { "Save" }, t)
-                            .child(kbd("⌘S", true, t))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_save(false, cx))),
-                    )
-            })
-            .when(tab == ChangeDetailTab::File && markdown && loaded, |d| {
-                d.child(
-                    seg_track(t)
-                        .child(seg_item("files-md-preview", "Preview", None, preview, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.files.viewer.md_source = false;
-                            cx.notify();
-                        })))
-                        .child(seg_item("files-md-source", "Source", None, !preview, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.files.viewer.md_source = true;
-                            cx.notify();
-                        }))),
-                )
-            })
-            .child(diffstat(change.as_ref().and_then(|c| c.added), change.as_ref().and_then(|c| c.removed), t))
-            .child(status_chip(change.as_ref().map_or('M', |c| c.status), t));
-
-        let banner = (tab == ChangeDetailTab::File && conflict).then(|| {
+        let header =
             div()
+                .h(HEADER_HEIGHT)
                 .flex_none()
-                .mx_2()
-                .mt_2()
-                .px_3()
-                .py_2()
+                .pl_2()
+                .pr_2()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .rounded(RADIUS_MD)
-                .bg(c(t.warning).opacity(0.1))
-                .border_1()
-                .border_color(c(t.warning).opacity(0.25))
-                .t_small()
-                .text_color(c(t.text))
-                .child(div().flex_none().text_color(c(t.warning)).child(Icon::Alert.el(zpx(13.))))
+                .border_b_1()
+                .border_color(c(t.border).opacity(0.7))
+                .child(back_btn)
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::for_path(name).el(zpx(14.))),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
-                        .flex_col()
-                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Changed on disk"))
-                        .child(div().t_caption().text_color(c(t.text_muted)).child("Something wrote this file after you opened it.")),
+                        .flex_row()
+                        .items_baseline()
+                        .gap_1p5()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_none()
+                                .t_small()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(c(t.text))
+                                .child(name.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .t_caption()
+                                .text_color(c(t.text_faint))
+                                .child(clean_dir.to_string()),
+                        ),
                 )
-                .child(text_button("files-take-disk", "Use disk version", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx))))
-                .child(solid_button("files-overwrite", "Keep mine", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.files_save(true, cx))))
-        });
+                .child(tab_toggle)
+                .when(tab == ChangeDetailTab::File && just_saved && !dirty, |d| {
+                    d.child(appear(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .t_caption()
+                            .text_color(c(t.success))
+                            .child(Icon::Check.el(zpx(12.)))
+                            .child("Saved"),
+                        "files-saved",
+                        crate::motion::FAST,
+                        2.,
+                        reduced,
+                    ))
+                })
+                .when(tab == ChangeDetailTab::File && dirty && !conflict, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .t_caption()
+                            .text_color(c(t.text_muted))
+                            .child(div().size(zpx(6.)).rounded_full().bg(c(t.warning)))
+                            .child("Unsaved"),
+                    )
+                    .child(text_button("files-discard", "Discard", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx)),
+                    ))
+                    .child(
+                        solid_button("files-save", if saving { "Saving…" } else { "Save" }, t)
+                            .child(kbd("⌘S", true, t))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.files_save(false, cx)
+                            })),
+                    )
+                })
+                .when(tab == ChangeDetailTab::File && markdown && loaded, |d| {
+                    d.child(
+                        seg_track(t)
+                            .child(
+                                seg_item("files-md-preview", "Preview", None, preview, t).on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.files.viewer.md_source = false;
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                seg_item("files-md-source", "Source", None, !preview, t).on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.files.viewer.md_source = true;
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                    )
+                })
+                .child(diffstat(
+                    change.as_ref().and_then(|c| c.added),
+                    change.as_ref().and_then(|c| c.removed),
+                    t,
+                ))
+                .child(status_chip(change.as_ref().map_or('M', |c| c.status), t));
 
-        let error_banner = (tab == ChangeDetailTab::File).then(|| error).flatten().map(|e| {
-            div()
-                .flex_none()
-                .px_3()
-                .py_1p5()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .border_b_1()
-                .border_color(c(t.border))
-                .t_small()
-                .text_color(c(t.danger))
-                .child(Icon::Alert.el(zpx(12.)))
-                .child(e)
-        });
+        let banner =
+            (tab == ChangeDetailTab::File && conflict).then(|| {
+                div()
+                    .flex_none()
+                    .mx_2()
+                    .mt_2()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_MD)
+                    .bg(c(t.warning).opacity(0.1))
+                    .border_1()
+                    .border_color(c(t.warning).opacity(0.25))
+                    .t_small()
+                    .text_color(c(t.text))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(t.warning))
+                            .child(Icon::Alert.el(zpx(13.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("Changed on disk"),
+                            )
+                            .child(
+                                div()
+                                    .t_caption()
+                                    .text_color(c(t.text_muted))
+                                    .child("Something wrote this file after you opened it."),
+                            ),
+                    )
+                    .child(
+                        text_button("files-take-disk", "Use disk version", t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx)),
+                        ),
+                    )
+                    .child(solid_button("files-overwrite", "Keep mine", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.files_save(true, cx)),
+                    ))
+            });
+
+        let error_banner = (tab == ChangeDetailTab::File)
+            .then(|| error)
+            .flatten()
+            .map(|e| {
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_1p5()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .border_b_1()
+                    .border_color(c(t.border))
+                    .t_small()
+                    .text_color(c(t.danger))
+                    .child(Icon::Alert.el(zpx(12.)))
+                    .child(e)
+            });
 
         let body: AnyElement = match tab {
-            ChangeDetailTab::Diff => self.render_single_file_diff(path, change.as_ref(), width, t, window, cx),
+            ChangeDetailTab::Diff => {
+                self.render_single_file_diff(path, change.as_ref(), width, t, window, cx)
+            }
             ChangeDetailTab::File => self.render_file_view_body(path, width, t, window, cx),
         };
 
@@ -1099,7 +1455,15 @@ impl KeelWindow {
             .child(header)
             .children(banner)
             .children(error_banner)
-            .child(div().flex_1().min_h_0().size_full().flex().flex_col().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -1121,13 +1485,32 @@ impl KeelWindow {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::Image.el(zpx(16.))))
-                .child(div().flex_1().t_small().text_color(c(t.text_muted)).child(if deleted { "Image deleted" } else { "Image changed" }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::Image.el(zpx(16.))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .t_small()
+                        .text_color(c(t.text_muted))
+                        .child(if deleted {
+                            "Image deleted"
+                        } else {
+                            "Image changed"
+                        }),
+                )
                 .when(!deleted, |d| {
-                    d.child(text_button("diff-open-image", "Open in viewer", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.files.change_detail_tab = ChangeDetailTab::File;
-                        cx.notify();
-                    })))
+                    d.child(
+                        text_button("diff-open-image", "Open in viewer", t).on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.files.change_detail_tab = ChangeDetailTab::File;
+                                cx.notify();
+                            },
+                        )),
+                    )
                 })
                 .into_any_element();
         }
@@ -1137,20 +1520,40 @@ impl KeelWindow {
                 self.files_want_diff(path.to_string(), cx);
                 self.render_code_skeleton("diff-single-skel", t)
             }
-            Some(Load::Failed(err)) => empty_state(Icon::Alert, "Couldn't load diff", err.clone(), t),
-            Some(Load::Ready(doc)) if doc.lines.is_empty() => {
-                empty_state(Icon::FileDiff, "No line changes", "It's binary, or only its mode or name changed.", t)
+            Some(Load::Failed(err)) => {
+                empty_state(Icon::Alert, "Couldn't load diff", err.clone(), t)
             }
+            Some(Load::Ready(doc)) if doc.lines.is_empty() => empty_state(
+                Icon::FileDiff,
+                "No line changes",
+                "It's binary, or only its mode or name changed.",
+                t,
+            ),
             Some(Load::Ready(doc)) => {
                 let zoom = crate::style::zoom();
-                let split = self.files.stack.force_split.unwrap_or(width >= SPLIT_AT * zoom);
+                let split = self
+                    .files
+                    .stack
+                    .force_split
+                    .unwrap_or(width >= SPLIT_AT * zoom);
                 let doc = doc.clone();
                 let reduced = self.reduced();
-                let ch = change.cloned().unwrap_or_else(|| Change { path: path.to_string(), status: 'M', added: None, removed: None });
+                let ch = change.cloned().unwrap_or_else(|| Change {
+                    path: path.to_string(),
+                    status: 'M',
+                    added: None,
+                    removed: None,
+                });
                 let (list_state, items_rc) = {
                     let s = &mut self.files.stack;
                     let limit = s.shown.get(path).copied().unwrap_or(FIRST_ROWS);
-                    let items = build_detail_items(0, &ch, Some(&Load::Ready(doc.clone())), Some(limit), split);
+                    let items = build_detail_items(
+                        0,
+                        &ch,
+                        Some(&Load::Ready(doc.clone())),
+                        Some(limit),
+                        split,
+                    );
                     let reset = s.split != split || s.items.len() != items.len();
                     s.split = split;
                     s.items = Rc::new(items);
@@ -1160,9 +1563,20 @@ impl KeelWindow {
                     (s.list.clone(), s.items.clone())
                 };
 
-                let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
+                let dark = matches!(
+                    window.appearance(),
+                    gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                );
                 let syntax = keel_theme::resolve_syntax_theme(self.state.ui_settings.theme, dark);
-                let digits = doc.lines.iter().filter_map(|l| l.new.max(l.old)).max().unwrap_or(1).to_string().len().max(2);
+                let digits = doc
+                    .lines
+                    .iter()
+                    .filter_map(|l| l.new.max(l.old))
+                    .max()
+                    .unwrap_or(1)
+                    .to_string()
+                    .len()
+                    .max(2);
                 let snap = Rc::new(Snap {
                     docs: vec![Some(doc)],
                     digits: vec![digits],
@@ -1180,7 +1594,12 @@ impl KeelWindow {
                 div()
                     .id("files-single-diff")
                     .size_full()
-                    .child(gpui::list(list_state, move |ix, _, _| render_detail_item(&rows_ctx, ix)).size_full())
+                    .child(
+                        gpui::list(list_state, move |ix, _, _| {
+                            render_detail_item(&rows_ctx, ix)
+                        })
+                        .size_full(),
+                    )
                     .into_any_element()
             }
         }
@@ -1255,12 +1674,26 @@ fn mark_cell(mark: &'static str, tone: Option<u32>, t: Tokens) -> gpui::Div {
 fn code_cell(line: &DiffLine, tone: Option<u32>, cx: &Ctx) -> gpui::Div {
     let t = cx.t;
     let code: AnyElement = if line.kind == LineKind::Note {
-        div().text_color(c(t.text_faint)).italic().child(line.text.clone()).into_any_element()
+        div()
+            .text_color(c(t.text_faint))
+            .italic()
+            .child(line.text.clone())
+            .into_any_element()
     } else {
         let emph_bg = c(tone.unwrap_or(t.accent)).opacity(0.28);
-        gpui::StyledText::new(line.text.clone()).with_highlights(paint_runs(line, &cx.syntax, emph_bg)).into_any_element()
+        gpui::StyledText::new(line.text.clone())
+            .with_highlights(paint_runs(line, &cx.syntax, emph_bg))
+            .into_any_element()
     };
-    div().flex_1().min_w_0().pr_3().py(zpx(2.)).t_code().line_height(zpx(CODE_LH)).text_color(c(cx.syntax.plain << 8 | 0xFF)).child(code)
+    div()
+        .flex_1()
+        .min_w_0()
+        .pr_3()
+        .py(zpx(2.))
+        .t_code()
+        .line_height(zpx(CODE_LH))
+        .text_color(c(cx.syntax.plain << 8 | 0xFF))
+        .child(code)
 }
 
 fn tone_of(kind: LineKind, t: Tokens) -> (Option<u32>, &'static str) {
@@ -1303,7 +1736,11 @@ fn unified_row(cx: &Ctx, f: usize, ix: usize, doc: &DiffDoc) -> AnyElement {
                 .flex()
                 .flex_row()
                 .when_some(tone, |d, tone| d.bg(c(tone).opacity(0.09)))
-                .child(gutter(tone, t).child(num_cell(line.old, w, tone.is_some(), t)).child(num_cell(line.new, w, tone.is_some(), t)))
+                .child(
+                    gutter(tone, t)
+                        .child(num_cell(line.old, w, tone.is_some(), t))
+                        .child(num_cell(line.new, w, tone.is_some(), t)),
+                )
                 .child(mark_cell(mark, tone, t))
                 .child(code_cell(line, tone, cx)),
         )
@@ -1316,7 +1753,11 @@ fn pair_row(cx: &Ctx, f: usize, a: Option<usize>, b: Option<usize>, doc: &DiffDo
     let w = num_w(cx, f);
     let half = |ix: Option<usize>, old_side: bool| -> AnyElement {
         let Some(ix) = ix else {
-            return div().flex_1().min_w_0().bg(c(t.text).opacity(0.03)).into_any_element();
+            return div()
+                .flex_1()
+                .min_w_0()
+                .bg(c(t.text).opacity(0.03))
+                .into_any_element();
         };
         let line = &doc.lines[ix];
         let (tone, mark) = tone_of(line.kind, t);
@@ -1355,7 +1796,10 @@ fn hunk_row(cx: &Ctx, f: usize, ix: usize, doc: &DiffDoc, first: bool) -> AnyEle
     let t = cx.t;
     let line = &doc.lines[ix];
     let text = line.text.as_ref();
-    let scope = text.get(2..).and_then(|s| s.find("@@")).map_or("", |i| text[i + 4..].trim());
+    let scope = text
+        .get(2..)
+        .and_then(|s| s.find("@@"))
+        .map_or("", |i| text[i + 4..].trim());
     let gap = line.gap;
     let label = match gap {
         0 if scope.is_empty() => text.to_string(),
@@ -1382,10 +1826,12 @@ fn hunk_row(cx: &Ctx, f: usize, ix: usize, doc: &DiffDoc, first: bool) -> AnyEle
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .when(gap > 0, |d| {
-                    d.cursor_pointer().hover(|s| s.bg(c(t.accent).opacity(0.08))).on_click(move |_, _, cx| {
-                        let path = path.clone();
-                        let _ = weak.update(cx, |this, cx| this.files_expand_gap(path, ix, cx));
-                    })
+                    d.cursor_pointer()
+                        .hover(|s| s.bg(c(t.accent).opacity(0.08)))
+                        .on_click(move |_, _, cx| {
+                            let path = path.clone();
+                            let _ = weak.update(cx, |this, cx| this.files_expand_gap(path, ix, cx));
+                        })
                 })
                 .child(
                     div()
@@ -1394,16 +1840,45 @@ fn hunk_row(cx: &Ctx, f: usize, ix: usize, doc: &DiffDoc, first: bool) -> AnyEle
                         .flex()
                         .justify_center()
                         .text_color(c(t.text_faint))
-                        .when(gap > 0, |d| d.group_hover("diff-hunk", |s| s.text_color(c(t.accent))).child(Icon::ArrowUpDown.el(zpx(12.)))),
+                        .when(gap > 0, |d| {
+                            d.group_hover("diff-hunk", |s| s.text_color(c(t.accent)))
+                                .child(Icon::ArrowUpDown.el(zpx(12.)))
+                        }),
                 )
-                .when(!label.is_empty(), |d| d.child(div().flex_none().text_color(c(t.text_muted)).when(gap > 0, |d| d.group_hover("diff-hunk", |s| s.text_color(c(t.accent)))).child(label)))
-                .when(!scope.is_empty(), |d| d.child(div().flex_1().min_w_0().truncate().pr_3().font_family(MONO).text_color(c(t.text_faint)).child(scope.to_string()))),
+                .when(!label.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_color(c(t.text_muted))
+                            .when(gap > 0, |d| {
+                                d.group_hover("diff-hunk", |s| s.text_color(c(t.accent)))
+                            })
+                            .child(label),
+                    )
+                })
+                .when(!scope.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .pr_3()
+                            .font_family(MONO)
+                            .text_color(c(t.text_faint))
+                            .child(scope.to_string()),
+                    )
+                }),
         )
         .into_any_element()
 }
 
 fn note_text(t: Tokens, text: &'static str) -> gpui::Div {
-    div().px_4().py_3().t_small().text_color(c(t.text_muted)).child(text)
+    div()
+        .px_4()
+        .py_3()
+        .t_small()
+        .text_color(c(t.text_muted))
+        .child(text)
 }
 
 /// What a section says when it has no lines to show.
@@ -1417,12 +1892,31 @@ fn note_row(cx: &Ctx, f: usize, note: Note) -> AnyElement {
             .flex_col()
             .gap(zpx(7.))
             .children([0.46, 0.7, 0.34].into_iter().enumerate().map(|(i, w)| {
-                crate::motion::shimmer(div().h(zpx(8.)).w(gpui::relative(w)).rounded(px(3.)).bg(c(t.text).opacity(0.06)), ("diff-skel", row_id(f, i)), i as f32 * 0.05, c(t.text).opacity(0.05), cx.reduced)
+                crate::motion::shimmer(
+                    div()
+                        .h(zpx(8.))
+                        .w(gpui::relative(w))
+                        .rounded(px(3.))
+                        .bg(c(t.text).opacity(0.06)),
+                    ("diff-skel", row_id(f, i)),
+                    i as f32 * 0.05,
+                    c(t.text).opacity(0.05),
+                    cx.reduced,
+                )
             }))
             .into_any_element(),
-        Note::Failed => note_text(t, "Couldn't load this diff. Refresh to try again.").into_any_element(),
-        Note::Empty => note_text(t, "No line changes. It's binary, or only its mode or name changed.").into_any_element(),
-        Note::Truncated => note_text(t, "The rest of this diff is too long to show.").border_t_1().border_color(c(t.border).opacity(0.6)).into_any_element(),
+        Note::Failed => {
+            note_text(t, "Couldn't load this diff. Refresh to try again.").into_any_element()
+        }
+        Note::Empty => note_text(
+            t,
+            "No line changes. It's binary, or only its mode or name changed.",
+        )
+        .into_any_element(),
+        Note::Truncated => note_text(t, "The rest of this diff is too long to show.")
+            .border_t_1()
+            .border_color(c(t.border).opacity(0.6))
+            .into_any_element(),
         Note::Image => {
             let ch = &cx.files[f];
             let (weak, path) = (cx.weak.clone(), ch.path.clone());
@@ -1434,13 +1928,34 @@ fn note_row(cx: &Ctx, f: usize, note: Note) -> AnyElement {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::Image.el(zpx(14.))))
-                .child(div().flex_1().t_small().text_color(c(t.text_muted)).child(if deleted { "Image deleted" } else { "Image changed" }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::Image.el(zpx(14.))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .t_small()
+                        .text_color(c(t.text_muted))
+                        .child(if deleted {
+                            "Image deleted"
+                        } else {
+                            "Image changed"
+                        }),
+                )
                 .when(!deleted, |d| {
-                    d.child(text_button("diff-open-image", "Open in viewer", t).on_click(move |_, window, cx| {
-                        let path = path.clone();
-                        let _ = weak.update(cx, |this, cx| this.files_reveal(path, true, window, cx));
-                    }))
+                    d.child(
+                        text_button("diff-open-image", "Open in viewer", t).on_click(
+                            move |_, window, cx| {
+                                let path = path.clone();
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.files_reveal(path, true, window, cx)
+                                });
+                            },
+                        ),
+                    )
                 })
                 .into_any_element()
         }
@@ -1470,7 +1985,13 @@ fn more_row(cx: &Ctx, f: usize, hidden: usize) -> AnyElement {
                 .cursor_pointer()
                 .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
                 .child(format!("Show {} more lines", grouped(next as u32)))
-                .when(hidden > next, |d| d.child(div().text_color(c(t.text_faint)).child(format!("of {}", grouped(hidden as u32)))))
+                .when(hidden > next, |d| {
+                    d.child(
+                        div()
+                            .text_color(c(t.text_faint))
+                            .child(format!("of {}", grouped(hidden as u32))),
+                    )
+                })
                 .on_click(move |_, _, cx| {
                     let path = path.clone();
                     let _ = weak.update(cx, |this, cx| this.files_show_more(path, cx));
@@ -1484,12 +2005,21 @@ mod tests {
     use super::*;
 
     fn ch(path: &str, status: char, a: u32, r: u32) -> Change {
-        Change { path: path.into(), status, added: Some(a), removed: Some(r) }
+        Change {
+            path: path.into(),
+            status,
+            added: Some(a),
+            removed: Some(r),
+        }
     }
 
     #[test]
     fn tree_joins_single_folders_and_sums_counts() {
-        let list = vec![ch("src/view/a.rs", 'M', 3, 1), ch("src/view/b.rs", 'A', 2, 0), ch("README.md", 'M', 1, 1)];
+        let list = vec![
+            ch("src/view/a.rs", 'M', 3, 1),
+            ch("src/view/b.rs", 'A', 2, 0),
+            ch("README.md", 'M', 1, 1),
+        ];
         let rows = change_tree(&list, &HashSet::new());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["src/view", "a.rs", "b.rs", "README.md"]);
@@ -1502,9 +2032,15 @@ mod tests {
     #[test]
     fn folds_lockfiles_generated_deleted_and_huge() {
         assert_eq!(closed_why(&ch("Cargo.lock", 'M', 1, 1)), Some("Lockfile"));
-        assert_eq!(closed_why(&ch("web/app.min.js", 'M', 1, 1)), Some("Generated"));
+        assert_eq!(
+            closed_why(&ch("web/app.min.js", 'M', 1, 1)),
+            Some("Generated")
+        );
         assert_eq!(closed_why(&ch("old.rs", 'D', 0, 9)), Some("Deleted"));
-        assert_eq!(closed_why(&ch("big.rs", 'M', 1400, 200)), Some("Large diff"));
+        assert_eq!(
+            closed_why(&ch("big.rs", 'M', 1400, 200)),
+            Some("Large diff")
+        );
         assert_eq!(closed_why(&ch("src/main.rs", 'M', 10, 2)), None);
         let mut open = HashMap::new();
         open.insert("Cargo.lock".to_string(), true);
@@ -1532,14 +2068,30 @@ mod tests {
     #[test]
     fn detail_items_builds_lines_without_outer_accordion_chrome() {
         let (lines, _) = parse_patch("@@ -1,2 +1,2 @@\n-old\n+new\n");
-        let doc = Rc::new(DiffDoc { lines, truncated: false });
-        let items = build_detail_items(0, &ch("a.rs", 'M', 1, 1), Some(&Load::Ready(doc)), None, false);
-        assert_eq!(items, [Item::Line(0, 0), Item::Line(0, 1), Item::Line(0, 2)]);
+        let doc = Rc::new(DiffDoc {
+            lines,
+            truncated: false,
+        });
+        let items = build_detail_items(
+            0,
+            &ch("a.rs", 'M', 1, 1),
+            Some(&Load::Ready(doc)),
+            None,
+            false,
+        );
+        assert_eq!(
+            items,
+            [Item::Line(0, 0), Item::Line(0, 1), Item::Line(0, 2)]
+        );
     }
 
     #[test]
     fn list_row_counts_a_header_per_folder() {
-        let list = vec![ch("@web/a.ts", 'M', 1, 0), ch("@web/b.ts", 'M', 1, 0), ch("@api/c.ts", 'A', 2, 0)];
+        let list = vec![
+            ch("@web/a.ts", 'M', 1, 0),
+            ch("@web/b.ts", 'M', 1, 0),
+            ch("@api/c.ts", 'A', 2, 0),
+        ];
         assert_eq!(change_list_row(&list, 0), 1);
         assert_eq!(change_list_row(&list, 1), 2);
         assert_eq!(change_list_row(&list, 2), 4);

@@ -31,13 +31,19 @@ pub fn normalize_host(input: &str) -> Result<String, String> {
         return Err("enter a GitLab address".into());
     }
     let (scheme, rest) = match input.split_once("://") {
-        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") => {
+        Some((scheme, rest))
+            if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") =>
+        {
             (scheme.to_ascii_lowercase(), rest)
         }
         Some(_) => return Err("the address must start with https://".into()),
         None => ("https".to_string(), input),
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if authority.is_empty() || authority.contains(char::is_whitespace) || authority.contains('@') {
         return Err("that doesn't look like a host name".into());
     }
@@ -51,13 +57,20 @@ pub fn verify_gitlab(host: &str, token: &str) -> Result<(String, String), String
         .timeout(VERIFY_TIMEOUT)
         .call();
     let body: serde_json::Value = match response {
-        Ok(ok) => ok.into_json().map_err(|err| format!("unexpected answer from {host}: {err}"))?,
+        Ok(ok) => ok
+            .into_json()
+            .map_err(|err| format!("unexpected answer from {host}: {err}"))?,
         Err(ureq::Error::Status(401, _)) => return Err("GitLab rejected the token (401)".into()),
-        Err(ureq::Error::Status(403, _)) => return Err("the token lacks the read_user or api scope (403)".into()),
+        Err(ureq::Error::Status(403, _)) => {
+            return Err("the token lacks the read_user or api scope (403)".into());
+        }
         Err(ureq::Error::Status(code, _)) => return Err(format!("{host} answered {code}")),
         Err(err) => return Err(format!("couldn't reach {host}: {err}")),
     };
-    let username = body["username"].as_str().ok_or("that host didn't answer like GitLab")?.to_string();
+    let username = body["username"]
+        .as_str()
+        .ok_or("that host didn't answer like GitLab")?
+        .to_string();
     let name = body["name"].as_str().unwrap_or(&username).to_string();
     Ok((username, name))
 }
@@ -65,14 +78,28 @@ pub fn verify_gitlab(host: &str, token: &str) -> Result<(String, String), String
 /// `GET {host}/api/v4/{path}` with the token kept for `host`. Only hosts
 /// in `connections.json` are asked, so a token never goes elsewhere.
 pub fn gitlab_get(data_dir: &Path, host: &str, path: &str) -> Result<serde_json::Value, String> {
-    if !list(data_dir).iter().any(|c| c.kind == "gitlab" && c.host == host) {
+    if !list(data_dir)
+        .iter()
+        .any(|c| c.kind == "gitlab" && c.host == host)
+    {
         return Err(format!("{host} isn't connected"));
     }
-    let token = load_token(data_dir, &account("gitlab", host)).ok_or("the token for this host is missing; reconnect in Settings")?;
-    match ureq::get(&format!("{host}/api/v4/{path}")).set("PRIVATE-TOKEN", &token).timeout(VERIFY_TIMEOUT).call() {
-        Ok(ok) => ok.into_json().map_err(|err| format!("unexpected answer from {host}: {err}")),
-        Err(ureq::Error::Status(401, _)) => Err("GitLab rejected the token (401); reconnect in Settings".into()),
-        Err(ureq::Error::Status(403, _)) => Err("the token can't read this (403); it needs the read_api or api scope".into()),
+    let token = load_token(data_dir, &account("gitlab", host))
+        .ok_or("the token for this host is missing; reconnect in Settings")?;
+    match ureq::get(&format!("{host}/api/v4/{path}"))
+        .set("PRIVATE-TOKEN", &token)
+        .timeout(VERIFY_TIMEOUT)
+        .call()
+    {
+        Ok(ok) => ok
+            .into_json()
+            .map_err(|err| format!("unexpected answer from {host}: {err}")),
+        Err(ureq::Error::Status(401, _)) => {
+            Err("GitLab rejected the token (401); reconnect in Settings".into())
+        }
+        Err(ureq::Error::Status(403, _)) => {
+            Err("the token can't read this (403); it needs the read_api or api scope".into())
+        }
         Err(ureq::Error::Status(404, _)) => Err("not found (404)".into()),
         Err(ureq::Error::Status(code, _)) => Err(format!("{host} answered {code}")),
         Err(err) => Err(format!("couldn't reach {host}: {err}")),
@@ -83,7 +110,11 @@ pub fn gitlab_get(data_dir: &Path, host: &str, path: &str) -> Result<serde_json:
 /// what the list shows.
 // ponytail: first 100 only, filtered client-side; page or search server-side if that runs short.
 pub fn gitlab_projects(data_dir: &Path, host: &str) -> Result<Vec<serde_json::Value>, String> {
-    let rows = gitlab_get(data_dir, host, "projects?membership=true&simple=true&order_by=last_activity_at&per_page=100")?;
+    let rows = gitlab_get(
+        data_dir,
+        host,
+        "projects?membership=true&simple=true&order_by=last_activity_at&per_page=100",
+    )?;
     Ok(rows
         .as_array()
         .map(|rows| {
@@ -106,7 +137,11 @@ pub fn gitlab_projects(data_dir: &Path, host: &str) -> Result<Vec<serde_json::Va
 /// (in board order, with colors; empty when it has none), open issues, and
 /// the most recently closed ones.
 // ponytail: first 100 open / 20 closed; page if boards outgrow that.
-pub fn gitlab_board(data_dir: &Path, host: &str, project_id: u64) -> Result<serde_json::Value, String> {
+pub fn gitlab_board(
+    data_dir: &Path,
+    host: &str,
+    project_id: u64,
+) -> Result<serde_json::Value, String> {
     let boards = gitlab_get(data_dir, host, &format!("projects/{project_id}/boards"))?;
     let mut lists: Vec<(i64, serde_json::Value)> = boards[0]["lists"]
         .as_array()
@@ -122,8 +157,12 @@ pub fn gitlab_board(data_dir: &Path, host: &str, project_id: u64) -> Result<serd
         .unwrap_or_default();
     lists.sort_by_key(|(position, _)| *position);
     let issues = |state: &str, n: u32| {
-        gitlab_get(data_dir, host, &format!("projects/{project_id}/issues?state={state}&order_by=updated_at&per_page={n}"))
-            .map(|rows| issue_rows(&rows))
+        gitlab_get(
+            data_dir,
+            host,
+            &format!("projects/{project_id}/issues?state={state}&order_by=updated_at&per_page={n}"),
+        )
+        .map(|rows| issue_rows(&rows))
     };
     Ok(serde_json::json!({
         "lists": lists.into_iter().map(|(_, l)| l).collect::<Vec<_>>(),
@@ -135,9 +174,22 @@ pub fn gitlab_board(data_dir: &Path, host: &str, project_id: u64) -> Result<serd
 /// One merge request, trimmed to what a session's MR monitor shows. One
 /// call: GitLab's single-MR endpoint already carries the head pipeline and
 /// the merge status. `project` is `group/project` (or a numeric id).
-pub fn gitlab_mr(data_dir: &Path, host: &str, project: &str, iid: u64) -> Result<serde_json::Value, String> {
-    let mr = gitlab_get(data_dir, host, &format!("projects/{}/merge_requests/{iid}", encode_segment(project)))?;
-    let pipeline = if mr["head_pipeline"]["status"].is_string() { &mr["head_pipeline"]["status"] } else { &mr["pipeline"]["status"] };
+pub fn gitlab_mr(
+    data_dir: &Path,
+    host: &str,
+    project: &str,
+    iid: u64,
+) -> Result<serde_json::Value, String> {
+    let mr = gitlab_get(
+        data_dir,
+        host,
+        &format!("projects/{}/merge_requests/{iid}", encode_segment(project)),
+    )?;
+    let pipeline = if mr["head_pipeline"]["status"].is_string() {
+        &mr["head_pipeline"]["status"]
+    } else {
+        &mr["pipeline"]["status"]
+    };
     Ok(serde_json::json!({
         "iid": mr["iid"],
         "title": mr["title"],
@@ -158,22 +210,38 @@ pub fn gitlab_mr(data_dir: &Path, host: &str, project: &str, iid: u64) -> Result
 /// pipeline (if any) passed, and GitLab itself calls it mergeable. The merge
 /// names the head commit it checked, so a push in between fails rather than
 /// merging code nobody looked at. Returns the MR afterwards, as [`gitlab_mr`].
-pub fn gitlab_merge(data_dir: &Path, host: &str, project: &str, iid: u64) -> Result<serde_json::Value, String> {
+pub fn gitlab_merge(
+    data_dir: &Path,
+    host: &str,
+    project: &str,
+    iid: u64,
+) -> Result<serde_json::Value, String> {
     let path = format!("projects/{}/merge_requests/{iid}", encode_segment(project));
     let mr = gitlab_get(data_dir, host, &path)?;
     merge_blocker(&mr).map_or(Ok(()), Err)?;
-    let sha = mr["sha"].as_str().ok_or("GitLab didn't say which commit the MR is at")?;
-    let token = load_token(data_dir, &account("gitlab", host)).ok_or("the token for this host is missing; reconnect in Settings")?;
+    let sha = mr["sha"]
+        .as_str()
+        .ok_or("GitLab didn't say which commit the MR is at")?;
+    let token = load_token(data_dir, &account("gitlab", host))
+        .ok_or("the token for this host is missing; reconnect in Settings")?;
     match ureq::put(&format!("{host}/api/v4/{path}/merge"))
         .set("PRIVATE-TOKEN", &token)
         .timeout(VERIFY_TIMEOUT)
         .send_json(serde_json::json!({ "sha": sha }))
     {
         Ok(_) => gitlab_mr(data_dir, host, project, iid),
-        Err(ureq::Error::Status(401, _)) => Err("GitLab rejected the token (401); reconnect in Settings".into()),
-        Err(ureq::Error::Status(403, _)) => Err("the token can't merge (403); it needs the api scope, and you need merge rights".into()),
-        Err(ureq::Error::Status(405 | 406 | 422, _)) => Err("GitLab won't merge it right now; open it to see why".into()),
-        Err(ureq::Error::Status(409, _)) => Err("the branch changed since the check; nothing was merged".into()),
+        Err(ureq::Error::Status(401, _)) => {
+            Err("GitLab rejected the token (401); reconnect in Settings".into())
+        }
+        Err(ureq::Error::Status(403, _)) => Err(
+            "the token can't merge (403); it needs the api scope, and you need merge rights".into(),
+        ),
+        Err(ureq::Error::Status(405 | 406 | 422, _)) => {
+            Err("GitLab won't merge it right now; open it to see why".into())
+        }
+        Err(ureq::Error::Status(409, _)) => {
+            Err("the branch changed since the check; nothing was merged".into())
+        }
         Err(ureq::Error::Status(code, _)) => Err(format!("{host} answered {code}")),
         Err(err) => Err(format!("couldn't reach {host}: {err}")),
     }
@@ -183,7 +251,9 @@ pub fn gitlab_merge(data_dir: &Path, host: &str, project: &str, iid: u64) -> Res
 pub(crate) fn merge_blocker(mr: &serde_json::Value) -> Option<String> {
     let iid = mr["iid"].as_u64().unwrap_or_default();
     let state = mr["state"].as_str().unwrap_or_default();
-    let pipeline = mr["head_pipeline"]["status"].as_str().or(mr["pipeline"]["status"].as_str());
+    let pipeline = mr["head_pipeline"]["status"]
+        .as_str()
+        .or(mr["pipeline"]["status"].as_str());
     let status = mr["detailed_merge_status"].as_str().unwrap_or_default();
     if state != "opened" {
         Some(format!("!{iid} is {state}"))
@@ -198,7 +268,10 @@ pub(crate) fn merge_blocker(mr: &serde_json::Value) -> Option<String> {
             "not_approved" => "it still needs approval".to_string(),
             "discussions_not_resolved" => "it has unresolved threads".to_string(),
             "need_rebase" => "it needs a rebase".to_string(),
-            other => format!("GitLab says it can't merge yet ({})", other.replace('_', " ")),
+            other => format!(
+                "GitLab says it can't merge yet ({})",
+                other.replace('_', " ")
+            ),
         })
     } else {
         None
@@ -209,7 +282,9 @@ pub(crate) fn merge_blocker(mr: &serde_json::Value) -> Option<String> {
 fn encode_segment(raw: &str) -> String {
     raw.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -246,7 +321,11 @@ pub fn list(data_dir: &Path) -> Vec<Connection> {
 
 /// Remember `connection` (replacing one for the same host) and its token.
 pub fn save(data_dir: &Path, connection: Connection, token: &str) -> Result<(), String> {
-    store_token(data_dir, &account(&connection.kind, &connection.host), token)?;
+    store_token(
+        data_dir,
+        &account(&connection.kind, &connection.host),
+        token,
+    )?;
     let mut all = list(data_dir);
     all.retain(|c| !(c.kind == connection.kind && c.host == connection.host));
     all.push(connection);
@@ -276,7 +355,16 @@ pub(crate) fn account(kind: &str, host: &str) -> String {
 }
 
 fn token_file(data_dir: &Path, account: &str) -> PathBuf {
-    let safe: String = account.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '_' }).collect();
+    let safe: String = account
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     data_dir.join("connections").join(format!("{safe}.token"))
 }
 
@@ -288,11 +376,20 @@ fn store_token(data_dir: &Path, account: &str, token: &str) -> Result<(), String
     {
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
         // Created 0600, so the token is never readable by others, not even briefly.
-        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-        file.write_all(token.as_bytes()).map_err(|e| e.to_string())?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        file.write_all(token.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(not(unix))]
     std::fs::write(&path, token).map_err(|e| e.to_string())?;
@@ -321,12 +418,31 @@ mod tests {
             mr[key] = value;
             merge_blocker(&mr)
         };
-        assert_eq!(with("state", "merged".into()).as_deref(), Some("!42 is merged"));
-        assert_eq!(with("draft", true.into()).as_deref(), Some("!42 is a draft"));
-        assert_eq!(with("has_conflicts", true.into()).as_deref(), Some("!42 has conflicts"));
-        assert_eq!(with("head_pipeline", serde_json::json!({ "status": "running" })).as_deref(), Some("the pipeline is running"));
-        assert_eq!(with("detailed_merge_status", "not_approved".into()).as_deref(), Some("it still needs approval"));
-        let no_pipeline = { let mut mr = ready.clone(); mr["head_pipeline"] = serde_json::Value::Null; mr };
+        assert_eq!(
+            with("state", "merged".into()).as_deref(),
+            Some("!42 is merged")
+        );
+        assert_eq!(
+            with("draft", true.into()).as_deref(),
+            Some("!42 is a draft")
+        );
+        assert_eq!(
+            with("has_conflicts", true.into()).as_deref(),
+            Some("!42 has conflicts")
+        );
+        assert_eq!(
+            with("head_pipeline", serde_json::json!({ "status": "running" })).as_deref(),
+            Some("the pipeline is running")
+        );
+        assert_eq!(
+            with("detailed_merge_status", "not_approved".into()).as_deref(),
+            Some("it still needs approval")
+        );
+        let no_pipeline = {
+            let mut mr = ready.clone();
+            mr["head_pipeline"] = serde_json::Value::Null;
+            mr
+        };
         assert_eq!(merge_blocker(&no_pipeline), None);
     }
 
@@ -339,8 +455,14 @@ mod tests {
     #[test]
     fn hosts_normalize_to_an_origin() {
         assert_eq!(normalize_host("gitlab.com").unwrap(), "https://gitlab.com");
-        assert_eq!(normalize_host(" https://GitLab.Example.com/group/proj ").unwrap(), "https://gitlab.example.com");
-        assert_eq!(normalize_host("http://gitlab.local:8080/").unwrap(), "http://gitlab.local:8080");
+        assert_eq!(
+            normalize_host(" https://GitLab.Example.com/group/proj ").unwrap(),
+            "https://gitlab.example.com"
+        );
+        assert_eq!(
+            normalize_host("http://gitlab.local:8080/").unwrap(),
+            "http://gitlab.local:8080"
+        );
         assert!(normalize_host("ftp://x").is_err());
         assert!(normalize_host("").is_err());
         assert!(normalize_host("user@host").is_err());
@@ -361,9 +483,16 @@ mod tests {
         save(&dir, conn("a"), "t1").unwrap();
         save(&dir, conn("b"), "t2").unwrap();
         assert_eq!(list(&dir), vec![conn("b")]);
-        assert_eq!(load_token(&dir, "gitlab:https://gitlab.com").as_deref(), Some("t2"));
+        assert_eq!(
+            load_token(&dir, "gitlab:https://gitlab.com").as_deref(),
+            Some("t2")
+        );
         // A host that isn't connected is never asked.
-        assert!(gitlab_get(&dir, "https://evil.example", "user").unwrap_err().contains("isn't connected"));
+        assert!(
+            gitlab_get(&dir, "https://evil.example", "user")
+                .unwrap_err()
+                .contains("isn't connected")
+        );
         remove(&dir, "gitlab", "https://gitlab.com").unwrap();
         assert!(list(&dir).is_empty());
         assert!(!token_file(&dir, "gitlab:https://gitlab.com").exists());

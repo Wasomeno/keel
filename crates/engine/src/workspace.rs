@@ -160,7 +160,9 @@ fn open_walked(walked: &Walked, write: bool) -> Result<(fs::File, bool), RpcErro
     } else {
         options.read(true);
     }
-    let file = options.open(&walked.path).map_err(|_| RpcErrorCode::PathRejected)?;
+    let file = options
+        .open(&walked.path)
+        .map_err(|_| RpcErrorCode::PathRejected)?;
     let created = walked.ino.is_none();
     let reject = |file: fs::File| {
         drop(file);
@@ -229,7 +231,8 @@ mod tests {
     use super::*;
 
     fn fresh_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keel-space-test-{}-{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("keel-space-test-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
@@ -379,7 +382,10 @@ mod tests {
             write_workspace_file(&canon_space, "evil_link", "x"),
             Err(RpcErrorCode::PathRejected)
         );
-        assert_eq!(fs::read_to_string(space_evil.join("evil.txt")).unwrap(), "evil");
+        assert_eq!(
+            fs::read_to_string(space_evil.join("evil.txt")).unwrap(),
+            "evil"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -439,7 +445,10 @@ mod tests {
             Err(RpcErrorCode::PathRejected)
         );
         assert!(!outside.join("new_file").exists());
-        assert_eq!(fs::read_to_string(outside.join("id_ed25519")).unwrap(), "KEY");
+        assert_eq!(
+            fs::read_to_string(outside.join("id_ed25519")).unwrap(),
+            "KEY"
+        );
         let _ = fs::remove_dir_all(&space_root);
         let _ = fs::remove_dir_all(&outside);
     }
@@ -508,7 +517,10 @@ mod tests {
     fn read_caps_bytes_and_directories_are_rejected() {
         let space_root = fresh_dir("dir-final");
         fs::create_dir_all(space_root.join("d")).unwrap();
-        assert_eq!(read_workspace_file(&space_root, "d"), Err(RpcErrorCode::PathRejected));
+        assert_eq!(
+            read_workspace_file(&space_root, "d"),
+            Err(RpcErrorCode::PathRejected)
+        );
         assert_eq!(
             write_workspace_file(&space_root, "d", "x"),
             Err(RpcErrorCode::PathRejected)

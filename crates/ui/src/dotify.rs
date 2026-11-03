@@ -9,7 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use keel_proto::dotify::{DotifyError, Entry, Pending, Project, Summary, Tracker, local_day_start, local_weekday};
+use keel_proto::dotify::{
+    DotifyError, Entry, Pending, Project, Summary, Tracker, local_day_start, local_weekday,
+};
 use serde::{Deserialize, Serialize};
 
 pub use crate::approval::{Look, bezier, in_out, out_quint, span};
@@ -47,13 +49,26 @@ pub struct Prefill {
 /// `develop`), else the chat's title.
 pub fn prefill_description(title: &str, branch: &str) -> Prefill {
     let branch = branch.trim();
-    let generic = matches!(branch, "" | "main" | "master" | "develop" | "dev" | "HEAD" | "trunk");
+    let generic = matches!(
+        branch,
+        "" | "main" | "master" | "develop" | "dev" | "HEAD" | "trunk"
+    );
     if !generic {
-        return Prefill { text: branch.to_string(), from_branch: true };
+        return Prefill {
+            text: branch.to_string(),
+            from_branch: true,
+        };
     }
     let title = title.trim();
-    let text = if title.is_empty() || title.eq_ignore_ascii_case("new chat") { String::new() } else { title.to_string() };
-    Prefill { text, from_branch: false }
+    let text = if title.is_empty() || title.eq_ignore_ascii_case("new chat") {
+        String::new()
+    } else {
+        title.to_string()
+    };
+    Prefill {
+        text,
+        from_branch: false,
+    }
 }
 
 // ── Memory ─────────────────────────────────────────────────────────────────
@@ -108,7 +123,10 @@ impl Memory {
     }
 
     pub fn load(data_dir: &Path) -> Self {
-        std::fs::read_to_string(Self::path(data_dir)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        std::fs::read_to_string(Self::path(data_dir))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self, data_dir: &Path) {
@@ -123,14 +141,17 @@ impl Memory {
     }
 
     pub fn project_for(&self, folder: Option<&str>) -> Option<Project> {
-        folder.and_then(|f| self.last_project.get(f).cloned()).or_else(|| self.any_project.clone())
+        folder
+            .and_then(|f| self.last_project.get(f).cloned())
+            .or_else(|| self.any_project.clone())
     }
 
     /// A clock-in with `project` (from `folder`): last for the folder, and
     /// to the front of Recent.
     pub fn remember(&mut self, folder: Option<&str>, project: &Project) {
         if let Some(folder) = folder.filter(|f| !f.is_empty()) {
-            self.last_project.insert(folder.to_string(), project.clone());
+            self.last_project
+                .insert(folder.to_string(), project.clone());
         }
         self.any_project = Some(project.clone());
         self.recent.retain(|p| p.id != project.id);
@@ -149,13 +170,28 @@ impl Memory {
     /// The project to suggest switching to: Keel has worked in `repo` for
     /// [`SWITCH_AFTER_MS`] while clocked in to another project, the repo
     /// is linked, not ignored, and not asked about within the cooldown.
-    pub fn switch_suggestion(&self, tracker: &Tracker, repo: &str, work_since: i64, now: i64) -> Option<Project> {
-        let Tracker::Running(entry) = tracker else { return None };
+    pub fn switch_suggestion(
+        &self,
+        tracker: &Tracker,
+        repo: &str,
+        work_since: i64,
+        now: i64,
+    ) -> Option<Project> {
+        let Tracker::Running(entry) = tracker else {
+            return None;
+        };
         let target = self.repo_project.get(repo)?;
-        if entry.project.as_ref().is_some_and(|p| p.id == target.id) || self.repo_ignored.iter().any(|r| r == repo) {
+        if entry.project.as_ref().is_some_and(|p| p.id == target.id)
+            || self.repo_ignored.iter().any(|r| r == repo)
+        {
             return None;
         }
-        if now - work_since < SWITCH_AFTER_MS || self.switch_asked.get(repo).is_some_and(|at| now - at < SWITCH_COOLDOWN_MS) {
+        if now - work_since < SWITCH_AFTER_MS
+            || self
+                .switch_asked
+                .get(repo)
+                .is_some_and(|at| now - at < SWITCH_COOLDOWN_MS)
+        {
             return None;
         }
         Some(target.clone())
@@ -185,7 +221,10 @@ pub fn repo_label(key: &str) -> &str {
 pub fn stats_animate(seen: Option<&StatsSeen>, now: &StatsSeen) -> bool {
     let Some(seen) = seen else { return true };
     let moved = |a: f64, b: f64| ((a * 10.).round() - (b * 10.).round()).abs() >= 1.;
-    seen.day_ms != now.day_ms || moved(seen.today_h, now.today_h) || moved(seen.week_h, now.week_h) || moved(seen.period_h, now.period_h)
+    seen.day_ms != now.day_ms
+        || moved(seen.today_h, now.today_h)
+        || moved(seen.week_h, now.week_h)
+        || moved(seen.period_h, now.period_h)
 }
 
 /// One stats column: value, its target if Dotify gives one, and the bar.
@@ -198,21 +237,34 @@ pub struct Stat {
 impl Stat {
     /// Bar fill 0..=1 (None: no target, no bar).
     pub fn fill(&self) -> Option<f32> {
-        self.target_h.filter(|t| *t > 0.).map(|t| (self.value_h / t).clamp(0., 1.) as f32)
+        self.target_h
+            .filter(|t| *t > 0.)
+            .map(|t| (self.value_h / t).clamp(0., 1.) as f32)
     }
 
     /// Hours over the target.
     pub fn over_h(&self) -> Option<f64> {
-        self.target_h.filter(|t| *t > 0. && self.value_h > *t).map(|t| self.value_h - t)
+        self.target_h
+            .filter(|t| *t > 0. && self.value_h > *t)
+            .map(|t| self.value_h - t)
     }
 }
 
 /// Today (value only: Dotify has no daily target), Week, Period.
 pub fn stats(today_h: Option<f64>, summary: Option<&Summary>) -> [Option<Stat>; 3] {
     [
-        today_h.map(|v| Stat { value_h: v, target_h: None }),
-        summary.map(|s| Stat { value_h: s.week_h, target_h: Some(s.week_normal_h) }),
-        summary.map(|s| Stat { value_h: s.period_h, target_h: Some(s.period_normal_h) }),
+        today_h.map(|v| Stat {
+            value_h: v,
+            target_h: None,
+        }),
+        summary.map(|s| Stat {
+            value_h: s.week_h,
+            target_h: Some(s.week_normal_h),
+        }),
+        summary.map(|s| Stat {
+            value_h: s.period_h,
+            target_h: Some(s.period_normal_h),
+        }),
     ]
 }
 
@@ -246,14 +298,28 @@ pub struct Row {
 
 /// Favorites, then Recent (not already a favorite), then everything else.
 /// Search results are one flat list.
-pub fn list_rows(favorites: &[Project], recent: &[Project], all: &[Project], results: Option<&[Project]>) -> Vec<Row> {
+pub fn list_rows(
+    favorites: &[Project],
+    recent: &[Project],
+    all: &[Project],
+    results: Option<&[Project]>,
+) -> Vec<Row> {
     if let Some(results) = results {
-        return results.iter().map(|p| Row { section: Section::Results, project: p.clone() }).collect();
+        return results
+            .iter()
+            .map(|p| Row {
+                section: Section::Results,
+                project: p.clone(),
+            })
+            .collect();
     }
     let mut rows: Vec<Row> = Vec::new();
     let push = |section: Section, p: &Project, rows: &mut Vec<Row>| {
         if !rows.iter().any(|r| r.project.id == p.id) {
-            rows.push(Row { section, project: p.clone() });
+            rows.push(Row {
+                section,
+                project: p.clone(),
+            });
         }
     };
     for p in favorites {
@@ -316,7 +382,11 @@ pub fn match_ranges(name: &str, query: &str) -> Vec<(usize, usize)> {
             want.next();
         }
     }
-    if want.peek().is_some() { Vec::new() } else { out }
+    if want.peek().is_some() {
+        Vec::new()
+    } else {
+        out
+    }
 }
 
 // ── Two-click confirm ──────────────────────────────────────────────────────
@@ -354,7 +424,11 @@ impl Confirm {
     pub fn remaining(&self, now: i64, reduced: bool) -> f32 {
         match self.armed_ms {
             Some(at) if now - at < CONFIRM_MS => {
-                if reduced { 1. } else { 1. - (now - at) as f32 / CONFIRM_MS as f32 }
+                if reduced {
+                    1.
+                } else {
+                    1. - (now - at) as f32 / CONFIRM_MS as f32
+                }
             }
             _ => 0.,
         }
@@ -391,13 +465,20 @@ pub struct Flow {
 
 impl Default for Flow {
     fn default() -> Self {
-        Flow { view: View::Idle, result: None }
+        Flow {
+            view: View::Idle,
+            result: None,
+        }
     }
 }
 
 impl Flow {
     fn base(tracker: &Tracker) -> View {
-        if matches!(tracker, Tracker::Running(_)) { View::ClockedIn } else { View::Idle }
+        if matches!(tracker, Tracker::Running(_)) {
+            View::ClockedIn
+        } else {
+            View::Idle
+        }
     }
 
     pub fn open(&mut self, tracker: &Tracker) {
@@ -424,7 +505,11 @@ impl Flow {
 
     /// Edit is only offered for an unlocked result.
     pub fn edit(&mut self) -> bool {
-        if self.result.as_ref().is_some_and(|e| !e.locked && e.end_ms.is_some()) {
+        if self
+            .result
+            .as_ref()
+            .is_some_and(|e| !e.locked && e.end_ms.is_some())
+        {
             self.view = View::Edit;
             true
         } else {
@@ -483,15 +568,36 @@ pub enum PillLook {
 
 impl PillLook {
     pub fn breathes(&self) -> bool {
-        matches!(self, PillLook::Running { dot: Dot::Green | Dot::Amber, .. })
+        matches!(
+            self,
+            PillLook::Running {
+                dot: Dot::Green | Dot::Amber,
+                ..
+            }
+        )
     }
 }
 
-pub fn pill_look(tracker: &Tracker, pending: Option<&Pending>, error: Option<&DotifyError>, overtime: bool, remind_badge: bool) -> PillLook {
+pub fn pill_look(
+    tracker: &Tracker,
+    pending: Option<&Pending>,
+    error: Option<&DotifyError>,
+    overtime: bool,
+    remind_badge: bool,
+) -> PillLook {
     if let Some(p) = pending {
-        return PillLook::Pending { label: if matches!(p, Pending::ClockIn { .. }) { "Clocking in…" } else { "Clocking out…" } };
+        return PillLook::Pending {
+            label: if matches!(p, Pending::ClockIn { .. }) {
+                "Clocking in…"
+            } else {
+                "Clocking out…"
+            },
+        };
     }
-    let offline = matches!(error, Some(DotifyError::Offline(_) | DotifyError::Server(_)));
+    let offline = matches!(
+        error,
+        Some(DotifyError::Offline(_) | DotifyError::Server(_))
+    );
     let expired = matches!(error, Some(DotifyError::Auth(_)));
     match tracker {
         Tracker::Running(_) => PillLook::Running {
@@ -540,7 +646,13 @@ pub struct Tween {
 
 impl Tween {
     pub fn settled(v: f32) -> Self {
-        Tween { from: v, to: v, start: 0., ms: 0., curve: out_quint }
+        Tween {
+            from: v,
+            to: v,
+            start: 0.,
+            ms: 0.,
+            curve: out_quint,
+        }
     }
 
     pub fn value(&self, now: f64) -> f32 {
@@ -556,7 +668,14 @@ impl Tween {
     }
 
     /// Head for `to`; `animate: false` snaps. True when a move started.
-    pub fn retarget(&mut self, to: f32, now: f64, ms: f32, curve: fn(f32) -> f32, animate: bool) -> bool {
+    pub fn retarget(
+        &mut self,
+        to: f32,
+        now: f64,
+        ms: f32,
+        curve: fn(f32) -> f32,
+        animate: bool,
+    ) -> bool {
         if (to - self.to).abs() < 0.5 {
             return false;
         }
@@ -564,7 +683,13 @@ impl Tween {
             *self = Tween::settled(to);
             return false;
         }
-        *self = Tween { from: self.value(now), to, start: now, ms, curve };
+        *self = Tween {
+            from: self.value(now),
+            to,
+            start: now,
+            ms,
+            curve,
+        };
         true
     }
 }
@@ -583,12 +708,18 @@ pub const STAGGERED_ROWS: usize = 8;
 /// The list's section index (its rows carry their own timing).
 pub const LIST_SECTION: usize = 2;
 /// Everything has landed by now (rows are the last).
-pub const ENTRY_DONE_MS: f32 = SECTION_START_MS + SECTION_STAGGER_MS * LIST_SECTION as f32 + ROW_STAGGER_MS * STAGGERED_ROWS as f32 + ENTER_MS;
+pub const ENTRY_DONE_MS: f32 = SECTION_START_MS
+    + SECTION_STAGGER_MS * LIST_SECTION as f32
+    + ROW_STAGGER_MS * STAGGERED_ROWS as f32
+    + ENTER_MS;
 
 fn rise(ms: f32, delay: f32, len: f32, px: f32) -> Look {
     // Opacity and translate share one eased progress.
     let e = out_quint(span(ms, delay, len));
-    Look { opacity: e, dy: px * (1. - e) }
+    Look {
+        opacity: e,
+        dy: px * (1. - e),
+    }
 }
 
 /// The popover opening as every menu does (`view::menu_motion`): a fade
@@ -596,10 +727,16 @@ fn rise(ms: f32, delay: f32, len: f32, px: f32) -> Look {
 /// over [`crate::motion::FAST`] eased out. Reduced motion cuts.
 pub fn popover_enter(ms: f32, up: bool, reduced: bool) -> Look {
     if reduced {
-        return Look { opacity: 1., dy: 0. };
+        return Look {
+            opacity: 1.,
+            dy: 0.,
+        };
     }
     let e = crate::motion::ease_out(span(ms, 0., POPOVER_EXIT_MS));
-    Look { opacity: e, dy: if up { 4. } else { -4. } * (1. - e) }
+    Look {
+        opacity: e,
+        dy: if up { 4. } else { -4. } * (1. - e),
+    }
 }
 
 pub const POPOVER_EXIT_MS: f32 = crate::motion::FAST.as_millis() as f32;
@@ -608,7 +745,10 @@ pub const POPOVER_EXIT_MS: f32 = crate::motion::FAST.as_millis() as f32;
 /// Reduced motion cuts (the caller ends the close at once).
 pub fn popover_exit(ms: f32, up: bool) -> Look {
     let e = crate::motion::ease_in(span(ms, 0., POPOVER_EXIT_MS));
-    Look { opacity: 1. - e, dy: if up { 4. } else { -4. } * e }
+    Look {
+        opacity: 1. - e,
+        dy: if up { 4. } else { -4. } * e,
+    }
 }
 
 /// When section `i` starts (header, search, list, description, footer, stats).
@@ -619,7 +759,10 @@ pub fn section_delay(i: usize) -> f32 {
 /// Section `i`: 180 ms, rising 6 px, 35 ms apart. Transparent from frame 1.
 pub fn section_enter(ms: f32, i: usize, reduced: bool) -> Look {
     if reduced {
-        return Look { opacity: span(ms, 0., 120.), dy: 0. };
+        return Look {
+            opacity: span(ms, 0., 120.),
+            dy: 0.,
+        };
     }
     rise(ms, section_delay(i), ENTER_MS, 6.)
 }
@@ -628,16 +771,27 @@ pub fn section_enter(ms: f32, i: usize, reduced: bool) -> Look {
 /// 18 ms apart from the list's slot; items past 8 move with the 8th.
 pub fn row_enter(ms: f32, i: usize, reduced: bool) -> Look {
     if reduced {
-        return Look { opacity: span(ms, 0., 120.), dy: 0. };
+        return Look {
+            opacity: span(ms, 0., 120.),
+            dy: 0.,
+        };
     }
     let i = i.min(STAGGERED_ROWS);
-    rise(ms, section_delay(LIST_SECTION) + ROW_STAGGER_MS * i as f32, ENTER_MS, 4.)
+    rise(
+        ms,
+        section_delay(LIST_SECTION) + ROW_STAGGER_MS * i as f32,
+        ENTER_MS,
+        4.,
+    )
 }
 
 /// The new view after a switch: 200 ms from 40 ms, rising 4 px.
 pub fn view_enter(ms: f32, reduced: bool) -> Look {
     if reduced {
-        return Look { opacity: span(ms, 0., 120.), dy: 0. };
+        return Look {
+            opacity: span(ms, 0., 120.),
+            dy: 0.,
+        };
     }
     rise(ms, 40., 200., 4.)
 }
@@ -679,18 +833,27 @@ impl SyncLabel {
             return (0., 1.);
         };
         let ms = (now - at) as f32;
-        let x = if reduced { span(ms, 0., 120.) } else { in_out(span(ms, 0., LABEL_FADE_MS)) };
+        let x = if reduced {
+            span(ms, 0., 120.)
+        } else {
+            in_out(span(ms, 0., LABEL_FADE_MS))
+        };
         (1. - x, x)
     }
 
     pub fn fading(&self, now: f64) -> bool {
-        self.changed.is_some_and(|at| ((now - at) as f32) < LABEL_FADE_MS)
+        self.changed
+            .is_some_and(|at| ((now - at) as f32) < LABEL_FADE_MS)
     }
 }
 
 /// A plain crossfade-in over `len` ms (capped to 120 under reduced motion).
 pub fn fade(ms: f32, delay: f32, len: f32, reduced: bool) -> f32 {
-    if reduced { span(ms, 0., len.min(120.)) } else { out_quint(span(ms, delay, len)) }
+    if reduced {
+        span(ms, 0., len.min(120.))
+    } else {
+        out_quint(span(ms, delay, len))
+    }
 }
 
 /// Stats bar `i` (Today, Week, Period): 0 → `to` over 500 ms OUT, 60 ms
@@ -728,7 +891,11 @@ pub fn breathe(ms: f32, reduced: bool) -> f32 {
         return 1.;
     }
     let phase = ((ms - 600.) / 1800.).rem_euclid(1.);
-    let tri = if phase < 0.5 { phase * 2. } else { 2. - phase * 2. };
+    let tri = if phase < 0.5 {
+        phase * 2.
+    } else {
+        2. - phase * 2.
+    };
     1. - 0.55 * in_out(tri)
 }
 
@@ -743,14 +910,24 @@ pub fn receipt_look(ms: f32, reduced: bool) -> Option<Look> {
         return None;
     }
     if reduced {
-        let o = if ms < out_at { span(ms, 0., 120.) } else { 1. - span(ms, out_at, 120.) };
+        let o = if ms < out_at {
+            span(ms, 0., 120.)
+        } else {
+            1. - span(ms, out_at, 120.)
+        };
         return Some(Look { opacity: o, dy: 0. });
     }
     if ms < out_at {
         let e = out_quint(span(ms, 0., enter));
-        Some(Look { opacity: e, dy: -4. * (1. - e) })
+        Some(Look {
+            opacity: e,
+            dy: -4. * (1. - e),
+        })
     } else {
-        Some(Look { opacity: 1. - ease_in(span(ms, out_at, 140.)), dy: 0. })
+        Some(Look {
+            opacity: 1. - ease_in(span(ms, out_at, 140.)),
+            dy: 0.,
+        })
     }
 }
 
@@ -759,12 +936,19 @@ pub fn banner_open(ms: f32, reduced: bool) -> (f32, f32) {
     if reduced {
         return (1., span(ms, 0., 120.));
     }
-    (out_quint(span(ms, 0., 180.)), out_quint(span(ms, 40., 140.)))
+    (
+        out_quint(span(ms, 0., 180.)),
+        out_quint(span(ms, 40., 140.)),
+    )
 }
 
 /// A border flash on error: red alpha 0 → .30 in 100, back out over 500.
 pub fn error_flash(ms: f32) -> f32 {
-    if ms < 100. { 0.3 * span(ms, 0., 100.) } else { 0.3 * (1. - out_quint(span(ms, 100., 500.))) }
+    if ms < 100. {
+        0.3 * span(ms, 0., 100.)
+    } else {
+        0.3 * (1. - out_quint(span(ms, 100., 500.)))
+    }
 }
 
 #[cfg(test)]
@@ -776,13 +960,29 @@ mod tests {
     }
 
     fn running() -> Tracker {
-        Tracker::Running(Entry { id: 1, start_ms: 0, ..Default::default() })
+        Tracker::Running(Entry {
+            id: 1,
+            start_ms: 0,
+            ..Default::default()
+        })
     }
 
     #[test]
     fn description_prefers_a_real_branch() {
-        assert_eq!(prefill_description("Fix login", "feat/login-refresh"), Prefill { text: "feat/login-refresh".into(), from_branch: true });
-        assert_eq!(prefill_description("Fix login", "main"), Prefill { text: "Fix login".into(), from_branch: false });
+        assert_eq!(
+            prefill_description("Fix login", "feat/login-refresh"),
+            Prefill {
+                text: "feat/login-refresh".into(),
+                from_branch: true
+            }
+        );
+        assert_eq!(
+            prefill_description("Fix login", "main"),
+            Prefill {
+                text: "Fix login".into(),
+                from_branch: false
+            }
+        );
         assert_eq!(prefill_description("New chat", "").text, "");
     }
 
@@ -796,10 +996,19 @@ mod tests {
         m.remember(Some("/a"), &p(3, "C"));
         m.remember(None, &p(2, "B"));
         m.remember(None, &p(4, "D"));
-        assert_eq!(m.recent.iter().map(|p| p.id).collect::<Vec<_>>(), vec![4, 2, 3], "newest first, no repeats, three");
+        assert_eq!(
+            m.recent.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![4, 2, 3],
+            "newest first, no repeats, three"
+        );
         assert_eq!(m.project_for(Some("/a")), Some(p(3, "C")));
         assert_eq!(m.project_for(Some("/zz")), Some(p(4, "D")));
-        m.stats_seen = Some(StatsSeen { day_ms: 5, today_h: 1., week_h: 2., period_h: 3. });
+        m.stats_seen = Some(StatsSeen {
+            day_ms: 5,
+            today_h: 1.,
+            week_h: 2.,
+            period_h: 3.,
+        });
         m.save(&dir);
         assert_eq!(Memory::load(&dir), m);
         let _ = std::fs::remove_dir_all(&dir);
@@ -813,24 +1022,64 @@ mod tests {
         assert_eq!(repo_label(&repo), "resona/web-revamp");
         assert_eq!(repo_label("/w/scratch/"), "scratch");
 
-        let running = |id| Tracker::Running(Entry { project: Some(p(id, "x")), start_ms: 0, ..Default::default() });
+        let running = |id| {
+            Tracker::Running(Entry {
+                project: Some(p(id, "x")),
+                start_ms: 0,
+                ..Default::default()
+            })
+        };
         let min = 60_000;
         let mut m = Memory::default();
         let now = 10 * 3_600_000;
-        assert_eq!(m.switch_suggestion(&running(222), &repo, now - 10 * min, now), None, "unlinked repo: no guess");
+        assert_eq!(
+            m.switch_suggestion(&running(222), &repo, now - 10 * min, now),
+            None,
+            "unlinked repo: no guess"
+        );
         m.map_repo(Some(&repo), &p(178, "Resona - Web Revamp"));
-        assert_eq!(m.switch_suggestion(&running(222), &repo, now - 10 * min, now), Some(p(178, "Resona - Web Revamp")));
-        assert_eq!(m.switch_suggestion(&running(178), &repo, now - 10 * min, now), None, "already on it");
-        assert_eq!(m.switch_suggestion(&Tracker::Idle, &repo, now - 10 * min, now), None, "idle is the clock-in nudge's job");
-        assert_eq!(m.switch_suggestion(&running(222), &repo, now - 4 * min, now), None, "under five minutes");
+        assert_eq!(
+            m.switch_suggestion(&running(222), &repo, now - 10 * min, now),
+            Some(p(178, "Resona - Web Revamp"))
+        );
+        assert_eq!(
+            m.switch_suggestion(&running(178), &repo, now - 10 * min, now),
+            None,
+            "already on it"
+        );
+        assert_eq!(
+            m.switch_suggestion(&Tracker::Idle, &repo, now - 10 * min, now),
+            None,
+            "idle is the clock-in nudge's job"
+        );
+        assert_eq!(
+            m.switch_suggestion(&running(222), &repo, now - 4 * min, now),
+            None,
+            "under five minutes"
+        );
         m.switch_asked.insert(repo.clone(), now - 30 * min);
-        assert_eq!(m.switch_suggestion(&running(222), &repo, now - 10 * min, now), None, "cooling down");
-        assert!(m.switch_suggestion(&running(222), &repo, now - 10 * min, now + 2 * 3_600_000).is_some(), "asks again later");
+        assert_eq!(
+            m.switch_suggestion(&running(222), &repo, now - 10 * min, now),
+            None,
+            "cooling down"
+        );
+        assert!(
+            m.switch_suggestion(&running(222), &repo, now - 10 * min, now + 2 * 3_600_000)
+                .is_some(),
+            "asks again later"
+        );
         m.switch_asked.clear();
         m.repo_ignored.push(repo.clone());
-        assert_eq!(m.switch_suggestion(&running(222), &repo, now - 10 * min, now), None, "don't ask");
+        assert_eq!(
+            m.switch_suggestion(&running(222), &repo, now - 10 * min, now),
+            None,
+            "don't ask"
+        );
         m.map_repo(Some(&repo), &p(203, "Resona Maintenance"));
-        assert!(m.repo_ignored.is_empty(), "a new clock-in from the repo re-enables it");
+        assert!(
+            m.repo_ignored.is_empty(),
+            "a new clock-in from the repo re-enables it"
+        );
         assert_eq!(m.repo_project[&repo].id, 203, "the latest clock-in wins");
 
         let dir = std::env::temp_dir().join(format!("keel-dotify-map-{}", uuid::Uuid::new_v4()));
@@ -841,9 +1090,21 @@ mod tests {
 
     #[test]
     fn list_sections_favorites_recent_all_without_repeats() {
-        let rows = list_rows(&[p(1, "A")], &[p(1, "A"), p(2, "B")], &[p(1, "A"), p(2, "B"), p(3, "C")], None);
+        let rows = list_rows(
+            &[p(1, "A")],
+            &[p(1, "A"), p(2, "B")],
+            &[p(1, "A"), p(2, "B"), p(3, "C")],
+            None,
+        );
         let got: Vec<(Section, i64)> = rows.iter().map(|r| (r.section, r.project.id)).collect();
-        assert_eq!(got, vec![(Section::Favorites, 1), (Section::Recent, 2), (Section::All, 3)]);
+        assert_eq!(
+            got,
+            vec![
+                (Section::Favorites, 1),
+                (Section::Recent, 2),
+                (Section::All, 3)
+            ]
+        );
         let flat = list_rows(&[p(1, "A")], &[], &[], Some(&[p(9, "Z")]));
         assert_eq!(flat[0].section, Section::Results);
         assert_eq!(step_highlight(None, 3, true), Some(0));
@@ -857,7 +1118,10 @@ mod tests {
         assert_eq!(match_ranges("Boilerplate - BE", "be"), vec![(14, 16)]);
         assert_eq!(match_ranges("Dotify Dot", "dot"), vec![(0, 3), (7, 10)]);
         // Not a substring: characters in order.
-        assert_eq!(match_ranges("DLTX Solutions", "dxs"), vec![(0, 1), (3, 4), (5, 6)]);
+        assert_eq!(
+            match_ranges("DLTX Solutions", "dxs"),
+            vec![(0, 1), (3, 4), (5, 6)]
+        );
         assert_eq!(match_ranges("Keel", "zz"), Vec::<(usize, usize)>::new());
         assert_eq!(match_ranges("Keel", "  "), Vec::<(usize, usize)>::new());
     }
@@ -884,7 +1148,12 @@ mod tests {
         let mut f = Flow::default();
         f.open(&running());
         assert_eq!(f.view, View::ClockedIn);
-        let stopped = Entry { id: 7, start_ms: 0, end_ms: Some(10), ..Default::default() };
+        let stopped = Entry {
+            id: 7,
+            start_ms: 0,
+            end_ms: Some(10),
+            ..Default::default()
+        };
         f.clocked_out(stopped.clone());
         assert_eq!(f.view, View::Result);
         f.tracker_changed(&Tracker::Idle);
@@ -897,7 +1166,11 @@ mod tests {
         f.open(&Tracker::Idle);
         assert_eq!((f.view, f.result.is_none()), (View::Idle, true));
         // Locked entries can't be edited.
-        f.clocked_out(Entry { locked: true, end_ms: Some(1), ..stopped });
+        f.clocked_out(Entry {
+            locked: true,
+            end_ms: Some(1),
+            ..stopped
+        });
         assert!(!f.edit());
         f.done(&Tracker::Idle);
         assert_eq!(f.view, View::Idle);
@@ -907,31 +1180,111 @@ mod tests {
     fn pill_states() {
         let off = DotifyError::Offline("x".into());
         let auth = DotifyError::Auth("x".into());
-        assert_eq!(pill_look(&Tracker::Idle, None, None, false, false), PillLook::Idle { badge: None });
-        assert_eq!(pill_look(&Tracker::Idle, None, None, false, true), PillLook::Idle { badge: Some(Badge::Amber) });
-        assert_eq!(pill_look(&Tracker::Idle, None, Some(&off), false, true), PillLook::Idle { badge: Some(Badge::Grey) });
-        assert_eq!(pill_look(&Tracker::Idle, None, Some(&auth), false, false), PillLook::Reconnect);
-        assert_eq!(pill_look(&running(), None, None, true, false), PillLook::Running { dot: Dot::Amber, dim: false, overtime: true });
-        assert_eq!(pill_look(&running(), None, Some(&off), true, false), PillLook::Running { dot: Dot::Grey, dim: true, overtime: false });
-        assert_eq!(pill_look(&running(), None, Some(&auth), false, false), PillLook::Running { dot: Dot::Red, dim: true, overtime: false });
-        assert_eq!(pill_look(&running(), Some(&Pending::ClockOut), None, false, false), PillLook::Pending { label: "Clocking out…" });
+        assert_eq!(
+            pill_look(&Tracker::Idle, None, None, false, false),
+            PillLook::Idle { badge: None }
+        );
+        assert_eq!(
+            pill_look(&Tracker::Idle, None, None, false, true),
+            PillLook::Idle {
+                badge: Some(Badge::Amber)
+            }
+        );
+        assert_eq!(
+            pill_look(&Tracker::Idle, None, Some(&off), false, true),
+            PillLook::Idle {
+                badge: Some(Badge::Grey)
+            }
+        );
+        assert_eq!(
+            pill_look(&Tracker::Idle, None, Some(&auth), false, false),
+            PillLook::Reconnect
+        );
+        assert_eq!(
+            pill_look(&running(), None, None, true, false),
+            PillLook::Running {
+                dot: Dot::Amber,
+                dim: false,
+                overtime: true
+            }
+        );
+        assert_eq!(
+            pill_look(&running(), None, Some(&off), true, false),
+            PillLook::Running {
+                dot: Dot::Grey,
+                dim: true,
+                overtime: false
+            }
+        );
+        assert_eq!(
+            pill_look(&running(), None, Some(&auth), false, false),
+            PillLook::Running {
+                dot: Dot::Red,
+                dim: true,
+                overtime: false
+            }
+        );
+        assert_eq!(
+            pill_look(&running(), Some(&Pending::ClockOut), None, false, false),
+            PillLook::Pending {
+                label: "Clocking out…"
+            }
+        );
         assert!(pill_look(&running(), None, None, false, false).breathes());
         assert!(!pill_look(&running(), None, Some(&off), false, false).breathes());
     }
 
     #[test]
     fn stats_animate_only_on_a_new_day_or_a_change() {
-        let seen = StatsSeen { day_ms: 100, today_h: 2.0, week_h: 30.0, period_h: 100.0 };
+        let seen = StatsSeen {
+            day_ms: 100,
+            today_h: 2.0,
+            week_h: 30.0,
+            period_h: 100.0,
+        };
         assert!(stats_animate(None, &seen));
-        assert!(!stats_animate(Some(&seen), &StatsSeen { today_h: 2.04, ..seen }), "sub-tenth drift doesn't count");
-        assert!(stats_animate(Some(&seen), &StatsSeen { week_h: 30.5, ..seen }));
-        assert!(stats_animate(Some(&seen), &StatsSeen { day_ms: 200, ..seen }));
+        assert!(
+            !stats_animate(
+                Some(&seen),
+                &StatsSeen {
+                    today_h: 2.04,
+                    ..seen
+                }
+            ),
+            "sub-tenth drift doesn't count"
+        );
+        assert!(stats_animate(
+            Some(&seen),
+            &StatsSeen {
+                week_h: 30.5,
+                ..seen
+            }
+        ));
+        assert!(stats_animate(
+            Some(&seen),
+            &StatsSeen {
+                day_ms: 200,
+                ..seen
+            }
+        ));
         // A bar starts empty only when animating.
         assert_eq!(bar_fill(0., 0, 0.8, true, false), 0.);
         assert_eq!(bar_fill(0., 0, 0.8, false, false), 0.8);
         assert!((bar_fill(5000., 2, 0.8, true, false) - 0.8).abs() < 1e-4);
-        let s = stats(Some(3.), Some(&Summary { week_h: 84., week_normal_h: 40., period_h: 20., period_normal_h: 160. }));
-        assert_eq!(s[0].unwrap().fill(), None, "Today has no target: value only");
+        let s = stats(
+            Some(3.),
+            Some(&Summary {
+                week_h: 84.,
+                week_normal_h: 40.,
+                period_h: 20.,
+                period_normal_h: 160.,
+            }),
+        );
+        assert_eq!(
+            s[0].unwrap().fill(),
+            None,
+            "Today has no target: value only"
+        );
         assert_eq!(s[1].unwrap().fill(), Some(1.));
         assert_eq!(s[1].unwrap().over_h(), Some(44.));
         assert_eq!(s[2].unwrap().over_h(), None);
@@ -943,7 +1296,13 @@ mod tests {
             assert_eq!(section_enter(ms, 3, true).dy, 0.);
             assert_eq!(row_enter(ms, 2, true).dy, 0.);
             assert!(section_enter(ms, 3, true).opacity == span(ms, 0., 120.));
-            assert_eq!(popover_enter(ms, false, true), Look { opacity: 1., dy: 0. });
+            assert_eq!(
+                popover_enter(ms, false, true),
+                Look {
+                    opacity: 1.,
+                    dy: 0.
+                }
+            );
             assert_eq!(view_enter(ms, true).dy, 0.);
             assert_eq!(breathe(ms + 5000., true), 1.);
             assert_eq!(bar_fill(ms, 1, 0.4, true, true), 0.4);
@@ -958,16 +1317,64 @@ mod tests {
     #[test]
     fn full_motion_curves_start_and_land() {
         // Same as the menus: 4 px from the pill's side, flipped when opening above.
-        assert_eq!(popover_enter(0., false, false), Look { opacity: 0., dy: -4. });
-        assert_eq!(popover_enter(0., true, false), Look { opacity: 0., dy: 4. });
-        assert_eq!(popover_enter(POPOVER_EXIT_MS, false, false), Look { opacity: 1., dy: 0. });
-        assert_eq!(popover_exit(POPOVER_EXIT_MS, false), Look { opacity: 0., dy: -4. });
-        assert_eq!(popover_exit(POPOVER_EXIT_MS, true), Look { opacity: 0., dy: 4. });
-        assert_eq!(section_enter(0., 2, false), Look { opacity: 0., dy: 6. });
-        assert_eq!(section_enter(section_delay(2) + ENTER_MS, 2, false).opacity, 1.);
+        assert_eq!(
+            popover_enter(0., false, false),
+            Look {
+                opacity: 0.,
+                dy: -4.
+            }
+        );
+        assert_eq!(
+            popover_enter(0., true, false),
+            Look {
+                opacity: 0.,
+                dy: 4.
+            }
+        );
+        assert_eq!(
+            popover_enter(POPOVER_EXIT_MS, false, false),
+            Look {
+                opacity: 1.,
+                dy: 0.
+            }
+        );
+        assert_eq!(
+            popover_exit(POPOVER_EXIT_MS, false),
+            Look {
+                opacity: 0.,
+                dy: -4.
+            }
+        );
+        assert_eq!(
+            popover_exit(POPOVER_EXIT_MS, true),
+            Look {
+                opacity: 0.,
+                dy: 4.
+            }
+        );
+        assert_eq!(
+            section_enter(0., 2, false),
+            Look {
+                opacity: 0.,
+                dy: 6.
+            }
+        );
+        assert_eq!(
+            section_enter(section_delay(2) + ENTER_MS, 2, false).opacity,
+            1.
+        );
         // Nothing pops in at full opacity before its slot, rows past 8 included.
-        assert_eq!(row_enter(section_delay(LIST_SECTION) - 1., 20, false).opacity, 0.);
-        assert_eq!(row_enter(ENTRY_DONE_MS, 20, false), Look { opacity: 1., dy: 0. });
+        assert_eq!(
+            row_enter(section_delay(LIST_SECTION) - 1., 20, false).opacity,
+            0.
+        );
+        assert_eq!(
+            row_enter(ENTRY_DONE_MS, 20, false),
+            Look {
+                opacity: 1.,
+                dy: 0.
+            }
+        );
         assert_eq!(row_enter(0., 0, false).dy, 4.);
         // One eased progress drives both channels.
         let l = section_enter(section_delay(1) + 60., 1, false);

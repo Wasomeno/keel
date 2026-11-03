@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Bounds, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, ScrollDelta, Styled, div,
-    point, px, size,
+    Bounds, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point,
+    ScrollDelta, Styled, div, point, px, size,
 };
 use keel_theme::Tokens;
 
@@ -35,7 +35,13 @@ pub struct Viewport {
 
 impl Default for Viewport {
     fn default() -> Self {
-        Self { zoom: 1., pan: Point::default(), bounds: Bounds::default(), drag: None, moved: Instant::now() }
+        Self {
+            zoom: 1.,
+            pan: Point::default(),
+            bounds: Bounds::default(),
+            drag: None,
+            moved: Instant::now(),
+        }
     }
 }
 
@@ -44,7 +50,8 @@ pub type SharedViewport = Rc<RefCell<Viewport>>;
 impl Viewport {
     /// Diagram px → screen px.
     pub fn scale(&self, (w, h): (f32, f32)) -> f32 {
-        let fit = (f32::from(self.bounds.size.width) / w).min(f32::from(self.bounds.size.height) / h);
+        let fit =
+            (f32::from(self.bounds.size.width) / w).min(f32::from(self.bounds.size.height) / h);
         fit * self.zoom
     }
 
@@ -111,10 +118,14 @@ pub fn viewer(source: String, t: Tokens, vp: SharedViewport) -> impl IntoElement
             window.refresh();
         })
         .on_pinch(move |e, window, _| {
-            pinch.borrow_mut().zoom_at(1. + e.delta, e.position, natural);
+            pinch
+                .borrow_mut()
+                .zoom_at(1. + e.delta, e.position, natural);
             window.refresh();
         })
-        .on_mouse_down(MouseButton::Left, move |e, _, _| down.borrow_mut().drag = Some(e.position))
+        .on_mouse_down(MouseButton::Left, move |e, _, _| {
+            down.borrow_mut().drag = Some(e.position)
+        })
         .on_mouse_move(move |e, window, _| {
             let mut vp = moving.borrow_mut();
             if let Some(last) = vp.drag {
@@ -127,7 +138,9 @@ pub fn viewer(source: String, t: Tokens, vp: SharedViewport) -> impl IntoElement
                 window.refresh();
             }
         })
-        .on_mouse_up(MouseButton::Left, move |_, _, _| up.borrow_mut().drag = None)
+        .on_mouse_up(MouseButton::Left, move |_, _, _| {
+            up.borrow_mut().drag = None
+        })
         .child(
             gpui::canvas(
                 |_, _, _| {},
@@ -164,7 +177,8 @@ fn paint(source: &str, t: &Tokens, vp: &Viewport, natural: (f32, f32), window: &
     };
 
     // Whole diagram, 2x the fit size: sharp enough for the first zoom steps.
-    let fit_w = f32::from(vp.bounds.size.width).min(natural.0 * f32::from(vp.bounds.size.height) / natural.1);
+    let fit_w = f32::from(vp.bounds.size.width)
+        .min(natural.0 * f32::from(vp.bounds.size.height) / natural.1);
     let base_w = (fit_w * sf * 2.).min(4096.);
     let base = draw(mermaid::raster(source, t, base_w, "viewer"), window);
 
@@ -173,7 +187,14 @@ fn paint(source: &str, t: &Tokens, vp: &Viewport, natural: (f32, f32), window: &
     if needs_crisp {
         if vp.moved.elapsed() < SETTLE {
             if let Some(shown) = mermaid::shown(source, t, "viewer-crisp") {
-                draw(mermaid::Raster { image: Some(shown), stale: None, pending: false }, window);
+                draw(
+                    mermaid::Raster {
+                        image: Some(shown),
+                        stale: None,
+                        pending: false,
+                    },
+                    window,
+                );
             }
             pending = true;
         } else if let Some(visible) = rect.intersect(&vp.bounds).nonempty() {
@@ -185,7 +206,10 @@ fn paint(source: &str, t: &Tokens, vp: &Viewport, natural: (f32, f32), window: &
                 pw: (f32::from(visible.size.width) * sf).ceil() as u32,
                 ph: (f32::from(visible.size.height) * sf).ceil() as u32,
             };
-            draw(mermaid::raster_region(source, t, region, "viewer-crisp"), window);
+            draw(
+                mermaid::raster_region(source, t, region, "viewer-crisp"),
+                window,
+            );
         }
     }
     if pending {
@@ -208,7 +232,10 @@ mod tests {
     use super::*;
 
     fn vp() -> Viewport {
-        Viewport { bounds: Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))), ..Default::default() }
+        Viewport {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -226,12 +253,18 @@ mod tests {
         let at = point(px(250.), px(300.));
         let under = |v: &Viewport| {
             let r = v.rect(natural);
-            ((at.x - r.origin.x) / v.scale(natural), (at.y - r.origin.y) / v.scale(natural))
+            (
+                (at.x - r.origin.x) / v.scale(natural),
+                (at.y - r.origin.y) / v.scale(natural),
+            )
         };
         let before = under(&v);
         v.zoom_at(3., at, natural);
         let after = under(&v);
-        assert!((before.0 - after.0).abs() < px(0.01) && (before.1 - after.1).abs() < px(0.01), "{before:?} {after:?}");
+        assert!(
+            (before.0 - after.0).abs() < px(0.01) && (before.1 - after.1).abs() < px(0.01),
+            "{before:?} {after:?}"
+        );
         assert_eq!(v.zoom, 3.);
     }
 

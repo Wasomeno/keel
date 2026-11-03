@@ -50,7 +50,11 @@ pub enum AttachError {
 }
 
 /// Copy the image at `source` into the store and describe it.
-pub fn attach_file(profile: &Path, source: &Path, name: Option<&str>) -> Result<Attachment, AttachError> {
+pub fn attach_file(
+    profile: &Path,
+    source: &Path,
+    name: Option<&str>,
+) -> Result<Attachment, AttachError> {
     let meta = fs::metadata(source).map_err(|_| AttachError::Unreadable)?;
     if !meta.is_file() {
         return Err(AttachError::Unreadable);
@@ -79,7 +83,11 @@ pub fn attach_file(profile: &Path, source: &Path, name: Option<&str>) -> Result<
         .map(str::to_string)
         .or_else(|| source.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "image".to_string());
-    Ok(Attachment { id, name, mime: mime.to_string() })
+    Ok(Attachment {
+        id,
+        name,
+        mime: mime.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -117,9 +125,18 @@ mod tests {
         let root = tmp("reject");
         let text = root.join("notes.png");
         fs::write(&text, b"just text, named like an image").unwrap();
-        assert_eq!(attach_file(&root, &text, None), Err(AttachError::NotAnImage));
-        assert_eq!(attach_file(&root, &root, None), Err(AttachError::Unreadable));
-        assert_eq!(attach_file(&root, &root.join("missing.png"), None), Err(AttachError::Unreadable));
+        assert_eq!(
+            attach_file(&root, &text, None),
+            Err(AttachError::NotAnImage)
+        );
+        assert_eq!(
+            attach_file(&root, &root, None),
+            Err(AttachError::Unreadable)
+        );
+        assert_eq!(
+            attach_file(&root, &root.join("missing.png"), None),
+            Err(AttachError::Unreadable)
+        );
         assert!(path(&root, "../../etc/passwd").is_none());
         assert_eq!(sniff_mime(b"GIF89a.."), Some("image/gif"));
         assert_eq!(sniff_mime(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));

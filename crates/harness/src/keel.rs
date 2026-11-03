@@ -33,6 +33,10 @@ static PI_AGENT_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub fn set_pi_agent_dir(data_dir: &Path) {
     let dir = KeelProfile::home(data_dir).join("agent");
     let _ = std::fs::create_dir_all(&dir);
+    let legacy_skill = dir.join("skills/indonesian-natural");
+    if legacy_skill.is_dir() {
+        let _ = std::fs::remove_dir_all(&legacy_skill);
+    }
     let _ = PI_AGENT_DIR.set(dir);
 }
 
@@ -113,6 +117,11 @@ pub(crate) fn login_extension() -> std::io::Result<PathBuf> {
 /// for bundled folders that are gone (an older app location). Other
 /// entries and settings are left alone.
 pub(crate) fn register_bundled_packages(exe: &Path, agent: &Path) {
+    let legacy_skill = agent.join("skills/indonesian-natural");
+    if legacy_skill.is_dir() {
+        let _ = std::fs::remove_dir_all(&legacy_skill);
+    }
+
     let Some(bundle) = exe.parent().and_then(Path::parent).map(|root| root.join("pi-packages")) else {
         return;
     };
@@ -187,7 +196,24 @@ impl PiProfile {
 }
 
 /// Default system prompt additions for Keel's agent.
-pub const KEEL_SYSTEM_PROMPT: &str = "You are a problem-solving companion. Be plain and concise: use clear, simple words, short direct sentences, active voice, and avoid unnecessary filler. When a skill matches the task or the user's language, read it before you reply.";
+pub const KEEL_SYSTEM_PROMPT: &str = "\
+You are a problem-solving companion. Be plain and concise: use clear, simple words, \
+short direct sentences, active voice, and avoid unnecessary filler. When a skill matches \
+the task, read it before you reply.\n\n\
+When the user writes in Bahasa Indonesia (or asks for Indonesian text):\n\
+- Reply in natural, casual Bahasa Indonesia, sounding like a sharp coworker in chat: \
+santai tapi jelas, ramah tapi tidak lebay.\n\
+- Mirror the user's register:\n\
+  - Default (casual or unclear): aku / kamu with informal verbs (udah, nggak, aja, bikin, pakai).\n\
+  - User says gue / lo (or gw/lu): answer with gue / lo.\n\
+  - User is formal (saya, mohon, Bapak/Ibu): use saya, standard verbs, and drop the \"you\" pronoun where possible. Polite, never bureaucratic.\n\
+  - Never default to \"Anda\" unless the user uses it first.\n\
+- Short, varied sentences in active voice. Say who does what directly.\n\
+- Everyday verbs: \"ngecek\" / \"mengecek\" (not \"melakukan pengecekan terhadap\"), \"benerin\" / \"memperbaiki\" (not \"melakukan perbaikan pada\"), \"bisa\" (not \"dapat\"), \"pakai\" (not \"memanfaatkan\").\n\
+- Eliminate calques and bureaucratic filler: no \"yang mana\" or \"dimana\" as relative pronouns, no \"merupakan\" as the default \"is\", no stacked di- passives, no \"tersebut\" in every sentence.\n\
+- Technical terms stay in standard developer forms the way Indonesian devs say them (commit, push, deploy, branch, merge, build, bug, PR, test, error, log, config, repo). Attach affixes with a hyphen (di-push, error-nya, nge-build). Never touch code, identifiers, paths, commands, or quoted output.\n\
+- No cosplay slang (no wkwk, anjay, sob, mantul, gaskeun) and no boilerplate pleasantries (\"Semoga membantu!\", \"Di era digital ini\"). Start directly with the answer.\n\
+- Match length: short questions get short answers.";
 
 /// Keel's system prompt, extensions and tools on top of Pi.
 #[derive(Debug, Clone)]
@@ -303,8 +329,8 @@ mod tests {
 
     #[test]
     fn default_prompt_does_not_force_a_language() {
-        assert!(!KEEL_SYSTEM_PROMPT.contains("English"), "{KEEL_SYSTEM_PROMPT}");
         assert!(KEEL_SYSTEM_PROMPT.contains("concise"), "{KEEL_SYSTEM_PROMPT}");
+        assert!(KEEL_SYSTEM_PROMPT.contains("Bahasa Indonesia"), "{KEEL_SYSTEM_PROMPT}");
     }
 
     #[test]
@@ -344,8 +370,12 @@ mod tests {
             ),
         )
         .unwrap();
+        let legacy_skill = agent.join("skills/indonesian-natural");
+        std::fs::create_dir_all(&legacy_skill).unwrap();
+        assert!(legacy_skill.is_dir());
         register_bundled_packages(&exe, &agent);
         register_bundled_packages(&exe, &agent);
+        assert!(!legacy_skill.exists());
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["packages"], serde_json::json!(["npm:a", pkg.to_string_lossy()]));

@@ -110,7 +110,8 @@ static ACTIVE_WAKER_TX: Mutex<Option<Sender>> = Mutex::new(None);
 static CEF_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
-static LIBRARY_LOADER: std::sync::OnceLock<library_loader::LibraryLoader> = std::sync::OnceLock::new();
+static LIBRARY_LOADER: std::sync::OnceLock<library_loader::LibraryLoader> =
+    std::sync::OnceLock::new();
 
 /// Set up CEF once at app start.
 pub fn ensure_cef_initialized() {
@@ -161,14 +162,28 @@ pub fn ensure_cef_initialized() {
         cache_path: CefString::from(cache_path.as_str()),
         root_cache_path: CefString::from(cache_path.as_str()),
         persist_session_cookies: 1,
-        browser_subprocess_path: helper_path.as_deref().map(CefString::from).unwrap_or_default(),
-        framework_dir_path: framework_path.as_deref().map(CefString::from).unwrap_or_default(),
-        main_bundle_path: bundle_path.as_deref().map(CefString::from).unwrap_or_default(),
+        browser_subprocess_path: helper_path
+            .as_deref()
+            .map(CefString::from)
+            .unwrap_or_default(),
+        framework_dir_path: framework_path
+            .as_deref()
+            .map(CefString::from)
+            .unwrap_or_default(),
+        main_bundle_path: bundle_path
+            .as_deref()
+            .map(CefString::from)
+            .unwrap_or_default(),
         ..unsafe { std::mem::zeroed() }
     };
 
     let args = args::Args::new();
-    let code = initialize(Some(&args.as_main_args()), Some(&mut settings), Some(&mut app), std::ptr::null_mut());
+    let code = initialize(
+        Some(&args.as_main_args()),
+        Some(&mut settings),
+        Some(&mut app),
+        std::ptr::null_mut(),
+    );
     if code == 1 {
         CEF_INITIALIZED.store(true, Ordering::SeqCst);
         tracing::info!("CEF initialized successfully");
@@ -180,7 +195,10 @@ pub fn ensure_cef_initialized() {
 fn resolve_helper_path(exe: &Path) -> Option<String> {
     // If inside an app bundle:
     // target/KeelDebug.app/Contents/MacOS/keel -> target/KeelDebug.app/Contents/Frameworks/Keel Debug Helper.app/Contents/MacOS/keel-helper
-    let in_bundle = exe.parent().and_then(|m| m.parent()).map(|c| c.join("Frameworks/Keel Debug Helper.app/Contents/MacOS/keel-helper"));
+    let in_bundle = exe
+        .parent()
+        .and_then(|m| m.parent())
+        .map(|c| c.join("Frameworks/Keel Debug Helper.app/Contents/MacOS/keel-helper"));
     if let Some(p) = in_bundle.filter(|p| p.is_file()) {
         return Some(p.to_string_lossy().into_owned());
     }
@@ -193,19 +211,31 @@ fn resolve_helper_path(exe: &Path) -> Option<String> {
 }
 
 fn resolve_framework_path(exe: &Path) -> Option<String> {
-    let in_bundle = exe.parent().and_then(|m| m.parent()).map(|c| c.join("Frameworks/Chromium Embedded Framework.framework"));
+    let in_bundle = exe
+        .parent()
+        .and_then(|m| m.parent())
+        .map(|c| c.join("Frameworks/Chromium Embedded Framework.framework"));
     if let Some(p) = in_bundle.filter(|p| p.exists()) {
         return Some(p.to_string_lossy().into_owned());
     }
     let local = PathBuf::from(".cef/cef_macos_aarch64/Chromium Embedded Framework.framework");
     if local.exists() {
-        return Some(local.canonicalize().unwrap_or(local).to_string_lossy().into_owned());
+        return Some(
+            local
+                .canonicalize()
+                .unwrap_or(local)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     None
 }
 
 fn resolve_bundle_path(exe: &Path) -> Option<String> {
-    let app = exe.parent().and_then(|m| m.parent()).and_then(|c| c.parent());
+    let app = exe
+        .parent()
+        .and_then(|m| m.parent())
+        .and_then(|c| c.parent());
     if let Some(p) = app.filter(|p| p.extension().is_some_and(|e| e == "app")) {
         return Some(p.to_string_lossy().into_owned());
     }
@@ -214,11 +244,14 @@ fn resolve_bundle_path(exe: &Path) -> Option<String> {
 
 fn dirs_profile() -> PathBuf {
     #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/Keel/browser"));
+    let base = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Library/Application Support/Keel/browser"));
     #[cfg(not(target_os = "macos"))]
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(|h| PathBuf::from(h).join("Keel/browser"))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/Keel/browser")));
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/Keel/browser"))
+        });
     let dir = base.unwrap_or_else(|| PathBuf::from("/tmp/keel-browser"));
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -815,17 +848,27 @@ impl NativePage {
             agent_mode: false,
         }));
         let held_dialog = Arc::new(Mutex::new(None));
-        let cdp_callbacks: Arc<Mutex<HashMap<u64, CdpCallback>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cdp_callbacks: Arc<Mutex<HashMap<u64, CdpCallback>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let render = KeelRenderHandler::new(frame_state.clone(), tx.clone());
         let load = KeelLoadHandler::new(shared_state.clone(), tx.clone());
-        let display = KeelDisplayHandler::new(shared_state.clone(), tx.clone(), std::time::Instant::now());
+        let display =
+            KeelDisplayHandler::new(shared_state.clone(), tx.clone(), std::time::Instant::now());
         let life_span = KeelLifeSpanHandler::new(tx.clone());
         let jsdialog = KeelJsdialogHandler::new(held_dialog.clone(), tx.clone());
         let request = KeelRequestHandler::new(shared_state.clone(), tx.clone());
         let context_menu = KeelContextMenuHandler::new();
 
-        let mut client = KeelClient::new(render, load, display, life_span, jsdialog, request, context_menu);
+        let mut client = KeelClient::new(
+            render,
+            load,
+            display,
+            life_span,
+            jsdialog,
+            request,
+            context_menu,
+        );
 
         // Alloy + a null parent. Windowless rendering ignores Chrome style;
         // `set_as_windowless` is what actually marks the browser off-screen.
@@ -846,7 +889,8 @@ impl NativePage {
             Some(&browser_settings),
             None,
             None,
-        ).ok_or_else(|| "failed to create CEF browser".to_string())?;
+        )
+        .ok_or_else(|| "failed to create CEF browser".to_string())?;
 
         let (devtools_reg, devtools_obs) = if let Some(host) = browser.host() {
             let mut observer = KeelDevToolsObserver::new(cdp_callbacks.clone());
@@ -874,7 +918,10 @@ impl NativePage {
             _devtools_obs: devtools_obs,
             next_cdp_id: AtomicU64::new(1),
             scale: Cell::new(2.0),
-            size: Cell::new(((init_w as f32 * 2.).round() as u32, (init_h as f32 * 2.).round() as u32)),
+            size: Cell::new((
+                (init_w as f32 * 2.).round() as u32,
+                (init_h as f32 * 2.).round() as u32,
+            )),
             resizing: Cell::new(false),
             frame_rate: Cell::new(60),
             background: Cell::new(false),
@@ -965,7 +1012,11 @@ impl NativePage {
     pub fn set_agent(&self, on: bool, sites: &[String]) {
         let mut s = self.shared_state.lock().unwrap();
         s.agent_mode = on;
-        s.sites = if sites.is_empty() { None } else { Some(sites.to_vec()) };
+        s.sites = if sites.is_empty() {
+            None
+        } else {
+            Some(sites.to_vec())
+        };
     }
 
     pub fn set_scale_factor(&self, scale: f32) {
@@ -990,7 +1041,13 @@ impl NativePage {
         self.resizing.set(on);
     }
 
-    pub fn sync(&self, bounds: Bounds<Pixels>, _mask: Bounds<Pixels>, _alpha: f32, _passthrough: bool) {
+    pub fn sync(
+        &self,
+        bounds: Bounds<Pixels>,
+        _mask: Bounds<Pixels>,
+        _alpha: f32,
+        _passthrough: bool,
+    ) {
         self.origin.set(bounds.origin);
         let dip_w = f32::from(bounds.size.width).round().max(1.) as u32;
         let dip_h = f32::from(bounds.size.height).round().max(1.) as u32;
@@ -1080,14 +1137,14 @@ impl NativePage {
                 let fs = self.frame_state.lock().unwrap();
                 (fs.generation, !fs.buffer.is_empty())
             };
-            let ready = has_buf && (
-                (!is_loading && (cur_gen > start_gen || (i >= 15 && saw_loading) || i >= 40))
-                || (cur_gen > start_gen && i >= 20)
-                || i >= 80
-            );
+            let ready = has_buf
+                && ((!is_loading && (cur_gen > start_gen || (i >= 15 && saw_loading) || i >= 40))
+                    || (cur_gen > start_gen && i >= 20)
+                    || i >= 80);
             if ready {
                 let fs = self.frame_state.lock().unwrap();
-                let mut img = image::RgbaImage::from_raw(fs.buf_w, fs.buf_h, fs.buffer.clone()).ok_or("invalid buffer")?;
+                let mut img = image::RgbaImage::from_raw(fs.buf_w, fs.buf_h, fs.buffer.clone())
+                    .ok_or("invalid buffer")?;
                 // Buffer is BGRA, swap B and R for correct PNG colors:
                 for px in img.chunks_exact_mut(4) {
                     px.swap(0, 2);
@@ -1095,7 +1152,9 @@ impl NativePage {
                 drop(fs);
                 self.update_frame();
                 let mut bytes = std::io::Cursor::new(Vec::new());
-                image::DynamicImage::ImageRgba8(img).write_to(&mut bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+                image::DynamicImage::ImageRgba8(img)
+                    .write_to(&mut bytes, image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
                 return Ok(bytes.into_inner());
             }
             if let Some(host) = self.browser.host() {
@@ -1181,16 +1240,32 @@ impl NativePage {
 
     pub fn handle_key_down(&self, event: &gpui::KeyDownEvent) -> bool {
         let key = &event.keystroke.key;
-        if forwarded_key(event.keystroke.modifiers.platform, event.keystroke.modifiers.control, key) {
+        if forwarded_key(
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.control,
+            key,
+        ) {
             return false;
         }
         let vk = key_to_vk(key);
-        let ch = if key.chars().count() == 1 { key.chars().next().unwrap() } else { '\0' };
+        let ch = if key.chars().count() == 1 {
+            key.chars().next().unwrap()
+        } else {
+            '\0'
+        };
         let mut modifiers = 0u32;
-        if event.keystroke.modifiers.shift { modifiers |= 1 << 0; }
-        if event.keystroke.modifiers.control { modifiers |= 1 << 1; }
-        if event.keystroke.modifiers.alt { modifiers |= 1 << 2; }
-        if event.keystroke.modifiers.platform { modifiers |= 1 << 3; }
+        if event.keystroke.modifiers.shift {
+            modifiers |= 1 << 0;
+        }
+        if event.keystroke.modifiers.control {
+            modifiers |= 1 << 1;
+        }
+        if event.keystroke.modifiers.alt {
+            modifiers |= 1 << 2;
+        }
+        if event.keystroke.modifiers.platform {
+            modifiers |= 1 << 3;
+        }
 
         let key_event = KeyEvent {
             size: std::mem::size_of::<sys::_cef_key_event_t>(),
@@ -1203,8 +1278,14 @@ impl NativePage {
             unmodified_character: ch as u16,
             focus_on_editable_field: 0,
         };
-        let char_event = if ch != '\0' && !event.keystroke.modifiers.platform && !event.keystroke.modifiers.control {
-            Some(KeyEvent { type_: KeyEventType::CHAR, ..key_event })
+        let char_event = if ch != '\0'
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            Some(KeyEvent {
+                type_: KeyEventType::CHAR,
+                ..key_event
+            })
         } else {
             None
         };
@@ -1216,16 +1297,32 @@ impl NativePage {
 
     pub fn handle_key_up(&self, event: &gpui::KeyUpEvent) -> bool {
         let key = &event.keystroke.key;
-        if forwarded_key(event.keystroke.modifiers.platform, event.keystroke.modifiers.control, key) {
+        if forwarded_key(
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.control,
+            key,
+        ) {
             return false;
         }
         let vk = key_to_vk(key);
-        let ch = if key.chars().count() == 1 { key.chars().next().unwrap() } else { '\0' };
+        let ch = if key.chars().count() == 1 {
+            key.chars().next().unwrap()
+        } else {
+            '\0'
+        };
         let mut modifiers = 0u32;
-        if event.keystroke.modifiers.shift { modifiers |= 1 << 0; }
-        if event.keystroke.modifiers.control { modifiers |= 1 << 1; }
-        if event.keystroke.modifiers.alt { modifiers |= 1 << 2; }
-        if event.keystroke.modifiers.platform { modifiers |= 1 << 3; }
+        if event.keystroke.modifiers.shift {
+            modifiers |= 1 << 0;
+        }
+        if event.keystroke.modifiers.control {
+            modifiers |= 1 << 1;
+        }
+        if event.keystroke.modifiers.alt {
+            modifiers |= 1 << 2;
+        }
+        if event.keystroke.modifiers.platform {
+            modifiers |= 1 << 3;
+        }
 
         let key_event = KeyEvent {
             size: std::mem::size_of::<sys::_cef_key_event_t>(),
@@ -1282,7 +1379,11 @@ impl NativePage {
                     }
                 }
             }
-            let job = Box::new(Job { browser: self.browser.clone(), event, char_event });
+            let job = Box::new(Job {
+                browser: self.browser.clone(),
+                event,
+                char_event,
+            });
             mac_dispatch::after(Box::into_raw(job) as *mut std::ffi::c_void, fire);
         }
         #[cfg(not(target_os = "macos"))]
@@ -1320,53 +1421,61 @@ impl NativePage {
             AGENT_JS, code
         );
         let tx = self.tx.clone();
-        self.send_cdp("Runtime.evaluate", serde_json::json!({
-            "expression": expr,
-            "returnByValue": true,
-            "awaitPromise": true
-        }), move |res| {
-            let result = match res {
-                Ok(val) => {
-                    let v = val.get("result").and_then(|r| r.get("value"));
-                    match v {
-                        Some(serde_json::Value::String(s)) => Ok(s.clone()),
-                        Some(other) => Ok(other.to_string()),
-                        None => {
-                            if let Some(exc) = val.get("exceptionDetails") {
-                                Err(exc["text"].as_str().unwrap_or("JS exception").to_string())
-                            } else {
-                                Ok(String::new())
+        self.send_cdp(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
+            move |res| {
+                let result = match res {
+                    Ok(val) => {
+                        let v = val.get("result").and_then(|r| r.get("value"));
+                        match v {
+                            Some(serde_json::Value::String(s)) => Ok(s.clone()),
+                            Some(other) => Ok(other.to_string()),
+                            None => {
+                                if let Some(exc) = val.get("exceptionDetails") {
+                                    Err(exc["text"].as_str().unwrap_or("JS exception").to_string())
+                                } else {
+                                    Ok(String::new())
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => Err(e),
-            };
-            let _ = tx.send(NativeEvent::Eval(seq, result));
-        });
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(NativeEvent::Eval(seq, result));
+            },
+        );
     }
 
     pub fn eval_script(&self, seq: u64, script: &str) {
         let expr = format!("(function() {{ return {}; }})()", script);
         let tx = self.tx.clone();
-        self.send_cdp("Runtime.evaluate", serde_json::json!({
-            "expression": expr,
-            "returnByValue": true,
-            "awaitPromise": true
-        }), move |res| {
-            let result = match res {
-                Ok(val) => {
-                    let v = val.get("result").and_then(|r| r.get("value"));
-                    match v {
-                        Some(serde_json::Value::String(s)) => Ok(s.clone()),
-                        Some(other) => Ok(other.to_string()),
-                        None => Ok(String::new()),
+        self.send_cdp(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
+            move |res| {
+                let result = match res {
+                    Ok(val) => {
+                        let v = val.get("result").and_then(|r| r.get("value"));
+                        match v {
+                            Some(serde_json::Value::String(s)) => Ok(s.clone()),
+                            Some(other) => Ok(other.to_string()),
+                            None => Ok(String::new()),
+                        }
                     }
-                }
-                Err(e) => Err(e),
-            };
-            let _ = tx.send(NativeEvent::Eval(seq, result));
-        });
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(NativeEvent::Eval(seq, result));
+            },
+        );
     }
 
     pub fn request_screenshot(&self, full_page: bool) {
@@ -1389,7 +1498,10 @@ impl NativePage {
                     if let Some(b64) = val.get("data").and_then(|d| d.as_str()) {
                         match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
                             Ok(bytes) => {
-                                let w = if let Ok(img) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
+                                let w = if let Ok(img) = image::load_from_memory_with_format(
+                                    &bytes,
+                                    image::ImageFormat::Png,
+                                ) {
                                     img.width()
                                 } else {
                                     width
@@ -1410,56 +1522,76 @@ impl NativePage {
 
     pub fn request_page_size(&self) {
         let tx = self.tx.clone();
-        self.send_cdp("Runtime.evaluate", serde_json::json!({
-            "expression": PAGE_SIZE_JS,
-            "returnByValue": true,
-            "awaitPromise": true
-        }), move |res| {
-            let result = match res {
-                Ok(val) => {
-                    val.get("result").and_then(|r| r.get("value")).map_or_else(
+        self.send_cdp(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": PAGE_SIZE_JS,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
+            move |res| {
+                let result = match res {
+                    Ok(val) => val.get("result").and_then(|r| r.get("value")).map_or_else(
                         || Err("no page size returned".to_string()),
-                        |v| Ok(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())),
-                    )
-                }
-                Err(e) => Err(e),
-            };
-            let _ = tx.send(NativeEvent::PageSize(result));
-        });
+                        |v| {
+                            Ok(v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string()))
+                        },
+                    ),
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(NativeEvent::PageSize(result));
+            },
+        );
     }
 
     pub fn request_frame_scroll(&self, y: f64) {
         let code = format!("({})({})", FRAME_JS, y);
         let tx = self.tx.clone();
-        self.send_cdp("Runtime.evaluate", serde_json::json!({
-            "expression": code,
-            "returnByValue": true,
-            "awaitPromise": true
-        }), move |res| {
-            let result = match res {
-                Ok(val) => {
-                    val.get("result").and_then(|r| r.get("value")).map_or_else(
+        self.send_cdp(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": code,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
+            move |res| {
+                let result = match res {
+                    Ok(val) => val.get("result").and_then(|r| r.get("value")).map_or_else(
                         || Err("scroll failed".to_string()),
-                        |v| Ok(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())),
-                    )
-                }
-                Err(e) => Err(e),
-            };
-            let _ = tx.send(NativeEvent::Scrolled(result));
-        });
+                        |v| {
+                            Ok(v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string()))
+                        },
+                    ),
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(NativeEvent::Scrolled(result));
+            },
+        );
     }
 
     pub fn finish_full_page(&self, sx: f64, sy: f64) {
         let code = format!("({})({}, {})", RESTORE_JS, sx, sy);
-        self.send_cdp("Runtime.evaluate", serde_json::json!({
-            "expression": code
-        }), |_| {});
+        self.send_cdp(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": code
+            }),
+            |_| {},
+        );
     }
 
     pub fn hide_fixed(&self) {
-        self.send_cdp("Runtime.evaluate", serde_json::json!({
-            "expression": HIDE_FIXED_JS
-        }), |_| {});
+        self.send_cdp(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": HIDE_FIXED_JS
+            }),
+            |_| {},
+        );
     }
 
     pub fn history(&self, forward: bool) {
@@ -1541,7 +1673,12 @@ impl NativePage {
         })
     }
 
-    pub fn send_cdp_sync(&self, method: &str, params: serde_json::Value, timeout_ms: u64) -> Result<serde_json::Value, String> {
+    pub fn send_cdp_sync(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout_ms: u64,
+    ) -> Result<serde_json::Value, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.send_cdp(method, params, move |res| {
             let _ = tx.send(res);
@@ -1562,11 +1699,15 @@ impl NativePage {
             "(function() {{ if (!window.__keelAgent) {{ {} }}; return window.__keelAgent.{}; }})()",
             AGENT_JS, code
         );
-        let res = self.send_cdp_sync("Runtime.evaluate", serde_json::json!({
-            "expression": expr,
-            "returnByValue": true,
-            "awaitPromise": true
-        }), timeout_ms)?;
+        let res = self.send_cdp_sync(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
+            timeout_ms,
+        )?;
         let v = res.get("result").and_then(|r| r.get("value"));
         match v {
             Some(serde_json::Value::String(s)) => Ok(s.clone()),
@@ -1639,7 +1780,9 @@ fn urlencoding_simple(text: &str) -> String {
     let mut out = String::new();
     for b in text.bytes() {
         match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }

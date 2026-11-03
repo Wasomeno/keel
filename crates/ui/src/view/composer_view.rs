@@ -1,13 +1,13 @@
 //! Composer dock: text area, picker chips, primary Send / Steer / Stop.
 
+use crate::style::zpx;
 use gpui::{AnyElement, ClickEvent, Context, IntoElement, div, prelude::*, px};
 use keel_proto::{ChatStatus, PermissionMode};
 use keel_theme::Tokens;
-use crate::style::zpx;
 
 use super::{KeelWindow, floating_menu_at, menu_item, menu_label, menu_separator};
-use crate::icons::Icon;
 use crate::composer::{PrimaryButtonAction, compute_button_action};
+use crate::icons::Icon;
 use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_SM, RADIUS_XL, c};
 
 /// Send button colors at fill `x` (0 idle, 1 active): the idle end is the
@@ -15,7 +15,10 @@ use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_SM, RADIUS_XL, c};
 /// muted to the window color with it.
 fn send_look(x: f32, t: Tokens) -> (gpui::Hsla, gpui::Hsla) {
     let on_bg = c(t.text);
-    let off_bg = gpui::Hsla { a: on_bg.a * 0.35, ..on_bg };
+    let off_bg = gpui::Hsla {
+        a: on_bg.a * 0.35,
+        ..on_bg
+    };
     let bg = mix_hsla(off_bg, on_bg, x);
     let fg = mix_hsla(c(t.text_muted), c(t.text_on_accent), x);
     (bg, fg)
@@ -24,7 +27,12 @@ fn send_look(x: f32, t: Tokens) -> (gpui::Hsla, gpui::Hsla) {
 fn mix_hsla(from: gpui::Hsla, to: gpui::Hsla, at: f32) -> gpui::Hsla {
     let at = at.clamp(0., 1.);
     let m = |a: f32, b: f32| a + (b - a) * at;
-    gpui::hsla(m(from.h, to.h), m(from.s, to.s), m(from.l, to.l), m(from.a, to.a))
+    gpui::hsla(
+        m(from.h, to.h),
+        m(from.s, to.s),
+        m(from.l, to.l),
+        m(from.a, to.a),
+    )
 }
 
 /// Which picker menu is open. At most one. Model carries harness and
@@ -121,13 +129,20 @@ impl KeelWindow {
 
     /// Toggle `picker`; opening, a searchable one starts on a fresh,
     /// focused search.
-    pub(super) fn open_picker_with_search(&mut self, picker: Picker, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(super) fn open_picker_with_search(
+        &mut self,
+        picker: Picker,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         self.toggle_picker(picker, cx);
         if picker.searchable() && self.open_picker() == Some(picker) {
             self.picker_query.clear();
             self.picker_filter_task = None;
             let placeholder = match picker {
-                Picker::Model if !self.selected_harness.is_empty() => format!("Search {} models", self.harness_label()),
+                Picker::Model if !self.selected_harness.is_empty() => {
+                    format!("Search {} models", self.harness_label())
+                }
                 _ => picker.search_placeholder().to_string(),
             };
             self.picker_filter.update(cx, |s, cx| {
@@ -167,7 +182,10 @@ impl KeelWindow {
     /// branches right away (same frame); otherwise HEAD alone is asked for
     /// first, so the label lands before the full listing.
     fn load_branches(&mut self, cx: &mut Context<Self>) {
-        let (Some(space), Some(client)) = (self.state.target_space_for_new_session(), self.client.clone()) else {
+        let (Some(space), Some(client)) = (
+            self.state.target_space_for_new_session(),
+            self.client.clone(),
+        ) else {
             return;
         };
         let path = space.path;
@@ -182,7 +200,8 @@ impl KeelWindow {
         let cached = self.branch_cache.get(&path).cloned();
         self.branches_loading = cached.is_none();
         if let Some(info) = cached {
-            self.state.apply_branches(&path, info.branches, info.current, info.detached);
+            self.state
+                .apply_branches(&path, info.branches, info.current, info.detached);
         } else {
             let (client, path) = (client.clone(), path.clone());
             cx.spawn(async move |this, cx| {
@@ -193,7 +212,12 @@ impl KeelWindow {
                         return;
                     }
                     if let Ok(info) = info {
-                        this.state.apply_branches(&path, info.branches, info.current, info.detached);
+                        this.state.apply_branches(
+                            &path,
+                            info.branches,
+                            info.current,
+                            info.detached,
+                        );
                         cx.notify();
                     }
                 });
@@ -217,7 +241,8 @@ impl KeelWindow {
                 }
                 this.branches_loading = false;
                 // Same label as the cached one: no roll (the label dedupes).
-                this.state.apply_branches(&path, info.branches, info.current, info.detached);
+                this.state
+                    .apply_branches(&path, info.branches, info.current, info.detached);
                 cx.notify();
             });
         })
@@ -231,7 +256,9 @@ impl KeelWindow {
             return;
         };
         for path in paths {
-            if self.branch_cache.contains_key(&path) || !self.branch_prefetching.insert(path.clone()) {
+            if self.branch_cache.contains_key(&path)
+                || !self.branch_prefetching.insert(path.clone())
+            {
                 continue;
             }
             let client = client.clone();
@@ -293,22 +320,29 @@ impl KeelWindow {
         };
         let _fit_p = self.composer_fit_progress(window);
 
-        let attach = icon_chip("attach-btn", Icon::Paperclip, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.set_picker(None, cx);
-            this.pick_images(cx);
-        }));
+        let attach = icon_chip("attach-btn", Icon::Paperclip, t).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.set_picker(None, cx);
+                this.pick_images(cx);
+            },
+        ));
 
         let model_effort = {
             let model_open = open == Some(Picker::Model);
-            let model_menu = self.menu_phase(Picker::Model.menu_id(), model_open, cx).map(|leaving| self.render_picker_menu(Picker::Model, leaving, true, t, cx));
+            let model_menu = self
+                .menu_phase(Picker::Model.menu_id(), model_open, cx)
+                .map(|leaving| self.render_picker_menu(Picker::Model, leaving, true, t, cx));
             let model_cap = (!hero && fit.compact >= 2).then(|| f32::from(zpx(88.)));
             let model_label = self.model_roll_label("model-chip-roll", window, model_cap);
 
             let has_effort = self.effort_stops().len() > 1;
             let effort_open = self.show_effort_menu;
-            let effort_menu = has_effort.then(|| {
-                self.menu_phase(EFFORT_MENU_ID, effort_open, cx).map(|leaving| self.render_effort_menu(leaving, t, cx))
-            }).flatten();
+            let effort_menu = has_effort
+                .then(|| {
+                    self.menu_phase(EFFORT_MENU_ID, effort_open, cx)
+                        .map(|leaving| self.render_effort_menu(leaving, t, cx))
+                })
+                .flatten();
 
             let model_chip_bounds = self.model_chip_bounds.clone();
             let model_chip = div()
@@ -424,9 +458,15 @@ impl KeelWindow {
         // Permission mode: unified chip in bottom row for both hero and docked modes.
         let permission_chip_bounds = self.permission_chip_bounds.clone();
         let mut permission_chip = (self.permission_modes().len() > 1).then(|| {
-            let label = self.permission_roll_label("composer-permission-chip-roll", window, !hero && fit.compact >= 1);
+            let label = self.permission_roll_label(
+                "composer-permission-chip-roll",
+                window,
+                !hero && fit.compact >= 1,
+            );
             let is_open = self.show_permission_menu;
-            let menu = self.menu_phase(PERMISSION_MENU_ID, is_open, cx).map(|leaving| self.render_permission_menu(leaving, t, cx));
+            let menu = self
+                .menu_phase(PERMISSION_MENU_ID, is_open, cx)
+                .map(|leaving| self.render_permission_menu(leaving, t, cx));
             let mode = self.effective_permission();
             let full = mode == PermissionMode::FullAccess;
             div()
@@ -447,7 +487,11 @@ impl KeelWindow {
                     chip("permission-picker-btn", t, is_open)
                         .when(full, |d| d.text_color(c(t.warning)))
                         .child(label)
-                        .child(Icon::ChevronDown.el(zpx(10.)).text_color(c(if full { t.warning } else { t.text_faint })))
+                        .child(Icon::ChevronDown.el(zpx(10.)).text_color(c(if full {
+                            t.warning
+                        } else {
+                            t.text_faint
+                        })))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             if this.menu_just_dismissed(PERMISSION_MENU_ID) {
                                 return;
@@ -473,8 +517,16 @@ impl KeelWindow {
                     || !text.trim().is_empty()
                     || !self.pending_refs.is_empty()
                     || (has_images && action == PrimaryButtonAction::Send));
-            let icon = if action == PrimaryButtonAction::Stop { Icon::Stop } else { Icon::Send };
-            let fill = if action == PrimaryButtonAction::Stop { 1. } else { self.send_fill(enabled, window) };
+            let icon = if action == PrimaryButtonAction::Stop {
+                Icon::Stop
+            } else {
+                Icon::Send
+            };
+            let fill = if action == PrimaryButtonAction::Stop {
+                1.
+            } else {
+                self.send_fill(enabled, window)
+            };
             let (bg, fg) = send_look(fill, t);
             div()
                 .id("composer-primary-btn")
@@ -489,19 +541,33 @@ impl KeelWindow {
                 .bg(bg)
                 .text_color(fg)
                 .when(enabled, |s| s.cursor_pointer().hover(|s| s.opacity(0.85)))
-                .child(icon.el(zpx(if icon == Icon::Stop { 10. } else { 15. })).opacity(0.35 + 0.65 * fill))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.handle_primary_button(window, cx)))
+                .child(
+                    icon.el(zpx(if icon == Icon::Stop { 10. } else { 15. }))
+                        .opacity(0.35 + 0.65 * fill),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.handle_primary_button(window, cx)
+                }))
         };
 
-        let suggestion = text.is_empty().then(|| self.prompt_suggestion.clone()).flatten();
+        let suggestion = text
+            .is_empty()
+            .then(|| self.prompt_suggestion.clone())
+            .flatten();
         let hint = t.text_faint;
-        let input = div().id("composer-input").relative().flex_1().min_w_0().t_reading()
+        let input = div()
+            .id("composer-input")
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .t_reading()
             .map(|d| match suggestion {
                 Some(text) => d
                     .child(div().w_full().text_color(c(hint)).child(text))
                     .child(div().absolute().inset_0().child(self.composer.clone()))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.composer.update(cx, |input, cx| input.focus(window, cx));
+                        this.composer
+                            .update(cx, |input, cx| input.focus(window, cx));
                     })),
                 None => d.child(self.composer.clone()),
             });
@@ -546,16 +612,20 @@ impl KeelWindow {
                     cx.stop_propagation();
                 }
             }))
-            .capture_action(cx.listener(|this, enter: &gpui_base::input::Enter, window, cx| {
-                if !enter.shift && this.accept_mention(None, false, window, cx) {
-                    cx.stop_propagation();
-                }
-            }))
-            .capture_action(cx.listener(|this, _: &gpui_base::input::IndentInline, window, cx| {
-                if this.accept_mention(None, true, window, cx) {
-                    cx.stop_propagation();
-                }
-            }))
+            .capture_action(
+                cx.listener(|this, enter: &gpui_base::input::Enter, window, cx| {
+                    if !enter.shift && this.accept_mention(None, false, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .capture_action(
+                cx.listener(|this, _: &gpui_base::input::IndentInline, window, cx| {
+                    if this.accept_mention(None, true, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             // Backspace at the very start takes out the command card before it,
             // as it would a word.
             .capture_action(cx.listener(|this, _: &gpui_base::input::Backspace, _, cx| {
@@ -595,7 +665,10 @@ impl KeelWindow {
                 // lifting the stone card off the background smoothly without pops during transitions.
                 let shadow = c(t.shadow);
                 let layer = |y: f32, blur: f32, spread: f32, alpha: f32| gpui::BoxShadow {
-                    color: gpui::Hsla { a: shadow.a * alpha, ..shadow },
+                    color: gpui::Hsla {
+                        a: shadow.a * alpha,
+                        ..shadow
+                    },
                     offset: gpui::point(zpx(0.), zpx(y)),
                     blur_radius: zpx(blur),
                     spread_radius: zpx(spread),
@@ -617,11 +690,14 @@ impl KeelWindow {
             // Where the hero panel sits, so the drop to the dock starts from it.
             .when(hero, |d| {
                 d.child(
-                    gpui::canvas(move |bounds, _, _| hero_panel.set(Some(bounds)), |_, _, _, _| {})
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
+                    gpui::canvas(
+                        move |bounds, _, _| hero_panel.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
                 )
             })
             .when(!hero, |d| {
@@ -653,25 +729,28 @@ impl KeelWindow {
                     // One inset all round: the text, the paperclip's glyph and
                     // the send button's edge sit HERO_INSET in from the sides;
                     // the same padding above the text and below the controls.
-                    d.px(zpx(HERO_INSET)).pt(zpx(HERO_PAD_Y)).pb(zpx(HERO_PAD_Y)).gap(zpx(HERO_GAP)).child(
-                        input,
-                    ).child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            // Its 30 px hit area pads the 16 px glyph by 7 px:
-                            // pulled out so the glyph, not the box, lines up.
-                            .child(attach.ml(zpx(-ATTACH_GLYPH_PAD)))
-                            .children(permission_chip.take())
-                            .children(scope_chip.take())
-                            .child(div().flex_1())
-                            .child(model_effort)
-                            .child(primary),
-                    )
+                    d.px(zpx(HERO_INSET))
+                        .pt(zpx(HERO_PAD_Y))
+                        .pb(zpx(HERO_PAD_Y))
+                        .gap(zpx(HERO_GAP))
+                        .child(input)
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                // Its 30 px hit area pads the 16 px glyph by 7 px:
+                                // pulled out so the glyph, not the box, lines up.
+                                .child(attach.ml(zpx(-ATTACH_GLYPH_PAD)))
+                                .children(permission_chip.take())
+                                .children(scope_chip.take())
+                                .child(div().flex_1())
+                                .child(model_effort)
+                                .child(primary),
+                        )
                 } else {
                     let ctrl_w = self.composer_ctrl_w.clone();
                     let level = fit.compact as usize;
@@ -753,8 +832,14 @@ impl KeelWindow {
                 window.request_animation_frame();
                 let tab = self.render_hero_targets(None, window, t, cx);
                 panel
-                    .child(crate::motion::vanish(div().absolute().inset_0().child(tab), ("hero-tab-out", self.hero_gen as usize), reduced))
-                    .when(e > 0., |el| el.justify_end().min_h(px(natural + e)).mt(px(-e)))
+                    .child(crate::motion::vanish(
+                        div().absolute().inset_0().child(tab),
+                        ("hero-tab-out", self.hero_gen as usize),
+                        reduced,
+                    ))
+                    .when(e > 0., |el| {
+                        el.justify_end().min_h(px(natural + e)).mt(px(-e))
+                    })
                     .into_any_element()
             }
             None => panel.into_any_element(),
@@ -764,7 +849,11 @@ impl KeelWindow {
         // now lives in the session card (see `session_card`).
         // Docked, the panel spans the reading column's text (the column less
         // the rows' own px_4), so its edges sit on the transcript's.
-        let max = if hero { HERO_COMPOSER_WIDTH } else { self.column_max() - zpx(32.) };
+        let max = if hero {
+            HERO_COMPOSER_WIDTH
+        } else {
+            self.column_max() - zpx(32.)
+        };
         if !hero {
             self.composer_max.set(f32::from(max));
         }
@@ -776,27 +865,38 @@ impl KeelWindow {
         // On the hero, folder / branch / machine ride in a tab on the panel's
         // top edge. Drawn after the panel so it covers that stretch of border.
         let tab = hero.then(|| self.render_hero_targets(open, window, t, cx));
-        div().flex_none().w_full().px_4()// Room between the last message and the docked input.
+        div()
+            .flex_none()
+            .w_full()
+            .px_4() // Room between the last message and the docked input.
             // Symmetric, so the hero drop can land on the slot's center.
-            .when(!hero, |d| d.pb(zpx(16.)).pt(zpx(16.))).flex().justify_center().child(
-            width.child(
-                div()
-                    .relative()
-                    .w_full()
-                    .when(hero, |d| d.mt(zpx(TAB_HEIGHT)))
-                    .child(panel)
-                    .children(tab)
-                    .children((!hero).then(|| self.render_points(t, cx)))
-                    .children(self.render_top_left_accessory(hero, t, cx))
-                    .children(self.render_create_error(t, cx)),
-            ),
-        )
-        // The slot's inner width (inside px_4), for next frame's room check.
-        .when(!dropping, |d| d.child(
-            gpui::canvas(move |bounds, window, _| record_slot(&record, bounds, window), |_, _, _, _| {})
-                .absolute()
-                .inset_0(),
-        ))
+            .when(!hero, |d| d.pb(zpx(16.)).pt(zpx(16.)))
+            .flex()
+            .justify_center()
+            .child(
+                width.child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .when(hero, |d| d.mt(zpx(TAB_HEIGHT)))
+                        .child(panel)
+                        .children(tab)
+                        .children((!hero).then(|| self.render_points(t, cx)))
+                        .children(self.render_top_left_accessory(hero, t, cx))
+                        .children(self.render_create_error(t, cx)),
+                ),
+            )
+            // The slot's inner width (inside px_4), for next frame's room check.
+            .when(!dropping, |d| {
+                d.child(
+                    gpui::canvas(
+                        move |bounds, window, _| record_slot(&record, bounds, window),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
     }
 
     /// Accessory row above the docked composer's top-left: suggestion hint.
@@ -827,8 +927,13 @@ impl KeelWindow {
     /// The "use suggestion" hint above the docked composer's top-left.
     fn render_suggestion_hint(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui::AnimationExt as _;
-        let phase = self.menu_phase("prompt-suggestion-hint", self.can_accept_suggestion(cx), cx)?;
-        let shortcut = if cfg!(target_os = "macos") { "⌘⇧Space" } else { "Ctrl+Shift+Space" };
+        let phase =
+            self.menu_phase("prompt-suggestion-hint", self.can_accept_suggestion(cx), cx)?;
+        let shortcut = if cfg!(target_os = "macos") {
+            "⌘⇧Space"
+        } else {
+            "Ctrl+Shift+Space"
+        };
         let hint = div()
             .id("prompt-suggestion-hint")
             .px_2()
@@ -839,7 +944,9 @@ impl KeelWindow {
             .cursor_pointer()
             .hover(|d| d.text_color(c(t.text_muted)))
             .child(format!("{shortcut} to use suggestion"))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.accept_suggestion(window, cx)));
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.accept_suggestion(window, cx)),
+            );
         Some(match phase {
             _ if self.reduced() => hint.into_any_element(),
             None => hint
@@ -909,7 +1016,13 @@ impl KeelWindow {
                 gpui::anchored()
                     .anchor(gpui::Anchor::BottomRight)
                     .snap_to_window_with_margin(zpx(8.))
-                    .child(super::menu_motion(panel, "points-menu", true, leaving, self.reduced())),
+                    .child(super::menu_motion(
+                        panel,
+                        "points-menu",
+                        true,
+                        leaving,
+                        self.reduced(),
+                    )),
             )
             .with_priority(1)
             .into_any_element()
@@ -931,16 +1044,17 @@ impl KeelWindow {
             // flush with the pill's outer edge.
             .child(div().absolute().top(px(-1.)).right(px(-1.)).children(menu))
             .children(super::dev::GeoTrace::probe(&self.geo_trace, |g| &g.points))
-            .child(
-                div()
-                    .child(points_chip("points-menu-btn", Icon::List, open, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            .child(div().child(
+                points_chip("points-menu-btn", Icon::List, open, t).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| {
                         if this.menu_just_dismissed("points-menu") {
                             return;
                         }
                         this.show_points_menu = !this.show_points_menu;
                         cx.notify();
-                    }))),
-            )
+                    },
+                )),
+            ))
             .into_any_element()
     }
 
@@ -961,7 +1075,9 @@ impl KeelWindow {
                 let n = self.mention_leave_gen;
                 self.mention_leaving = Some((n, prev.clone()));
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(crate::motion::FAST + std::time::Duration::from_millis(20)).await;
+                    cx.background_executor()
+                        .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
+                        .await;
                     let _ = this.update(cx, |this, cx| {
                         if this.mention_leaving.as_ref().is_some_and(|(m, _)| *m == n) {
                             this.mention_leaving = None;
@@ -976,7 +1092,10 @@ impl KeelWindow {
         self.mention_shown = now.clone();
         match now {
             Some(m) => Some(self.render_mention_menu(m, None, t, cx)),
-            None => self.mention_leaving.clone().map(|(n, m)| self.render_mention_menu(m, Some(n), t, cx)),
+            None => self
+                .mention_leaving
+                .clone()
+                .map(|(n, m)| self.render_mention_menu(m, Some(n), t, cx)),
         }
     }
 
@@ -985,14 +1104,29 @@ impl KeelWindow {
     /// and folders. `/`: the harness's commands and skills. Click or
     /// Enter/Tab takes one. Rows cascade in when it opens, skeletons stand in
     /// while a list loads, and `leaving` draws its fade out after a close.
-    fn render_mention_menu(&mut self, mention: super::Mention, leaving: Option<u64>, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+    fn render_mention_menu(
+        &mut self,
+        mention: super::Mention,
+        leaving: Option<u64>,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let reduced = self.reduced();
         let root = self.mention_root();
-        let in_project = self.projects.mention_label(self.current_chat.as_deref(), root.as_deref()).is_some();
+        let in_project = self
+            .projects
+            .mention_label(self.current_chat.as_deref(), root.as_deref())
+            .is_some();
         let loading = if in_project {
-            self.projects.mention_loading(self.current_chat.as_deref(), root.as_deref(), &self.folder_paths, &self.folder_paths_loading)
+            self.projects.mention_loading(
+                self.current_chat.as_deref(),
+                root.as_deref(),
+                &self.folder_paths,
+                &self.folder_paths_loading,
+            )
         } else {
-            root.as_ref().is_some_and(|r| !self.folder_paths.contains_key(r))
+            root.as_ref()
+                .is_some_and(|r| !self.folder_paths.contains_key(r))
         };
         let has_files = in_project || root.is_some();
         let matches = self.mention_matches_for(&mention);
@@ -1012,10 +1146,20 @@ impl KeelWindow {
                 .when(!active, |d| d.hover(|s| s.bg(c(t.hover))))
         };
         let faint = |text: String| {
-            div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().t_small().text_color(c(t.text_faint)).child(text)
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .t_small()
+                .text_color(c(t.text_faint))
+                .child(text)
         };
-        let (mut issue_rows, mut file_rows, mut command_rows): (Vec<AnyElement>, Vec<AnyElement>, Vec<AnyElement>) =
-            (Vec::new(), Vec::new(), Vec::new());
+        let (mut issue_rows, mut file_rows, mut command_rows): (
+            Vec<AnyElement>,
+            Vec<AnyElement>,
+            Vec<AnyElement>,
+        ) = (Vec::new(), Vec::new(), Vec::new());
         for (ix, item) in matches.into_iter().enumerate() {
             let active = ix == mention.active;
             let pick = item.clone();
@@ -1026,24 +1170,58 @@ impl KeelWindow {
             match item {
                 super::MentionItem::Command(command) => command_rows.push(cascade_in(
                     row(format!("mention-cmd-{}", command.insert), active)
+                        .child(div().flex_none().text_color(c(t.text_faint)).child(
+                            if command.skill {
+                                Icon::Brain.el(zpx(13.))
+                            } else {
+                                Icon::Tool.el(zpx(13.))
+                            },
+                        ))
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(c(t.text_faint))
-                                .child(if command.skill { Icon::Brain.el(zpx(13.)) } else { Icon::Tool.el(zpx(13.)) }),
+                                .text_color(c(t.text))
+                                .child(command.insert.clone()),
                         )
-                        .child(div().flex_none().text_color(c(t.text)).child(command.insert.clone()))
                         .when(command.project, |d| {
-                            d.child(div().flex_none().px_1().rounded(zpx(3.)).bg(c(t.surface)).t_caption().text_color(c(t.text_faint)).child("project"))
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded(zpx(3.))
+                                    .bg(c(t.surface))
+                                    .t_caption()
+                                    .text_color(c(t.text_faint))
+                                    .child("project"),
+                            )
                         })
                         .child(faint(command.description))
                         .on_click(accept),
                 )),
                 super::MentionItem::Issue(issue) => issue_rows.push(cascade_in(
                     row(format!("mention-issue-{}", issue.iid), active)
-                        .child(div().flex_none().text_color(c(t.success)).child(Icon::Issue.el(zpx(13.))))
-                        .child(div().flex_none().t_small().text_color(c(t.text_faint)).child(format!("#{}", issue.iid)))
-                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(c(t.text)).child(issue.title))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(c(t.success))
+                                .child(Icon::Issue.el(zpx(13.))),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .t_small()
+                                .text_color(c(t.text_faint))
+                                .child(format!("#{}", issue.iid)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_color(c(t.text))
+                                .child(issue.title),
+                        )
                         .on_click(accept),
                 )),
                 super::MentionItem::Path(path) => {
@@ -1061,7 +1239,11 @@ impl KeelWindow {
                                     .text_color(c(if folder { t.accent } else { t.text_faint }))
                                     .child(Icon::for_path(&path).el(zpx(13.))),
                             )
-                            .child(div().flex_none().text_color(c(t.text)).child(if folder { format!("{name}/") } else { name }))
+                            .child(div().flex_none().text_color(c(t.text)).child(if folder {
+                                format!("{name}/")
+                            } else {
+                                name
+                            }))
                             .child(faint(dir))
                             .on_click(accept),
                     ));
@@ -1072,13 +1254,26 @@ impl KeelWindow {
         let width = if mention.slash {
             // `/`: the harness's commands and skills, nothing else.
             let harness = self.slash_harness();
-            let name = self.harnesses.iter().find(|h| h.id == harness).map(|h| h.display_name.clone()).unwrap_or(harness);
+            let name = self
+                .harnesses
+                .iter()
+                .find(|h| h.id == harness)
+                .map(|h| h.display_name.clone())
+                .unwrap_or(harness);
             items.push(menu_label(format!("Commands & skills · {name}"), t).into_any_element());
             if !self.commands.contains_key(&self.commands_key()) {
                 items.extend(skeleton_rows("mention-cmd-skel", 4, t, reduced));
             } else if command_rows.is_empty() {
                 items.push(
-                    menu_label(if mention.query.is_empty() { "None found for this harness" } else { "No matches" }, t).into_any_element(),
+                    menu_label(
+                        if mention.query.is_empty() {
+                            "None found for this harness"
+                        } else {
+                            "No matches"
+                        },
+                        t,
+                    )
+                    .into_any_element(),
                 );
             }
             items.extend(command_rows);
@@ -1098,7 +1293,13 @@ impl KeelWindow {
             let file_label = self
                 .projects
                 .mention_label(self.current_chat.as_deref(), root.as_deref())
-                .unwrap_or_else(|| if root.is_none() { "Pick a folder to reference its files".into() } else { "Reference a file".into() });
+                .unwrap_or_else(|| {
+                    if root.is_none() {
+                        "Pick a folder to reference its files".into()
+                    } else {
+                        "Reference a file".into()
+                    }
+                });
             items.push(menu_label(file_label, t).into_any_element());
             if has_files && loading {
                 items.extend(skeleton_rows("mention-file-skel", 4, t, reduced));
@@ -1112,7 +1313,16 @@ impl KeelWindow {
             this.mention = None;
             cx.notify();
         });
-        floating_menu_at("mention-menu", t, width, true, leaving, reduced, dismiss, items)
+        floating_menu_at(
+            "mention-menu",
+            t,
+            width,
+            true,
+            leaving,
+            reduced,
+            dismiss,
+            items,
+        )
     }
 
     /// Why the new chat could not be created, under the composer, until
@@ -1136,7 +1346,12 @@ impl KeelWindow {
                 .gap_2()
                 .t_small()
                 .text_color(c(t.text))
-                .child(div().flex_none().text_color(c(t.danger)).child(Icon::Alert.el(zpx(13.))))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(c(t.danger))
+                        .child(Icon::Alert.el(zpx(13.))),
+                )
                 .child(div().flex_1().min_w_0().child(message))
                 .child(
                     div()
@@ -1157,20 +1372,37 @@ impl KeelWindow {
 
     /// Where the new chat will run (folder, branch) and, optionally, the
     /// GitLab repo its issue lives in. Right-aligned above the hero composer.
-    fn render_hero_targets(&mut self, open: Option<Picker>, window: &gpui::Window, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+    fn render_hero_targets(
+        &mut self,
+        open: Option<Picker>,
+        window: &gpui::Window,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (space_name, space_path) = self
             .state
             .target_space_for_new_session()
             .map(|s| (s.name.clone(), s.path.clone()))
             .unwrap_or_else(|| ("Choose folder".into(), String::new()));
-        let space = self.projects.folder_chip((!space_path.is_empty()).then_some(space_path.as_str()), space_name);
+        let space = self.projects.folder_chip(
+            (!space_path.is_empty()).then_some(space_path.as_str()),
+            space_name,
+        );
         // While a new folder's branches load, the previous label holds
         // (dimmed), so a folder change is one roll: old branch → new branch.
         let branch_label = self.state.branch_chip_label().unwrap_or_else(|| {
-            if self.branch_label.now.is_empty() { "Branch".into() } else { self.branch_label.now.clone() }
+            if self.branch_label.now.is_empty() {
+                "Branch".into()
+            } else {
+                self.branch_label.now.clone()
+            }
         });
         let branch_label = self.branch_chip_label(branch_label, window);
-        let repo = self.issue_repo.as_ref().map(|(_, p)| p.name.clone()).unwrap_or_else(|| "Issue repo".into());
+        let repo = self
+            .issue_repo
+            .as_ref()
+            .map(|(_, p)| p.name.clone())
+            .unwrap_or_else(|| "Issue repo".into());
         let divider = || div().w(zpx(1.)).h(zpx(14.)).flex_none().bg(c(t.border));
         div()
             .absolute()
@@ -1190,11 +1422,38 @@ impl KeelWindow {
             .border_1()
             .border_b_0()
             .border_color(c(t.border))
-            .child(self.picker_chip(Picker::Folder, "folder-picker-btn", Some(Icon::Folder), space.into_any_element(), 180., open, t, cx))
+            .child(self.picker_chip(
+                Picker::Folder,
+                "folder-picker-btn",
+                Some(Icon::Folder),
+                space.into_any_element(),
+                180.,
+                open,
+                t,
+                cx,
+            ))
             .child(divider())
-            .child(self.picker_chip(Picker::Branch, "branch-picker-btn", Some(Icon::Branch), branch_label, BRANCH_LABEL_MAX, open, t, cx))
+            .child(self.picker_chip(
+                Picker::Branch,
+                "branch-picker-btn",
+                Some(Icon::Branch),
+                branch_label,
+                BRANCH_LABEL_MAX,
+                open,
+                t,
+                cx,
+            ))
             .child(divider())
-            .child(self.picker_chip(Picker::Repo, "repo-picker-btn", Some(Icon::GitLab), repo.into_any_element(), 180., open, t, cx))
+            .child(self.picker_chip(
+                Picker::Repo,
+                "repo-picker-btn",
+                Some(Icon::GitLab),
+                repo.into_any_element(),
+                180.,
+                open,
+                t,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -1209,14 +1468,35 @@ impl KeelWindow {
         let widths = self.chip_widths.clone();
         let key = item.key();
         let (icon, tint, tag, label) = match &item {
-            super::MentionItem::Command(cmd) => {
-                (if cmd.skill { Icon::Brain } else { Icon::Tool }, t.text_muted, None, cmd.name.clone())
-            }
-            super::MentionItem::Issue(i) => (Icon::FileText, t.success, Some(format!("#{}", i.iid)), i.title.clone()),
+            super::MentionItem::Command(cmd) => (
+                if cmd.skill { Icon::Brain } else { Icon::Tool },
+                t.text_muted,
+                None,
+                cmd.name.clone(),
+            ),
+            super::MentionItem::Issue(i) => (
+                Icon::FileText,
+                t.success,
+                Some(format!("#{}", i.iid)),
+                i.title.clone(),
+            ),
             super::MentionItem::Path(path) => {
-                let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+                let name = path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(path);
                 let folder = path.ends_with('/');
-                (Icon::for_path(path), if folder { t.accent } else { t.text_muted }, None, if folder { format!("{name}/") } else { name.to_string() })
+                (
+                    Icon::for_path(path),
+                    if folder { t.accent } else { t.text_muted },
+                    None,
+                    if folder {
+                        format!("{name}/")
+                    } else {
+                        name.to_string()
+                    },
+                )
             }
         };
         let exit = leaving.get(&key).copied();
@@ -1241,9 +1521,22 @@ impl KeelWindow {
             .border_1()
             .border_color(c(t.border))
             .t_small()
-            .child(div().flex_none().text_color(c(tint)).child(icon.el(zpx(13.))))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(tint))
+                    .child(icon.el(zpx(13.))),
+            )
             .children(tag.map(|tag| div().flex_none().text_color(c(t.text_faint)).child(tag)))
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(c(t.text)).child(label))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(c(t.text))
+                    .child(label),
+            )
             .child(
                 div()
                     .id(gpui::ElementId::Name(format!("ref-remove-{key}").into()))
@@ -1258,23 +1551,36 @@ impl KeelWindow {
                     .hover(|d| d.bg(c(t.hover)).text_color(c(t.text)))
                     .child(Icon::Close.el(zpx(11.)))
                     .when(exit.is_none(), |d| {
-                        d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.remove_ref(remove.clone(), cx)))
+                        d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.remove_ref(remove.clone(), cx)
+                        }))
                     }),
             )
             // Its painted width, for the fold when it leaves.
             .when(exit.is_none(), |d| {
                 let (widths, key) = (widths.clone(), key.clone());
                 d.child(
-                    gpui::canvas(move |bounds, _, _| {
-                        widths.borrow_mut().insert(key.clone(), f32::from(bounds.size.width));
-                    }, |_, _, _, _| {})
+                    gpui::canvas(
+                        move |bounds, _, _| {
+                            widths
+                                .borrow_mut()
+                                .insert(key.clone(), f32::from(bounds.size.width));
+                        },
+                        |_, _, _, _| {},
+                    )
                     .absolute()
                     .inset_0(),
                 )
             });
         match exit {
-            None => crate::motion::appear(chip, gpui::ElementId::Name(format!("ref-in-{key}").into()), crate::motion::BASE, 4., reduced)
-                .into_any_element(),
+            None => crate::motion::appear(
+                chip,
+                gpui::ElementId::Name(format!("ref-in-{key}").into()),
+                crate::motion::BASE,
+                4.,
+                reduced,
+            )
+            .into_any_element(),
             Some(n) => {
                 let full = width.unwrap_or(160.);
                 div()
@@ -1283,11 +1589,14 @@ impl KeelWindow {
                     .child(chip)
                     .with_animation(
                         gpui::ElementId::Name(format!("ref-out-{key}-{n}").into()),
-                        gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out),
+                        gpui::Animation::new(crate::motion::SLOW)
+                            .with_easing(crate::motion::ease_out),
                         move |el, d| {
                             // Gone from sight in the first half; the space closes
                             // over the whole run, taking the gap after it too.
-                            el.opacity((1. - d * 1.8).max(0.)).w(px(full * (1. - d))).mr(zpx(-CHIP_GAP * d))
+                            el.opacity((1. - d * 1.8).max(0.))
+                                .w(px(full * (1. - d)))
+                                .mr(zpx(-CHIP_GAP * d))
                         },
                     )
                     .into_any_element()
@@ -1298,16 +1607,25 @@ impl KeelWindow {
     /// Thumbnails of images waiting to be sent, with remove buttons. The row
     /// opens with the first image (or its spinner) and closes with the last,
     /// like the chips row, the last thumbnails staying put while it closes.
-    fn render_pending_images(&mut self, t: Tokens, hero: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_pending_images(
+        &mut self,
+        t: Tokens,
+        hero: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         use gpui::AnimationExt as _;
         let reduced = self.reduced();
         let closing = self.pending_images.is_empty() && self.attaching == 0;
         // Shown in place: what's attached, plus any thumbnail folding away
         // (`Some(exit number)`) back where it sat.
-        let mut images: Vec<_> = if closing { &self.images_leaving } else { &self.pending_images }
-            .iter()
-            .map(|i| (i, None))
-            .collect();
+        let mut images: Vec<_> = if closing {
+            &self.images_leaving
+        } else {
+            &self.pending_images
+        }
+        .iter()
+        .map(|i| (i, None))
+        .collect();
         if !closing {
             for (ix, image, n) in &self.images_folding {
                 images.insert((*ix).min(images.len()), (image, Some(*n)));
@@ -1337,9 +1655,15 @@ impl KeelWindow {
                     .border_color(c(t.border))
                     .cursor_pointer()
                     .when(exit.is_none(), |d| {
-                        d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_lightbox(super::Lightbox::Image(path.clone()), cx)))
+                        d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.open_lightbox(super::Lightbox::Image(path.clone()), cx)
+                        }))
                     })
-                    .child(gpui::img(image.path.clone()).size_full().object_fit(gpui::ObjectFit::Cover))
+                    .child(
+                        gpui::img(image.path.clone())
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover),
+                    )
                     .child(
                         div()
                             .id(gpui::ElementId::Name(format!("remove-{group}").into()))
@@ -1373,8 +1697,13 @@ impl KeelWindow {
                         .child(tile)
                         .with_animation(
                             ("image-out", n as usize),
-                            gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out),
-                            move |el, d| el.opacity((1. - d * 1.8).max(0.)).w(zpx(56. * (1. - d))).mr(zpx(-6. * d)),
+                            gpui::Animation::new(crate::motion::SLOW)
+                                .with_easing(crate::motion::ease_out),
+                            move |el, d| {
+                                el.opacity((1. - d * 1.8).max(0.))
+                                    .w(zpx(56. * (1. - d)))
+                                    .mr(zpx(-6. * d))
+                            },
                         )
                         .into_any_element(),
                 }
@@ -1390,7 +1719,11 @@ impl KeelWindow {
                         .border_1()
                         .border_color(c(t.border))
                         .text_color(c(t.text_faint))
-                        .child(crate::motion::spin(Icon::Spinner.el(zpx(16.)), "attach-spinner", reduced)),
+                        .child(crate::motion::spin(
+                            Icon::Spinner.el(zpx(16.)),
+                            "attach-spinner",
+                            reduced,
+                        )),
                 )
             });
         let sized = move |el, p| reveal_row(el, p, 56. + 4., hero);
@@ -1429,17 +1762,29 @@ impl KeelWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_open = open == Some(picker);
-        let menu = self.menu_phase(picker.menu_id(), is_open, cx).map(|leaving| self.render_picker_menu(picker, leaving, true, t, cx));
-        div()
-            .relative()
-            .children(menu)
-            .child(
-                chip(id, t, is_open)
-                    .when_some(icon, |d, icon| d.child(icon.el(zpx(13.))))
-                    .child(div().max_w(zpx(max_label)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
-                    .child(div().text_color(c(t.text_faint)).child(Icon::ChevronDown.el(zpx(12.))))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_picker_with_search(picker, window, cx))),
-            )
+        let menu = self
+            .menu_phase(picker.menu_id(), is_open, cx)
+            .map(|leaving| self.render_picker_menu(picker, leaving, true, t, cx));
+        div().relative().children(menu).child(
+            chip(id, t, is_open)
+                .when_some(icon, |d, icon| d.child(icon.el(zpx(13.))))
+                .child(
+                    div()
+                        .max_w(zpx(max_label))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_color(c(t.text_faint))
+                        .child(Icon::ChevronDown.el(zpx(12.))),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_picker_with_search(picker, window, cx)
+                })),
+        )
     }
 
     /// How filled the send button is, 0 idle to 1 active. The first paint
@@ -1467,7 +1812,12 @@ impl KeelWindow {
     /// bottom, a new line pushed them up at once, then they slid back down).
     /// Measured a frame late; a hero ↔ dock switch snaps (the drop has its
     /// own morph), as does reduced motion.
-    fn ease_input_height(&mut self, input: gpui::Stateful<gpui::Div>, hero: bool, window: &gpui::Window) -> gpui::Div {
+    fn ease_input_height(
+        &mut self,
+        input: gpui::Stateful<gpui::Div>,
+        hero: bool,
+        window: &gpui::Window,
+    ) -> gpui::Div {
         let now = std::time::Instant::now();
         let natural = self.composer_natural.clone();
         if self.composer_h_hero != hero {
@@ -1513,9 +1863,14 @@ impl KeelWindow {
                 if h.animating(now) {
                     window.request_animation_frame();
                 }
-                div().h(px(h.value_at(now).min(cap))).overflow_hidden().child(input)
+                div()
+                    .h(px(h.value_at(now).min(cap)))
+                    .overflow_hidden()
+                    .child(input)
             }
-            None => div().when(cap > 0., |d| d.max_h(px(cap)).overflow_hidden()).child(input),
+            None => div()
+                .when(cap > 0., |d| d.max_h(px(cap)).overflow_hidden())
+                .child(input),
         }
     }
 
@@ -1546,7 +1901,8 @@ impl KeelWindow {
 
         let roll = self.branch_label.roll as usize;
         let rolling = roll > 0 && !reduced;
-        let anim = || gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out);
+        let anim =
+            || gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out);
         // The width eases on an empty spacer; the labels are absolute
         // siblings over it. They must not be children of the width
         // animation: gpui keys an animation's children under its id, so a
@@ -1556,7 +1912,11 @@ impl KeelWindow {
         let spacer = if width.animating(now) && !reduced {
             let (from, to) = (width.from, width.to);
             spacer
-                .with_animation(("branch-chip-w", width.generation as usize), anim(), move |el, d| el.w(px(from + (to - from) * d)))
+                .with_animation(
+                    ("branch-chip-w", width.generation as usize),
+                    anim(),
+                    move |el, d| el.w(px(from + (to - from) * d)),
+                )
                 .into_any_element()
         } else {
             spacer.w(px(width.to)).into_any_element()
@@ -1575,86 +1935,160 @@ impl KeelWindow {
                 .text_ellipsis()
                 .child(text)
         };
-        let frame = div().relative().flex_none().h(zpx(ROLL_H)).overflow_hidden().child(spacer);
+        let frame = div()
+            .relative()
+            .flex_none()
+            .h(zpx(ROLL_H))
+            .overflow_hidden()
+            .child(spacer);
         if !rolling {
             return frame.child(line(label, target)).into_any_element();
         }
         frame
-            .child(line(label, target).with_animation(("branch-chip-roll", roll * 2 + 1), anim(), |el, d| {
-                el.top(zpx(ROLL_TRAVEL * (1. - d))).opacity(d)
-            }))
-            .child(line(self.branch_label.prev.clone(), self.branch_prev_w).with_animation(("branch-chip-roll", roll * 2), anim(), |el, d| {
-                // Gone by two thirds of the way, so the two labels never pile up.
-                el.top(zpx(-ROLL_TRAVEL * d)).opacity((1. - d * 1.5).max(0.))
-            }))
+            .child(line(label, target).with_animation(
+                ("branch-chip-roll", roll * 2 + 1),
+                anim(),
+                |el, d| el.top(zpx(ROLL_TRAVEL * (1. - d))).opacity(d),
+            ))
+            .child(
+                line(self.branch_label.prev.clone(), self.branch_prev_w).with_animation(
+                    ("branch-chip-roll", roll * 2),
+                    anim(),
+                    |el, d| {
+                        // Gone by two thirds of the way, so the two labels never pile up.
+                        el.top(zpx(-ROLL_TRAVEL * d))
+                            .opacity((1. - d * 1.5).max(0.))
+                    },
+                ),
+            )
             .into_any_element()
     }
 
     /// The effort levels the slider snaps to: the harness default first,
     /// then the model's levels, lowest to highest.
     pub(super) fn effort_stops(&self) -> Vec<String> {
-        std::iter::once(String::new()).chain(self.effort_levels()).collect()
+        std::iter::once(String::new())
+            .chain(self.effort_levels())
+            .collect()
     }
 
     /// Where the selected level sits on the slider, 0..1.
     pub(super) fn effort_fraction(&self) -> f32 {
         let stops = self.effort_stops();
-        stop_fraction(stops.iter().position(|s| *s == self.selected_effort).unwrap_or(0), stops.len())
+        stop_fraction(
+            stops
+                .iter()
+                .position(|s| *s == self.selected_effort)
+                .unwrap_or(0),
+            stops.len(),
+        )
     }
-
 
     /// The thinking-effort dropdown: one row per level, highest on top and
     /// the current one checked. Enters and leaves as one surface, exactly
     /// like the model picker (`floating_menu_at`'s motion): no row cascade.
-    fn render_effort_menu(&mut self, leaving: Option<u64>, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+    fn render_effort_menu(
+        &mut self,
+        leaving: Option<u64>,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let reduced = self.reduced();
         let stops = self.effort_stops();
         let mut items = vec![menu_label("Thinking effort", t).into_any_element()];
         // `i` is the level's rank, 0 the lowest.
         items.extend(stops.into_iter().enumerate().rev().map(|(i, level)| {
-            menu_item(format!("effort-{i}"), t, true, level == self.selected_effort)
-                .child(effort_label(&level))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.select_effort(level.clone(), cx);
-                    this.close_effort_menu(cx);
-                }))
-                .into_any_element()
+            menu_item(
+                format!("effort-{i}"),
+                t,
+                true,
+                level == self.selected_effort,
+            )
+            .child(effort_label(&level))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.select_effort(level.clone(), cx);
+                this.close_effort_menu(cx);
+            }))
+            .into_any_element()
         }));
         let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
             this.note_menu_dismissed(EFFORT_MENU_ID);
             this.close_effort_menu(cx);
         });
         let (anchor, at) = match self.effort_chip_bounds.get() {
-            Some(b) => (gpui::Anchor::BottomLeft, Some(gpui::point(b.left(), b.top()))),
+            Some(b) => (
+                gpui::Anchor::BottomLeft,
+                Some(gpui::point(b.left(), b.top())),
+            ),
             None => (gpui::Anchor::BottomLeft, None),
         };
-        super::floating_menu_positioned(EFFORT_MENU_ID, t, 180., anchor, at, true, leaving, reduced, dismiss, items)
+        super::floating_menu_positioned(
+            EFFORT_MENU_ID,
+            t,
+            180.,
+            anchor,
+            at,
+            true,
+            leaving,
+            reduced,
+            dismiss,
+            items,
+        )
     }
 
-    fn render_permission_menu(&mut self, leaving: Option<u64>, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+    fn render_permission_menu(
+        &mut self,
+        leaving: Option<u64>,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let reduced = self.reduced();
         let current = self.effective_permission();
         let mut items = vec![menu_label("Permissions", t).into_any_element()];
         items.extend(self.permission_modes().to_vec().into_iter().map(|mode| {
-            menu_item(format!("permission-{}", mode.as_str()), t, true, mode == current)
-                .child(permission_icon(mode).el(zpx(PERMISSION_ICON)))
-                .child(div().flex_1().child(permission_label(mode)))
-                .child(div().flex_none().text_color(c(t.text_faint)).child(permission_detail(mode)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.select_permission(mode, cx);
-                    this.close_permission_menu(cx);
-                }))
-                .into_any_element()
+            menu_item(
+                format!("permission-{}", mode.as_str()),
+                t,
+                true,
+                mode == current,
+            )
+            .child(permission_icon(mode).el(zpx(PERMISSION_ICON)))
+            .child(div().flex_1().child(permission_label(mode)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(t.text_faint))
+                    .child(permission_detail(mode)),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.select_permission(mode, cx);
+                this.close_permission_menu(cx);
+            }))
+            .into_any_element()
         }));
         let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
             this.note_menu_dismissed(PERMISSION_MENU_ID);
             this.close_permission_menu(cx);
         });
         let (anchor, at) = match self.permission_chip_bounds.get() {
-            Some(b) => (gpui::Anchor::BottomLeft, Some(gpui::point(b.left(), b.top()))),
+            Some(b) => (
+                gpui::Anchor::BottomLeft,
+                Some(gpui::point(b.left(), b.top())),
+            ),
             None => (gpui::Anchor::BottomLeft, None),
         };
-        super::floating_menu_positioned(PERMISSION_MENU_ID, t, 300., anchor, at, true, leaving, reduced, dismiss, items)
+        super::floating_menu_positioned(
+            PERMISSION_MENU_ID,
+            t,
+            300.,
+            anchor,
+            at,
+            true,
+            leaving,
+            reduced,
+            dismiss,
+            items,
+        )
     }
 
     /// The selected level's name, rolling when it changes: the old name slides
@@ -1664,7 +2098,15 @@ impl KeelWindow {
         use gpui::AnimationExt as _;
         let current = effort_label(&self.selected_effort);
         let line = |text: String| {
-            let d = div().absolute().inset_0().flex().items_center().whitespace_nowrap().overflow_hidden().text_ellipsis().child(text);
+            let d = div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(text);
             if right { d.justify_end() } else { d }
         };
         let frame = div().relative().w_full().h(zpx(ROLL_H)).overflow_hidden();
@@ -1675,15 +2117,22 @@ impl KeelWindow {
         // Up: new comes from below (+), old leaves upward (-). Down: mirrored.
         let travel = if up { ROLL_TRAVEL } else { -ROLL_TRAVEL };
         let n = self.effort_glide as usize;
-        let roll = || gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out);
+        let roll =
+            || gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out);
         frame
-            .child(line(effort_label(&self.effort_prev)).with_animation((id, n * 2), roll(), move |el, d| {
-                // Gone by two thirds of the way, so the two names never pile up.
-                el.top(zpx(-travel * d)).opacity((1. - d * 1.5).max(0.))
-            }))
-            .child(line(current).with_animation((id, n * 2 + 1), roll(), move |el, d| {
-                el.top(zpx(travel * (1. - d))).opacity(d)
-            }))
+            .child(line(effort_label(&self.effort_prev)).with_animation(
+                (id, n * 2),
+                roll(),
+                move |el, d| {
+                    // Gone by two thirds of the way, so the two names never pile up.
+                    el.top(zpx(-travel * d)).opacity((1. - d * 1.5).max(0.))
+                },
+            ))
+            .child(
+                line(current).with_animation((id, n * 2 + 1), roll(), move |el, d| {
+                    el.top(zpx(travel * (1. - d))).opacity(d)
+                }),
+            )
             .into_any_element()
     }
 
@@ -1692,42 +2141,85 @@ impl KeelWindow {
     /// in, upward for a model later in the list, downward for an earlier one.
     /// The chip's width eases to the new label's full width (see
     /// [`ChipWidth`]); only a row out of room squeezes it.
-    fn model_roll_label(&mut self, id: &'static str, window: &gpui::Window, cap: Option<f32>) -> AnyElement {
+    fn model_roll_label(
+        &mut self,
+        id: &'static str,
+        window: &gpui::Window,
+        cap: Option<f32>,
+    ) -> AnyElement {
         let current = self.model_label();
         let target = measure_label(window, &current, gpui::FontWeight::MEDIUM);
         let target = cap.map(|cap| target.min(cap)).unwrap_or(target);
         let prev = self.model_prev.clone();
         let (roll, up) = (self.model_roll, self.model_roll_up);
         let line = move |text: String| {
-            div().h_full().flex().items_center().child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(text))
+            div().h_full().flex().items_center().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(text),
+            )
         };
         let key = current.clone();
-        self.chip_label(ChipLabel::Model, id, &key, target, roll, up, line(current.clone()), line(prev))
+        self.chip_label(
+            ChipLabel::Model,
+            id,
+            &key,
+            target,
+            roll,
+            up,
+            line(current.clone()),
+            line(prev),
+        )
     }
 
     /// The permission chip's icon and name, rolling on a change like the
     /// model chip: upward toward Full access, downward toward Ask.
-    fn permission_roll_label(&mut self, id: &'static str, window: &gpui::Window, icon_only: bool) -> AnyElement {
+    fn permission_roll_label(
+        &mut self,
+        id: &'static str,
+        window: &gpui::Window,
+        icon_only: bool,
+    ) -> AnyElement {
         let row = |mode: PermissionMode| {
             div()
                 .flex()
                 .items_center()
                 .whitespace_nowrap()
                 .child(permission_icon(mode).el(zpx(PERMISSION_ICON)))
-                .when(!icon_only, |d| d.child(div().ml(zpx(PERMISSION_GAP)).child(permission_label(mode))))
+                .when(!icon_only, |d| {
+                    d.child(div().ml(zpx(PERMISSION_GAP)).child(permission_label(mode)))
+                })
         };
         let current = self.effective_permission();
         let prev = self.permission_prev;
         let target = if icon_only {
             f32::from(zpx(PERMISSION_ICON))
         } else {
-            f32::from(zpx(PERMISSION_ICON + PERMISSION_GAP)) + measure_label(window, permission_label(current), gpui::FontWeight::NORMAL)
+            f32::from(zpx(PERMISSION_ICON + PERMISSION_GAP))
+                + measure_label(window, permission_label(current), gpui::FontWeight::NORMAL)
         };
         let rank = |m: PermissionMode| PermissionMode::ALL.iter().position(|x| *x == m);
         let up = rank(current) >= rank(prev);
         let roll = self.permission_roll;
-        let key = if icon_only { format!("icon:{}", current.as_str()) } else { current.as_str().to_string() };
-        self.chip_label(ChipLabel::Permission, id, &key, target, roll, up, row(current), row(prev))
+        let key = if icon_only {
+            format!("icon:{}", current.as_str())
+        } else {
+            current.as_str().to_string()
+        };
+        self.chip_label(
+            ChipLabel::Permission,
+            id,
+            &key,
+            target,
+            roll,
+            up,
+            row(current),
+            row(prev),
+        )
     }
 
     /// A chip label whose width eases on an empty spacer while the labels
@@ -1755,37 +2247,59 @@ impl KeelWindow {
         };
         slot.update(text, target, now, !reduced);
         let (width, prev_w) = (slot.tween.expect("set by update"), slot.prev_w);
-        let anim = || gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out);
+        let anim =
+            || gpui::Animation::new(crate::motion::SLOW).with_easing(crate::motion::ease_out);
         let moving = width.animating(now) && !reduced;
         let spacer = div().h(zpx(ROLL_H));
         let spacer = if moving {
             let (from, to) = (width.from, width.to);
             spacer
-                .with_animation((which.width_id(), width.generation as usize), anim(), move |el, d| el.w(px(from + (to - from) * d)))
+                .with_animation(
+                    (which.width_id(), width.generation as usize),
+                    anim(),
+                    move |el, d| el.w(px(from + (to - from) * d)),
+                )
                 .into_any_element()
         } else {
             spacer.w(px(width.to)).into_any_element()
         };
-        let layer = |el: gpui::Div, w: f32| el.absolute().left_0().top_0().h_full().w(px(w)).overflow_hidden();
+        let layer = |el: gpui::Div, w: f32| {
+            el.absolute()
+                .left_0()
+                .top_0()
+                .h_full()
+                .w(px(w))
+                .overflow_hidden()
+        };
         // At rest the label is held to the frame, so a frame squeezed by its
         // row ends the text in an ellipsis; while the width eases, the label
         // keeps its own width and the frame reveals it.
         let now_layer = |el: gpui::Div| layer(el, target).when(!moving, |d| d.max_w_full());
         // Shrinks only when its row lets it (the model chip, out of room).
-        let frame = div().relative().flex_shrink(1.).min_w_0().h(zpx(ROLL_H)).overflow_hidden().child(spacer);
+        let frame = div()
+            .relative()
+            .flex_shrink(1.)
+            .min_w_0()
+            .h(zpx(ROLL_H))
+            .overflow_hidden()
+            .child(spacer);
         if roll == 0 || reduced {
             return frame.child(now_layer(now_el)).into_any_element();
         }
         let travel = if up { ROLL_TRAVEL } else { -ROLL_TRAVEL };
         let n = roll as usize;
         frame
-            .child(now_layer(now_el).with_animation((id, n * 2 + 1), anim(), move |el, d| {
-                el.top(zpx(travel * (1. - d))).opacity(d)
-            }))
-            .child(layer(old_el, prev_w).with_animation((id, n * 2), anim(), move |el, d| {
-                // Gone by two thirds of the way, so the two labels never pile up.
-                el.top(zpx(-travel * d)).opacity((1. - d * 1.5).max(0.))
-            }))
+            .child(
+                now_layer(now_el).with_animation((id, n * 2 + 1), anim(), move |el, d| {
+                    el.top(zpx(travel * (1. - d))).opacity(d)
+                }),
+            )
+            .child(
+                layer(old_el, prev_w).with_animation((id, n * 2), anim(), move |el, d| {
+                    // Gone by two thirds of the way, so the two labels never pile up.
+                    el.top(zpx(-travel * d)).opacity((1. - d * 1.5).max(0.))
+                }),
+            )
             .into_any_element()
     }
 
@@ -1806,7 +2320,12 @@ impl KeelWindow {
             .border_1()
             .border_color(c(t.border))
             .t_body()
-            .child(div().flex_none().text_color(c(t.text_faint)).child(icon.el(zpx(13.))))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(t.text_faint))
+                    .child(icon.el(zpx(13.))),
+            )
             .child(div().flex_1().min_w_0().child(self.picker_filter.clone()))
             .into_any_element()
     }
@@ -1814,7 +2333,14 @@ impl KeelWindow {
     /// A picker's menu; `leaving` renders its exit.
     /// `up`: opens above its anchor (the composer's pickers); the session
     /// card's branch picker opens below.
-    pub(super) fn render_picker_menu(&mut self, picker: Picker, leaving: Option<u64>, up: bool, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_picker_menu(
+        &mut self,
+        picker: Picker,
+        leaving: Option<u64>,
+        up: bool,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut items: Vec<AnyElement> = Vec::new();
         let id = picker.menu_id();
         let width = match picker {
@@ -1828,39 +2354,81 @@ impl KeelWindow {
                 items.extend(self.project_picker_rows(t, cx));
                 let current = self.state.target_space_for_new_session();
                 let no_project = self.state.data_dir.join("No project");
-                let is_no_project = |s: &crate::state::SpaceItem| std::path::Path::new(&s.path) == no_project;
+                let is_no_project =
+                    |s: &crate::state::SpaceItem| std::path::Path::new(&s.path) == no_project;
                 let none_current = current.as_ref().is_some_and(&is_no_project);
                 let current = current.map(|s| s.id);
                 let mut spaces: Vec<_> = self
                     .state
                     .spaces
                     .values()
-                    .filter(|s| !s.tombstoned && s.device_id == self.state.local_device_id && !is_no_project(s))
+                    .filter(|s| {
+                        !s.tombstoned
+                            && s.device_id == self.state.local_device_id
+                            && !is_no_project(s)
+                    })
                     .cloned()
                     .collect();
                 spaces.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-                let limit = if query.is_empty() { MENU_ROWS } else { MENU_SEARCH_ROWS };
-                let (rows, more) = filter_rows(&spaces, &query, limit, |s| [s.name.as_str(), s.path.as_str()]);
+                let limit = if query.is_empty() {
+                    MENU_ROWS
+                } else {
+                    MENU_SEARCH_ROWS
+                };
+                let (rows, more) = filter_rows(&spaces, &query, limit, |s| {
+                    [s.name.as_str(), s.path.as_str()]
+                });
                 self.prefetch_branches(rows.iter().map(|s| s.path.clone()).collect(), cx);
-                items.push(menu_label(if query.is_empty() { "Recent folders" } else { "Matches" }, t).into_any_element());
+                items.push(
+                    menu_label(
+                        if query.is_empty() {
+                            "Recent folders"
+                        } else {
+                            "Matches"
+                        },
+                        t,
+                    )
+                    .into_any_element(),
+                );
                 if rows.is_empty() {
                     items.push(if spaces.is_empty() && query.is_empty() {
-                        super::menu_empty_row(Icon::History, "No recent folders", t).into_any_element()
+                        super::menu_empty_row(Icon::History, "No recent folders", t)
+                            .into_any_element()
                     } else {
-                        menu_label(if spaces.is_empty() { "No folders yet" } else { "No folders match" }, t).into_any_element()
+                        menu_label(
+                            if spaces.is_empty() {
+                                "No folders yet"
+                            } else {
+                                "No folders match"
+                            },
+                            t,
+                        )
+                        .into_any_element()
                     });
                 }
                 for space in rows {
                     let id = space.id.clone();
-                    let row = menu_item(format!("folder-{}", space.id), t, true, current.as_deref() == Some(&space.id))
-                        .child(div().flex_none().text_color(c(t.text)).child(space.name.clone()))
-                        .child(faint_path(space.path.clone(), t))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let row = menu_item(
+                        format!("folder-{}", space.id),
+                        t,
+                        true,
+                        current.as_deref() == Some(&space.id),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(t.text))
+                            .child(space.name.clone()),
+                    )
+                    .child(faint_path(space.path.clone(), t))
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
                             this.state.new_chat_space = Some(id.clone());
                             this.state.reset_branch_for_folder();
                             this.create_error = None;
                             this.set_picker(None, cx);
-                        }));
+                        },
+                    ));
                     items.push(row.into_any_element());
                 }
                 if more > 0 {
@@ -1890,11 +2458,19 @@ impl KeelWindow {
             Picker::Repo => {
                 let reduced = self.reduced();
                 items.push(self.picker_search_box(Icon::GitLab, t));
-                let current = self.issue_repo.as_ref().map(|(host, p)| (host.clone(), p.id));
+                let current = self
+                    .issue_repo
+                    .as_ref()
+                    .map(|(host, p)| (host.clone(), p.id));
                 items.push(
                     menu_item("repo-none", t, true, current.is_none())
                         .child("None")
-                        .child(div().t_small().text_color(c(t.text_faint)).child("issue repo is optional"))
+                        .child(
+                            div()
+                                .t_small()
+                                .text_color(c(t.text_faint))
+                                .child("issue repo is optional"),
+                        )
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.set_picker(None, cx);
                             this.select_issue_repo(None, cx);
@@ -1903,37 +2479,60 @@ impl KeelWindow {
                 );
                 match self.repo_projects.clone() {
                     None => items.extend(skeleton_rows("repo", 4, t, reduced)),
-                    Some(Err(err)) => items.push(menu_label(format!("Couldn't load projects: {err}"), t).into_any_element()),
-                    Some(Ok(projects)) if projects.is_empty() => {
-                        items.push(menu_label("Connect GitLab in Settings to pick a repo", t).into_any_element())
-                    }
+                    Some(Err(err)) => items.push(
+                        menu_label(format!("Couldn't load projects: {err}"), t).into_any_element(),
+                    ),
+                    Some(Ok(projects)) if projects.is_empty() => items.push(
+                        menu_label("Connect GitLab in Settings to pick a repo", t)
+                            .into_any_element(),
+                    ),
                     Some(Ok(projects)) => {
                         let query = self.picker_query.clone();
-                        let limit = if query.is_empty() { MENU_ROWS } else { MENU_SEARCH_ROWS };
+                        let limit = if query.is_empty() {
+                            MENU_ROWS
+                        } else {
+                            MENU_SEARCH_ROWS
+                        };
                         let (rows, more) = super::gitlab::filter_projects(&projects, &query, limit);
-                        items.push(menu_label(if query.is_empty() { "Recent" } else { "Matches" }, t).into_any_element());
+                        items.push(
+                            menu_label(
+                                if query.is_empty() {
+                                    "Recent"
+                                } else {
+                                    "Matches"
+                                },
+                                t,
+                            )
+                            .into_any_element(),
+                        );
                         if rows.is_empty() {
                             items.push(menu_label("No repos match", t).into_any_element());
                         }
                         for (host, project) in rows {
                             let selected = current.as_ref() == Some(&(host.clone(), project.id));
                             let pick = (host.clone(), project.clone());
-                            let row = menu_item(format!("repo-{host}-{}", project.id), t, true, selected)
-                                .child(div().flex_none().text_color(c(t.text)).child(project.name.clone()))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .t_small()
-                                        .text_color(c(t.text_faint))
-                                        .child(project.path.clone()),
-                                )
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.set_picker(None, cx);
-                                    this.select_issue_repo(Some(pick.clone()), cx);
-                                }));
+                            let row =
+                                menu_item(format!("repo-{host}-{}", project.id), t, true, selected)
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(c(t.text))
+                                            .child(project.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .t_small()
+                                            .text_color(c(t.text_faint))
+                                            .child(project.path.clone()),
+                                    )
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.set_picker(None, cx);
+                                        this.select_issue_repo(Some(pick.clone()), cx);
+                                    }));
                             items.push(row.into_any_element());
                         }
                         if more > 0 {
@@ -1949,17 +2548,38 @@ impl KeelWindow {
                 // engine ever lists more (the test mock).
                 let choose = self.harnesses.len() > 1;
                 if choose {
-                    items.push(menu_label(if locked { "Harness · fixed for this chat" } else { "Harness · new chats" }, t).into_any_element());
+                    items.push(
+                        menu_label(
+                            if locked {
+                                "Harness · fixed for this chat"
+                            } else {
+                                "Harness · new chats"
+                            },
+                            t,
+                        )
+                        .into_any_element(),
+                    );
                 }
                 for h in self.harnesses.clone().into_iter().filter(|_| choose) {
                     let id = h.id.clone();
-                    let label = if h.installed { h.display_name.clone() } else { format!("{} (not installed)", h.display_name) };
+                    let label = if h.installed {
+                        h.display_name.clone()
+                    } else {
+                        format!("{} (not installed)", h.display_name)
+                    };
                     let pickable = h.installed && !locked;
-                    let mut row = menu_item(format!("harness-{}", h.id), t, pickable, h.id == self.selected_harness)
-                        .child(Icon::harness(&h.id).el(zpx(MENU_LOGO)))
-                        .child(label);
+                    let mut row = menu_item(
+                        format!("harness-{}", h.id),
+                        t,
+                        pickable,
+                        h.id == self.selected_harness,
+                    )
+                    .child(Icon::harness(&h.id).el(zpx(MENU_LOGO)))
+                    .child(label);
                     if pickable {
-                        row = row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select_harness(id.clone(), cx)));
+                        row = row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.select_harness(id.clone(), cx)
+                        }));
                     }
                     items.push(row.into_any_element());
                 }
@@ -1977,7 +2597,13 @@ impl KeelWindow {
                 let card = self.card_branch_menu();
                 let from_card = card.is_some();
                 let (selected, current, branches, loading, detached) = match card {
-                    Some(list) => (list.current.clone(), list.current, list.branches, list.loading, list.detached),
+                    Some(list) => (
+                        list.current.clone(),
+                        list.current,
+                        list.branches,
+                        list.loading,
+                        list.detached,
+                    ),
                     None => (
                         self.state.selected_branch.clone(),
                         self.state.current_branch.clone(),
@@ -1992,34 +2618,63 @@ impl KeelWindow {
                 } else if branches.is_empty() {
                     items.push(menu_label("No branches (not a git repo?)", t).into_any_element());
                 } else {
-                    let limit = if query.is_empty() { MENU_ROWS } else { MENU_SEARCH_ROWS };
+                    let limit = if query.is_empty() {
+                        MENU_ROWS
+                    } else {
+                        MENU_SEARCH_ROWS
+                    };
                     let (rows, more) = filter_rows(&branches, &query, limit, |b| [b.as_str()]);
                     if let Some(sha) = detached.filter(|_| query.is_empty()) {
-                        items.push(menu_label(format!("HEAD detached at {sha}"), t).into_any_element());
+                        items.push(
+                            menu_label(format!("HEAD detached at {sha}"), t).into_any_element(),
+                        );
                     }
-                    items.push(menu_label(if query.is_empty() { "Branches" } else { "Matches" }, t).into_any_element());
+                    items.push(
+                        menu_label(
+                            if query.is_empty() {
+                                "Branches"
+                            } else {
+                                "Matches"
+                            },
+                            t,
+                        )
+                        .into_any_element(),
+                    );
                     if rows.is_empty() {
                         items.push(menu_label("No branches match", t).into_any_element());
                     }
                     for name in rows {
                         let pick = name.clone();
                         let is_current = current.as_deref() == Some(name.as_str());
-                        let row = menu_item(format!("branch-option-{name}"), t, true, selected.as_deref() == Some(name.as_str()))
-                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
-                            // The checked-out branch: listed first, tagged.
-                            .when(is_current, |d| {
-                                d.child(
-                                    div()
-                                        .flex_none()
-                                        .px_1p5()
-                                        .rounded(crate::style::RADIUS_SM)
-                                        .bg(c(t.hover))
-                                        .t_caption()
-                                        .text_color(c(t.text_faint))
-                                        .child("current"),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let row = menu_item(
+                            format!("branch-option-{name}"),
+                            t,
+                            true,
+                            selected.as_deref() == Some(name.as_str()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(name.clone()),
+                        )
+                        // The checked-out branch: listed first, tagged.
+                        .when(is_current, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .px_1p5()
+                                    .rounded(crate::style::RADIUS_SM)
+                                    .bg(c(t.hover))
+                                    .t_caption()
+                                    .text_color(c(t.text_faint))
+                                    .child("current"),
+                            )
+                        })
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
                                 if from_card {
                                     this.card_pick_branch(pick.clone(), cx);
                                     return;
@@ -2027,7 +2682,8 @@ impl KeelWindow {
                                 this.state.set_branch(Some(pick.clone()));
                                 this.create_error = None;
                                 this.set_picker(None, cx);
-                            }));
+                            },
+                        ));
                         items.push(row.into_any_element());
                     }
                     if more > 0 {
@@ -2043,10 +2699,31 @@ impl KeelWindow {
         });
         if picker == Picker::Model {
             let (anchor, at) = match self.model_chip_bounds.get() {
-                Some(b) => (gpui::Anchor::BottomLeft, Some(gpui::point(b.left(), b.top()))),
-                None => (if up { gpui::Anchor::BottomLeft } else { gpui::Anchor::TopLeft }, None),
+                Some(b) => (
+                    gpui::Anchor::BottomLeft,
+                    Some(gpui::point(b.left(), b.top())),
+                ),
+                None => (
+                    if up {
+                        gpui::Anchor::BottomLeft
+                    } else {
+                        gpui::Anchor::TopLeft
+                    },
+                    None,
+                ),
             };
-            return super::model_picker::model_menu_shell(id, t, width, anchor, at, up, leaving, self.reduced(), dismiss, items);
+            return super::model_picker::model_menu_shell(
+                id,
+                t,
+                width,
+                anchor,
+                at,
+                up,
+                leaving,
+                self.reduced(),
+                dismiss,
+                items,
+            );
         }
         if picker == Picker::Branch && self.session_card.picking && self.current_chat.is_some() {
             let compact = self.session_card.compact;
@@ -2071,7 +2748,18 @@ impl KeelWindow {
                 }
                 None => (gpui::Anchor::TopLeft, None, 252.),
             };
-            return super::floating_menu_positioned(id, t, w, anchor, at, false, leaving, self.reduced(), dismiss, items);
+            return super::floating_menu_positioned(
+                id,
+                t,
+                w,
+                anchor,
+                at,
+                false,
+                leaving,
+                self.reduced(),
+                dismiss,
+                items,
+            );
         }
         floating_menu_at(id, t, width, up, leaving, self.reduced(), dismiss, items)
     }
@@ -2203,7 +2891,6 @@ fn permission_icon(mode: PermissionMode) -> Icon {
 /// (padding, icon, gaps and chevron take the rest).
 const BRANCH_LABEL_MAX: f32 = 271.;
 
-
 /// Width of `text` in the chips' small type, at the current zoom.
 fn measure_small_label(window: &gpui::Window, text: &str) -> f32 {
     measure_label(window, text, gpui::FontWeight::NORMAL)
@@ -2219,14 +2906,27 @@ fn measure_label(window: &gpui::Window, text: &str, weight: gpui::FontWeight) ->
     }
     let run = gpui::TextRun {
         len: text.len(),
-        font: gpui::Font { weight, ..gpui::font(crate::style::SANS) },
+        font: gpui::Font {
+            weight,
+            ..gpui::font(crate::style::SANS)
+        },
         color: gpui::black(),
         background_color: None,
         underline: None,
         strikethrough: None,
     };
     let size = zpx(crate::style::SMALL.size);
-    let width = f32::from(window.text_system().shape_line(gpui::SharedString::from(text.to_string()), size, &[run], None).width);
+    let width = f32::from(
+        window
+            .text_system()
+            .shape_line(
+                gpui::SharedString::from(text.to_string()),
+                size,
+                &[run],
+                None,
+            )
+            .width,
+    );
     // A pixel of slack so rounding never ellipsizes a label that fits.
     width.ceil() + 1.
 }
@@ -2241,7 +2941,11 @@ const EFFORT_CHIP_LABEL_W: f32 = 50.;
 
 /// An effort level as shown: "" is the harness default.
 fn effort_label(level: &str) -> String {
-    if level.is_empty() { "Default".into() } else { capitalize(level) }
+    if level.is_empty() {
+        "Default".into()
+    } else {
+        capitalize(level)
+    }
 }
 
 /// Stop `i` of `n` along a 0..1 track; a lone stop sits at the start.
@@ -2252,8 +2956,13 @@ fn stop_fraction(i: usize, n: usize) -> f32 {
 /// Record the composer slot's inner width (inside its px_4) from the slot's
 /// outer `bounds`. A refresh asked for mid-draw is dropped, so a change
 /// redraws on the next frame.
-pub(super) fn record_slot(record: &std::cell::Cell<f32>, bounds: gpui::Bounds<gpui::Pixels>, window: &mut gpui::Window) {
-    let inner = f32::from(bounds.size.width) - 2. * f32::from(gpui::rems(1.).to_pixels(window.rem_size()));
+pub(super) fn record_slot(
+    record: &std::cell::Cell<f32>,
+    bounds: gpui::Bounds<gpui::Pixels>,
+    window: &mut gpui::Window,
+) {
+    let inner =
+        f32::from(bounds.size.width) - 2. * f32::from(gpui::rems(1.).to_pixels(window.rem_size()));
     if (record.get() - inner).abs() > 0.5 {
         record.set(inner);
         window.request_animation_frame();
@@ -2277,7 +2986,13 @@ fn reveal_row(el: gpui::Div, p: f32, line: f32, hero: bool) -> gpui::Div {
         // cancels the gap leaves a negative outer height, which the layout
         // floors at zero when sizing the panel: 12 px too tall for the
         // first and last frame, and the text jumped.
-        return el.absolute().top_0().left_0().right_0().h_0().overflow_hidden();
+        return el
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h_0()
+            .overflow_hidden();
     }
     let height = (line * z * p).round().min(total);
     el.overflow_hidden()
@@ -2291,7 +3006,13 @@ fn reveal_row(el: gpui::Div, p: f32, line: f32, hero: bool) -> gpui::Div {
 fn skeleton_rows(prefix: &'static str, count: usize, t: Tokens, reduced: bool) -> Vec<AnyElement> {
     (0..count)
         .map(|i| {
-            let bar = |w: f32| div().h(zpx(10.)).w(zpx(w)).rounded(zpx(3.)).bg(c(t.surface));
+            let bar = |w: f32| {
+                div()
+                    .h(zpx(10.))
+                    .w(zpx(w))
+                    .rounded(zpx(3.))
+                    .bg(c(t.surface))
+            };
             let phase = i as f32 * 0.12;
             div()
                 .h(zpx(28.))
@@ -2301,8 +3022,20 @@ fn skeleton_rows(prefix: &'static str, count: usize, t: Tokens, reduced: bool) -
                 .items_center()
                 .gap_2()
                 .child(div().w(zpx(14.)).flex_none())
-                .child(crate::motion::shimmer(bar(70. + 18. * (i % 3) as f32), (prefix, i * 2), phase, c(t.hover), reduced))
-                .child(crate::motion::shimmer(bar(110. - 14. * (i % 2) as f32), (prefix, i * 2 + 1), phase + 0.06, c(t.hover), reduced))
+                .child(crate::motion::shimmer(
+                    bar(70. + 18. * (i % 3) as f32),
+                    (prefix, i * 2),
+                    phase,
+                    c(t.hover),
+                    reduced,
+                ))
+                .child(crate::motion::shimmer(
+                    bar(110. - 14. * (i % 2) as f32),
+                    (prefix, i * 2 + 1),
+                    phase + 0.06,
+                    c(t.hover),
+                    reduced,
+                ))
                 .into_any_element()
         })
         .collect()
@@ -2323,15 +3056,38 @@ pub(super) fn model_skeleton(t: Tokens, clock_ms: f32, reduced: bool) -> Vec<Any
     (0..SKELETON_ROWS)
         .map(|i| {
             let (label_w, id_w) = WIDTHS[i];
-            let pill = |w: f32, h: f32, a: f32| div().flex_none().h(zpx(h)).w(zpx(w)).rounded_full().bg(c(t.text).opacity(a));
-            let band = (!reduced).then(|| crate::trace_view::shimmer_left(clock_ms, i as f32 * 0.06)).flatten().map(|left| {
-                let hl = c(t.text).opacity(0.05);
-                let clear = gpui::Hsla { a: 0., ..hl };
-                let half = |a: gpui::Hsla, b: gpui::Hsla| {
-                    div().flex_1().h_full().bg(gpui::linear_gradient(90., gpui::linear_color_stop(a, 0.), gpui::linear_color_stop(b, 1.)))
-                };
-                div().absolute().top_0().bottom_0().left(gpui::relative(left)).w(gpui::relative(0.6)).flex().flex_row().child(half(clear, hl)).child(half(hl, clear))
-            });
+            let pill = |w: f32, h: f32, a: f32| {
+                div()
+                    .flex_none()
+                    .h(zpx(h))
+                    .w(zpx(w))
+                    .rounded_full()
+                    .bg(c(t.text).opacity(a))
+            };
+            let band = (!reduced)
+                .then(|| crate::trace_view::shimmer_left(clock_ms, i as f32 * 0.06))
+                .flatten()
+                .map(|left| {
+                    let hl = c(t.text).opacity(0.05);
+                    let clear = gpui::Hsla { a: 0., ..hl };
+                    let half = |a: gpui::Hsla, b: gpui::Hsla| {
+                        div().flex_1().h_full().bg(gpui::linear_gradient(
+                            90.,
+                            gpui::linear_color_stop(a, 0.),
+                            gpui::linear_color_stop(b, 1.),
+                        ))
+                    };
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(gpui::relative(left))
+                        .w(gpui::relative(0.6))
+                        .flex()
+                        .flex_row()
+                        .child(half(clear, hl))
+                        .child(half(hl, clear))
+                });
             div()
                 .relative()
                 .overflow_hidden()
@@ -2355,12 +3111,23 @@ pub(super) fn model_skeleton(t: Tokens, clock_ms: f32, reduced: bool) -> Vec<Any
 
 /// A row's secondary text: a path, faint and cut short with an ellipsis.
 fn faint_path(path: String, t: Tokens) -> impl IntoElement {
-    div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().t_small().text_color(c(t.text_faint)).child(path)
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .t_small()
+        .text_color(c(t.text_faint))
+        .child(path)
 }
 
 /// Under a capped list: how many more matched, and how to reach them.
 fn more_hint(more: usize, query: &str) -> String {
-    if query.is_empty() { format!("{more} more — search to find them") } else { format!("{more} more — keep typing") }
+    if query.is_empty() {
+        format!("{more} more — search to find them")
+    } else {
+        format!("{more} more — keep typing")
+    }
 }
 
 /// How long a picker search waits after the last keystroke.
@@ -2376,8 +3143,15 @@ pub(super) fn filter_rows<'a, T, const N: usize>(
     text: impl Fn(&'a T) -> [&'a str; N],
 ) -> (Vec<&'a T>, usize) {
     let query = query.to_lowercase();
-    let matching: Vec<&T> =
-        rows.iter().filter(|row| query.is_empty() || text(row).iter().any(|field| field.to_lowercase().contains(&query))).collect();
+    let matching: Vec<&T> = rows
+        .iter()
+        .filter(|row| {
+            query.is_empty()
+                || text(row)
+                    .iter()
+                    .any(|field| field.to_lowercase().contains(&query))
+        })
+        .collect();
     let more = matching.len().saturating_sub(limit);
     (matching.into_iter().take(limit).collect(), more)
 }
@@ -2391,7 +3165,10 @@ pub(super) const HERO_COMPOSER_WIDTH: gpui::Pixels = px(640.);
 /// "high" → "High".
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
-    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// A round icon-only control (attach).
@@ -2422,7 +3199,15 @@ pub(super) struct ComposerFit {
 /// compaction level. Level 0 is the full labels, 1 drops the permission
 /// name and shortens the scope chip, 2 keeps both as icons.
 pub(super) fn composer_left_widths(permission: bool, scope: bool) -> [f32; 3] {
-    let perm = |icon: bool| if !permission { 0. } else if icon { 48. } else { 130. };
+    let perm = |icon: bool| {
+        if !permission {
+            0.
+        } else if icon {
+            48.
+        } else {
+            130.
+        }
+    };
     let scope = |level: u8| {
         if !scope {
             0.
@@ -2434,7 +3219,11 @@ pub(super) fn composer_left_widths(permission: bool, scope: bool) -> [f32; 3] {
             }
         }
     };
-    [perm(false) + scope(0), perm(true) + scope(1), perm(true) + scope(2)]
+    [
+        perm(false) + scope(0),
+        perm(true) + scope(1),
+        perm(true) + scope(2),
+    ]
 }
 
 /// The layout for a panel `panel` wide, given the fixed room and the
@@ -2442,9 +3231,21 @@ pub(super) fn composer_left_widths(permission: bool, scope: bool) -> [f32; 3] {
 /// scope chips, which sit outside the measured model cluster. Inline only
 /// at full chips, when the text keeps `min_text`; stacked otherwise, as
 /// little compacted as fits. A layout comes back only with `hyst` to spare.
-pub(super) fn fit_composer(panel: f32, fixed: f32, left: [f32; 3], ctrl: [f32; 3], prev: ComposerFit, min_text: f32, hyst: f32) -> ComposerFit {
+pub(super) fn fit_composer(
+    panel: f32,
+    fixed: f32,
+    left: [f32; 3],
+    ctrl: [f32; 3],
+    prev: ComposerFit,
+    min_text: f32,
+    hyst: f32,
+) -> ComposerFit {
     let text = panel - fixed - left[0] - ctrl[0];
-    let need = if prev.stacked { min_text + hyst } else { min_text };
+    let need = if prev.stacked {
+        min_text + hyst
+    } else {
+        min_text
+    };
     if text >= need {
         return ComposerFit::default();
     }
@@ -2453,7 +3254,10 @@ pub(super) fn fit_composer(panel: f32, fixed: f32, left: [f32; 3], ctrl: [f32; 3
     let compact = (0..3u8)
         .find(|&k| left[k as usize] + ctrl[k as usize] + if k < was { hyst } else { 0. } <= room)
         .unwrap_or(2);
-    ComposerFit { stacked: true, compact }
+    ComposerFit {
+        stacked: true,
+        compact,
+    }
 }
 
 impl KeelWindow {
@@ -2467,7 +3271,10 @@ impl KeelWindow {
         let (slot, max) = (self.composer_slot.get(), self.composer_max.get());
         // Mid-slide the dock already has its landing width (`column_slide`):
         // decide from that, not last frame's box, so it doesn't lag a frame.
-        let landing = self.column_slide.map(|s| s.to.w).filter(|_| !dropping && max > 0.);
+        let landing = self
+            .column_slide
+            .map(|s| s.to.w)
+            .filter(|_| !dropping && max > 0.);
         let panel = if let Some(w) = landing {
             max.min(w - z(32.))
         } else if dropping && slot > 0. && max > 0. {
@@ -2485,12 +3292,28 @@ impl KeelWindow {
         let guess = [full, full - z(40.), full - z(80.)];
         let ctrl = [0, 1, 2].map(|k| if got[k] > 0. { got[k] } else { guess[k] });
         let permission = self.permission_modes().len() > 1;
-        let scope = self.current_chat.as_deref().is_some_and(|id| self.projects.chat_project_id(id).is_some());
+        let scope = self
+            .current_chat
+            .as_deref()
+            .is_some_and(|id| self.projects.chat_project_id(id).is_some());
         let left = composer_left_widths(permission, scope).map(z);
-        let next = fit_composer(panel, z(FIT_FIXED), left, ctrl, self.composer_fit, z(FIT_MIN_TEXT), z(FIT_HYST));
+        let next = fit_composer(
+            panel,
+            z(FIT_FIXED),
+            left,
+            ctrl,
+            self.composer_fit,
+            z(FIT_MIN_TEXT),
+            z(FIT_HYST),
+        );
         // Mid-slide the text reflows once, at the start; so does this, with
         // no glide racing the slide (it would blank the controls mid-move).
-        if next.stacked != self.composer_fit.stacked && self.composer_fit_known && !dropping && landing.is_none() && !self.reduced() {
+        if next.stacked != self.composer_fit.stacked
+            && self.composer_fit_known
+            && !dropping
+            && landing.is_none()
+            && !self.reduced()
+        {
             self.composer_fit_at = Some(std::time::Instant::now());
         }
         self.composer_fit = next;
@@ -2556,7 +3379,9 @@ mod slider_tests {
     #[test]
     fn composer_stacks_when_the_text_would_be_squeezed_with_hysteresis() {
         let ctrl = [330., 260., 220.];
-        let fit = |panel: f32, prev: ComposerFit| fit_composer(panel, 66., [0., 0., 0.], ctrl, prev, 260., 16.);
+        let fit = |panel: f32, prev: ComposerFit| {
+            fit_composer(panel, 66., [0., 0., 0.], ctrl, prev, 260., 16.)
+        };
         let inline = ComposerFit::default();
         // Wide: inline. The line is 66 + 330 + 260 = 656.
         assert_eq!(fit(720., inline), inline);
@@ -2572,8 +3397,18 @@ mod slider_tests {
         // name shortens; never anything wider than the room.
         assert_eq!(fit(380., stacked).compact, 1);
         let tight = fit(300., stacked);
-        assert_eq!(tight, ComposerFit { stacked: true, compact: 2 });
-        assert_eq!(fit(200., stacked).compact, 2, "the most compact, even if over");
+        assert_eq!(
+            tight,
+            ComposerFit {
+                stacked: true,
+                compact: 2
+            }
+        );
+        assert_eq!(
+            fit(200., stacked).compact,
+            2,
+            "the most compact, even if over"
+        );
         // Growing back needs the 16 px too.
         assert_eq!(fit(330., tight).compact, 2);
         assert_eq!(fit(342., tight).compact, 1);
@@ -2588,7 +3423,10 @@ mod slider_tests {
     fn project_scope_forces_a_tighter_composer_before_the_row_overflows() {
         let ctrl = [160., 140., 100.];
         let left = composer_left_widths(true, true);
-        let stacked = ComposerFit { stacked: true, compact: 0 };
+        let stacked = ComposerFit {
+            stacked: true,
+            compact: 0,
+        };
         let wide = fit_composer(560., 66., left, ctrl, ComposerFit::default(), 260., 16.);
         assert!(wide.stacked);
         assert_eq!(wide.compact, 0);
@@ -2609,14 +3447,22 @@ mod slider_tests {
         assert_eq!(morph_extra(120., d, d), 0.);
         assert_eq!(morph_extra(120., Duration::from_secs(2), d), 0.);
         // Shrinks every frame, never back up.
-        let steps: Vec<f32> = (0..=38).map(|i| morph_extra(120., Duration::from_millis(i * 10), d)).collect();
+        let steps: Vec<f32> = (0..=38)
+            .map(|i| morph_extra(120., Duration::from_millis(i * 10), d))
+            .collect();
         assert!(steps.windows(2).all(|w| w[1] <= w[0]));
     }
 
     #[test]
     fn effort_stops_and_labels() {
-        assert_eq!((stop_fraction(0, 4), stop_fraction(3, 4), stop_fraction(0, 1)), (0., 1., 0.));
+        assert_eq!(
+            (
+                stop_fraction(0, 4),
+                stop_fraction(3, 4),
+                stop_fraction(0, 1)
+            ),
+            (0., 1., 0.)
+        );
         assert_eq!(effort_label(""), "Default");
     }
 }
-

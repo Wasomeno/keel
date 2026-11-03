@@ -81,9 +81,15 @@ mod tests {
             { "label": "Files", "before": "0", "after": "3", "change": null, "better": "neither" },
         ] }))
         .unwrap();
-        assert_eq!((tiles[0].verdict(), tiles[0].change_text().as_str()), (Some(true), "↓ 32%"));
+        assert_eq!(
+            (tiles[0].verdict(), tiles[0].change_text().as_str()),
+            (Some(true), "↓ 32%")
+        );
         assert_eq!(tiles[1].verdict(), Some(false));
-        assert_eq!((tiles[2].verdict(), tiles[2].change_text().as_str()), (None, ""));
+        assert_eq!(
+            (tiles[2].verdict(), tiles[2].change_text().as_str()),
+            (None, "")
+        );
         assert!(from_spec(&json!({ "component": "stats", "items": [] })).is_none());
     }
 }

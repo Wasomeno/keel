@@ -37,7 +37,11 @@ impl MrSnapshot {
             title: s("title"),
             state: s("state"),
             draft: v["draft"].as_bool().unwrap_or(false),
-            detailed_merge_status: if detailed.is_empty() { s("merge_status") } else { detailed },
+            detailed_merge_status: if detailed.is_empty() {
+                s("merge_status")
+            } else {
+                detailed
+            },
             has_conflicts: v["has_conflicts"].as_bool().unwrap_or(false),
             pipeline: s("pipeline"),
             source_branch: s("source_branch"),
@@ -57,7 +61,9 @@ impl MrSnapshot {
         let dms = self.detailed_merge_status.as_str();
         if self.pipeline == "failed" {
             MrStatus::Failed
-        } else if self.has_conflicts || matches!(dms, "conflict" | "need_rebase" | "cannot_be_merged") {
+        } else if self.has_conflicts
+            || matches!(dms, "conflict" | "need_rebase" | "cannot_be_merged")
+        {
             MrStatus::Conflicts
         } else if matches!(
             self.pipeline.as_str(),
@@ -85,7 +91,11 @@ impl MrSnapshot {
             MrStatus::Closed => "Closed",
         };
         if self.draft && !status.is_done() {
-            if status == MrStatus::Open { "Draft".into() } else { format!("Draft · {word}") }
+            if status == MrStatus::Open {
+                "Draft".into()
+            } else {
+                format!("Draft · {word}")
+            }
         } else {
             word.into()
         }
@@ -149,7 +159,14 @@ pub struct Tracked {
 
 impl Tracked {
     pub fn new(mr: MrRef) -> Self {
-        Self { mr, snap: None, ok_ms: 0, tried_ms: 0, errors: 0, error: None }
+        Self {
+            mr,
+            snap: None,
+            ok_ms: 0,
+            tried_ms: 0,
+            errors: 0,
+            error: None,
+        }
     }
 
     pub fn status(&self) -> Option<MrStatus> {
@@ -228,7 +245,11 @@ impl SessionMr {
             self.tracked = Some(Tracked::new(mr));
             return Mention::Tracked;
         }
-        self.offer = Some(Offer { mr, msg_id: msg_id.to_string(), snap: None });
+        self.offer = Some(Offer {
+            mr,
+            msg_id: msg_id.to_string(),
+            snap: None,
+        });
         Mention::Offered
     }
 
@@ -264,12 +285,18 @@ impl SessionMr {
     pub fn finish(&mut self, note: String) {
         if let Some(t) = self.tracked.take() {
             self.remember(&t.mr);
-            self.notes.push(Note { text: note, msg_id: None });
+            self.notes.push(Note {
+                text: note,
+                msg_id: None,
+            });
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tracked.is_none() && self.offer.is_none() && self.seen.is_empty() && self.notes.is_empty()
+        self.tracked.is_none()
+            && self.offer.is_none()
+            && self.seen.is_empty()
+            && self.notes.is_empty()
     }
 }
 
@@ -329,16 +356,28 @@ pub fn parse_input(input: &str, default: Option<(&str, &str)>) -> Result<MrRef, 
         .trim_start_matches('!')
         .parse()
         .map_err(|_| "Paste a merge request link or type !42.".to_string())?;
-    let (host, project) = default.ok_or_else(|| "No GitLab project known for this chat; paste the full link.".to_string())?;
-    Ok(MrRef { host: host.to_string(), project: project.to_string(), iid })
+    let (host, project) = default
+        .ok_or_else(|| "No GitLab project known for this chat; paste the full link.".to_string())?;
+    Ok(MrRef {
+        host: host.to_string(),
+        project: project.to_string(),
+        iid,
+    })
 }
 
 /// A turn's tool call made an MR (rather than just mentioning one).
 pub fn tool_creates_mr(name: &str, summary: &str) -> bool {
     let text = format!("{name} {summary}").to_ascii_lowercase();
-    ["mr create", "create_merge_request", "merge_request.create", "create-merge-request", "createmergerequest", "mr_create"]
-        .iter()
-        .any(|needle| text.contains(needle))
+    [
+        "mr create",
+        "create_merge_request",
+        "merge_request.create",
+        "create-merge-request",
+        "createmergerequest",
+        "mr_create",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// Title cut to `max` characters with an ellipsis.
@@ -355,22 +394,42 @@ mod tests {
     use super::*;
 
     fn mr(iid: u64) -> MrRef {
-        MrRef { host: "https://gitlab.com".into(), project: "kev/keel".into(), iid }
+        MrRef {
+            host: "https://gitlab.com".into(),
+            project: "kev/keel".into(),
+            iid,
+        }
     }
 
     #[test]
     fn bang_mentions_are_found_at_word_starts() {
         use keel_proto::mr::find_bang_iids;
-        assert_eq!(find_bang_iids("Merge request !337 is merged (see !12). Not a!5, !x, !9a or !"), [337, 12]);
+        assert_eq!(
+            find_bang_iids("Merge request !337 is merged (see !12). Not a!5, !x, !9a or !"),
+            [337, 12]
+        );
     }
 
     #[test]
     fn urls_are_found_in_prose_and_tool_output() {
         let text = "Opened https://gitlab.com/kev/keel/-/merge_requests/42 (and see\nhttps://GitLab.example.com/a/b/c/-/merge_requests/7#note_1). Again: https://gitlab.com/kev/keel/-/merge_requests/42.";
         let found = find_mr_urls(text);
-        assert_eq!(found, vec![mr(42), MrRef { host: "https://gitlab.example.com".into(), project: "a/b/c".into(), iid: 7 }]);
+        assert_eq!(
+            found,
+            vec![
+                mr(42),
+                MrRef {
+                    host: "https://gitlab.example.com".into(),
+                    project: "a/b/c".into(),
+                    iid: 7
+                }
+            ]
+        );
         assert!(find_mr_urls("merge_requests/ with no link /-/merge_requests/x").is_empty());
-        assert_eq!(mr(42).web_url(), "https://gitlab.com/kev/keel/-/merge_requests/42");
+        assert_eq!(
+            mr(42).web_url(),
+            "https://gitlab.com/kev/keel/-/merge_requests/42"
+        );
     }
 
     #[test]
@@ -378,7 +437,13 @@ mod tests {
         let default = Some(("https://gitlab.com", "kev/keel"));
         assert_eq!(parse_input("!42", default), Ok(mr(42)));
         assert_eq!(parse_input(" 42 ", default), Ok(mr(42)));
-        assert_eq!(parse_input("https://gitlab.com/kev/keel/-/merge_requests/42/diffs", None), Ok(mr(42)));
+        assert_eq!(
+            parse_input(
+                "https://gitlab.com/kev/keel/-/merge_requests/42/diffs",
+                None
+            ),
+            Ok(mr(42))
+        );
         assert!(parse_input("!42", None).is_err());
         assert!(parse_input("hello", default).is_err());
     }
@@ -403,15 +468,38 @@ mod tests {
         };
         assert_eq!(snap("merged", "failed", "").status(), MrStatus::Merged);
         assert_eq!(snap("closed", "", "").status(), MrStatus::Closed);
-        assert_eq!(snap("opened", "failed", "conflict").status(), MrStatus::Failed);
-        assert_eq!(snap("opened", "success", "need_rebase").status(), MrStatus::Conflicts);
-        assert_eq!(snap("opened", "running", "ci_still_running").status(), MrStatus::Running);
-        assert_eq!(snap("opened", "success", "mergeable").status(), MrStatus::Mergeable);
+        assert_eq!(
+            snap("opened", "failed", "conflict").status(),
+            MrStatus::Failed
+        );
+        assert_eq!(
+            snap("opened", "success", "need_rebase").status(),
+            MrStatus::Conflicts
+        );
+        assert_eq!(
+            snap("opened", "running", "ci_still_running").status(),
+            MrStatus::Running
+        );
+        assert_eq!(
+            snap("opened", "success", "mergeable").status(),
+            MrStatus::Mergeable
+        );
         assert_eq!(snap("opened", "", "not_approved").status(), MrStatus::Open);
-        let draft = MrSnapshot { draft: true, ..snap("opened", "", "draft_status") };
-        assert_eq!((draft.status(), draft.status_text().as_str()), (MrStatus::Open, "Draft"));
-        let parsed = MrSnapshot::parse(&serde_json::json!({"title": "T", "state": "opened", "merge_status": "can_be_merged", "pipeline": null}));
-        assert_eq!((parsed.status(), parsed.title.as_str()), (MrStatus::Mergeable, "T"));
+        let draft = MrSnapshot {
+            draft: true,
+            ..snap("opened", "", "draft_status")
+        };
+        assert_eq!(
+            (draft.status(), draft.status_text().as_str()),
+            (MrStatus::Open, "Draft")
+        );
+        let parsed = MrSnapshot::parse(
+            &serde_json::json!({"title": "T", "state": "opened", "merge_status": "can_be_merged", "pipeline": null}),
+        );
+        assert_eq!(
+            (parsed.status(), parsed.title.as_str()),
+            (MrStatus::Mergeable, "T")
+        );
     }
 
     #[test]
@@ -425,7 +513,10 @@ mod tests {
         // A second one is only offered (as a replacement).
         assert_eq!(s.mention(mr(3), "m3", true), Mention::Offered);
         s.track(mr(3));
-        assert_eq!((s.tracked.as_ref().map(|t| t.mr.iid), s.offer.is_none()), (Some(3), true));
+        assert_eq!(
+            (s.tracked.as_ref().map(|t| t.mr.iid), s.offer.is_none()),
+            (Some(3), true)
+        );
         assert_eq!(s.mention(mr(2), "m2", true), Mention::Nothing);
         s.finish("!3 merged".into());
         assert!(s.tracked.is_none());
@@ -450,7 +541,10 @@ mod tests {
         assert!(tool_creates_mr("Bash", "glab mr create --fill"));
         assert!(tool_creates_mr("mcp__gitlab__create_merge_request", ""));
         assert!(!tool_creates_mr("Bash", "glab mr view 42"));
-        assert_eq!(truncate("A fairly long merge request title here", 12), "A fairly lo…");
+        assert_eq!(
+            truncate("A fairly long merge request title here", 12),
+            "A fairly lo…"
+        );
         assert_eq!(truncate("short", 12), "short");
     }
 }

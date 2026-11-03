@@ -1960,6 +1960,11 @@ mod tests {
     }
 
     fn argv_of(fix: &Fix) -> Vec<String> {
+        if let Ok(json_text) = fs::read_to_string(fix.stub_dir.join("argv.json")) {
+            if let Ok(args) = serde_json::from_str(&json_text) {
+                return args;
+            }
+        }
         fs::read_to_string(fix.stub_dir.join("argv"))
             .expect("argv")
             .lines()

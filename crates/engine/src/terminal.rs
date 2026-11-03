@@ -52,8 +52,16 @@ struct TermIo {
 impl Term {
     #[cfg(unix)]
     fn busy(&self) -> bool {
-        let shell = self.child.lock().unwrap_or_else(|p| p.into_inner()).process_id();
-        let foreground = self.master.lock().unwrap_or_else(|p| p.into_inner()).process_group_leader();
+        let shell = self
+            .child
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .process_id();
+        let foreground = self
+            .master
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .process_group_leader();
         matches!((shell, foreground), (Some(shell), Some(fg)) if fg > 0 && fg as u32 != shell)
     }
 
@@ -83,10 +91,26 @@ pub struct TerminalInfo {
 
 impl Terminals {
     /// Start the login shell in `cwd` at the given size.
-    pub fn open(&self, cwd: &Path, chat_id: Option<String>, cols: u16, rows: u16) -> Result<String, TerminalError> {
-        let size = PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 };
-        let pair = native_pty_system().openpty(size).map_err(|e| TerminalError::Spawn(e.to_string()))?;
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_string());
+    pub fn open(
+        &self,
+        cwd: &Path,
+        chat_id: Option<String>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, TerminalError> {
+        let size = PtySize {
+            rows: rows.max(2),
+            cols: cols.max(10),
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let pair = native_pty_system()
+            .openpty(size)
+            .map_err(|e| TerminalError::Spawn(e.to_string()))?;
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/bin/zsh".to_string());
         let mut cmd = CommandBuilder::new(&shell);
         cmd.arg("-l");
         cmd.cwd(cwd);
@@ -98,10 +122,19 @@ impl Terminals {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        let child = pair.slave.spawn_command(cmd).map_err(|e| TerminalError::Spawn(e.to_string()))?;
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| TerminalError::Spawn(e.to_string()))?;
         drop(pair.slave);
-        let reader = pair.master.try_clone_reader().map_err(|e| TerminalError::Spawn(e.to_string()))?;
-        let writer = pair.master.take_writer().map_err(|e| TerminalError::Spawn(e.to_string()))?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| TerminalError::Spawn(e.to_string()))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| TerminalError::Spawn(e.to_string()))?;
 
         let id = uuid::Uuid::new_v4().to_string();
         let term = Arc::new(Term {
@@ -110,7 +143,11 @@ impl Terminals {
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
-            io: Mutex::new(TermIo { replay: VecDeque::new(), subs: Vec::new(), exit: None }),
+            io: Mutex::new(TermIo {
+                replay: VecDeque::new(),
+                subs: Vec::new(),
+                exit: None,
+            }),
         });
         self.lock().insert(id.clone(), term.clone());
         std::thread::Builder::new()
@@ -124,14 +161,24 @@ impl Terminals {
     pub fn input(&self, id: &str, data: &[u8]) -> Result<(), TerminalError> {
         let term = self.get(id)?;
         let mut writer = term.writer.lock().unwrap_or_else(|p| p.into_inner());
-        writer.write_all(data).and_then(|_| writer.flush()).map_err(|e| TerminalError::Io(e.to_string()))
+        writer
+            .write_all(data)
+            .and_then(|_| writer.flush())
+            .map_err(|e| TerminalError::Io(e.to_string()))
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let term = self.get(id)?;
-        let size = PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows: rows.max(2),
+            cols: cols.max(10),
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         let master = term.master.lock().unwrap_or_else(|p| p.into_inner());
-        master.resize(size).map_err(|e| TerminalError::Io(e.to_string()))
+        master
+            .resize(size)
+            .map_err(|e| TerminalError::Io(e.to_string()))
     }
 
     /// End the shell and forget the terminal.
@@ -142,7 +189,12 @@ impl Terminals {
     }
 
     /// Replay what is buffered, then stream new output on `stream`.
-    pub fn subscribe(&self, id: &str, stream: String, outbound: Outbound) -> Result<(), TerminalError> {
+    pub fn subscribe(
+        &self,
+        id: &str,
+        stream: String,
+        outbound: Outbound,
+    ) -> Result<(), TerminalError> {
         let term = self.get(id)?;
         let mut io = term.io.lock().unwrap_or_else(|p| p.into_inner());
         io.subs.retain(|sub| !sub.outbound.is_closed());
@@ -168,7 +220,12 @@ impl Terminals {
                 terminal_id: id.clone(),
                 chat_id: term.chat_id.clone(),
                 cwd: term.cwd.to_string_lossy().into_owned(),
-                exited: term.io.lock().unwrap_or_else(|p| p.into_inner()).exit.is_some(),
+                exited: term
+                    .io
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .exit
+                    .is_some(),
                 busy: term.busy(),
             })
             .collect();
@@ -221,16 +278,25 @@ fn pump(mut reader: Box<dyn Read + Send>, term: Arc<Term>) {
     let mut io = term.io.lock().unwrap_or_else(|p| p.into_inner());
     io.exit = Some(code);
     for sub in &io.subs {
-        send(&sub.outbound, &sub.stream, SubscribeEvent::TerminalExit { code });
+        send(
+            &sub.outbound,
+            &sub.stream,
+            SubscribeEvent::TerminalExit { code },
+        );
     }
 }
 
 fn output_event(bytes: &[u8]) -> SubscribeEvent {
-    SubscribeEvent::TerminalOutput { data: base64::engine::general_purpose::STANDARD.encode(bytes) }
+    SubscribeEvent::TerminalOutput {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    }
 }
 
 fn send(outbound: &Outbound, stream: &str, event: SubscribeEvent) {
-    let item = RpcStreamItem { stream: stream.to_string(), event };
+    let item = RpcStreamItem {
+        stream: stream.to_string(),
+        event,
+    };
     if let Ok(json) = serde_json::to_string(&item) {
         outbound.push(&json);
     }
@@ -242,7 +308,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Collect a stream's decoded output until `needle` shows up.
-    fn read_until(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>, needle: &str) -> (String, Option<Option<i32>>) {
+    fn read_until(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        needle: &str,
+    ) -> (String, Option<Option<i32>>) {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut out = String::new();
         let mut exit = None;
@@ -252,7 +321,9 @@ mod tests {
                     let item: RpcStreamItem = serde_json::from_str(&json).unwrap();
                     match item.event {
                         SubscribeEvent::TerminalOutput { data } => {
-                            let bytes = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap();
                             out.push_str(&String::from_utf8_lossy(&bytes));
                         }
                         SubscribeEvent::TerminalExit { code } => exit = Some(code),
@@ -271,14 +342,20 @@ mod tests {
         let dir = std::env::temp_dir();
         let id = terminals.open(&dir, None, 80, 24).expect("open");
         let (outbound, mut rx) = Outbound::pair();
-        terminals.subscribe(&id, "s1".into(), outbound).expect("subscribe");
-        terminals.input(&id, b"echo keel-$((40+2))\n").expect("input");
+        terminals
+            .subscribe(&id, "s1".into(), outbound)
+            .expect("subscribe");
+        terminals
+            .input(&id, b"echo keel-$((40+2))\n")
+            .expect("input");
         let (out, _) = read_until(&mut rx, "keel-42");
         assert!(out.contains("keel-42"), "{out}");
 
         // A panel that attaches later sees the same output from the replay.
         let (late, mut late_rx) = Outbound::pair();
-        terminals.subscribe(&id, "s2".into(), late).expect("late subscribe");
+        terminals
+            .subscribe(&id, "s2".into(), late)
+            .expect("late subscribe");
         let (replayed, _) = read_until(&mut late_rx, "keel-42");
         assert!(replayed.contains("keel-42"));
 
@@ -286,16 +363,25 @@ mod tests {
         assert_eq!(terminals.list().len(), 1);
         terminals.close(&id).expect("close");
         assert!(terminals.list().is_empty());
-        assert!(matches!(terminals.input(&id, b"x"), Err(TerminalError::Unknown)));
+        assert!(matches!(
+            terminals.input(&id, b"x"),
+            Err(TerminalError::Unknown)
+        ));
     }
 
     #[test]
     fn busy_while_a_command_runs_not_at_the_prompt() {
         let terminals = Terminals::default();
-        let id = terminals.open(&std::env::temp_dir(), None, 80, 24).expect("open");
+        let id = terminals
+            .open(&std::env::temp_dir(), None, 80, 24)
+            .expect("open");
         let (outbound, mut rx) = Outbound::pair();
-        terminals.subscribe(&id, "s".into(), outbound).expect("subscribe");
-        terminals.input(&id, b"echo ready-$((1+1))\n").expect("input");
+        terminals
+            .subscribe(&id, "s".into(), outbound)
+            .expect("subscribe");
+        terminals
+            .input(&id, b"echo ready-$((1+1))\n")
+            .expect("input");
         read_until(&mut rx, "ready-2");
         let busy = |want: bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -318,15 +404,21 @@ mod tests {
     #[test]
     fn exit_is_reported() {
         let terminals = Terminals::default();
-        let id = terminals.open(&std::env::temp_dir(), None, 80, 24).expect("open");
+        let id = terminals
+            .open(&std::env::temp_dir(), None, 80, 24)
+            .expect("open");
         let (outbound, mut rx) = Outbound::pair();
-        terminals.subscribe(&id, "s".into(), outbound).expect("subscribe");
+        terminals
+            .subscribe(&id, "s".into(), outbound)
+            .expect("subscribe");
         terminals.input(&id, b"exit 3\n").expect("input");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut code = None;
         while Instant::now() < deadline && code.is_none() {
             if let Ok(json) = rx.try_recv() {
-                if let SubscribeEvent::TerminalExit { code: c } = serde_json::from_str::<RpcStreamItem>(&json).unwrap().event {
+                if let SubscribeEvent::TerminalExit { code: c } =
+                    serde_json::from_str::<RpcStreamItem>(&json).unwrap().event
+                {
                     code = Some(c);
                 }
             } else {

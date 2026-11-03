@@ -22,7 +22,10 @@ pub struct Client {
 
 impl Client {
     pub fn new(base: &str, token: &str) -> Self {
-        Client { base: base.trim_end_matches('/').to_string(), token: wire::normalize_token(token) }
+        Client {
+            base: base.trim_end_matches('/').to_string(),
+            token: wire::normalize_token(token),
+        }
     }
 
     /// One call; `Ok` is the envelope's `data`.
@@ -34,37 +37,51 @@ impl Client {
             .set("User-Agent", "Keel")
             .timeout(TIMEOUT);
         let result = match body {
-            Some(body) => request.set("Content-Type", "application/json").send_json(body.clone()),
+            Some(body) => request
+                .set("Content-Type", "application/json")
+                .send_json(body.clone()),
             None => request.call(),
         };
         match result {
             Ok(ok) => {
-                let text = ok.into_string().map_err(|e| DotifyError::Server(format!("unreadable answer: {e}")))?;
+                let text = ok
+                    .into_string()
+                    .map_err(|e| DotifyError::Server(format!("unreadable answer: {e}")))?;
                 if text.trim().is_empty() {
                     return Ok(Value::Null);
                 }
-                let body: Value =
-                    serde_json::from_str(&text).map_err(|_| DotifyError::Server("Dotify answered something that isn't JSON".into()))?;
+                let body: Value = serde_json::from_str(&text).map_err(|_| {
+                    DotifyError::Server("Dotify answered something that isn't JSON".into())
+                })?;
                 Ok(wire::envelope_data(&body).clone())
             }
             Err(ureq::Error::Status(code, response)) => {
-                let body: Value = response.into_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+                let body: Value = response
+                    .into_string()
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or(Value::Null);
                 Err(DotifyError::from_status(code, &body))
             }
-            Err(ureq::Error::Transport(t)) => Err(DotifyError::Offline(scrub(&t.to_string(), &self.token))),
+            Err(ureq::Error::Transport(t)) => {
+                Err(DotifyError::Offline(scrub(&t.to_string(), &self.token)))
+            }
         }
     }
 
     pub fn status(&self) -> Result<Status, DotifyError> {
-        self.call("GET", "tracker/check-status", None).map(|d| Status::parse(&d))
+        self.call("GET", "tracker/check-status", None)
+            .map(|d| Status::parse(&d))
     }
 
     pub fn summary(&self) -> Result<Summary, DotifyError> {
-        self.call("GET", "time-entities/summary", None).map(|d| Summary::parse(&d))
+        self.call("GET", "time-entities/summary", None)
+            .map(|d| Summary::parse(&d))
     }
 
     pub fn entries(&self) -> Result<Vec<Entry>, DotifyError> {
-        self.call("GET", "time-entities", None).map(|d| wire::parse_entries(&d))
+        self.call("GET", "time-entities", None)
+            .map(|d| wire::parse_entries(&d))
     }
 
     pub fn projects(&self, search: Option<&str>) -> Result<Vec<Project>, DotifyError> {
@@ -72,46 +89,72 @@ impl Client {
             Some(q) => format!("projects?search={}", encode_query(q)),
             None => "projects".to_string(),
         };
-        self.call("GET", &path, None).map(|d| wire::parse_projects(&d))
+        self.call("GET", &path, None)
+            .map(|d| wire::parse_projects(&d))
     }
 
     pub fn favorites(&self) -> Result<Vec<Project>, DotifyError> {
-        self.call("GET", "projects/favorite", None).map(|d| wire::parse_projects(&d))
+        self.call("GET", "projects/favorite", None)
+            .map(|d| wire::parse_projects(&d))
     }
 
     /// Star (`POST`) or unstar (`DELETE`) `/projects/:id/favorite`.
     pub fn favorite(&self, project_id: i64, on: bool) -> Result<(), DotifyError> {
-        self.call(if on { "POST" } else { "DELETE" }, &format!("projects/{project_id}/favorite"), None).map(|_| ())
+        self.call(
+            if on { "POST" } else { "DELETE" },
+            &format!("projects/{project_id}/favorite"),
+            None,
+        )
+        .map(|_| ())
     }
 
     pub fn clock_in(&self, project_id: i64, description: &str) -> Result<Entry, DotifyError> {
-        let data = self.call("POST", "tracker/clock-in", Some(&json!({ "projectId": project_id, "description": description })))?;
-        Entry::parse(&data).ok_or_else(|| DotifyError::Server("clock-in answered without an entry".into()))
+        let data = self.call(
+            "POST",
+            "tracker/clock-in",
+            Some(&json!({ "projectId": project_id, "description": description })),
+        )?;
+        Entry::parse(&data)
+            .ok_or_else(|| DotifyError::Server("clock-in answered without an entry".into()))
     }
 
     pub fn clock_out(&self) -> Result<Entry, DotifyError> {
         let data = self.call("POST", "tracker/clock-out", None)?;
-        Entry::parse(&data).ok_or_else(|| DotifyError::Server("clock-out answered without an entry".into()))
+        Entry::parse(&data)
+            .ok_or_else(|| DotifyError::Server("clock-out answered without an entry".into()))
     }
 
     /// `PUT /time-entities/:id`. Keel only edits stopped entries, and sends
     /// their end unchanged (`startDate` can't be changed at all).
-    pub fn update_entry(&self, id: i64, project_id: i64, description: &str, end_ms: i64) -> Result<Entry, DotifyError> {
+    pub fn update_entry(
+        &self,
+        id: i64,
+        project_id: i64,
+        description: &str,
+        end_ms: i64,
+    ) -> Result<Entry, DotifyError> {
         let body = json!({ "projectId": project_id, "description": description, "endDate": wire::format_utc(end_ms) });
         let data = self.call("PUT", &format!("time-entities/{id}"), Some(&body))?;
-        Entry::parse(&data).ok_or_else(|| DotifyError::Server("update answered without an entry".into()))
+        Entry::parse(&data)
+            .ok_or_else(|| DotifyError::Server("update answered without an entry".into()))
     }
 }
 
 /// Never let the token reach a message.
 fn scrub(text: &str, token: &str) -> String {
-    if token.len() >= 8 { text.replace(token, "<token>") } else { text.to_string() }
+    if token.len() >= 8 {
+        text.replace(token, "<token>")
+    } else {
+        text.to_string()
+    }
 }
 
 fn encode_query(raw: &str) -> String {
     raw.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -119,17 +162,22 @@ fn encode_query(raw: &str) -> String {
 
 /// The stored Dotify connection, if any.
 pub fn connection(data_dir: &Path) -> Option<Connection> {
-    connections::list(data_dir).into_iter().find(|c| c.kind == KIND)
+    connections::list(data_dir)
+        .into_iter()
+        .find(|c| c.kind == KIND)
 }
 
 /// A client for the stored connection.
 pub fn client(data_dir: &Path) -> Result<Client, DotifyError> {
-    let conn = connection(data_dir).ok_or_else(|| DotifyError::Auth("Dotify isn't connected".into()))?;
+    let conn =
+        connection(data_dir).ok_or_else(|| DotifyError::Auth("Dotify isn't connected".into()))?;
     // The token stays filed under the host it was saved with (so one saved
     // against the retired development API is still found); calls go to
     // where that host resolves now: production.
     let token = connections::load_token(data_dir, &connections::account(KIND, &conn.host))
-        .ok_or_else(|| DotifyError::Auth("the Dotify token is missing; connect again in Settings".into()))?;
+        .ok_or_else(|| {
+            DotifyError::Auth("the Dotify token is missing; connect again in Settings".into())
+        })?;
     Ok(Client::new(wire::resolve_base(&conn.host), &token))
 }
 
@@ -142,9 +190,18 @@ pub fn connect(data_dir: &Path, base: &str, raw_token: &str) -> Result<Connectio
     }
     let client = Client::new(base, &token);
     client.status()?;
-    let (name, email) = wire::token_identity(&token).unwrap_or_else(|| ("Dotify user".into(), String::new()));
-    let conn = Connection { kind: KIND.into(), host: client.base.clone(), username: email, name };
-    for old in connections::list(data_dir).into_iter().filter(|c| c.kind == KIND && c.host != conn.host) {
+    let (name, email) =
+        wire::token_identity(&token).unwrap_or_else(|| ("Dotify user".into(), String::new()));
+    let conn = Connection {
+        kind: KIND.into(),
+        host: client.base.clone(),
+        username: email,
+        name,
+    };
+    for old in connections::list(data_dir)
+        .into_iter()
+        .filter(|c| c.kind == KIND && c.host != conn.host)
+    {
         let _ = connections::remove(data_dir, KIND, &old.host);
     }
     connections::save(data_dir, conn.clone(), &token).map_err(DotifyError::Server)?;
@@ -160,25 +217,43 @@ pub fn run_op(data_dir: &Path, params: &Value) -> Result<Value, DotifyError> {
         "status" => c.status().map(|s| json!(s)),
         "summary" => c.summary().map(|s| json!(s)),
         "entries" => c.entries().map(|e| json!({ "entries": e })),
-        "projects" => c.projects(params["search"].as_str()).map(|p| json!({ "projects": p })),
+        "projects" => c
+            .projects(params["search"].as_str())
+            .map(|p| json!({ "projects": p })),
         "favorites" => c.favorites().map(|p| json!({ "projects": p })),
         "clock_in" => {
-            let project = params["project_id"].as_i64().ok_or_else(|| DotifyError::Rejected("pick a project".into()))?;
-            c.clock_in(project, params["description"].as_str().unwrap_or_default()).map(entry)
+            let project = params["project_id"]
+                .as_i64()
+                .ok_or_else(|| DotifyError::Rejected("pick a project".into()))?;
+            c.clock_in(project, params["description"].as_str().unwrap_or_default())
+                .map(entry)
         }
         "clock_out" => c.clock_out().map(entry),
         "favorite" => {
-            let project = params["project_id"].as_i64().ok_or_else(|| DotifyError::Rejected("project_id is required".into()))?;
+            let project = params["project_id"]
+                .as_i64()
+                .ok_or_else(|| DotifyError::Rejected("project_id is required".into()))?;
             let on = params["on"].as_bool().unwrap_or(true);
-            c.favorite(project, on).map(|_| json!({ "project_id": project, "on": on }))
+            c.favorite(project, on)
+                .map(|_| json!({ "project_id": project, "on": on }))
         }
         "update_entry" => {
-            let (Some(id), Some(project), Some(end)) =
-                (params["id"].as_i64(), params["project_id"].as_i64(), params["end_ms"].as_i64())
-            else {
-                return Err(DotifyError::Rejected("id, project_id and end_ms are required".into()));
+            let (Some(id), Some(project), Some(end)) = (
+                params["id"].as_i64(),
+                params["project_id"].as_i64(),
+                params["end_ms"].as_i64(),
+            ) else {
+                return Err(DotifyError::Rejected(
+                    "id, project_id and end_ms are required".into(),
+                ));
             };
-            c.update_entry(id, project, params["description"].as_str().unwrap_or_default(), end).map(entry)
+            c.update_entry(
+                id,
+                project,
+                params["description"].as_str().unwrap_or_default(),
+                end,
+            )
+            .map(entry)
         }
         other => Err(DotifyError::Rejected(format!("unknown op {other}"))),
     }
@@ -201,7 +276,9 @@ mod tests {
     }
 
     /// A one-thread HTTP server answering each request from `answer`.
-    fn mock(answer: impl Fn(&str, &str) -> (u16, String) + Send + 'static) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fn mock(
+        answer: impl Fn(&str, &str) -> (u16, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<Seen>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/api/v1", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -215,7 +292,10 @@ mod tests {
                     continue;
                 }
                 let mut parts = line.split_whitespace();
-                let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string());
+                let (method, path) = (
+                    parts.next().unwrap_or("").to_string(),
+                    parts.next().unwrap_or("").to_string(),
+                );
                 let (mut len, mut auth) = (0usize, String::new());
                 loop {
                     let mut h = String::new();
@@ -234,7 +314,12 @@ mod tests {
                 let _ = reader.read_exact(&mut body);
                 let path = path.trim_start_matches("/api/v1/").to_string();
                 let (code, text) = answer(&method, &path);
-                log.lock().unwrap().push(Seen { method, path, auth, body: String::from_utf8_lossy(&body).into() });
+                log.lock().unwrap().push(Seen {
+                    method,
+                    path,
+                    auth,
+                    body: String::from_utf8_lossy(&body).into(),
+                });
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
@@ -255,17 +340,22 @@ mod tests {
 
     #[test]
     fn reads_parse_through_the_envelope_with_a_clean_bearer() {
-        let (base, seen) = mock(|_, path| match path {
+        let (base, seen) = mock(|_, path| {
+            match path {
             "tracker/check-status" => (200, RUNNING.into()),
             "time-entities/summary" => (200, r#"{"message":"ok","data":{"employee_week_hours":42.62,"this_week_normal_hours":40}}"#.into()),
             p if p.starts_with("projects?search=") => (200, r#"{"message":"ok","data":[{"id":222,"name":"DLTX Solutions"}]}"#.into()),
             "projects/favorite" => (200, r#"{"message":"ok","data":[{"id":200,"name":"Dotify 2026"}]}"#.into()),
             _ => (404, r#"{"message":"Not Found","data":null}"#.into()),
+        }
         });
         let c = Client::new(&base, "Bearer tok.en.x");
         let status = c.status().unwrap();
         assert!(status.overtime);
-        assert_eq!(status.running.unwrap().project.unwrap().name, "DLTX Solutions");
+        assert_eq!(
+            status.running.unwrap().project.unwrap().name,
+            "DLTX Solutions"
+        );
         assert_eq!(c.summary().unwrap().week_h, 42.62);
         assert_eq!(c.projects(Some("dl tx")).unwrap()[0].id, 222);
         assert_eq!(c.favorites().unwrap()[0].name, "Dotify 2026");
@@ -286,46 +376,85 @@ mod tests {
         let started = c.clock_in(222, "feat(x): y").unwrap();
         assert_eq!(started.id, 191356);
         let stopped = c.clock_out().unwrap();
-        assert_eq!((stopped.duration_h, wire::hours_label(stopped.duration_h)), (4.25, "4h 15m".to_string()));
-        c.update_entry(191357, 222, "better", stopped.end_ms.unwrap()).unwrap();
+        assert_eq!(
+            (stopped.duration_h, wire::hours_label(stopped.duration_h)),
+            (4.25, "4h 15m".to_string())
+        );
+        c.update_entry(191357, 222, "better", stopped.end_ms.unwrap())
+            .unwrap();
         let seen = seen.lock().unwrap();
         let body = |i: usize| serde_json::from_str::<Value>(&seen[i].body).unwrap_or(Value::Null);
-        assert_eq!(body(0), json!({"projectId": 222, "description": "feat(x): y"}));
+        assert_eq!(
+            body(0),
+            json!({"projectId": 222, "description": "feat(x): y"})
+        );
         assert_eq!(seen[1].body, "");
-        assert_eq!(body(2), json!({"projectId": 222, "description": "better", "endDate": "2026-10-08T07:30:00.000Z"}));
+        assert_eq!(
+            body(2),
+            json!({"projectId": 222, "description": "better", "endDate": "2026-10-08T07:30:00.000Z"})
+        );
     }
 
     #[test]
     fn favorite_toggle_posts_and_deletes() {
         let (base, seen) = mock(|method, path| match (method, path) {
-            ("POST", "projects/222/favorite") => (201, r#"{"message":"Project favorited","data":null}"#.into()),
-            ("DELETE", "projects/222/favorite") => (200, r#"{"message":"Project unfavorited","data":null}"#.into()),
-            ("POST", "projects/9/favorite") => (404, r#"{"message":"Project not found","data":null}"#.into()),
+            ("POST", "projects/222/favorite") => {
+                (201, r#"{"message":"Project favorited","data":null}"#.into())
+            }
+            ("DELETE", "projects/222/favorite") => (
+                200,
+                r#"{"message":"Project unfavorited","data":null}"#.into(),
+            ),
+            ("POST", "projects/9/favorite") => {
+                (404, r#"{"message":"Project not found","data":null}"#.into())
+            }
             _ => (500, "{}".into()),
         });
         let c = Client::new(&base, "tok");
         c.favorite(222, true).unwrap();
         c.favorite(222, false).unwrap();
-        assert_eq!(c.favorite(9, true).unwrap_err(), DotifyError::Rejected("Project not found".into()));
+        assert_eq!(
+            c.favorite(9, true).unwrap_err(),
+            DotifyError::Rejected("Project not found".into())
+        );
         let seen = seen.lock().unwrap();
-        let calls: Vec<(String, String)> = seen.iter().map(|s| (s.method.clone(), s.path.clone())).collect();
-        assert_eq!(calls[0], ("POST".to_string(), "projects/222/favorite".to_string()));
-        assert_eq!(calls[1], ("DELETE".to_string(), "projects/222/favorite".to_string()));
-        assert!(seen.iter().all(|s| s.body.is_empty() && s.auth == "Bearer tok"));
+        let calls: Vec<(String, String)> = seen
+            .iter()
+            .map(|s| (s.method.clone(), s.path.clone()))
+            .collect();
+        assert_eq!(
+            calls[0],
+            ("POST".to_string(), "projects/222/favorite".to_string())
+        );
+        assert_eq!(
+            calls[1],
+            ("DELETE".to_string(), "projects/222/favorite".to_string())
+        );
+        assert!(
+            seen.iter()
+                .all(|s| s.body.is_empty() && s.auth == "Bearer tok")
+        );
     }
 
     #[test]
     fn errors_are_told_apart() {
-        let (base, _) = mock(|_, path| match path {
+        let (base, _) = mock(|_, path| {
+            match path {
             "tracker/check-status" => (401, r#"{"message":"Unauthorized","statusCode":401}"#.into()),
             "time-entities/1" => (400, r#"{"message":"Cannot edit time entity from a confirmed attendance period","data":null}"#.into()),
             _ => (500, "oops".into()),
+        }
         });
         let c = Client::new(&base, "tok");
-        assert_eq!(c.status().unwrap_err(), DotifyError::Auth("Unauthorized".into()));
+        assert_eq!(
+            c.status().unwrap_err(),
+            DotifyError::Auth("Unauthorized".into())
+        );
         assert_eq!(
             c.update_entry(1, 2, "d", 0).unwrap_err(),
-            DotifyError::Rejected("Cannot edit time entity from a confirmed attendance period".into())
+            DotifyError::Rejected(
+                "Cannot edit time entity from a confirmed attendance period".into()
+            )
         );
         assert!(matches!(c.summary().unwrap_err(), DotifyError::Server(_)));
         // Nothing listening: offline, and the token never shows up.
@@ -345,15 +474,24 @@ mod tests {
         // {"name":"Ada L","email":"ada@example.com","exp":2000000000}
         let token = "Bearer x.eyJuYW1lIjoiQWRhIEwiLCJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSIsImV4cCI6MjAwMDAwMDAwMH0.s";
         let conn = connect(&dir, &base, token).unwrap();
-        assert_eq!((conn.name.as_str(), conn.username.as_str()), ("Ada L", "ada@example.com"));
+        assert_eq!(
+            (conn.name.as_str(), conn.username.as_str()),
+            ("Ada L", "ada@example.com")
+        );
         assert_eq!(connection(&dir).unwrap().host, base);
         assert!(run_op(&dir, &json!({"op": "status"})).unwrap()["running"]["id"] == 191356);
         let (bad, _) = mock(|_, _| (401, r#"{"message":"Unauthorized"}"#.into()));
-        assert!(matches!(connect(&dir, &bad, "nope"), Err(DotifyError::Auth(_))));
+        assert!(matches!(
+            connect(&dir, &bad, "nope"),
+            Err(DotifyError::Auth(_))
+        ));
         // The failed connect left the good one alone.
         assert_eq!(connection(&dir).unwrap().host, base);
         connections::remove(&dir, KIND, &base).unwrap();
-        assert!(matches!(run_op(&dir, &json!({"op": "status"})), Err(DotifyError::Auth(_))));
+        assert!(matches!(
+            run_op(&dir, &json!({"op": "status"})),
+            Err(DotifyError::Auth(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -364,7 +502,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keel-dotify-dev-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let dev = "https://api.dotify-dev.dot.co.id/api/v1";
-        let conn = Connection { kind: KIND.into(), host: dev.into(), username: "ada@example.com".into(), name: "Ada L".into() };
+        let conn = Connection {
+            kind: KIND.into(),
+            host: dev.into(),
+            username: "ada@example.com".into(),
+            name: "Ada L".into(),
+        };
         connections::save(&dir, conn, "test-token-value").unwrap();
         // Still found under the old host, and sent to production (no call made).
         let c = client(&dir).unwrap();
@@ -378,16 +521,31 @@ mod tests {
     #[test]
     #[ignore]
     fn live_dotify_read_only() {
-        let data_dir = std::path::PathBuf::from(std::env::var("KEEL_DOTIFY_DATA").expect("KEEL_DOTIFY_DATA"));
+        let data_dir =
+            std::path::PathBuf::from(std::env::var("KEEL_DOTIFY_DATA").expect("KEEL_DOTIFY_DATA"));
         let c = client(&data_dir).expect("connected");
         let status = c.status().expect("status");
-        println!("check-status: running={} overtime={}", status.running.is_some(), status.overtime);
+        println!(
+            "check-status: running={} overtime={}",
+            status.running.is_some(),
+            status.overtime
+        );
         let s = c.summary().expect("summary");
-        println!("summary: week {:.2}/{:.0}h period {:.2}/{:.0}h", s.week_h, s.week_normal_h, s.period_h, s.period_normal_h);
+        println!(
+            "summary: week {:.2}/{:.0}h period {:.2}/{:.0}h",
+            s.week_h, s.week_normal_h, s.period_h, s.period_normal_h
+        );
         println!("favorites: {}", c.favorites().expect("favorites").len());
         println!("projects: {}", c.projects(None).expect("projects").len());
-        println!("projects?search=dot: {}", c.projects(Some("dot")).expect("search").len());
+        println!(
+            "projects?search=dot: {}",
+            c.projects(Some("dot")).expect("search").len()
+        );
         let entries = c.entries().expect("entries");
-        println!("time-entities: {} entries, {} locked", entries.len(), entries.iter().filter(|e| e.locked).count());
+        println!(
+            "time-entities: {} entries, {} locked",
+            entries.len(),
+            entries.iter().filter(|e| e.locked).count()
+        );
     }
 }

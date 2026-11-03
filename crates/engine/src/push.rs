@@ -153,7 +153,10 @@ pub(crate) fn message_frames(prev: Option<&Pushed>, full: &Value) -> Vec<Value> 
 /// whose body only grew.
 fn appended(was: &Value, now: &Value) -> Option<usize> {
     let kind = was.get("kind")?.as_str()?;
-    if !matches!(kind, "text" | "reasoning") || now.get("kind") != was.get("kind") || now.get("id") != was.get("id") {
+    if !matches!(kind, "text" | "reasoning")
+        || now.get("kind") != was.get("kind")
+        || now.get("id") != was.get("id")
+    {
         return None;
     }
     let (old, new) = (was.get("body")?.as_str()?, now.get("body")?.as_str()?);
@@ -235,7 +238,11 @@ mod tests {
         let frames = message_frames(prev.map(Pushed::of).as_ref(), full);
         let mut view = prev.cloned();
         for frame in &frames {
-            assert!(size(frame) <= FRAME_BUDGET, "frame of {} bytes", size(frame));
+            assert!(
+                size(frame) <= FRAME_BUDGET,
+                "frame of {} bytes",
+                size(frame)
+            );
             view = Some(apply(view, frame).expect("frame applies"));
         }
         view.expect("a view")
@@ -258,7 +265,10 @@ mod tests {
         let frames = message_frames(Some(&Pushed::of(&before)), &after);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0]["body_from"], 5);
-        assert_eq!(frames[0]["parts"], json!([{ "kind": "text", "id": "p1", "body": " world" }]));
+        assert_eq!(
+            frames[0]["parts"],
+            json!([{ "kind": "text", "id": "p1", "body": " world" }])
+        );
         assert_eq!(replay(Some(&before), &after)["parts"], after["parts"]);
     }
 
@@ -266,7 +276,11 @@ mod tests {
     fn new_and_changed_parts_send_from_the_first_difference() {
         let tool = |state: &str| json!({ "kind": "tool", "tool_id": "t1", "name": "bash", "state": state, "summary": "ls", "images": [] });
         let before = message(vec![text("a"), tool("running")]);
-        let after = message(vec![text("a"), tool("done"), json!({ "kind": "text", "id": "p2", "body": "b" })]);
+        let after = message(vec![
+            text("a"),
+            tool("done"),
+            json!({ "kind": "text", "id": "p2", "body": "b" }),
+        ]);
         let frames = message_frames(Some(&Pushed::of(&before)), &after);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0]["parts_from"], 1);
@@ -280,7 +294,11 @@ mod tests {
     #[test]
     fn oversize_messages_split_into_frames_that_fit() {
         let big = "x".repeat(3 * 1024 * 1024 + 7);
-        let full = message(vec![text("intro"), json!({ "kind": "reasoning", "id": "r", "body": big }), text("end")]);
+        let full = message(vec![
+            text("intro"),
+            json!({ "kind": "reasoning", "id": "r", "body": big }),
+            text("end"),
+        ]);
         let frames = message_frames(None, &full);
         assert!(frames.len() > 3, "{} frames", frames.len());
         assert_eq!(replay(None, &full)["parts"], full["parts"]);
@@ -292,7 +310,9 @@ mod tests {
 
     #[test]
     fn huge_tool_summaries_are_capped_in_the_push() {
-        let full = message(vec![json!({ "kind": "tool", "tool_id": "t", "name": "bash", "state": "done", "summary": "y".repeat(2 << 20), "images": [] })]);
+        let full = message(vec![
+            json!({ "kind": "tool", "tool_id": "t", "name": "bash", "state": "done", "summary": "y".repeat(2 << 20), "images": [] }),
+        ]);
         let view = replay(None, &full);
         let summary = view["parts"][0]["summary"].as_str().unwrap();
         assert!(summary.len() < FRAME_BUDGET && summary.ends_with("(truncated)"));
@@ -302,9 +322,13 @@ mod tests {
     fn attachment_changes_alone_still_push() {
         let before = message(vec![text("a")]);
         let mut after = before.clone();
-        after["attachments"] = json!([{ "id": "f", "name": "a.png", "mime": "image/png", "path": "/tmp/a.png" }]);
+        after["attachments"] =
+            json!([{ "id": "f", "name": "a.png", "mime": "image/png", "path": "/tmp/a.png" }]);
         let frames = message_frames(Some(&Pushed::of(&before)), &after);
         assert_eq!(frames.len(), 1);
-        assert_eq!(replay(Some(&before), &after)["attachments"], after["attachments"]);
+        assert_eq!(
+            replay(Some(&before), &after)["attachments"],
+            after["attachments"]
+        );
     }
 }

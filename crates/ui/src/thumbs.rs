@@ -26,7 +26,10 @@ impl Asset for Thumb {
     type Source = ThumbSource;
     type Output = Result<Arc<RenderImage>, ImageCacheError>;
 
-    fn load(source: Self::Source, _cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
+    fn load(
+        source: Self::Source,
+        _cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
         async move { decode(&source) }
     }
 }
@@ -39,13 +42,22 @@ pub fn fit(iw: u32, ih: u32, w: u32, h: u32, cover: bool) -> (u32, u32) {
     }
     let (sx, sy) = (w as f64 / iw as f64, h as f64 / ih as f64);
     let scale = if cover { sx.max(sy) } else { sx.min(sy) }.min(1.0);
-    (((iw as f64 * scale).round() as u32).max(1), ((ih as f64 * scale).round() as u32).max(1))
+    (
+        ((iw as f64 * scale).round() as u32).max(1),
+        ((ih as f64 * scale).round() as u32).max(1),
+    )
 }
 
 fn decode(source: &ThumbSource) -> Result<Arc<RenderImage>, ImageCacheError> {
     let bytes = std::fs::read(&source.path)?;
     let image = image::load_from_memory(&bytes)?;
-    let (tw, th) = fit(image.width(), image.height(), source.w, source.h, source.cover);
+    let (tw, th) = fit(
+        image.width(),
+        image.height(),
+        source.w,
+        source.h,
+        source.cover,
+    );
     let image = if (tw, th) == (image.width(), image.height()) {
         image
     } else {
@@ -68,7 +80,9 @@ pub fn source(path: impl Into<PathBuf>, w: f32, h: f32, cover: bool) -> ImageSou
         h: (h * 2.0).ceil().max(1.0) as u32,
         cover,
     };
-    ImageSource::Custom(Arc::new(move |window, cx| window.use_asset::<Thumb>(&source, cx)))
+    ImageSource::Custom(Arc::new(move |window, cx| {
+        window.use_asset::<Thumb>(&source, cx)
+    }))
 }
 
 #[cfg(test)]
@@ -93,8 +107,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keel-thumb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("big.png");
-        image::RgbaImage::from_pixel(1600, 1000, image::Rgba([10, 20, 30, 255])).save(&path).unwrap();
-        let image = decode(&ThumbSource { path: path, w: 720, h: 450, cover: false }).unwrap();
+        image::RgbaImage::from_pixel(1600, 1000, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+        let image = decode(&ThumbSource {
+            path: path,
+            w: 720,
+            h: 450,
+            cover: false,
+        })
+        .unwrap();
         let size = image.size(0);
         assert_eq!((size.width.0, size.height.0), (720, 450));
         // BGRA: blue first.

@@ -13,19 +13,20 @@
 //! - Code block height is `lines * line_height`, independent of syntax highlight.
 //! - Paint-only syntax colors.
 
+use crate::style::zpx;
 use std::collections::HashMap;
 use std::ops::Range;
-use crate::style::zpx;
 
 use gpui::{
-    AnyElement, Context, ElementId, FollowMode, Hsla, IntoElement, ListAlignment, ListState, Pixels,
-    Render, SharedString, Styled, TextAlign, TextRun, Window, div, prelude::*, px, relative,
+    AnyElement, Context, ElementId, FollowMode, Hsla, IntoElement, ListAlignment, ListState,
+    Pixels, Render, SharedString, Styled, TextAlign, TextRun, Window, div, prelude::*, px,
+    relative,
 };
 use keel_theme::{SyntaxPaintMap, Tokens};
 
-use crate::markdown::TranscriptBlock;
-use crate::icons::Icon;
 use crate::files::{FileKind, FileRef};
+use crate::icons::Icon;
+use crate::markdown::TranscriptBlock;
 use crate::markdown::{ColumnAlign, ImageRef, Inline, InlineSpan, ToolEntry};
 use crate::style::{KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, READING, c};
 
@@ -57,11 +58,14 @@ impl HeightMemo {
     }
 
     pub fn get(&self, row_id: &str, content_len: usize, width: Pixels) -> Option<Pixels> {
-        self.cache.get(&Self::key(row_id, content_len, width)).copied()
+        self.cache
+            .get(&Self::key(row_id, content_len, width))
+            .copied()
     }
 
     pub fn insert(&mut self, row_id: &str, content_len: usize, width: Pixels, height: Pixels) {
-        self.cache.insert(Self::key(row_id, content_len, width), height);
+        self.cache
+            .insert(Self::key(row_id, content_len, width), height);
     }
 
     pub fn clear(&mut self) {
@@ -154,19 +158,26 @@ pub struct TranscriptState {
     pub row_heights: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
 }
 
-pub fn tool_group_height(group_id: &str, tools: &[crate::markdown::ToolEntry], overrides: &[(String, bool)]) -> f32 {
+pub fn tool_group_height(
+    group_id: &str,
+    tools: &[crate::markdown::ToolEntry],
+    overrides: &[(String, bool)],
+) -> f32 {
     let base = crate::trace_view::LINE_H * tools.len().max(1) as f32 + 4.0;
     let mut extra = 0.0;
     for tool in tools {
         let is_error = tool.state == "error";
         let open = overrides
             .iter()
-            .find(|(id, _)| id == &crate::turn::line_id(group_id, &tool.tool_id) || id.ends_with(&tool.tool_id))
+            .find(|(id, _)| {
+                id == &crate::turn::line_id(group_id, &tool.tool_id) || id.ends_with(&tool.tool_id)
+            })
             .map(|(_, o)| *o)
             .unwrap_or(is_error);
         if open {
             let body_lines = if let Some(diff) = &tool.diff {
-                diff.new_text.lines().count() + diff.old_text.as_deref().map_or(0, |o| o.lines().count())
+                diff.new_text.lines().count()
+                    + diff.old_text.as_deref().map_or(0, |o| o.lines().count())
             } else if !tool.output_tail.is_empty() {
                 tool.output_tail.lines().count()
             } else {
@@ -174,7 +185,9 @@ pub fn tool_group_height(group_id: &str, tools: &[crate::markdown::ToolEntry], o
             };
             if body_lines > 0 {
                 let pad = 8.0 + 2.0;
-                let body_h = (body_lines.max(1) as f32 * 16.0 + 34.0).min(crate::code_block::COMPACT_CAP + 2.0) + pad;
+                let body_h = (body_lines.max(1) as f32 * 16.0 + 34.0)
+                    .min(crate::code_block::COMPACT_CAP + 2.0)
+                    + pad;
                 extra += body_h;
             }
         }
@@ -260,7 +273,9 @@ impl TranscriptState {
     /// for another frame). The goal is re-read each frame, so streamed rows
     /// push it; on landing, Tail takes over and pins the true bottom.
     pub fn advance_glide(&mut self, now: std::time::Instant) -> bool {
-        let Some((from, at)) = self.glide else { return false };
+        let Some((from, at)) = self.glide else {
+            return false;
+        };
         let to = f32::from(self.list_state.max_offset_for_scrollbar().y);
         let (pos, done) = crate::motion::scroll_glide(from, to, now.saturating_duration_since(at));
         if done {
@@ -334,7 +349,10 @@ impl TranscriptState {
         }
         self.glide = None;
         self.set_stick(false);
-        self.list_state.scroll_to(gpui::ListOffset { item_ix: index, offset_in_item: px(0.) });
+        self.list_state.scroll_to(gpui::ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.),
+        });
     }
 
     /// First row of each user message, with a one-line preview. These are
@@ -401,7 +419,13 @@ impl TranscriptState {
     /// `later` (the messages after it in chat order): rows publish when they
     /// are ready, so a reopened chat's tool-only turn can beat the user
     /// message (waiting on its parse) that came before it.
-    pub fn upsert_message_before(&mut self, message_id: &str, role: &str, blocks: Vec<TranscriptBlock>, later: &[String]) {
+    pub fn upsert_message_before(
+        &mut self,
+        message_id: &str,
+        role: &str,
+        blocks: Vec<TranscriptBlock>,
+        later: &[String],
+    ) {
         let now = std::time::Instant::now();
         let live = self.live_motion(now);
         let start = self.items.iter().position(|r| r.message_id == message_id);
@@ -437,7 +461,8 @@ impl TranscriptState {
                 .iter()
                 .take_while(|r| r.message_id == message_id)
                 .count();
-        let wanted: std::collections::HashSet<String> = blocks.iter().map(|b| b.id().to_string()).collect();
+        let wanted: std::collections::HashSet<String> =
+            blocks.iter().map(|b| b.id().to_string()).collect();
         let mut ix = start;
         for block in blocks {
             loop {
@@ -507,7 +532,10 @@ impl TranscriptState {
 
     /// Rows publishing now are live output, not the chat loading.
     fn live_motion(&self, now: std::time::Instant) -> bool {
-        self.animate_new && !self.reduced_motion && now.saturating_duration_since(self.opened_at) >= std::time::Duration::from_millis(800)
+        self.animate_new
+            && !self.reduced_motion
+            && now.saturating_duration_since(self.opened_at)
+                >= std::time::Duration::from_millis(800)
     }
 
     /// The entrance start for a row arriving now: rows within ~100 ms of the
@@ -532,7 +560,10 @@ impl TranscriptState {
     /// Drop ghosts whose exit has played. True while any row still enters
     /// or leaves (the view keeps asking for frames).
     pub fn reap(&mut self, now: std::time::Instant) -> bool {
-        let done = |r: &TranscriptRowItem| r.leaving.is_some_and(|at| now.saturating_duration_since(at) >= crate::motion::ROW_EXIT);
+        let done = |r: &TranscriptRowItem| {
+            r.leaving
+                .is_some_and(|at| now.saturating_duration_since(at) >= crate::motion::ROW_EXIT)
+        };
         while let Some(ix) = self.items.iter().position(done) {
             let id = self.items[ix].row_id().to_string();
             std::rc::Rc::make_mut(&mut self.items).remove(ix);
@@ -541,11 +572,16 @@ impl TranscriptState {
                 self.row_heights.borrow_mut().remove(&id);
             }
         }
-        let moving = self.items.iter().any(|r| r.look(now, self.reduced_motion).is_some());
+        let moving = self
+            .items
+            .iter()
+            .any(|r| r.look(now, self.reduced_motion).is_some());
         // Fold bodies (`fold:`) and step rows keep theirs: a close starts from it.
         // ponytail: fold heights live until the chat switches; prune if chats get huge.
         if !moving && !self.row_heights.borrow().is_empty() {
-            self.row_heights.borrow_mut().retain(|k, _| k.starts_with("fold:") || k.contains('#'));
+            self.row_heights
+                .borrow_mut()
+                .retain(|k, _| k.starts_with("fold:") || k.contains('#'));
         }
         moving
     }
@@ -560,21 +596,29 @@ impl TranscriptState {
             return cached;
         }
         let height = match block {
-            TranscriptBlock::Code { line_count, language, content, closed, .. } => {
-                diagram_height(language, content, *closed, width).unwrap_or_else(|| {
-                    let _ = line_count;
-                    let mut props = crate::code_block::CodeBlockProps::new("", content.as_str(), crate::code_block::CodeSize::Full);
-                    props.expanded = false;
-                    px(crate::code_block::outer_height(&props, 900., std::time::Instant::now()) + 8.0)
-                })
-            }
+            TranscriptBlock::Code {
+                line_count,
+                language,
+                content,
+                closed,
+                ..
+            } => diagram_height(language, content, *closed, width).unwrap_or_else(|| {
+                let _ = line_count;
+                let mut props = crate::code_block::CodeBlockProps::new(
+                    "",
+                    content.as_str(),
+                    crate::code_block::CodeSize::Full,
+                );
+                props.expanded = false;
+                px(crate::code_block::outer_height(&props, 900., std::time::Instant::now()) + 8.0)
+            }),
             TranscriptBlock::Paragraph { content, .. } => {
                 let lines = content.lines().count().max(1);
                 px((lines as f32) * f32::from(Self::prose_line_height()) + 12.0)
             }
-            TranscriptBlock::List { items, .. } => {
-                px((items.len().max(1) as f32) * (f32::from(Self::prose_line_height()) + 4.0) + 12.0)
-            }
+            TranscriptBlock::List { items, .. } => px((items.len().max(1) as f32)
+                * (f32::from(Self::prose_line_height()) + 4.0)
+                + 12.0),
             TranscriptBlock::Heading { level, .. } => px(match level {
                 1 => 52.0,
                 2 => 44.0,
@@ -588,21 +632,46 @@ impl TranscriptState {
                 let shown = rows.len() + usize::from(header.iter().any(|c| !c.text.is_empty()));
                 px(shown as f32 * 30.0 + 10.0)
             }
-            TranscriptBlock::ToolGroup { tools, expanded, .. } if tools.len() == 1 && tools[0].is_receipt() => {
-                px(32.0 + if *expanded { receipt_body_height(&tools[0]) } else { 0.0 })
-            }
-            TranscriptBlock::ToolGroup { id, tools, overrides, .. } => px(tool_group_height(id, tools, overrides)),
-            TranscriptBlock::Plan { entries, live, expanded, .. } => {
+            TranscriptBlock::ToolGroup {
+                tools, expanded, ..
+            } if tools.len() == 1 && tools[0].is_receipt() => px(32.0
+                + if *expanded {
+                    receipt_body_height(&tools[0])
+                } else {
+                    0.0
+                }),
+            TranscriptBlock::ToolGroup {
+                id,
+                tools,
+                overrides,
+                ..
+            } => px(tool_group_height(id, tools, overrides)),
+            TranscriptBlock::Plan {
+                entries,
+                live,
+                expanded,
+                ..
+            } => {
                 let open = expanded.unwrap_or(*live);
-                px(crate::trace_view::LINE_H * (1 + if open { entries.len() } else { 0 }) as f32 + 4.0)
+                px(
+                    crate::trace_view::LINE_H * (1 + if open { entries.len() } else { 0 }) as f32
+                        + 4.0,
+                )
             }
             TranscriptBlock::TurnSummary { .. } => px(crate::trace_view::LINE_H),
             TranscriptBlock::Images { .. } => px(THUMB_H + 8.0),
-            TranscriptBlock::Shots { paths, .. } => px(paths.len().max(1) as f32 * (SHOT_H + 8.0) + 8.0),
-            TranscriptBlock::Files { .. } => px(FILE_CHIP_H + 12.0),
-            TranscriptBlock::Reasoning { content, expanded, .. } => {
-                px(crate::trace_view::LINE_H + if *expanded { content.lines().count() as f32 * f32::from(Self::line_height()) } else { 0.0 })
+            TranscriptBlock::Shots { paths, .. } => {
+                px(paths.len().max(1) as f32 * (SHOT_H + 8.0) + 8.0)
             }
+            TranscriptBlock::Files { .. } => px(FILE_CHIP_H + 12.0),
+            TranscriptBlock::Reasoning {
+                content, expanded, ..
+            } => px(crate::trace_view::LINE_H
+                + if *expanded {
+                    content.lines().count() as f32 * f32::from(Self::line_height())
+                } else {
+                    0.0
+                }),
             TranscriptBlock::Subagent { .. } => px(crate::trace_view::LINE_H),
             TranscriptBlock::Chart { .. } => px(crate::chart::HEIGHT + 76.0),
             TranscriptBlock::Choices { choices, .. } => {
@@ -613,18 +682,27 @@ impl TranscriptState {
                 let body_h = if card.files.len() == 1 && card.more == 0 {
                     0.0
                 } else if *expanded {
-                    FILE_ROW_H * card.files.len() as f32 + if card.more > 0 { FILE_ROW_H } else { 0.0 }
+                    FILE_ROW_H * card.files.len() as f32
+                        + if card.more > 0 { FILE_ROW_H } else { 0.0 }
                 } else {
                     0.0
                 };
                 px(FILES_HEAD_H + body_h + 12.0)
             }
-            TranscriptBlock::MrCard { card, .. } => px(MR_HEAD_H + if card.offer_merge { MR_FOOT_H } else { 0.0 } + 10.0),
+            TranscriptBlock::MrCard { card, .. } => {
+                px(MR_HEAD_H + if card.offer_merge { MR_FOOT_H } else { 0.0 } + 10.0)
+            }
             TranscriptBlock::Tests { run, .. } => {
-                let failures = if run.failures.is_empty() { 0.0 } else { 12.0 + 22.0 * run.failures.len() as f32 };
+                let failures = if run.failures.is_empty() {
+                    0.0
+                } else {
+                    12.0 + 22.0 * run.failures.len() as f32
+                };
                 px(TESTS_SUMMARY_H + failures + 10.0)
             }
-            TranscriptBlock::Steps { steps, .. } => px(CHOICE_HEADER_H + CHOICE_ROW_H * steps.items.len() as f32 + 12.0),
+            TranscriptBlock::Steps { steps, .. } => {
+                px(CHOICE_HEADER_H + CHOICE_ROW_H * steps.items.len() as f32 + 12.0)
+            }
             TranscriptBlock::Callout { .. } => px(CALLOUT_H + 10.0),
             TranscriptBlock::Compare { columns, .. } => {
                 let points = columns.iter().map(|c| c.points.len()).max().unwrap_or(1);
@@ -644,34 +722,74 @@ impl TranscriptState {
 #[derive(Clone, Debug)]
 pub enum RowAction {
     /// Open or close a folded row (tool group, thinking), by row id.
-    Toggle { row_id: String },
-    OpenImage { path: String },
+    Toggle {
+        row_id: String,
+    },
+    OpenImage {
+        path: String,
+    },
     /// A file chip: preview in the browser pane, or open with the system app.
-    OpenFile { path: String },
+    OpenFile {
+        path: String,
+    },
     /// A changed file in FileChanges: open its diff in the right-side diffs panel.
-    OpenFileDiff { path: String },
+    OpenFileDiff {
+        path: String,
+    },
     /// A subagent indicator row: open that subagent's session.
-    OpenSubagent { subagent_id: String },
-    Copy { row_id: String, content: String },
+    OpenSubagent {
+        subagent_id: String,
+    },
+    Copy {
+        row_id: String,
+        content: String,
+    },
     /// A diagram's expand button: show it full window, to pan and zoom.
-    OpenDiagram { row_id: String, source: String },
+    OpenDiagram {
+        row_id: String,
+        source: String,
+    },
     /// A diagram as a PNG on the clipboard, drawn in these colors.
-    CopyImage { row_id: String, source: String, tokens: Tokens },
+    CopyImage {
+        row_id: String,
+        source: String,
+        tokens: Tokens,
+    },
     /// A choice button: send `text` as the user's next message.
-    Choose { text: String },
-    OpenUrl { url: String },
+    Choose {
+        text: String,
+    },
+    OpenUrl {
+        url: String,
+    },
     /// An MR card's Merge button (`row_id` keys its [`MergeUi`]); the first
     /// click arms it, a second one merges.
-    Merge { row_id: String, message_id: String, part_id: String },
+    Merge {
+        row_id: String,
+        message_id: String,
+        part_id: String,
+    },
     /// An MR card's Track: the chat's header follows this MR.
-    TrackMr { mr: crate::mr::MrRef },
+    TrackMr {
+        mr: crate::mr::MrRef,
+    },
     /// A code block's Run: type `command` into a new terminal tab. A risky
     /// one only runs on a second click (`row_id` keys the arming).
-    Run { row_id: String, command: String, risky: bool },
+    Run {
+        row_id: String,
+        command: String,
+        risky: bool,
+    },
     /// A diagram node: start a question about it in the composer.
-    AskAbout { label: String },
+    AskAbout {
+        label: String,
+    },
     /// Open the full content in a modal viewer overlay.
-    OpenFullOutput { title: Option<String>, content: String, error: bool },
+    OpenFullOutput {
+        title: Option<String>,
+        content: String,
+        error: bool,
+    },
 }
 
 /// Where an MR card's Merge button is, by row id. No entry: idle.
@@ -738,7 +856,12 @@ pub enum RowProbe {
     Tool,
 }
 
-fn diagram_height(language: &Option<String>, content: &str, closed: bool, width: Pixels) -> Option<Pixels> {
+fn diagram_height(
+    language: &Option<String>,
+    content: &str,
+    closed: bool,
+    width: Pixels,
+) -> Option<Pixels> {
     if let Some(diagram) = crate::diagram::parse(language.as_deref(), content) {
         return Some(px(crate::diagram::size(&diagram, f32::from(width)).1 + 36.));
     }
@@ -750,10 +873,19 @@ fn diagram_height(language: &Option<String>, content: &str, closed: bool, width:
 /// A finished `mermaid` fence, or a `diagram` fence that is not a box drawing.
 /// A fence still streaming stays code until it closes.
 fn is_mermaid(language: &Option<String>, closed: bool) -> bool {
-    closed && matches!(language.as_deref().map(str::trim), Some("mermaid" | "diagram"))
+    closed
+        && matches!(
+            language.as_deref().map(str::trim),
+            Some("mermaid" | "diagram")
+        )
 }
 
-fn render_mermaid(item: &TranscriptRowItem, language: &Option<String>, content: &str, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
+fn render_mermaid(
+    item: &TranscriptRowItem,
+    language: &Option<String>,
+    content: &str,
+    rc: &RowContext,
+) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
     let label = language.clone().unwrap_or_else(|| "mermaid".into());
     let (row_id, text) = (item.row_id().to_string(), content.to_string());
@@ -770,7 +902,16 @@ fn render_mermaid(item: &TranscriptRowItem, language: &Option<String>, content: 
         .overflow_hidden()
         .flex()
         .flex_col()
-        .child(diagram_bar(item, &label, rc.copied.as_deref(), rc.on_action.clone(), row_id, text, Some(t), t))
+        .child(diagram_bar(
+            item,
+            &label,
+            rc.copied.as_deref(),
+            rc.on_action.clone(),
+            row_id,
+            text,
+            Some(t),
+            t,
+        ))
         .child(
             div().w_full().px_4().py_3().flex().justify_center().child(
                 // Same sizing as `mermaid::fit`: the column's width, capped in
@@ -807,7 +948,16 @@ fn render_diagram(
         .overflow_hidden()
         .flex()
         .flex_col()
-        .child(diagram_bar(item, &label, rc.copied.as_deref(), on_action, row_id, text, None, t))
+        .child(diagram_bar(
+            item,
+            &label,
+            rc.copied.as_deref(),
+            on_action,
+            row_id,
+            text,
+            None,
+            t,
+        ))
         .child(
             gpui::canvas(
                 {
@@ -821,8 +971,14 @@ fn render_diagram(
                             .iter()
                             .filter_map(|node| {
                                 let (x, y, w, h) = *placed.nodes.get(&node.id)?;
-                                let at = gpui::Bounds::new(shift(bounds.origin, x, y), gpui::size(px(w), px(h)));
-                                Some((window.insert_hitbox(at, gpui::HitboxBehavior::Normal), node.label.clone()))
+                                let at = gpui::Bounds::new(
+                                    shift(bounds.origin, x, y),
+                                    gpui::size(px(w), px(h)),
+                                );
+                                Some((
+                                    window.insert_hitbox(at, gpui::HitboxBehavior::Normal),
+                                    node.label.clone(),
+                                ))
                             })
                             .collect();
                         (bounds.origin, placed, nodes)
@@ -898,7 +1054,14 @@ fn chart_bar(
                             .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
                     })
                     .active(|s| s.opacity(0.85))
-                    .on_click(move |_, _, cx| to_chart(RowAction::Toggle { row_id: format!("{row_id1}~table=0") }, cx))
+                    .on_click(move |_, _, cx| {
+                        to_chart(
+                            RowAction::Toggle {
+                                row_id: format!("{row_id1}~table=0"),
+                            },
+                            cx,
+                        )
+                    })
                     .child("Chart"),
             )
             .child(
@@ -921,7 +1084,14 @@ fn chart_bar(
                             .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
                     })
                     .active(|s| s.opacity(0.85))
-                    .on_click(move |_, _, cx| to_table(RowAction::Toggle { row_id: format!("{row_id2}~table=1") }, cx))
+                    .on_click(move |_, _, cx| {
+                        to_table(
+                            RowAction::Toggle {
+                                row_id: format!("{row_id2}~table=1"),
+                            },
+                            cx,
+                        )
+                    })
                     .child("Table"),
             );
     }
@@ -934,7 +1104,15 @@ fn chart_bar(
             tint(is_copied),
             t,
         )
-        .on_click(move |_, _, cx| copy_act(RowAction::Copy { row_id: copy_id.clone(), content: copy_text.clone() }, cx)),
+        .on_click(move |_, _, cx| {
+            copy_act(
+                RowAction::Copy {
+                    row_id: copy_id.clone(),
+                    content: copy_text.clone(),
+                },
+                cx,
+            )
+        }),
     );
 
     let kind_label = match chart.kind {
@@ -985,12 +1163,30 @@ fn render_chart(
 ) -> gpui::Div {
     let t = rc.tokens;
     let row_id = item.row_id().to_string();
-    let show_table = rc.open_lines.get(&format!("{row_id}~table")).copied().unwrap_or(false);
+    let show_table = rc
+        .open_lines
+        .get(&format!("{row_id}~table"))
+        .copied()
+        .unwrap_or(false);
 
-    let header_bar = chart_bar(item, chart, replaces, show_table, rc.copied.as_deref(), rc.on_action.clone(), t);
+    let header_bar = chart_bar(
+        item,
+        chart,
+        replaces,
+        show_table,
+        rc.copied.as_deref(),
+        rc.on_action.clone(),
+        t,
+    );
 
     let content = if show_table && let Some(replaces) = replaces {
-        if let TranscriptBlock::Table { align, header, rows, .. } = replaces.as_ref() {
+        if let TranscriptBlock::Table {
+            align,
+            header,
+            rows,
+            ..
+        } = replaces.as_ref()
+        {
             render_table(item, align, header, rows, rc)
         } else {
             div()
@@ -1012,7 +1208,12 @@ fn render_chart(
                 .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
                 .active(|s| s.opacity(0.85))
                 .child(div().size(px(7.)).rounded(px(2.)).bg(series_color(t, ix)))
-                .child(div().text_size(zpx(11.5)).font_weight(gpui::FontWeight::MEDIUM).child(series.name.clone()))
+                .child(
+                    div()
+                        .text_size(zpx(11.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(series.name.clone()),
+                )
         });
         let chart = chart.clone();
         div()
@@ -1032,7 +1233,9 @@ fn render_chart(
             .child(
                 gpui::canvas(
                     |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-                    move |bounds, hitbox, window, cx| paint_chart(&chart, bounds, &hitbox, t, window, cx),
+                    move |bounds, hitbox, window, cx| {
+                        paint_chart(&chart, bounds, &hitbox, t, window, cx)
+                    },
                 )
                 .w_full()
                 .h(px(crate::chart::HEIGHT)),
@@ -1055,14 +1258,24 @@ fn render_chart(
         .child(header_bar)
         .child(content);
 
-    div().w_full().py_1().child(crate::motion::appear(card, format!("chart-in-{row_id}"), crate::motion::BASE, 4., rc.reduced))
+    div().w_full().py_1().child(crate::motion::appear(
+        card,
+        format!("chart-in-{row_id}"),
+        crate::motion::BASE,
+        4.,
+        rc.reduced,
+    ))
 }
 
 /// Choice buttons as a card: a header, then one row per option with its
 /// number, label, a "Recommended" pill, and an arrow that lights on hover.
 /// Only the latest turn's card clicks, and only while the chat is idle; an
 /// older one is dimmed and says it was answered.
-fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, rc: &RowContext) -> gpui::Div {
+fn render_choices(
+    item: &TranscriptRowItem,
+    choices: &crate::choices::Choices,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let live = rc.live_choices.as_deref() == Some(item.message_id.as_str());
     let header = div()
@@ -1075,9 +1288,18 @@ fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, r
         .border_color(c(t.border))
         .text_size(zpx(11.5))
         .text_color(c(t.text_muted))
-        .child(if live { Icon::PointerClick } else { Icon::Check }.el(zpx(12.)))
+        .child(
+            if live {
+                Icon::PointerClick
+            } else {
+                Icon::Check
+            }
+            .el(zpx(12.)),
+        )
         .child(if live { "Pick one" } else { "Answered" })
-        .when(live, |d| d.child(div().text_color(c(t.text_faint)).child("· click to reply")));
+        .when(live, |d| {
+            d.child(div().text_color(c(t.text_faint)).child("· click to reply"))
+        });
     let rows = choices.options.iter().enumerate().map(|(ix, label)| {
         let recommended = choices.recommended == Some(ix);
         let group = SharedString::from(format!("choice-{}-{ix}", item.row_id()));
@@ -1091,8 +1313,14 @@ fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, r
             .rounded_full()
             .font_family(MONO)
             .text_size(zpx(11.))
-            .when(recommended, |d| d.bg(c(t.accent)).text_color(c(t.text_on_accent)))
-            .when(!recommended, |d| d.border_1().border_color(c(t.border)).text_color(c(t.text_muted)))
+            .when(recommended, |d| {
+                d.bg(c(t.accent)).text_color(c(t.text_on_accent))
+            })
+            .when(!recommended, |d| {
+                d.border_1()
+                    .border_color(c(t.border))
+                    .text_color(c(t.text_muted))
+            })
             .child((ix + 1).to_string());
         let pill = div()
             .flex_none()
@@ -1108,7 +1336,11 @@ fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, r
             .child(Icon::StarFilled.el(zpx(9.)))
             .child("Recommended");
         let pill = if recommended {
-            crate::motion::settle(pill, format!("choice-rec-{}-{ix}", item.row_id()), rc.reduced)
+            crate::motion::settle(
+                pill,
+                format!("choice-rec-{}-{ix}", item.row_id()),
+                rc.reduced,
+            )
         } else {
             pill.into_any_element()
         };
@@ -1122,13 +1354,23 @@ fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, r
             .gap_3()
             .when(ix > 0, |d| d.border_t_1().border_color(c(t.border)))
             .child(badge)
-            .child(div().flex_1().min_w_0().truncate().text_size(zpx(13.5)).text_color(c(t.text)).child(label.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(zpx(13.5))
+                    .text_color(c(t.text))
+                    .child(label.clone()),
+            )
             .when(recommended, |d| d.child(pill))
             .when(live, |d| {
                 d.cursor_pointer()
                     .hover(|s| s.bg(c(t.hover)))
                     .active(|s| s.bg(c(t.selected)).opacity(0.85))
-                    .on_click(move |_, _, cx| on_action(RowAction::Choose { text: text.clone() }, cx))
+                    .on_click(move |_, _, cx| {
+                        on_action(RowAction::Choose { text: text.clone() }, cx)
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -1137,7 +1379,12 @@ fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, r
                             .child(Icon::Forward.el(zpx(13.))),
                     )
             });
-        crate::motion::stagger_in(row, format!("choice-{}-{ix}", item.row_id()), ix, rc.reduced)
+        crate::motion::stagger_in(
+            row,
+            format!("choice-{}-{ix}", item.row_id()),
+            ix,
+            rc.reduced,
+        )
     });
     div().w_full().py_1().child(
         div()
@@ -1156,7 +1403,11 @@ fn render_choices(item: &TranscriptRowItem, choices: &crate::choices::Choices, r
 /// A test run as a card: a status badge and headline with the command,
 /// a bar split into passed, failed and skipped, the counts, then the
 /// failing tests' names.
-fn render_tests(item: &TranscriptRowItem, run: &crate::test_run::TestRun, rc: &RowContext) -> gpui::Div {
+fn render_tests(
+    item: &TranscriptRowItem,
+    run: &crate::test_run::TestRun,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let ok = run.failed == 0;
     let status = c(if ok { t.success } else { t.danger });
@@ -1225,8 +1476,12 @@ fn render_tests(item: &TranscriptRowItem, run: &crate::test_run::TestRun, rc: &R
                 .text_size(zpx(11.5))
                 .text_color(c(t.text_muted))
                 .child(count(run.passed, "passed", c(t.success)))
-                .when(run.failed > 0, |d| d.child(count(run.failed, "failed", c(t.danger))))
-                .when(run.skipped > 0, |d| d.child(count(run.skipped, "skipped", c(t.text_faint)))),
+                .when(run.failed > 0, |d| {
+                    d.child(count(run.failed, "failed", c(t.danger)))
+                })
+                .when(run.skipped > 0, |d| {
+                    d.child(count(run.skipped, "skipped", c(t.text_faint)))
+                }),
         );
     let failures = (!run.failures.is_empty()).then(|| {
         div()
@@ -1242,7 +1497,13 @@ fn render_tests(item: &TranscriptRowItem, run: &crate::test_run::TestRun, rc: &R
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_none().size(px(5.)).rounded_full().bg(c(t.danger)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(5.))
+                            .rounded_full()
+                            .bg(c(t.danger)),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1253,7 +1514,12 @@ fn render_tests(item: &TranscriptRowItem, run: &crate::test_run::TestRun, rc: &R
                             .text_color(c(t.text_muted))
                             .child(name.clone()),
                     );
-                crate::motion::stagger_in(row, format!("test-fail-{}-{ix}", item.row_id()), ix, rc.reduced)
+                crate::motion::stagger_in(
+                    row,
+                    format!("test-fail-{}-{ix}", item.row_id()),
+                    ix,
+                    rc.reduced,
+                )
             }))
     });
     let card = div()
@@ -1301,8 +1567,13 @@ fn render_mr_card(
     use crate::mr::MrStatus;
     let t = rc.tokens;
     // Tracked in this chat: the header's latest poll, not the turn's snapshot.
-    let tracked = rc.tracked_mr.as_ref().filter(|tracked| tracked.mr == card.mr);
-    let snap = tracked.and_then(|tracked| tracked.snap.as_ref()).unwrap_or(&card.snap);
+    let tracked = rc
+        .tracked_mr
+        .as_ref()
+        .filter(|tracked| tracked.mr == card.mr);
+    let snap = tracked
+        .and_then(|tracked| tracked.snap.as_ref())
+        .unwrap_or(&card.snap);
     let status = snap.status();
     let tint = c(crate::mr::status_color(Some(status), t));
     let row_id = item.row_id().to_string();
@@ -1376,17 +1647,23 @@ fn render_mr_card(
             .into_any_element()
     };
     // CI on its own pill, unless the status already is the pipeline.
-    let ci = (!snap.pipeline.is_empty() && !matches!(status, MrStatus::Running | MrStatus::Failed)).then(|| {
-        let (word, color) = match snap.pipeline.as_str() {
-            "success" => ("CI passed", t.success),
-            "failed" => ("CI failed", t.danger),
-            "running" | "pending" | "created" | "preparing" | "waiting_for_resource" | "scheduled" => ("CI running", t.warning),
-            "canceled" => ("CI canceled", t.text_faint),
-            "skipped" => ("CI skipped", t.text_faint),
-            _ => ("CI", t.text_faint),
-        };
-        pill(word.to_string(), c(color))
-    });
+    let ci = (!snap.pipeline.is_empty() && !matches!(status, MrStatus::Running | MrStatus::Failed))
+        .then(|| {
+            let (word, color) = match snap.pipeline.as_str() {
+                "success" => ("CI passed", t.success),
+                "failed" => ("CI failed", t.danger),
+                "running"
+                | "pending"
+                | "created"
+                | "preparing"
+                | "waiting_for_resource"
+                | "scheduled" => ("CI running", t.warning),
+                "canceled" => ("CI canceled", t.text_faint),
+                "skipped" => ("CI skipped", t.text_faint),
+                _ => ("CI", t.text_faint),
+            };
+            pill(word.to_string(), c(color))
+        });
     let branches = (!snap.source_branch.is_empty()).then(|| {
         div()
             .truncate()
@@ -1426,7 +1703,14 @@ fn render_mr_card(
                         .items_baseline()
                         .gap_1p5()
                         .min_w_0()
-                        .child(div().flex_none().font_family(MONO).text_size(zpx(12.)).text_color(c(t.text_faint)).child(card.mr.label()))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(MONO)
+                                .text_size(zpx(12.))
+                                .text_color(c(t.text_faint))
+                                .child(card.mr.label()),
+                        )
                         .child(
                             div()
                                 .min_w_0()
@@ -1452,7 +1736,8 @@ fn render_mr_card(
             _ => (format!("Merge {}", card.mr.label()), Icon::GitLab, false),
         };
         let armed = matches!(merge, Some(MergeUi::Armed));
-        let (row, message_id, part_id) = (row_id.clone(), message_id.to_string(), part_id.to_string());
+        let (row, message_id, part_id) =
+            (row_id.clone(), message_id.to_string(), part_id.to_string());
         let error = match &merge {
             Some(MergeUi::Failed(why)) => Some(why.clone()),
             _ => None,
@@ -1471,9 +1756,16 @@ fn render_mr_card(
                     .min_w_0()
                     .truncate()
                     .text_size(zpx(12.))
-                    .text_color(c(if error.is_some() { t.danger } else { t.text_faint }))
+                    .text_color(c(if error.is_some() {
+                        t.danger
+                    } else {
+                        t.text_faint
+                    }))
                     .child(error.unwrap_or_else(|| {
-                        format!("Keel checks {} on GitLab again before merging", card.mr.label())
+                        format!(
+                            "Keel checks {} on GitLab again before merging",
+                            card.mr.label()
+                        )
                     })),
             )
             .child({
@@ -1497,7 +1789,11 @@ fn render_mr_card(
                             .active(move |s| s.opacity(0.75))
                             .on_click(move |_, _, cx| {
                                 on_action(
-                                    RowAction::Merge { row_id: row.clone(), message_id: message_id.clone(), part_id: part_id.clone() },
+                                    RowAction::Merge {
+                                        row_id: row.clone(),
+                                        message_id: message_id.clone(),
+                                        part_id: part_id.clone(),
+                                    },
                                     cx,
                                 )
                             })
@@ -1524,14 +1820,17 @@ fn render_mr_card(
     )
 }
 
-
 /// Before → after figures as a row of tiles: the label, the new value large,
 /// then the change (green when it went the better way, red when worse) and
 /// the old value.
 /// Numbered steps. Done steps stay readable, the current one is the filled
 /// badge, and later ones fade. Rows cascade in; the current badge settles
 /// with a small scale so the eye lands on it.
-fn render_steps(item: &TranscriptRowItem, steps: &crate::steps::Steps, rc: &RowContext) -> gpui::Div {
+fn render_steps(
+    item: &TranscriptRowItem,
+    steps: &crate::steps::Steps,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let done = steps.done();
     let header = div()
@@ -1563,11 +1862,26 @@ fn render_steps(item: &TranscriptRowItem, steps: &crate::steps::Steps, rc: &RowC
             .rounded_full()
             .font_family(MONO)
             .text_size(zpx(11.))
-            .when(state == "now", |d| d.bg(c(t.accent)).text_color(c(t.text_on_accent)))
-            .when(state == "done", |d| d.bg(c(t.success).opacity(0.15)).text_color(c(t.success)).child(Icon::Check.el(zpx(11.))))
-            .when(state == "later", |d| d.border_1().border_color(c(t.border)).text_color(c(t.text_faint)).child((ix + 1).to_string()));
+            .when(state == "now", |d| {
+                d.bg(c(t.accent)).text_color(c(t.text_on_accent))
+            })
+            .when(state == "done", |d| {
+                d.bg(c(t.success).opacity(0.15))
+                    .text_color(c(t.success))
+                    .child(Icon::Check.el(zpx(11.)))
+            })
+            .when(state == "later", |d| {
+                d.border_1()
+                    .border_color(c(t.border))
+                    .text_color(c(t.text_faint))
+                    .child((ix + 1).to_string())
+            });
         let badge = if state == "now" {
-            crate::motion::settle(badge.child((ix + 1).to_string()), format!("step-now-{}-{ix}", item.row_id()), rc.reduced)
+            crate::motion::settle(
+                badge.child((ix + 1).to_string()),
+                format!("step-now-{}-{ix}", item.row_id()),
+                rc.reduced,
+            )
         } else {
             badge.into_any_element()
         };
@@ -1586,7 +1900,11 @@ fn render_steps(item: &TranscriptRowItem, steps: &crate::steps::Steps, rc: &RowC
                     .min_w_0()
                     .truncate()
                     .text_size(zpx(13.5))
-                    .text_color(c(if state == "later" { t.text_muted } else { t.text }))
+                    .text_color(c(if state == "later" {
+                        t.text_muted
+                    } else {
+                        t.text
+                    }))
                     .child(label.clone()),
             )
             .when(state == "now", |d| {
@@ -1615,7 +1933,11 @@ fn render_steps(item: &TranscriptRowItem, steps: &crate::steps::Steps, rc: &RowC
 
 /// One sentence. It rises a few pixels into place; a warning or result
 /// keeps its color, and reduced motion is a fade only.
-fn render_callout(item: &TranscriptRowItem, callout: &crate::callout::Callout, rc: &RowContext) -> gpui::Div {
+fn render_callout(
+    item: &TranscriptRowItem,
+    callout: &crate::callout::Callout,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let (icon, tone) = match callout.kind {
         crate::callout::Kind::Warning => (Icon::Alert, t.warning),
@@ -1643,13 +1965,28 @@ fn render_callout(item: &TranscriptRowItem, callout: &crate::callout::Callout, r
                 .child(icon.el(zpx(12.)))
                 .child(callout.label()),
         )
-        .child(div().text_size(zpx(13.5)).text_color(c(t.text)).child(callout.text.clone()));
-    div().w_full().py_1().child(crate::motion::appear(card, format!("callout-{}", item.row_id()), crate::motion::BASE, 4., rc.reduced))
+        .child(
+            div()
+                .text_size(zpx(13.5))
+                .text_color(c(t.text))
+                .child(callout.text.clone()),
+        );
+    div().w_full().py_1().child(crate::motion::appear(
+        card,
+        format!("callout-{}", item.row_id()),
+        crate::motion::BASE,
+        4.,
+        rc.reduced,
+    ))
 }
 
 /// Claims side by side. Columns cascade in; the recommended one gets the
 /// same accent treatment as a recommended choice.
-fn render_compare(item: &TranscriptRowItem, columns: &[crate::compare::Column], rc: &RowContext) -> gpui::Div {
+fn render_compare(
+    item: &TranscriptRowItem,
+    columns: &[crate::compare::Column],
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let cards = columns.iter().enumerate().map(|(ix, col)| {
         let points = col.points.iter().map(|point| {
@@ -1658,8 +1995,22 @@ fn render_compare(item: &TranscriptRowItem, columns: &[crate::compare::Column], 
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .child(div().flex_none().size(px(4.)).rounded_full().bg(c(t.text_faint)))
-                .child(div().flex_1().min_w_0().truncate().text_size(zpx(12.5)).text_color(c(t.text)).child(point.clone()))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(4.))
+                        .rounded_full()
+                        .bg(c(t.text_faint)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(zpx(12.5))
+                        .text_color(c(t.text))
+                        .child(point.clone()),
+                )
         });
         let card = div()
             .flex_1()
@@ -1680,7 +2031,16 @@ fn render_compare(item: &TranscriptRowItem, columns: &[crate::compare::Column], 
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(div().flex_1().min_w_0().truncate().text_size(zpx(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(t.text)).child(col.title.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(zpx(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(t.text))
+                            .child(col.title.clone()),
+                    )
                     .when(col.recommended, |d| {
                         d.child(crate::motion::settle(
                             div()
@@ -1700,77 +2060,107 @@ fn render_compare(item: &TranscriptRowItem, columns: &[crate::compare::Column], 
                     }),
             )
             .children(points);
-        crate::motion::stagger_in(card, format!("compare-{}-{ix}", item.row_id()), ix, rc.reduced)
+        crate::motion::stagger_in(
+            card,
+            format!("compare-{}-{ix}", item.row_id()),
+            ix,
+            rc.reduced,
+        )
     });
     div().w_full().py_1().flex().gap_2().children(cards)
 }
 
 /// A box drawing, painted by the diagram fence's painter. The card fades in;
 /// the boxes themselves stay put, since a moving graph is harder to read.
-fn render_stats(item: &TranscriptRowItem, items: &[crate::stats::Stat], rc: &RowContext) -> gpui::Div {
+fn render_stats(
+    item: &TranscriptRowItem,
+    items: &[crate::stats::Stat],
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
-    div().w_full().py_1().flex().gap_2().children(items.iter().enumerate().map(|(ix, stat)| {
-        let tone = match stat.verdict() {
-            Some(true) => t.success,
-            Some(false) => t.danger,
-            None => t.text_muted,
-        };
-        let change = stat.change_text();
-        let card = div()
-            .flex_1()
-            .min_w_0()
-            .h(zpx(STAT_H))
-            .px_3()
-            .py(px(10.))
-            .flex()
-            .flex_col()
-            .justify_between()
-            .rounded(RADIUS_LG)
-            .border_1()
-            .border_color(c(t.border))
-            .bg(c(t.surface))
-            .hover(|s| s.border_color(c(t.focus)))
-            .child(div().truncate().text_size(zpx(11.5)).text_color(c(t.text_muted)).child(stat.label.clone()))
-            .child(
-                div()
-                    .truncate()
-                    .text_size(zpx(22.))
-                    .line_height(zpx(26.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(c(t.text))
-                    .child(stat.after.clone()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .min_w_0()
-                    .text_size(zpx(11.5))
-                    .when(!change.is_empty(), |d| {
-                        d.child(crate::motion::settle(
+    div()
+        .w_full()
+        .py_1()
+        .flex()
+        .gap_2()
+        .children(items.iter().enumerate().map(|(ix, stat)| {
+            let tone = match stat.verdict() {
+                Some(true) => t.success,
+                Some(false) => t.danger,
+                None => t.text_muted,
+            };
+            let change = stat.change_text();
+            let card = div()
+                .flex_1()
+                .min_w_0()
+                .h(zpx(STAT_H))
+                .px_3()
+                .py(px(10.))
+                .flex()
+                .flex_col()
+                .justify_between()
+                .rounded(RADIUS_LG)
+                .border_1()
+                .border_color(c(t.border))
+                .bg(c(t.surface))
+                .hover(|s| s.border_color(c(t.focus)))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(zpx(11.5))
+                        .text_color(c(t.text_muted))
+                        .child(stat.label.clone()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(zpx(22.))
+                        .line_height(zpx(26.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(c(t.text))
+                        .child(stat.after.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .min_w_0()
+                        .text_size(zpx(11.5))
+                        .when(!change.is_empty(), |d| {
+                            d.child(crate::motion::settle(
+                                div()
+                                    .flex_none()
+                                    .px_1p5()
+                                    .rounded_full()
+                                    .bg(c(tone).opacity(0.12))
+                                    .text_color(c(tone))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(change),
+                                format!("stat-chg-{}-{ix}", item.row_id()),
+                                rc.reduced,
+                            ))
+                        })
+                        .child(
                             div()
-                                .flex_none()
-                                .px_1p5()
-                                .rounded_full()
-                                .bg(c(tone).opacity(0.12))
-                                .text_color(c(tone))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(change),
-                            format!("stat-chg-{}-{ix}", item.row_id()),
-                            rc.reduced,
-                        ))
-                    })
-                    .child(div().truncate().text_color(c(t.text_faint)).child(format!("from {}", stat.before))),
-            );
-        crate::motion::stagger_in(card, format!("stat-{}-{ix}", item.row_id()), ix, rc.reduced)
-    }))
+                                .truncate()
+                                .text_color(c(t.text_faint))
+                                .child(format!("from {}", stat.before)),
+                        ),
+                );
+            crate::motion::stagger_in(card, format!("stat-{}-{ix}", item.row_id()), ix, rc.reduced)
+        }))
 }
 
 /// The files a turn changed: a headline with the total lines added and
 /// removed, then one row per file (status badge, path, counts and a
 /// five-block diffstat), each opening the file.
-fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::FileChanges, expanded: bool, rc: &RowContext) -> gpui::Div {
+fn render_file_changes(
+    item: &TranscriptRowItem,
+    card: &crate::file_changes::FileChanges,
+    expanded: bool,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let (added, removed) = card.totals();
     let counts = |added: Option<u32>, removed: Option<u32>| {
@@ -1780,8 +2170,12 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
             .gap_1p5()
             .font_family(MONO)
             .text_size(zpx(11.5))
-            .when_some(added.filter(|n| *n > 0), |d, n| d.child(div().text_color(c(t.success)).child(format!("+{n}"))))
-            .when_some(removed.filter(|n| *n > 0), |d, n| d.child(div().text_color(c(t.danger)).child(format!("−{n}"))))
+            .when_some(added.filter(|n| *n > 0), |d, n| {
+                d.child(div().text_color(c(t.success)).child(format!("+{n}")))
+            })
+            .when_some(removed.filter(|n| *n > 0), |d, n| {
+                d.child(div().text_color(c(t.danger)).child(format!("−{n}")))
+            })
     };
 
     // If there is only 1 file changed, render a single file change component directly without collapse or expand behavior.
@@ -1801,22 +2195,29 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
         };
         let has_counts = file.added.is_some() || file.removed.is_some();
         let diffstat = has_counts.then(|| {
-            let (green, red) = crate::file_changes::blocks(file.added.unwrap_or(0), file.removed.unwrap_or(0));
-            div().flex_none().flex().gap(px(2.)).children((0..5).map(|block| {
-                let color = if block < green {
-                    c(t.success)
-                } else if block < green + red {
-                    c(t.danger)
-                } else {
-                    c(t.border)
-                };
-                div().size(px(7.)).rounded(px(1.5)).bg(color)
-            }))
+            let (green, red) =
+                crate::file_changes::blocks(file.added.unwrap_or(0), file.removed.unwrap_or(0));
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(2.))
+                .children((0..5).map(|block| {
+                    let color = if block < green {
+                        c(t.success)
+                    } else if block < green + red {
+                        c(t.danger)
+                    } else {
+                        c(t.border)
+                    };
+                    div().size(px(7.)).rounded(px(1.5)).bg(color)
+                }))
         });
         let path = file.path.clone();
         let on_action = rc.on_action.clone();
         let single_row = div()
-            .id(ElementId::Name(format!("changed-{}-0", item.row_id()).into()))
+            .id(ElementId::Name(
+                format!("changed-{}-0", item.row_id()).into(),
+            ))
             .h(zpx(FILES_HEAD_H))
             .px_3()
             .flex()
@@ -1847,11 +2248,21 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
                     .min_w_0()
                     .flex()
                     .text_size(zpx(12.5))
-                    .child(div().min_w_0().truncate().text_color(c(t.text_faint)).child(dir))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(c(t.text_faint))
+                            .child(dir),
+                    )
                     .child(
                         div()
                             .flex_none()
-                            .text_color(c(if file.status == 'D' { t.text_faint } else { t.text }))
+                            .text_color(c(if file.status == 'D' {
+                                t.text_faint
+                            } else {
+                                t.text
+                            }))
                             .when(file.status == 'D', |d| d.line_through())
                             .child(name),
                     ),
@@ -1873,7 +2284,9 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
     let row_id = item.row_id().to_string();
     let on_action = rc.on_action.clone();
     let head = div()
-        .id(ElementId::Name(format!("files-head-{}", item.row_id()).into()))
+        .id(ElementId::Name(
+            format!("files-head-{}", item.row_id()).into(),
+        ))
         .h(zpx(FILES_HEAD_H))
         .px_3()
         .flex()
@@ -1882,9 +2295,23 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
         .cursor_pointer()
         .hover(|s| s.bg(c(t.hover)))
         .active(|s| s.bg(c(t.selected)).opacity(0.85))
-        .on_click(move |_, _, cx| on_action(RowAction::Toggle { row_id: row_id.clone() }, cx))
+        .on_click(move |_, _, cx| {
+            on_action(
+                RowAction::Toggle {
+                    row_id: row_id.clone(),
+                },
+                cx,
+            )
+        })
         .child(Icon::FileDiff.el(zpx(13.)))
-        .child(div().flex_1().text_size(zpx(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(t.text)).child(card.headline()))
+        .child(
+            div()
+                .flex_1()
+                .text_size(zpx(13.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(c(t.text))
+                .child(card.headline()),
+        )
         .child(counts(Some(added), Some(removed)))
         .child(chevron(expanded, item.row_id(), rc));
     let rows = card.files.iter().enumerate().map(|(ix, file)| {
@@ -1902,21 +2329,28 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
         };
         let has_counts = file.added.is_some() || file.removed.is_some();
         let diffstat = has_counts.then(|| {
-            let (green, red) = crate::file_changes::blocks(file.added.unwrap_or(0), file.removed.unwrap_or(0));
-            div().flex_none().flex().gap(px(2.)).children((0..5).map(|block| {
-                let color = if block < green {
-                    c(t.success)
-                } else if block < green + red {
-                    c(t.danger)
-                } else {
-                    c(t.border)
-                };
-                div().size(px(7.)).rounded(px(1.5)).bg(color)
-            }))
+            let (green, red) =
+                crate::file_changes::blocks(file.added.unwrap_or(0), file.removed.unwrap_or(0));
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(2.))
+                .children((0..5).map(|block| {
+                    let color = if block < green {
+                        c(t.success)
+                    } else if block < green + red {
+                        c(t.danger)
+                    } else {
+                        c(t.border)
+                    };
+                    div().size(px(7.)).rounded(px(1.5)).bg(color)
+                }))
         });
         let (path, on_action) = (file.path.clone(), rc.on_action.clone());
         div()
-            .id(ElementId::Name(format!("changed-{}-{ix}", item.row_id()).into()))
+            .id(ElementId::Name(
+                format!("changed-{}-{ix}", item.row_id()).into(),
+            ))
             .h(zpx(FILE_ROW_H))
             .px_3()
             .flex()
@@ -1947,8 +2381,24 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
                     .min_w_0()
                     .flex()
                     .text_size(zpx(12.5))
-                    .child(div().min_w_0().truncate().text_color(c(t.text_faint)).child(dir))
-                    .child(div().flex_none().text_color(c(if file.status == 'D' { t.text_faint } else { t.text })).when(file.status == 'D', |d| d.line_through()).child(name)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(c(t.text_faint))
+                            .child(dir),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(if file.status == 'D' {
+                                t.text_faint
+                            } else {
+                                t.text
+                            }))
+                            .when(file.status == 'D', |d| d.line_through())
+                            .child(name),
+                    ),
             )
             .child(counts(file.added, file.removed))
             .children(diffstat)
@@ -1971,7 +2421,8 @@ fn render_file_changes(item: &TranscriptRowItem, card: &crate::file_changes::Fil
         .border_color(c(t.border))
         .children(rows)
         .children(more);
-    let body_height = FILE_ROW_H * card.files.len() as f32 + if card.more > 0 { FILE_ROW_H } else { 0.0 };
+    let body_height =
+        FILE_ROW_H * card.files.len() as f32 + if card.more > 0 { FILE_ROW_H } else { 0.0 };
     let body_animated = fold_body(body, item.row_id(), expanded, body_height, rc);
     div().w_full().py_1().child(
         div()
@@ -2014,10 +2465,13 @@ fn paint_chart(
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let (left, top, plot_w, plot_h) = crate::chart::plot_box(w, h);
     let pointer = window.mouse_position();
-    let hover = hitbox.is_hovered(window).then(|| {
-        let x = f32::from(pointer.x - origin.x) - left;
-        crate::chart::category_at(chart, plot_w, x)
-    }).flatten();
+    let hover = hitbox
+        .is_hovered(window)
+        .then(|| {
+            let x = f32::from(pointer.x - origin.x) - left;
+            crate::chart::category_at(chart, plot_w, x)
+        })
+        .flatten();
     if hover.is_some() {
         window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
     }
@@ -2034,8 +2488,19 @@ fn paint_chart(
     let mut tick = lo;
     while tick <= hi + step / 2. {
         let y = y_of(tick);
-        window.paint_quad(gpui::fill(gpui::Bounds::new(shift(origin, left, y), gpui::size(px(plot_w), px(1.))), grid));
-        paint_label(&crate::chart::label(tick), origin, 6., y - 8., faint, window, cx);
+        window.paint_quad(gpui::fill(
+            gpui::Bounds::new(shift(origin, left, y), gpui::size(px(plot_w), px(1.))),
+            grid,
+        ));
+        paint_label(
+            &crate::chart::label(tick),
+            origin,
+            6.,
+            y - 8.,
+            faint,
+            window,
+            cx,
+        );
         tick += step;
     }
     let n = chart.labels.len();
@@ -2044,9 +2509,20 @@ fn paint_chart(
     let every = (64. / slot).ceil().max(1.) as usize;
     for (ix, name) in chart.labels.iter().enumerate().step_by(every) {
         let x = left + slot * (ix as f32 + 0.5);
-        let shown: String = name.chars().take((slot * every as f32 / 7.5) as usize).collect();
+        let shown: String = name
+            .chars()
+            .take((slot * every as f32 / 7.5) as usize)
+            .collect();
         let half = shown.chars().count() as f32 * 3.6;
-        paint_label(&shown, origin, x - half, top + plot_h + 6., faint, window, cx);
+        paint_label(
+            &shown,
+            origin,
+            x - half,
+            top + plot_h + 6.,
+            faint,
+            window,
+            cx,
+        );
     }
     let zero = y_of(0f64.clamp(lo, hi));
     match chart.kind {
@@ -2081,13 +2557,26 @@ fn paint_chart(
                     let (top_y, bottom_y) = (y_of(v).min(zero), y_of(v).max(zero));
                     let h = (bottom_y - top_y).max(2.);
                     let corners = if v >= 0. {
-                        gpui::Corners { top_left: px(3.), top_right: px(3.), bottom_left: px(0.5), bottom_right: px(0.5) }
+                        gpui::Corners {
+                            top_left: px(3.),
+                            top_right: px(3.),
+                            bottom_left: px(0.5),
+                            bottom_right: px(0.5),
+                        }
                     } else {
-                        gpui::Corners { top_left: px(0.5), top_right: px(0.5), bottom_left: px(3.), bottom_right: px(3.) }
+                        gpui::Corners {
+                            top_left: px(0.5),
+                            top_right: px(0.5),
+                            bottom_left: px(3.),
+                            bottom_right: px(3.),
+                        }
                     };
                     window.paint_quad(
                         gpui::fill(
-                            gpui::Bounds::new(shift(origin, x + 1., top_y), gpui::size(px((bar - 2.).max(1.)), px(h))),
+                            gpui::Bounds::new(
+                                shift(origin, x + 1., top_y),
+                                gpui::size(px((bar - 2.).max(1.)), px(h)),
+                            ),
                             color,
                         )
                         .corner_radii(corners),
@@ -2100,7 +2589,10 @@ fn paint_chart(
                 let x = left + slot * (ix as f32 + 0.5);
                 window.paint_quad(
                     gpui::fill(
-                        gpui::Bounds::new(shift(origin, x - 0.75, top + 2.), gpui::size(px(1.5), px(plot_h - 4.))),
+                        gpui::Bounds::new(
+                            shift(origin, x - 0.75, top + 2.),
+                            gpui::size(px(1.5), px(plot_h - 4.)),
+                        ),
                         c(t.border).opacity(0.85),
                     )
                     .corner_radii(px(0.75)),
@@ -2136,14 +2628,20 @@ fn paint_chart(
                         // Magnetic active point: outer halo + surface border + solid core
                         window.paint_quad(
                             gpui::fill(
-                                gpui::Bounds::new(shift(origin, x - 6., y - 6.), gpui::size(px(12.), px(12.))),
+                                gpui::Bounds::new(
+                                    shift(origin, x - 6., y - 6.),
+                                    gpui::size(px(12.), px(12.)),
+                                ),
                                 base_color.opacity(0.22),
                             )
                             .corner_radii(px(6.)),
                         );
                         window.paint_quad(
                             gpui::fill(
-                                gpui::Bounds::new(shift(origin, x - 4., y - 4.), gpui::size(px(8.), px(8.))),
+                                gpui::Bounds::new(
+                                    shift(origin, x - 4., y - 4.),
+                                    gpui::size(px(8.), px(8.)),
+                                ),
                                 c(t.surface),
                             )
                             .corner_radii(px(4.))
@@ -2152,16 +2650,26 @@ fn paint_chart(
                         );
                         window.paint_quad(
                             gpui::fill(
-                                gpui::Bounds::new(shift(origin, x - 2., y - 2.), gpui::size(px(4.), px(4.))),
+                                gpui::Bounds::new(
+                                    shift(origin, x - 2., y - 2.),
+                                    gpui::size(px(4.), px(4.)),
+                                ),
                                 base_color,
                             )
                             .corner_radii(px(2.)),
                         );
                     } else {
-                        let pt_color = if hover.is_some() { base_color.opacity(0.5) } else { base_color };
+                        let pt_color = if hover.is_some() {
+                            base_color.opacity(0.5)
+                        } else {
+                            base_color
+                        };
                         window.paint_quad(
                             gpui::fill(
-                                gpui::Bounds::new(shift(origin, x - 2.5, y - 2.5), gpui::size(px(5.), px(5.))),
+                                gpui::Bounds::new(
+                                    shift(origin, x - 2.5, y - 2.5),
+                                    gpui::size(px(5.), px(5.)),
+                                ),
                                 pt_color,
                             )
                             .corner_radii(px(2.5)),
@@ -2174,7 +2682,9 @@ fn paint_chart(
     if let Some(ix) = hover
         && let Some((name, rows)) = crate::chart::hover_rows(chart, ix)
     {
-        paint_chart_tip(&name, &rows, origin, left, top, plot_w, slot, ix, t, window, cx);
+        paint_chart_tip(
+            &name, &rows, origin, left, top, plot_w, slot, ix, t, window, cx,
+        );
     }
 }
 
@@ -2204,11 +2714,26 @@ fn paint_chart_tip(
         if bold {
             font.weight = gpui::FontWeight::SEMIBOLD;
         }
-        let run = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
-        window.text_system().shape_line(SharedString::from(text.to_string()), px(size), &[run], None)
+        let run = TextRun {
+            len: text.len(),
+            font,
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window.text_system().shape_line(
+            SharedString::from(text.to_string()),
+            px(size),
+            &[run],
+            None,
+        )
     };
     let max_w = (plot_w - 16.).max(130.);
-    let value_w = rows.iter().map(|(_, _, v)| f32::from(shape(v, 11.5, c(t.text), true, window).width)).fold(0., f32::max);
+    let value_w = rows
+        .iter()
+        .map(|(_, _, v)| f32::from(shape(v, 11.5, c(t.text), true, window).width))
+        .fold(0., f32::max);
     let name_room = max_w - 2. * PAD - SWATCH - 6. - GAP - value_w;
     // A series name that doesn't fit loses characters from its end.
     let fit = |text: &str, window: &mut gpui::Window| -> String {
@@ -2219,14 +2744,18 @@ fn paint_chart_tip(
         while !cut.is_empty() {
             cut.pop();
             let candidate = format!("{}…", cut.trim_end());
-            if f32::from(shape(&candidate, 11.5, c(t.text_muted), false, window).width) <= name_room {
+            if f32::from(shape(&candidate, 11.5, c(t.text_muted), false, window).width) <= name_room
+            {
                 return candidate;
             }
         }
         "…".to_string()
     };
     let names: Vec<String> = rows.iter().map(|(_, n, _)| fit(n, window)).collect();
-    let name_w = names.iter().map(|n| f32::from(shape(n, 11.5, c(t.text_muted), false, window).width)).fold(0., f32::max);
+    let name_w = names
+        .iter()
+        .map(|n| f32::from(shape(n, 11.5, c(t.text_muted), false, window).width))
+        .fold(0., f32::max);
     let head_w = f32::from(shape(name, 11.5, c(t.text), true, window).width);
     let body_w = SWATCH + 6. + name_w + GAP + value_w;
     let wide = (head_w.max(body_w) + 2. * PAD).min(max_w);
@@ -2257,65 +2786,120 @@ fn paint_chart_tip(
 
     // Floating card surface
     window.paint_quad(
-        gpui::fill(gpui::Bounds::new(shift(origin, x, y), gpui::size(px(wide), px(high))), c(t.surface))
-            .corner_radii(px(7.))
-            .border_widths(px(1.))
-            .border_color(c(t.border)),
+        gpui::fill(
+            gpui::Bounds::new(shift(origin, x, y), gpui::size(px(wide), px(high))),
+            c(t.surface),
+        )
+        .corner_radii(px(7.))
+        .border_widths(px(1.))
+        .border_color(c(t.border)),
     );
 
     let line_y = |row: usize| y + PAD + row as f32 * ROW;
-    let _ = shape(name, 11.5, c(t.text), true, window).paint(shift(origin, x + PAD, line_y(0)), px(ROW), TextAlign::Left, None, window, cx);
+    let _ = shape(name, 11.5, c(t.text), true, window).paint(
+        shift(origin, x + PAD, line_y(0)),
+        px(ROW),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 
     // Subtle hairline divider separating category header from metric rows
-    window.paint_quad(
-        gpui::fill(
-            gpui::Bounds::new(shift(origin, x + PAD, line_y(0) + ROW - 3.), gpui::size(px(wide - 2. * PAD), px(1.))),
-            c(t.border).opacity(0.65),
+    window.paint_quad(gpui::fill(
+        gpui::Bounds::new(
+            shift(origin, x + PAD, line_y(0) + ROW - 3.),
+            gpui::size(px(wide - 2. * PAD), px(1.)),
         ),
-    );
+        c(t.border).opacity(0.65),
+    ));
 
     for (row, ((si, _, value), label)) in rows.iter().zip(&names).enumerate() {
         let ly = line_y(row + 1) + 2.;
         window.paint_quad(
-            gpui::fill(gpui::Bounds::new(shift(origin, x + PAD, ly + (ROW - SWATCH) / 2.), gpui::size(px(SWATCH), px(SWATCH))), series_color(t, *si))
-                .corner_radii(px(2.5)),
+            gpui::fill(
+                gpui::Bounds::new(
+                    shift(origin, x + PAD, ly + (ROW - SWATCH) / 2.),
+                    gpui::size(px(SWATCH), px(SWATCH)),
+                ),
+                series_color(t, *si),
+            )
+            .corner_radii(px(2.5)),
         );
-        let _ = shape(label, 11.5, c(t.text_muted), false, window).paint(shift(origin, x + PAD + SWATCH + 6., ly), px(ROW), TextAlign::Left, None, window, cx);
+        let _ = shape(label, 11.5, c(t.text_muted), false, window).paint(
+            shift(origin, x + PAD + SWATCH + 6., ly),
+            px(ROW),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
         let v = shape(value, 11.5, c(t.text), true, window);
         let vx = x + wide - PAD - f32::from(v.width);
-        let _ = v.paint(shift(origin, vx, ly), px(ROW), TextAlign::Left, None, window, cx);
+        let _ = v.paint(
+            shift(origin, vx, ly),
+            px(ROW),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 }
 
 /// A mermaid diagram scaled to fit its bounds, centered. Inline the bounds
 /// already have its aspect ratio; the lightbox hands it the whole window.
-pub fn mermaid_canvas(source: String, t: Tokens, view: &'static str, on_action: OnRowAction) -> gpui::Canvas<Vec<(gpui::Hitbox, String)>> {
+pub fn mermaid_canvas(
+    source: String,
+    t: Tokens,
+    view: &'static str,
+    on_action: OnRowAction,
+) -> gpui::Canvas<Vec<(gpui::Hitbox, String)>> {
     // Where the diagram lands in `bounds`: scaled to fit, centered.
     let fit = |source: &str, bounds: gpui::Bounds<Pixels>| {
         let (w, h) = crate::mermaid::size(source)?;
         let s = (f32::from(bounds.size.width) / w).min(f32::from(bounds.size.height) / h);
         let size = gpui::size(px(w * s), px(h * s));
-        Some((s, gpui::Bounds::new(bounds.center() - gpui::point(size.width / 2., size.height / 2.), size)))
+        Some((
+            s,
+            gpui::Bounds::new(
+                bounds.center() - gpui::point(size.width / 2., size.height / 2.),
+                size,
+            ),
+        ))
     };
     let at_source = source.clone();
     gpui::canvas(
         // One hitbox per node, so a node can be clicked.
         move |bounds, window, _| {
-            let Some((s, at)) = fit(&at_source, bounds) else { return Vec::new() };
+            let Some((s, at)) = fit(&at_source, bounds) else {
+                return Vec::new();
+            };
             crate::mermaid::nodes(&at_source, &t)
                 .into_iter()
                 .map(|(label, x, y, w, h)| {
-                    let node = gpui::Bounds::new(shift(at.origin, x * s, y * s), gpui::size(px(w * s), px(h * s)));
-                    (window.insert_hitbox(node, gpui::HitboxBehavior::Normal), label)
+                    let node = gpui::Bounds::new(
+                        shift(at.origin, x * s, y * s),
+                        gpui::size(px(w * s), px(h * s)),
+                    );
+                    (
+                        window.insert_hitbox(node, gpui::HitboxBehavior::Normal),
+                        label,
+                    )
                 })
                 .collect()
         },
         move |bounds, nodes, window, _| {
             clickable_nodes(nodes, on_action.clone(), window);
-            let Some((w, h)) = crate::mermaid::size(&source) else { return };
+            let Some((w, h)) = crate::mermaid::size(&source) else {
+                return;
+            };
             let s = (f32::from(bounds.size.width) / w).min(f32::from(bounds.size.height) / h);
             let size = gpui::size(px(w * s), px(h * s));
-            let at = gpui::Bounds::new(bounds.center() - gpui::point(size.width / 2., size.height / 2.), size);
+            let at = gpui::Bounds::new(
+                bounds.center() - gpui::point(size.width / 2., size.height / 2.),
+                size,
+            );
             let raster = crate::mermaid::raster(&source, &t, w * s * window.scale_factor(), view);
             if let Some(stale) = raster.stale {
                 let _ = window.drop_image(stale);
@@ -2331,7 +2915,13 @@ pub fn mermaid_canvas(source: String, t: Tokens, view: &'static str, on_action: 
 }
 
 /// A small text button in a diagram's header bar (and the lightbox toolbar).
-pub fn bar_button(id: String, icon: Icon, label: &'static str, color: u32, t: Tokens) -> gpui::Stateful<gpui::Div> {
+pub fn bar_button(
+    id: String,
+    icon: Icon,
+    label: &'static str,
+    color: u32,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(ElementId::Name(id.into()))
         .h(zpx(22.))
@@ -2356,18 +2946,42 @@ pub fn message_text(items: &[TranscriptRowItem], ix: usize) -> Option<String> {
     if items.get(ix + 1).is_some_and(|next| next.message_id == *id) {
         return None;
     }
-    let start = items[..ix].iter().rposition(|r| r.message_id != *id).map_or(0, |p| p + 1);
-    let parts: Vec<String> = items[start..=ix].iter().filter(|r| r.leaving.is_none()).filter_map(|r| block_markdown(&r.block)).collect();
+    let start = items[..ix]
+        .iter()
+        .rposition(|r| r.message_id != *id)
+        .map_or(0, |p| p + 1);
+    let parts: Vec<String> = items[start..=ix]
+        .iter()
+        .filter(|r| r.leaving.is_none())
+        .filter_map(|r| block_markdown(&r.block))
+        .collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn block_markdown(block: &TranscriptBlock) -> Option<String> {
-    let row = |cells: &[Inline]| format!("| {} |", cells.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" | "));
+    let row = |cells: &[Inline]| {
+        format!(
+            "| {} |",
+            cells
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )
+    };
     Some(match block {
         TranscriptBlock::Paragraph { content, .. } => content.clone(),
-        TranscriptBlock::Heading { level, content, .. } => format!("{} {content}", "#".repeat(*level as usize)),
-        TranscriptBlock::Quote { content, .. } => content.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n"),
-        TranscriptBlock::Code { language, content, .. } => format!("```{}\n{content}\n```", language.as_deref().unwrap_or("")),
+        TranscriptBlock::Heading { level, content, .. } => {
+            format!("{} {content}", "#".repeat(*level as usize))
+        }
+        TranscriptBlock::Quote { content, .. } => content
+            .lines()
+            .map(|l| format!("> {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        TranscriptBlock::Code {
+            language, content, ..
+        } => format!("```{}\n{content}\n```", language.as_deref().unwrap_or("")),
         TranscriptBlock::List { items, .. } => items
             .iter()
             .map(|it| {
@@ -2381,12 +2995,18 @@ fn block_markdown(block: &TranscriptBlock) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n"),
         TranscriptBlock::Table { header, rows, .. } => std::iter::once(row(header))
-            .chain(std::iter::once(format!("|{}", " --- |".repeat(header.len().max(1)))))
+            .chain(std::iter::once(format!(
+                "|{}",
+                " --- |".repeat(header.len().max(1))
+            )))
             .chain(rows.iter().map(|r| row(r)))
             .collect::<Vec<_>>()
             .join("\n"),
         TranscriptBlock::Rule { .. } => "---".into(),
-        TranscriptBlock::Chart { replaces: Some(table), .. } => return block_markdown(table),
+        TranscriptBlock::Chart {
+            replaces: Some(table),
+            ..
+        } => return block_markdown(table),
         TranscriptBlock::Chart { chart, .. } => return Some(chart.to_markdown()),
         _ => return None,
     })
@@ -2394,7 +3014,12 @@ fn block_markdown(block: &TranscriptBlock) -> Option<String> {
 
 /// The Copy button under a message; `text` from [`message_text`]. Shown while
 /// the message is hovered (and while it says Copied); hidden, it keeps its room.
-pub fn message_copy(item: &TranscriptRowItem, text: String, shown: bool, rc: &RowContext) -> AnyElement {
+pub fn message_copy(
+    item: &TranscriptRowItem,
+    text: String,
+    shown: bool,
+    rc: &RowContext,
+) -> AnyElement {
     let key = format!("{}#message", item.message_id);
     let copied = rc.copied.as_deref() == Some(key.as_str());
     let on_action = rc.on_action.clone();
@@ -2409,11 +3034,23 @@ pub fn message_copy(item: &TranscriptRowItem, text: String, shown: bool, rc: &Ro
                 format!("copy-{key}"),
                 if copied { Icon::Check } else { Icon::Copy },
                 if copied { "Copied" } else { "Copy" },
-                if copied { rc.tokens.success } else { rc.tokens.text_faint },
+                if copied {
+                    rc.tokens.success
+                } else {
+                    rc.tokens.text_faint
+                },
                 rc.tokens,
             )
             .t_caption()
-            .on_click(move |_, _, cx| on_action(RowAction::Copy { row_id: key.clone(), content: text.clone() }, cx)),
+            .on_click(move |_, _, cx| {
+                on_action(
+                    RowAction::Copy {
+                        row_id: key.clone(),
+                        content: text.clone(),
+                    },
+                    cx,
+                )
+            }),
         )
         .into_any_element()
 }
@@ -2471,21 +3108,48 @@ fn diagram_bar(
     let actions = match mermaid {
         Some(tokens) => {
             let (open, image) = (on_action.clone(), on_action.clone());
-            let (open_id, open_src, image_id, image_src) = (row_id.clone(), text.clone(), row_id.clone(), text.clone());
+            let (open_id, open_src, image_id, image_src) =
+                (row_id.clone(), text.clone(), row_id.clone(), text.clone());
             actions
-                .child(bar_button(format!("expand-{id}"), Icon::Expand, "Expand", t.text_faint, t).on_click(
-                    move |_, _, cx| open(RowAction::OpenDiagram { row_id: open_id.clone(), source: open_src.clone() }, cx),
-                ))
+                .child(
+                    bar_button(
+                        format!("expand-{id}"),
+                        Icon::Expand,
+                        "Expand",
+                        t.text_faint,
+                        t,
+                    )
+                    .on_click(move |_, _, cx| {
+                        open(
+                            RowAction::OpenDiagram {
+                                row_id: open_id.clone(),
+                                source: open_src.clone(),
+                            },
+                            cx,
+                        )
+                    }),
+                )
                 .child(
                     bar_button(
                         format!("copy-image-{id}"),
-                        if image_copied { Icon::Check } else { Icon::Copy },
+                        if image_copied {
+                            Icon::Check
+                        } else {
+                            Icon::Copy
+                        },
                         if image_copied { "Copied" } else { "Copy image" },
                         tint(image_copied),
                         t,
                     )
                     .on_click(move |_, _, cx| {
-                        image(RowAction::CopyImage { row_id: image_id.clone(), source: image_src.clone(), tokens }, cx)
+                        image(
+                            RowAction::CopyImage {
+                                row_id: image_id.clone(),
+                                source: image_src.clone(),
+                                tokens,
+                            },
+                            cx,
+                        )
                     }),
                 )
         }
@@ -2504,7 +3168,15 @@ fn diagram_bar(
             tint(code_copied),
             t,
         )
-        .on_click(move |_, _, cx| on_action(RowAction::Copy { row_id: row_id.clone(), content: text.clone() }, cx)),
+        .on_click(move |_, _, cx| {
+            on_action(
+                RowAction::Copy {
+                    row_id: row_id.clone(),
+                    content: text.clone(),
+                },
+                cx,
+            )
+        }),
     );
 
     div()
@@ -2535,18 +3207,47 @@ fn paint_diagram(
     let accent = c(t.accent);
     let box_of = |id: &str| placed.nodes.get(id).copied();
     for edge in &diagram.edges {
-        let Some((x1, y1, w1, h1)) = box_of(&edge.from) else { continue };
-        let Some((x2, y2, w2, h2)) = box_of(&edge.to) else { continue };
+        let Some((x1, y1, w1, h1)) = box_of(&edge.from) else {
+            continue;
+        };
+        let Some((x2, y2, w2, h2)) = box_of(&edge.to) else {
+            continue;
+        };
         let back = y2 + h2 <= y1 + 4.;
-        let vertical = !back && y2 >= y1 + h1 - 4. && (x1 - x2).abs() < (y2 - (y1 + h1)).abs().max(8.);
+        let vertical =
+            !back && y2 >= y1 + h1 - 4. && (x1 - x2).abs() < (y2 - (y1 + h1)).abs().max(8.);
         let (ax, ay, bx, by, dir) = if back {
-            (x1, y1 + h1 / 2., x2, y2 + h2 / 2., crate::diagram::Dir::Left)
+            (
+                x1,
+                y1 + h1 / 2.,
+                x2,
+                y2 + h2 / 2.,
+                crate::diagram::Dir::Left,
+            )
         } else if vertical {
-            (x1 + w1 / 2., y1 + h1, x2 + w2 / 2., y2, crate::diagram::Dir::Down)
+            (
+                x1 + w1 / 2.,
+                y1 + h1,
+                x2 + w2 / 2.,
+                y2,
+                crate::diagram::Dir::Down,
+            )
         } else if x2 >= x1 {
-            (x1 + w1, y1 + h1 / 2., x2, y2 + h2 / 2., crate::diagram::Dir::Right)
+            (
+                x1 + w1,
+                y1 + h1 / 2.,
+                x2,
+                y2 + h2 / 2.,
+                crate::diagram::Dir::Right,
+            )
         } else {
-            (x1, y1 + h1 / 2., x2 + w2, y2 + h2 / 2., crate::diagram::Dir::Left)
+            (
+                x1,
+                y1 + h1 / 2.,
+                x2 + w2,
+                y2 + h2 / 2.,
+                crate::diagram::Dir::Left,
+            )
         };
         if back {
             side_return(origin, ax, ay, bx, by, accent, window);
@@ -2555,24 +3256,49 @@ fn paint_diagram(
         }
         arrow_head(origin, bx, by, dir, accent, window);
         if !edge.label.is_empty() {
-            paint_label(&edge.label, origin, (ax + bx) / 2. - 16., (ay + by) / 2. - 14., faint, window, cx);
+            paint_label(
+                &edge.label,
+                origin,
+                (ax + bx) / 2. - 16.,
+                (ay + by) / 2. - 14.,
+                faint,
+                window,
+                cx,
+            );
         }
     }
     for node in &diagram.nodes {
-        let Some((x, y, w, h)) = box_of(&node.id) else { continue };
+        let Some((x, y, w, h)) = box_of(&node.id) else {
+            continue;
+        };
         window.paint_quad(
-            gpui::fill(gpui::Bounds::new(shift(origin, x, y), gpui::size(px(w), px(h))), fill)
-                .corner_radii(px(8.))
-                .border_widths(px(1.))
-                .border_color(border),
+            gpui::fill(
+                gpui::Bounds::new(shift(origin, x, y), gpui::size(px(w), px(h))),
+                fill,
+            )
+            .corner_radii(px(8.))
+            .border_widths(px(1.))
+            .border_color(border),
         );
-        paint_label(&node.label, origin, x + 8., y + (h - 14.) / 2., ink, window, cx);
+        paint_label(
+            &node.label,
+            origin,
+            x + 8.,
+            y + (h - 14.) / 2.,
+            ink,
+            window,
+            cx,
+        );
     }
 }
 
 /// Diagram nodes as click targets: a pointer over each, and a click starts a
 /// question about that node in the composer.
-fn clickable_nodes(nodes: Vec<(gpui::Hitbox, String)>, on_action: OnRowAction, window: &mut gpui::Window) {
+fn clickable_nodes(
+    nodes: Vec<(gpui::Hitbox, String)>,
+    on_action: OnRowAction,
+    window: &mut gpui::Window,
+) {
     for (hitbox, _) in &nodes {
         window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
     }
@@ -2581,7 +3307,12 @@ fn clickable_nodes(nodes: Vec<(gpui::Hitbox, String)>, on_action: OnRowAction, w
             return;
         }
         if let Some((_, label)) = nodes.iter().find(|(hitbox, _)| hitbox.is_hovered(window)) {
-            on_action(RowAction::AskAbout { label: label.clone() }, cx);
+            on_action(
+                RowAction::AskAbout {
+                    label: label.clone(),
+                },
+                cx,
+            );
         }
     });
 }
@@ -2685,8 +3416,17 @@ fn paint_label(
         underline: None,
         strikethrough: None,
     };
-    let line = window.text_system().shape_line(SharedString::from(text), px(12.), &[run], None);
-    let _ = line.paint(shift(origin, x, y), px(16.), TextAlign::Left, None, window, cx);
+    let line = window
+        .text_system()
+        .shape_line(SharedString::from(text), px(12.), &[run], None);
+    let _ = line.paint(
+        shift(origin, x, y),
+        px(16.),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 /// What a row is, for the space around it.
@@ -2700,7 +3440,9 @@ enum Flow {
 
 fn flow(block: &TranscriptBlock) -> Flow {
     match block {
-        TranscriptBlock::Paragraph { .. } | TranscriptBlock::List { .. } | TranscriptBlock::Quote { .. } => Flow::Text,
+        TranscriptBlock::Paragraph { .. }
+        | TranscriptBlock::List { .. }
+        | TranscriptBlock::Quote { .. } => Flow::Text,
         TranscriptBlock::Heading { level, .. } => Flow::Heading(*level),
         TranscriptBlock::ToolGroup { .. }
         | TranscriptBlock::Reasoning { .. }
@@ -2729,7 +3471,9 @@ pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32
     if prev.role != cur.role {
         return 14.;
     }
-    let first = prev.message_id != cur.message_id && flow(&prev.block) != Flow::Trace && flow(&cur.block) != Flow::Trace;
+    let first = prev.message_id != cur.message_id
+        && flow(&prev.block) != Flow::Trace
+        && flow(&cur.block) != Flow::Trace;
     match (flow(&prev.block), flow(&cur.block)) {
         (_, Flow::Heading(level)) => match level {
             1 => 26.,
@@ -2748,9 +3492,17 @@ pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32
     }
 }
 
-pub fn render_row(ix: usize, item: &TranscriptRowItem, prev: Option<&TranscriptRowItem>, rc: &RowContext) -> AnyElement {
+pub fn render_row(
+    ix: usize,
+    item: &TranscriptRowItem,
+    prev: Option<&TranscriptRowItem>,
+    rc: &RowContext,
+) -> AnyElement {
     let reduced = rc.reduced;
-    let rc = &RowContext { order: (ix as u64) << 20, ..rc.clone() };
+    let rc = &RowContext {
+        order: (ix as u64) << 20,
+        ..rc.clone()
+    };
     let gap = row_gap(prev, item);
     let row = render_row_body(item, rc).pt(zpx(gap));
     let Some(look) = item.look(rc.now, reduced) else {
@@ -2761,32 +3513,67 @@ pub fn render_row(ix: usize, item: &TranscriptRowItem, prev: Option<&TranscriptR
     // its measured natural height outside.
     let id = item.row_id().to_string();
     let heights = rc.row_heights.clone();
-    let natural = heights.borrow().get(&id).copied().or_else(|| match &item.block {
-        TranscriptBlock::ToolGroup { tools, expanded, .. } if tools.len() == 1 && tools[0].is_receipt() => {
-            Some(32.0 + if *expanded { receipt_body_height(&tools[0]) } else { 0.0 })
-        }
-        TranscriptBlock::ToolGroup { id, tools, overrides, .. } => Some(tool_group_height(id, tools, overrides)),
-        TranscriptBlock::Reasoning { content, expanded, .. } => {
-            Some(crate::trace_view::LINE_H + if *expanded { content.lines().count() as f32 * 18.0 } else { 0.0 })
-        }
-        TranscriptBlock::Plan { entries, live, expanded, .. } => {
-            Some(crate::trace_view::LINE_H * (1 + if expanded.unwrap_or(*live) { entries.len() } else { 0 }) as f32 + 4.0)
-        }
-        TranscriptBlock::TurnSummary { .. } => Some(crate::trace_view::LINE_H),
-        TranscriptBlock::Paragraph { content, .. } => {
-            let lines = content.lines().count().max(1);
-            Some((lines as f32) * 22.0 + 12.0)
-        }
-        TranscriptBlock::Heading { level, .. } => Some(match level {
-            1 => 52.0,
-            2 => 44.0,
-            _ => 38.0,
-        }),
-        _ => None,
-    });
+    let natural = heights
+        .borrow()
+        .get(&id)
+        .copied()
+        .or_else(|| match &item.block {
+            TranscriptBlock::ToolGroup {
+                tools, expanded, ..
+            } if tools.len() == 1 && tools[0].is_receipt() => Some(
+                32.0 + if *expanded {
+                    receipt_body_height(&tools[0])
+                } else {
+                    0.0
+                },
+            ),
+            TranscriptBlock::ToolGroup {
+                id,
+                tools,
+                overrides,
+                ..
+            } => Some(tool_group_height(id, tools, overrides)),
+            TranscriptBlock::Reasoning {
+                content, expanded, ..
+            } => Some(
+                crate::trace_view::LINE_H
+                    + if *expanded {
+                        content.lines().count() as f32 * 18.0
+                    } else {
+                        0.0
+                    },
+            ),
+            TranscriptBlock::Plan {
+                entries,
+                live,
+                expanded,
+                ..
+            } => Some(
+                crate::trace_view::LINE_H
+                    * (1 + if expanded.unwrap_or(*live) {
+                        entries.len()
+                    } else {
+                        0
+                    }) as f32
+                    + 4.0,
+            ),
+            TranscriptBlock::TurnSummary { .. } => Some(crate::trace_view::LINE_H),
+            TranscriptBlock::Paragraph { content, .. } => {
+                let lines = content.lines().count().max(1);
+                Some((lines as f32) * 22.0 + 12.0)
+            }
+            TranscriptBlock::Heading { level, .. } => Some(match level {
+                1 => 52.0,
+                2 => 44.0,
+                _ => 38.0,
+            }),
+            _ => None,
+        });
     let measure = gpui::canvas(
         move |bounds, _, _| {
-            heights.borrow_mut().insert(id, f32::from(bounds.size.height));
+            heights
+                .borrow_mut()
+                .insert(id, f32::from(bounds.size.height));
         },
         |_, _, _, _| {},
     )
@@ -2832,7 +3619,14 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             .text_color(c(t.text).opacity(0.88))
     };
     let content_elem = match &item.block {
-        TranscriptBlock::Code { language, content, spans, closed, run, .. } => {
+        TranscriptBlock::Code {
+            language,
+            content,
+            spans,
+            closed,
+            run,
+            ..
+        } => {
             if let Some(diagram) = crate::diagram::parse(language.as_deref(), content) {
                 return render_diagram(item, language, content, &diagram, rc);
             }
@@ -2840,22 +3634,58 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 return render_mermaid(item, language, content, rc);
             }
             let props = fence_props(item, language, content, spans, *closed, run.is_some(), rc);
-            let (on_action, row_id, text, run) = (rc.on_action.clone(), item.row_id().to_string(), content.clone(), run.clone());
+            let (on_action, row_id, text, run) = (
+                rc.on_action.clone(),
+                item.row_id().to_string(),
+                content.clone(),
+                run.clone(),
+            );
             let (wrap, more) = (props.wrap, props.expanded);
             let on_code: crate::code_block::OnCodeAction = std::rc::Rc::new(move |action, cx| {
                 use crate::code_block::CodeAction;
-                let toggle = |key: &str, open: bool| RowAction::Toggle { row_id: format!("{row_id}~{key}={}", u8::from(!open)) };
+                let toggle = |key: &str, open: bool| RowAction::Toggle {
+                    row_id: format!("{row_id}~{key}={}", u8::from(!open)),
+                };
                 match action {
-                    CodeAction::Copy { .. } => on_action(RowAction::Copy { row_id: row_id.clone(), content: text.clone() }, cx),
+                    CodeAction::Copy { .. } => on_action(
+                        RowAction::Copy {
+                            row_id: row_id.clone(),
+                            content: text.clone(),
+                        },
+                        cx,
+                    ),
                     CodeAction::Wrap => on_action(toggle("wrap", wrap), cx),
                     CodeAction::ShowMore => on_action(toggle("more", more), cx),
                     CodeAction::Run => {
                         if let Some(run) = &run {
-                            on_action(RowAction::Run { row_id: row_id.clone(), command: run.command.clone(), risky: run.risky }, cx);
+                            on_action(
+                                RowAction::Run {
+                                    row_id: row_id.clone(),
+                                    command: run.command.clone(),
+                                    risky: run.risky,
+                                },
+                                cx,
+                            );
                         }
                     }
-                    CodeAction::ShowFull { content, title, error } | CodeAction::OpenViewer { content, title, error } => {
-                        on_action(RowAction::OpenFullOutput { title, content, error }, cx);
+                    CodeAction::ShowFull {
+                        content,
+                        title,
+                        error,
+                    }
+                    | CodeAction::OpenViewer {
+                        content,
+                        title,
+                        error,
+                    } => {
+                        on_action(
+                            RowAction::OpenFullOutput {
+                                title,
+                                content,
+                                error,
+                            },
+                            cx,
+                        );
                     }
                 }
             });
@@ -2863,10 +3693,21 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 .relative()
                 .w_full()
                 .my_1()
-                .child(crate::code_block::render(&props, t, &syntax, rc.viewport_h, on_code))
+                .child(crate::code_block::render(
+                    &props,
+                    t,
+                    &syntax,
+                    rc.viewport_h,
+                    on_code,
+                ))
                 .children(rc.probe.as_ref().and_then(|p| p(RowProbe::Code)))
         }
-        TranscriptBlock::Heading { level, content, spans, .. } => {
+        TranscriptBlock::Heading {
+            level,
+            content,
+            spans,
+            ..
+        } => {
             let (size, line, weight) = match level {
                 1 => (20., 28., gpui::FontWeight::SEMIBOLD),
                 2 => (17., 24., gpui::FontWeight::SEMIBOLD),
@@ -2881,74 +3722,139 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 .line_height(zpx(line))
                 .font_weight(weight)
                 .text_color(c(if *level >= 5 { t.text_muted } else { t.text }))
-                .child(inline_text(format!("h-{}", item.row_id()), content, spans, 0, rc))
+                .child(inline_text(
+                    format!("h-{}", item.row_id()),
+                    content,
+                    spans,
+                    0,
+                    rc,
+                ))
         }
-        TranscriptBlock::Paragraph { content, spans, .. } => {
-            prose(div()).child(inline_text(format!("p-{}", item.row_id()), content, spans, 0, rc))
-        }
+        TranscriptBlock::Paragraph { content, spans, .. } => prose(div()).child(inline_text(
+            format!("p-{}", item.row_id()),
+            content,
+            spans,
+            0,
+            rc,
+        )),
         TranscriptBlock::Quote { content, spans, .. } => prose(div())
             .pl_3()
             .border_l_2()
             .border_color(c(t.border))
             .text_color(c(t.text_muted))
-            .child(inline_text(format!("q-{}", item.row_id()), content, spans, 0, rc)),
-        TranscriptBlock::Rule { .. } => div().w_full().py_2().child(div().w_full().h(px(1.)).bg(c(t.border))),
-        TranscriptBlock::Table { align, header, rows, .. } => render_table(item, align, header, rows, rc),
-        TranscriptBlock::List { items, .. } => prose(div()).flex().flex_col().gap(zpx(4.)).children(items.iter().enumerate().map(|(ix, it)| {
-            let marker = match it.task {
-                Some(checked) => div()
-                    .flex_none()
-                    .mt(zpx(5.))
-                    .size(zpx(13.))
+            .child(inline_text(
+                format!("q-{}", item.row_id()),
+                content,
+                spans,
+                0,
+                rc,
+            )),
+        TranscriptBlock::Rule { .. } => div()
+            .w_full()
+            .py_2()
+            .child(div().w_full().h(px(1.)).bg(c(t.border))),
+        TranscriptBlock::Table {
+            align,
+            header,
+            rows,
+            ..
+        } => render_table(item, align, header, rows, rc),
+        TranscriptBlock::List { items, .. } => prose(div())
+            .flex()
+            .flex_col()
+            .gap(zpx(4.))
+            .children(items.iter().enumerate().map(|(ix, it)| {
+                let marker = match it.task {
+                    Some(checked) => div()
+                        .flex_none()
+                        .mt(zpx(5.))
+                        .size(zpx(13.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(crate::style::RADIUS_SM)
+                        .border_1()
+                        .border_color(c(if checked { t.accent } else { t.text_faint }))
+                        .when(checked, |d| {
+                            d.bg(c(t.accent))
+                                .text_color(c(t.text_on_accent))
+                                .child(Icon::Check.el(zpx(9.)))
+                        })
+                        .into_any_element(),
+                    None => div()
+                        .flex_none()
+                        .min_w(zpx(16.))
+                        .text_color(c(t.text_muted))
+                        .child(list_marker(&it.marker, it.depth))
+                        .into_any_element(),
+                };
+                div()
                     .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(crate::style::RADIUS_SM)
-                    .border_1()
-                    .border_color(c(if checked { t.accent } else { t.text_faint }))
-                    .when(checked, |d| d.bg(c(t.accent)).text_color(c(t.text_on_accent)).child(Icon::Check.el(zpx(9.))))
-                    .into_any_element(),
-                None => div()
-                    .flex_none()
-                    .min_w(zpx(16.))
-                    .text_color(c(t.text_muted))
-                    .child(list_marker(&it.marker, it.depth))
-                    .into_any_element(),
-            };
-            div()
-                .flex()
-                .flex_row()
-                .gap(zpx(6.))
-                .pl(zpx(4. + 20.0 * it.depth as f32))
-                .child(marker)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .when(it.task == Some(true), |d| d.text_color(c(t.text_muted)))
-                        .child(inline_text(format!("li-{}-{ix}", item.row_id()), &it.text, &it.spans, ix as u64, rc)),
-                )
-        })),
-        TranscriptBlock::ToolGroup { tools, expanded, .. } if tools.len() == 1 && tools[0].is_receipt() => {
+                    .flex_row()
+                    .gap(zpx(6.))
+                    .pl(zpx(4. + 20.0 * it.depth as f32))
+                    .child(marker)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when(it.task == Some(true), |d| d.text_color(c(t.text_muted)))
+                            .child(inline_text(
+                                format!("li-{}-{ix}", item.row_id()),
+                                &it.text,
+                                &it.spans,
+                                ix as u64,
+                                rc,
+                            )),
+                    )
+            })),
+        TranscriptBlock::ToolGroup {
+            tools, expanded, ..
+        } if tools.len() == 1 && tools[0].is_receipt() => {
             render_receipt(item, &tools[0], *expanded, rc)
         }
-        TranscriptBlock::ToolGroup { tools, overrides, .. } => crate::trace_view::render_tool_group(item, tools, overrides, rc)
+        TranscriptBlock::ToolGroup {
+            tools, overrides, ..
+        } => crate::trace_view::render_tool_group(item, tools, overrides, rc)
             .relative()
             .children(rc.probe.as_ref().and_then(|p| p(RowProbe::Tool))),
-        TranscriptBlock::Subagent { subagent_id, name, state, summary, .. } => {
-            crate::trace_view::render_subagent(item, subagent_id, name, state, summary, rc)
-        }
-        TranscriptBlock::Reasoning { content, expanded, .. } => crate::trace_view::render_reasoning(item, content, *expanded, rc),
-        TranscriptBlock::Plan { entries, live, expanded, .. } => crate::trace_view::render_plan(item, entries, *live, *expanded, rc),
-        TranscriptBlock::TurnSummary { label, failed, expanded, .. } => {
-            crate::trace_view::render_turn_summary(item, label, *failed, *expanded, rc)
-        }
-        TranscriptBlock::Chart { chart, replaces, .. } => render_chart(item, chart, replaces, rc),
+        TranscriptBlock::Subagent {
+            subagent_id,
+            name,
+            state,
+            summary,
+            ..
+        } => crate::trace_view::render_subagent(item, subagent_id, name, state, summary, rc),
+        TranscriptBlock::Reasoning {
+            content, expanded, ..
+        } => crate::trace_view::render_reasoning(item, content, *expanded, rc),
+        TranscriptBlock::Plan {
+            entries,
+            live,
+            expanded,
+            ..
+        } => crate::trace_view::render_plan(item, entries, *live, *expanded, rc),
+        TranscriptBlock::TurnSummary {
+            label,
+            failed,
+            expanded,
+            ..
+        } => crate::trace_view::render_turn_summary(item, label, *failed, *expanded, rc),
+        TranscriptBlock::Chart {
+            chart, replaces, ..
+        } => render_chart(item, chart, replaces, rc),
         TranscriptBlock::Choices { choices, .. } => render_choices(item, choices, rc),
         TranscriptBlock::Tests { run, .. } => render_tests(item, run, rc),
         TranscriptBlock::Stats { items, .. } => render_stats(item, items, rc),
-        TranscriptBlock::FileChanges { card, expanded, .. } => render_file_changes(item, card, *expanded, rc),
-        TranscriptBlock::MrCard { card, message_id, part_id, .. } => render_mr_card(item, card, message_id, part_id, rc),
+        TranscriptBlock::FileChanges { card, expanded, .. } => {
+            render_file_changes(item, card, *expanded, rc)
+        }
+        TranscriptBlock::MrCard {
+            card,
+            message_id,
+            part_id,
+            ..
+        } => render_mr_card(item, card, message_id, part_id, rc),
         TranscriptBlock::Steps { steps, .. } => render_steps(item, steps, rc),
         TranscriptBlock::Callout { callout, .. } => render_callout(item, callout, rc),
         TranscriptBlock::Compare { columns, .. } => render_compare(item, columns, rc),
@@ -2959,21 +3865,32 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             .flex_row()
             .flex_wrap()
             .gap_1p5()
-            .children(items.iter().enumerate().map(|(ix, file)| file_chip(item, ix, file, rc))),
-        TranscriptBlock::Shots { paths, .. } => div()
-            .w_full()
-            .py_1()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .children(paths.iter().enumerate().map(|(ix, path)| shot(item, ix, path, rc))),
+            .children(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, file)| file_chip(item, ix, file, rc)),
+            ),
+        TranscriptBlock::Shots { paths, .. } => {
+            div().w_full().py_1().flex().flex_col().gap_2().children(
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, path)| shot(item, ix, path, rc)),
+            )
+        }
         TranscriptBlock::Images { items, .. } => div()
             .flex()
             .flex_row()
             .flex_wrap()
             .justify_end()
             .gap_1p5()
-            .children(items.iter().enumerate().map(|(ix, image)| thumbnail(item, ix, image, rc))),
+            .children(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, image)| thumbnail(item, ix, image, rc)),
+            ),
     };
 
     div()
@@ -3048,12 +3965,19 @@ fn favicon_cache_dir() -> std::path::PathBuf {
 fn host_favicon_path(host: &str) -> std::path::PathBuf {
     let safe_host: String = host
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     favicon_cache_dir().join(format!("{safe_host}.png"))
 }
 
-static FAVICON_FETCHES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+static FAVICON_FETCHES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
 
 fn start_favicon_fetch(host: &str) {
     if host.is_empty()
@@ -3070,7 +3994,8 @@ fn start_favicon_fetch(host: &str) {
         return;
     }
 
-    let fetches = FAVICON_FETCHES.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()));
+    let fetches =
+        FAVICON_FETCHES.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()));
     {
         let mut set = match fetches.write() {
             Ok(s) => s,
@@ -3227,7 +4152,8 @@ fn favicon_badge(host: &str, size_px: f32, t: Tokens) -> AnyElement {
         .into_any_element()
 }
 
-static PREVIEW_CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<String, String>>> = std::sync::OnceLock::new();
+static PREVIEW_CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<String, String>>> =
+    std::sync::OnceLock::new();
 
 fn get_cached_preview(url: &str) -> Option<String> {
     PREVIEW_CACHE.get()?.read().ok()?.get(url).cloned()
@@ -3240,13 +4166,15 @@ fn cache_preview(url: String, title: String) {
     }
 }
 
-static PREVIEW_FETCHES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+static PREVIEW_FETCHES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
 
 fn fetch_preview_title(url: String) {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return;
     }
-    let fetches = PREVIEW_FETCHES.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()));
+    let fetches =
+        PREVIEW_FETCHES.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()));
     {
         let mut set = match fetches.write() {
             Ok(s) => s,
@@ -3262,7 +4190,10 @@ fn fetch_preview_title(url: String) {
         use std::io::Read as _;
         if let Ok(resp) = ureq::get(&url)
             .timeout(std::time::Duration::from_secs(3))
-            .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+            .set(
+                "User-Agent",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            )
             .call()
         {
             let mut reader = resp.into_reader().take(64 * 1024);
@@ -3333,12 +4264,21 @@ fn parse_url_preview(url: &str, anchor_title: Option<&str>) -> UrlPreviewInfo {
         .unwrap_or(url);
 
     let path = clean.split_once('/').map(|(_, p)| p).unwrap_or("");
-    let path_no_query = path.split('?').next().unwrap_or(path).split('#').next().unwrap_or(path);
+    let path_no_query = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .split('#')
+        .next()
+        .unwrap_or(path);
     let parts: Vec<&str> = path_no_query.split('/').filter(|s| !s.is_empty()).collect();
 
     // GitLab or GitHub MR/PR/Issues
     if host.contains("gitlab") || host.contains("github") {
-        if let Some(pos) = parts.iter().position(|&p| p == "merge_requests" || p == "pull" || p == "issues") {
+        if let Some(pos) = parts
+            .iter()
+            .position(|&p| p == "merge_requests" || p == "pull" || p == "issues")
+        {
             let (kind, badge_name) = match parts[pos] {
                 "merge_requests" => ("Merge Request", "MR"),
                 "pull" => ("Pull Request", "PR"),
@@ -3355,7 +4295,9 @@ fn parse_url_preview(url: &str, anchor_title: Option<&str>) -> UrlPreviewInfo {
             };
 
             let title = match anchor_title {
-                Some(t) if !t.is_empty() && t != url && !t.starts_with("http") => Some(t.to_string()),
+                Some(t) if !t.is_empty() && t != url && !t.starts_with("http") => {
+                    Some(t.to_string())
+                }
                 _ => number.clone(),
             };
 
@@ -3381,7 +4323,9 @@ fn parse_url_preview(url: &str, anchor_title: Option<&str>) -> UrlPreviewInfo {
                             let mut chars = w.chars();
                             match chars.next() {
                                 None => String::new(),
-                                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                                Some(first) => {
+                                    first.to_uppercase().collect::<String>() + chars.as_str()
+                                }
                             }
                         })
                         .collect::<Vec<_>>()
@@ -3458,7 +4402,9 @@ impl UrlTip {
         if need_poll {
             cx.spawn(async move |this, cx| {
                 for _ in 0..10 {
-                    cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
                     let has_title = get_cached_preview(&url_key).is_some();
                     let has_icon = path.exists();
                     if has_title && has_icon {
@@ -3557,66 +4503,69 @@ impl Render for UrlTip {
                     ),
             )
             // 2. Content Preview Section
-            .when(display_title.is_some() || preview.category.is_some() || preview.subtitle.is_some(), |d| {
-                let category = preview.category.clone();
-                let subtitle = preview.subtitle.clone();
-                let has_category = category.is_some();
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(zpx(3.))
-                        .py(zpx(5.))
-                        .border_y_1()
-                        .border_color(c(t.border))
-                        .when_some(category, |d, cat| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(zpx(5.))
-                                    .child(
-                                        div()
-                                            .px(zpx(5.))
-                                            .py(zpx(1.))
-                                            .rounded(px(3.))
-                                            .bg(c(t.info).opacity(0.15))
-                                            .text_color(c(t.info))
-                                            .text_size(zpx(10.))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .child(cat),
-                                    )
-                                    .when_some(subtitle.as_ref(), |d, sub| {
-                                        d.child(
+            .when(
+                display_title.is_some() || preview.category.is_some() || preview.subtitle.is_some(),
+                |d| {
+                    let category = preview.category.clone();
+                    let subtitle = preview.subtitle.clone();
+                    let has_category = category.is_some();
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(zpx(3.))
+                            .py(zpx(5.))
+                            .border_y_1()
+                            .border_color(c(t.border))
+                            .when_some(category, |d, cat| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(zpx(5.))
+                                        .child(
                                             div()
-                                                .text_size(zpx(11.))
-                                                .text_color(c(t.text_muted))
-                                                .child(sub.clone()),
+                                                .px(zpx(5.))
+                                                .py(zpx(1.))
+                                                .rounded(px(3.))
+                                                .bg(c(t.info).opacity(0.15))
+                                                .text_color(c(t.info))
+                                                .text_size(zpx(10.))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .child(cat),
                                         )
-                                    }),
-                            )
-                        })
-                        .when_some(display_title, |d, title| {
-                            d.child(
-                                div()
-                                    .text_size(zpx(12.5))
-                                    .line_height(zpx(17.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(c(t.text))
-                                    .child(title),
-                            )
-                        })
-                        .when(!has_category && subtitle.is_some(), |d| {
-                            d.child(
-                                div()
-                                    .text_size(zpx(11.))
-                                    .text_color(c(t.text_muted))
-                                    .child(subtitle.unwrap()),
-                            )
-                        }),
-                )
-            })
+                                        .when_some(subtitle.as_ref(), |d, sub| {
+                                            d.child(
+                                                div()
+                                                    .text_size(zpx(11.))
+                                                    .text_color(c(t.text_muted))
+                                                    .child(sub.clone()),
+                                            )
+                                        }),
+                                )
+                            })
+                            .when_some(display_title, |d, title| {
+                                d.child(
+                                    div()
+                                        .text_size(zpx(12.5))
+                                        .line_height(zpx(17.))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(c(t.text))
+                                        .child(title),
+                                )
+                            })
+                            .when(!has_category && subtitle.is_some(), |d| {
+                                d.child(
+                                    div()
+                                        .text_size(zpx(11.))
+                                        .text_color(c(t.text_muted))
+                                        .child(subtitle.unwrap()),
+                                )
+                            }),
+                    )
+                },
+            )
             // 3. Full URL Footer
             .child(
                 div()
@@ -3679,10 +4628,23 @@ fn link_chip(
                 .child(Icon::External.el(zpx(9.))),
         )
         .tooltip(move |_, cx| {
-            cx.new(|cx| UrlTip::new(&tip_url, (!tip_text.is_empty()).then(|| tip_text.clone()), t, cx)).into()
+            cx.new(|cx| {
+                UrlTip::new(
+                    &tip_url,
+                    (!tip_text.is_empty()).then(|| tip_text.clone()),
+                    t,
+                    cx,
+                )
+            })
+            .into()
         })
         .on_click(move |_, _, cx| {
-            on_action(RowAction::OpenUrl { url: url_click.clone() }, cx);
+            on_action(
+                RowAction::OpenUrl {
+                    url: url_click.clone(),
+                },
+                cx,
+            );
         })
 }
 
@@ -3693,15 +4655,77 @@ fn split_trailing_punct(word: &str) -> (&str, &str) {
 
 fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
     const EXTENSIONS: &[&str] = &[
-        "go", "rs", "ts", "tsx", "js", "jsx", "py", "md", "json", "toml", "yaml", "yml",
-        "html", "htm", "css", "scss", "sh", "bash", "zsh", "c", "h", "cpp", "hpp", "cc",
-        "sql", "proto", "txt", "lock", "svg", "png", "jpg", "jpeg", "gif", "webp",
-        "xml", "csv", "tsv", "env", "log", "java", "kt", "swift", "rb", "php", "vue",
-        "svelte", "lua", "graphql", "gql", "tf", "dockerfile", "makefile",
+        "go",
+        "rs",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "py",
+        "md",
+        "json",
+        "toml",
+        "yaml",
+        "yml",
+        "html",
+        "htm",
+        "css",
+        "scss",
+        "sh",
+        "bash",
+        "zsh",
+        "c",
+        "h",
+        "cpp",
+        "hpp",
+        "cc",
+        "sql",
+        "proto",
+        "txt",
+        "lock",
+        "svg",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "xml",
+        "csv",
+        "tsv",
+        "env",
+        "log",
+        "java",
+        "kt",
+        "swift",
+        "rb",
+        "php",
+        "vue",
+        "svelte",
+        "lua",
+        "graphql",
+        "gql",
+        "tf",
+        "dockerfile",
+        "makefile",
     ];
-    const SPECIAL_FILES: &[&str] = &["makefile", "dockerfile", "gemfile", "procfile", "license", "licence"];
+    const SPECIAL_FILES: &[&str] = &[
+        "makefile",
+        "dockerfile",
+        "gemfile",
+        "procfile",
+        "license",
+        "licence",
+    ];
     const SYSTEM_ROOTS: &[&str] = &[
-        "/Users/", "/home/", "/private/", "/tmp/", "/var/", "/opt/", "/usr/", "/Applications/", "/Volumes/",
+        "/Users/",
+        "/home/",
+        "/private/",
+        "/tmp/",
+        "/var/",
+        "/opt/",
+        "/usr/",
+        "/Applications/",
+        "/Volumes/",
     ];
 
     let s = s.trim();
@@ -3713,7 +4737,12 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
         return None;
     }
 
-    let s = s.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'));
+    let s = s.trim_matches(|c: char| {
+        matches!(
+            c,
+            '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+        )
+    });
     let trimmed = s.trim_end_matches(['.', ':', ';', '!', '?', ',']);
     if trimmed.is_empty() {
         return None;
@@ -3728,7 +4757,10 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
     let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
     let filename = parts.last()?;
 
-    if SPECIAL_FILES.iter().any(|f| filename.eq_ignore_ascii_case(f)) {
+    if SPECIAL_FILES
+        .iter()
+        .any(|f| filename.eq_ignore_ascii_case(f))
+    {
         return Some(trimmed.to_string());
     }
     if filename.starts_with('.') && filename.len() > 1 && !filename.starts_with("..") {
@@ -3737,7 +4769,10 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
 
     if let Some((stem, ext)) = filename.rsplit_once('.') {
         let ext_lower = ext.to_ascii_lowercase();
-        if stem.is_empty() || ext.chars().all(|c| c.is_ascii_digit()) || stem.chars().all(|c| c.is_ascii_digit()) {
+        if stem.is_empty()
+            || ext.chars().all(|c| c.is_ascii_digit())
+            || stem.chars().all(|c| c.is_ascii_digit())
+        {
             return None;
         }
         if parts.len() > 1 {
@@ -3806,7 +4841,12 @@ impl Render for FileTip {
 }
 
 /// An interactive file chip rendered inline in response prose.
-fn file_inline_chip(id: &str, path: &str, t: Tokens, on_action: OnRowAction) -> gpui::Stateful<gpui::Div> {
+fn file_inline_chip(
+    id: &str,
+    path: &str,
+    t: Tokens,
+    on_action: OnRowAction,
+) -> gpui::Stateful<gpui::Div> {
     let file_kind = crate::files::FileKind::of(std::path::Path::new(path));
     let icon = file_kind.icon();
     let display_path = path.to_string();
@@ -3853,29 +4893,53 @@ fn file_inline_chip(id: &str, path: &str, t: Tokens, on_action: OnRowAction) -> 
             cx.new(move |_| FileTip { path, tokens: t }).into()
         })
         .on_click(move |_, _, cx| {
-            on_action(RowAction::OpenFile { path: click_path.clone() }, cx);
+            on_action(
+                RowAction::OpenFile {
+                    path: click_path.clone(),
+                },
+                cx,
+            );
         })
 }
 
 /// Text with its inline styles: bold, italic, strikethrough, inline code
 /// (tinted like a code block), links, and clickable file chips.
-fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &RowContext) -> AnyElement {
+fn inline_text(
+    id: String,
+    text: &str,
+    spans: &[InlineSpan],
+    order: u64,
+    rc: &RowContext,
+) -> AnyElement {
     let t = rc.tokens;
 
     let has_interactive = spans.iter().any(|s| {
-        s.link.is_some() || (s.style.code && looks_like_file_path(&text[s.range.clone()], true).is_some())
-    }) || text.split_whitespace().any(|w| looks_like_file_path(w, false).is_some());
+        s.link.is_some()
+            || (s.style.code && looks_like_file_path(&text[s.range.clone()], true).is_some())
+    }) || text
+        .split_whitespace()
+        .any(|w| looks_like_file_path(w, false).is_some());
 
     if !has_interactive {
         let key = format!("sel-{id}");
         if spans.is_empty() {
-            return selectable(key, text, order, rc, |s| s.into_any_element(), gpui::StyledText::new(text.to_string()));
+            return selectable(
+                key,
+                text,
+                order,
+                rc,
+                |s| s.into_any_element(),
+                gpui::StyledText::new(text.to_string()),
+            );
         }
         let highlights = spans.iter().map(|span| {
             let style = gpui::HighlightStyle {
                 font_weight: span.style.bold.then_some(gpui::FontWeight::SEMIBOLD),
                 font_style: span.style.italic.then_some(gpui::FontStyle::Italic),
-                strikethrough: span.style.strike.then(|| gpui::StrikethroughStyle { thickness: px(1.), color: None }),
+                strikethrough: span.style.strike.then(|| gpui::StrikethroughStyle {
+                    thickness: px(1.),
+                    color: None,
+                }),
                 background_color: span.style.code.then(|| c(t.code)),
                 // Bold leads by brightness as much as weight (body text is dimmer).
                 color: if span.style.code || span.style.bold {
@@ -3896,13 +4960,21 @@ fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &Ro
     let mut cursor = 0;
     for span in spans {
         if span.range.start > cursor {
-            slices.push((cursor..span.range.start, crate::markdown::InlineStyle::default(), None));
+            slices.push((
+                cursor..span.range.start,
+                crate::markdown::InlineStyle::default(),
+                None,
+            ));
         }
         slices.push((span.range.clone(), span.style, span.link.clone()));
         cursor = span.range.end;
     }
     if cursor < text.len() {
-        slices.push((cursor..text.len(), crate::markdown::InlineStyle::default(), None));
+        slices.push((
+            cursor..text.len(),
+            crate::markdown::InlineStyle::default(),
+            None,
+        ));
     }
 
     let mut elements: Vec<AnyElement> = Vec::new();
@@ -3913,8 +4985,13 @@ fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &Ro
             if url.starts_with("file://") || looks_like_file_path(&url, true).is_some() {
                 let file_path = url.strip_prefix("file://").unwrap_or(&url);
                 elements.push(
-                    file_inline_chip(&format!("{id}-{item_ix}"), file_path, t, rc.on_action.clone())
-                        .into_any_element(),
+                    file_inline_chip(
+                        &format!("{id}-{item_ix}"),
+                        file_path,
+                        t,
+                        rc.on_action.clone(),
+                    )
+                    .into_any_element(),
                 );
                 item_ix += 1;
                 continue;
@@ -3924,8 +5001,14 @@ fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &Ro
             fetch_preview_title(url.clone());
             let display_label = url_chip_label(label, &url);
             elements.push(
-                link_chip(&format!("{id}-{item_ix}"), &display_label, &url, t, rc.on_action.clone())
-                    .into_any_element(),
+                link_chip(
+                    &format!("{id}-{item_ix}"),
+                    &display_label,
+                    &url,
+                    t,
+                    rc.on_action.clone(),
+                )
+                .into_any_element(),
             );
             item_ix += 1;
         } else {
@@ -3933,8 +5016,13 @@ fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &Ro
             if style.code {
                 if let Some(file_path) = looks_like_file_path(slice_str.trim(), true) {
                     elements.push(
-                        file_inline_chip(&format!("{id}-{item_ix}"), &file_path, t, rc.on_action.clone())
-                            .into_any_element(),
+                        file_inline_chip(
+                            &format!("{id}-{item_ix}"),
+                            &file_path,
+                            t,
+                            rc.on_action.clone(),
+                        )
+                        .into_any_element(),
                     );
                     item_ix += 1;
                     continue;
@@ -3943,13 +5031,23 @@ fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &Ro
 
             for word in slice_str.split_whitespace() {
                 let is_bullet = word == "·" || word == "•" || word == "◦" || word == "▪";
-                let is_punct = word == "," || word == "." || word == ":" || word == ";" || word == "!" || word == "?";
+                let is_punct = word == ","
+                    || word == "."
+                    || word == ":"
+                    || word == ";"
+                    || word == "!"
+                    || word == "?";
                 let (trimmed_word, trailing_punct) = split_trailing_punct(word);
 
                 if let Some(file_path) = looks_like_file_path(trimmed_word, style.code) {
                     elements.push(
-                        file_inline_chip(&format!("{id}-{item_ix}"), &file_path, t, rc.on_action.clone())
-                            .into_any_element(),
+                        file_inline_chip(
+                            &format!("{id}-{item_ix}"),
+                            &file_path,
+                            t,
+                            rc.on_action.clone(),
+                        )
+                        .into_any_element(),
                     );
                     item_ix += 1;
                     if !trailing_punct.is_empty() {
@@ -3992,7 +5090,10 @@ fn inline_text(id: String, text: &str, spans: &[InlineSpan], order: u64, rc: &Ro
                     let el = div()
                         .flex_none()
                         .when(is_punct, |d| d.ml(zpx(-3.)))
-                        .when(style.bold, |d| d.font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(t.text)))
+                        .when(style.bold, |d| {
+                            d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(c(t.text))
+                        })
                         .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
                         .when(style.italic, |d| d.italic())
                         .when(style.strike, |d| d.line_through())
@@ -4090,7 +5191,9 @@ impl gpui::Element for Selectable {
     ) -> (gpui_base::TextSelectionHandle, gpui::Hitbox) {
         self.child.prepaint(window, cx);
         let handle = window
-            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |_, cx| gpui_base::TextSelectionHandle::new("", cx))
+            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |_, cx| {
+                gpui_base::TextSelectionHandle::new("", cx)
+            })
             .read(cx)
             .clone();
         let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
@@ -4119,20 +5222,36 @@ impl gpui::Element for Selectable {
         // code's own background covered the selection, leaving holes.
         self.child.paint(window, cx);
         let run = gpui_base::TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds);
-        let range = handle.update_runs(&[run], cx).ranges().first().cloned().flatten();
+        let range = handle
+            .update_runs(&[run], cx)
+            .ranges()
+            .first()
+            .cloned()
+            .flatten();
         if let Some(range) = range
-            && let (Some(start), Some(end)) = (self.layout.position_for_index(range.start), self.layout.position_for_index(range.end))
+            && let (Some(start), Some(end)) = (
+                self.layout.position_for_index(range.start),
+                self.layout.position_for_index(range.end),
+            )
         {
             let lh = self.layout.line_height();
-            let quad = |a: gpui::Point<Pixels>, b: gpui::Point<Pixels>| gpui::fill(gpui::Bounds::from_corners(a, b), self.color);
+            let quad = |a: gpui::Point<Pixels>, b: gpui::Point<Pixels>| {
+                gpui::fill(gpui::Bounds::from_corners(a, b), self.color)
+            };
             if start.y == end.y {
                 window.paint_quad(quad(start, gpui::point(end.x, end.y + lh)));
             } else {
                 window.paint_quad(quad(start, gpui::point(bounds.right(), start.y + lh)));
                 if end.y > start.y + lh {
-                    window.paint_quad(quad(gpui::point(bounds.left(), start.y + lh), gpui::point(bounds.right(), end.y)));
+                    window.paint_quad(quad(
+                        gpui::point(bounds.left(), start.y + lh),
+                        gpui::point(bounds.right(), end.y),
+                    ));
                 }
-                window.paint_quad(quad(gpui::point(bounds.left(), end.y), gpui::point(end.x, end.y + lh)));
+                window.paint_quad(quad(
+                    gpui::point(bounds.left(), end.y),
+                    gpui::point(end.x, end.y + lh),
+                ));
             }
         }
     }
@@ -4150,7 +5269,10 @@ fn render_table(
     rc: &RowContext,
 ) -> gpui::Div {
     let t = rc.tokens;
-    let cols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
+    let cols = header
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+        .max(1);
     let weights: Vec<f32> = (0..cols)
         .map(|col| {
             let longest = header
@@ -4172,7 +5294,11 @@ fn render_table(
             .flex()
             .flex_row()
             .when(!last, |d| d.border_b_1().border_color(c(t.border)))
-            .when(head, |d| d.bg(c(t.surface)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(t.text)))
+            .when(head, |d| {
+                d.bg(c(t.surface))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(t.text))
+            })
             .when(zebra, |d| d.bg(c(t.hover)))
             .children((0..cols).map(|col| {
                 let cell = cells.get(col).unwrap_or(&empty);
@@ -4187,9 +5313,19 @@ fn render_table(
                         div()
                             .px_2p5()
                             .py(zpx(5.))
-                            .when(align.get(col) == Some(&ColumnAlign::Center), |d| d.text_center())
-                            .when(align.get(col) == Some(&ColumnAlign::Right), |d| d.text_right())
-                            .child(inline_text(format!("td-{}-{key}-{col}", item.row_id()), &cell.text, &cell.spans, order + col as u64, rc)),
+                            .when(align.get(col) == Some(&ColumnAlign::Center), |d| {
+                                d.text_center()
+                            })
+                            .when(align.get(col) == Some(&ColumnAlign::Right), |d| {
+                                d.text_right()
+                            })
+                            .child(inline_text(
+                                format!("td-{}-{key}-{col}", item.row_id()),
+                                &cell.text,
+                                &cell.spans,
+                                order + col as u64,
+                                rc,
+                            )),
                     )
             }))
     };
@@ -4204,7 +5340,16 @@ fn render_table(
     if show_header {
         grid = grid.child(row_el("h", 0, header, true, false, rows.is_empty()));
     }
-    grid = grid.children(rows.iter().enumerate().map(|(ix, r)| row_el(&ix.to_string(), ((ix + 1) * cols) as u64, r, false, ix % 2 == 1, ix + 1 == rows.len())));
+    grid = grid.children(rows.iter().enumerate().map(|(ix, r)| {
+        row_el(
+            &ix.to_string(),
+            ((ix + 1) * cols) as u64,
+            r,
+            false,
+            ix % 2 == 1,
+            ix + 1 == rows.len(),
+        )
+    }));
     let mut scroller = div()
         .id(ElementId::Name(format!("table-{}", item.row_id()).into()))
         .w_full()
@@ -4228,10 +5373,17 @@ const THUMB_H: f32 = 80.;
 
 /// One image in a user bubble: the file when it is on this device, a named
 /// placeholder otherwise. Click opens the lightbox.
-fn thumbnail(item: &TranscriptRowItem, ix: usize, image: &ImageRef, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
+fn thumbnail(
+    item: &TranscriptRowItem,
+    ix: usize,
+    image: &ImageRef,
+    rc: &RowContext,
+) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
     let frame = div()
-        .id(ElementId::Name(format!("thumb-{}-{ix}", item.row_id()).into()))
+        .id(ElementId::Name(
+            format!("thumb-{}-{ix}", item.row_id()).into(),
+        ))
         .w(zpx(THUMB_W))
         .h(zpx(THUMB_H))
         .flex_none()
@@ -4252,7 +5404,15 @@ fn thumbnail(item: &TranscriptRowItem, ix: usize, image: &ImageRef, rc: &RowCont
                 .gap_1()
                 .text_color(c(t.text_faint))
                 .child(Icon::Image.el(zpx(18.)))
-                .child(div().t_caption().max_w(zpx(THUMB_W - 12.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
+                .child(
+                    div()
+                        .t_caption()
+                        .max_w(zpx(THUMB_W - 12.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(name.clone()),
+                )
                 .into_any_element()
         }
     };
@@ -4264,12 +5424,19 @@ fn thumbnail(item: &TranscriptRowItem, ix: usize, image: &ImageRef, rc: &RowCont
                 .cursor_pointer()
                 .hover(|s| s.border_color(c(t.focus)))
                 .active(|s| s.border_color(c(t.focus)).opacity(0.85))
-                .on_click(move |_, _, cx| on_action(RowAction::OpenImage { path: open.clone() }, cx))
+                .on_click(move |_, _, cx| {
+                    on_action(RowAction::OpenImage { path: open.clone() }, cx)
+                })
                 .child(
-                    gpui::img(crate::thumbs::source(path, THUMB_W * crate::style::zoom(), THUMB_H * crate::style::zoom(), true))
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::Cover)
-                        .with_fallback(placeholder),
+                    gpui::img(crate::thumbs::source(
+                        path,
+                        THUMB_W * crate::style::zoom(),
+                        THUMB_H * crate::style::zoom(),
+                        true,
+                    ))
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .with_fallback(placeholder),
                 )
         }
         None => frame.child(placeholder()),
@@ -4282,7 +5449,12 @@ const SHOT_H: f32 = 225.;
 
 /// One large image under a tool row or in assistant text. Click previews
 /// it like a file chip (browser pane, else the system viewer).
-fn shot(item: &TranscriptRowItem, ix: usize, path: &str, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
+fn shot(
+    item: &TranscriptRowItem,
+    ix: usize,
+    path: &str,
+    rc: &RowContext,
+) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
     let on_action = rc.on_action.clone();
     let open = path.to_string();
@@ -4291,7 +5463,9 @@ fn shot(item: &TranscriptRowItem, ix: usize, path: &str, rc: &RowContext) -> gpu
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
     div()
-        .id(ElementId::Name(format!("shot-{}-{ix}", item.row_id()).into()))
+        .id(ElementId::Name(
+            format!("shot-{}-{ix}", item.row_id()).into(),
+        ))
         .w(zpx(SHOT_W))
         .max_w_full()
         .h(zpx(SHOT_H))
@@ -4307,22 +5481,27 @@ fn shot(item: &TranscriptRowItem, ix: usize, path: &str, rc: &RowContext) -> gpu
         .on_click(move |_, _, cx| on_action(RowAction::OpenFile { path: open.clone() }, cx))
         .child(
             // Downscaled once, off the main thread, not the full bitmap.
-            gpui::img(crate::thumbs::source(path, SHOT_W * crate::style::zoom(), SHOT_H * crate::style::zoom(), false))
-                .size_full()
-                .object_fit(gpui::ObjectFit::Contain)
-                .with_fallback(move || {
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap_1()
-                        .text_color(c(t.text_faint))
-                        .child(Icon::Image.el(zpx(18.)))
-                        .child(div().t_caption().child(name.clone()))
-                        .into_any_element()
-                }),
+            gpui::img(crate::thumbs::source(
+                path,
+                SHOT_W * crate::style::zoom(),
+                SHOT_H * crate::style::zoom(),
+                false,
+            ))
+            .size_full()
+            .object_fit(gpui::ObjectFit::Contain)
+            .with_fallback(move || {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .text_color(c(t.text_faint))
+                    .child(Icon::Image.el(zpx(18.)))
+                    .child(div().t_caption().child(name.clone()))
+                    .into_any_element()
+            }),
         )
 }
 
@@ -4331,7 +5510,12 @@ const FILE_CHIP_H: f32 = 32.;
 /// A file the turn produced: a small preview (images) or type icon, the
 /// name, and its extension. Click previews it in the browser pane when the
 /// pane can show it, else opens it with the system app.
-fn file_chip(item: &TranscriptRowItem, ix: usize, file: &FileRef, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
+fn file_chip(
+    item: &TranscriptRowItem,
+    ix: usize,
+    file: &FileRef,
+    rc: &RowContext,
+) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
     let kind = file.kind();
     let ext = std::path::Path::new(&file.name)
@@ -4363,7 +5547,9 @@ fn file_chip(item: &TranscriptRowItem, ix: usize, file: &FileRef, rc: &RowContex
     let on_action = rc.on_action.clone();
     let path = file.path.clone();
     div()
-        .id(ElementId::Name(format!("file-{}-{ix}", item.row_id()).into()))
+        .id(ElementId::Name(
+            format!("file-{}-{ix}", item.row_id()).into(),
+        ))
         .h(zpx(FILE_CHIP_H))
         .max_w(zpx(340.))
         .pl(zpx(6.))
@@ -4392,12 +5578,22 @@ fn file_chip(item: &TranscriptRowItem, ix: usize, file: &FileRef, rc: &RowContex
                 .text_color(c(t.text))
                 .child(file.name.clone()),
         )
-        .child(div().flex_none().t_caption().text_color(c(t.text_faint)).child(ext))
         .child(
             div()
                 .flex_none()
+                .t_caption()
                 .text_color(c(t.text_faint))
-                .child((if kind.previewable() { Icon::Globe } else { Icon::External }).el(zpx(11.))),
+                .child(ext),
+        )
+        .child(
+            div().flex_none().text_color(c(t.text_faint)).child(
+                (if kind.previewable() {
+                    Icon::Globe
+                } else {
+                    Icon::External
+                })
+                .el(zpx(11.)),
+            ),
         )
 }
 
@@ -4439,14 +5635,13 @@ fn tool_label(tool: &ToolEntry) -> &str {
     }
 }
 
-
-
 /// "Running bash" / "Ran bash" / "Ran 3 tools", and the distinct tool names in order.
 pub fn tool_group_labels(tools: &[ToolEntry]) -> (String, Vec<&str>) {
     let title = match tools.iter().rev().find(|tool| tool.state == "running") {
         Some(tool) if browser_step(&tool.name).is_some() => tool_label(tool).to_string(),
         Some(tool) => format!("Running {}", tool.name),
-        None if tools.len() == 1 => browser_step(&tools[0].name).map_or_else(|| format!("Ran {}", tools[0].name), |s| s.done.to_string()),
+        None if tools.len() == 1 => browser_step(&tools[0].name)
+            .map_or_else(|| format!("Ran {}", tools[0].name), |s| s.done.to_string()),
         None => format!("Ran {} tools", tools.len()),
     };
     let mut names: Vec<&str> = Vec::new();
@@ -4458,8 +5653,6 @@ pub fn tool_group_labels(tools: &[ToolEntry]) -> (String, Vec<&str>) {
     }
     (title, names)
 }
-
-
 
 /// Collapsed: one line, "Ran 3 tools" with names, or the tool now running.
 /// Expanded: each call with its status and first line of output.
@@ -4474,23 +5667,43 @@ fn receipt_body_height(tool: &ToolEntry) -> f32 {
         return 0.0;
     };
     let args = receipt.tool.map(|t| t.args).unwrap_or_default();
-    let lines = crate::approval::arg_lines(&args, 72) + receipt.answer.map_or(0, |a| a.lines().count());
-    if lines == 0 { 0.0 } else { lines as f32 * 22.0 + 28.0 }
+    let lines =
+        crate::approval::arg_lines(&args, 72) + receipt.answer.map_or(0, |a| a.lines().count());
+    if lines == 0 {
+        0.0
+    } else {
+        lines as f32 * 22.0 + 28.0
+    }
 }
 
 /// A settled question: `✓ Allowed · Navigate browser · example.com`, styled
 /// like a tool row. Clicking shows what was asked, read-only.
-fn render_receipt(item: &TranscriptRowItem, tool: &ToolEntry, expanded: bool, rc: &RowContext) -> gpui::Div {
+fn render_receipt(
+    item: &TranscriptRowItem,
+    tool: &ToolEntry,
+    expanded: bool,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let receipt = keel_proto::Receipt::from_summary(&tool.summary);
-    let line = receipt.as_ref().map(crate::approval::receipt_line).unwrap_or(crate::approval::ReceiptLine {
-        mark: crate::approval::Mark::None,
-        verb: "Question settled".to_string(),
-        title: None,
-        arg: None,
-    });
-    let args = receipt.as_ref().and_then(|r| r.tool.as_ref()).map(|t| t.args.clone()).unwrap_or_default();
-    let answer = receipt.as_ref().and_then(|r| r.answer.clone()).filter(|a| !a.trim().is_empty());
+    let line = receipt
+        .as_ref()
+        .map(crate::approval::receipt_line)
+        .unwrap_or(crate::approval::ReceiptLine {
+            mark: crate::approval::Mark::None,
+            verb: "Question settled".to_string(),
+            title: None,
+            arg: None,
+        });
+    let args = receipt
+        .as_ref()
+        .and_then(|r| r.tool.as_ref())
+        .map(|t| t.args.clone())
+        .unwrap_or_default();
+    let answer = receipt
+        .as_ref()
+        .and_then(|r| r.answer.clone())
+        .filter(|a| !a.trim().is_empty());
     let has_body = !args.is_empty() || answer.is_some();
     let on_action = rc.on_action.clone();
     let row_id = item.row_id().to_string();
@@ -4507,7 +5720,14 @@ fn render_receipt(item: &TranscriptRowItem, tool: &ToolEntry, expanded: bool, rc
         .when(has_body, |d| {
             d.cursor_pointer()
                 .hover(|s| s.bg(c(t.hover)))
-                .on_click(move |_, _, cx| on_action(RowAction::Toggle { row_id: row_id.clone() }, cx))
+                .on_click(move |_, _, cx| {
+                    on_action(
+                        RowAction::Toggle {
+                            row_id: row_id.clone(),
+                        },
+                        cx,
+                    )
+                })
                 .child(chevron(expanded, item.row_id(), rc))
         });
     let body = div()
@@ -4516,17 +5736,29 @@ fn render_receipt(item: &TranscriptRowItem, tool: &ToolEntry, expanded: bool, rc
         .flex()
         .flex_col()
         .gap_1()
-        .when(!args.is_empty(), |d| d.child(crate::view::receipt_args_el(&args, t)))
-        .children(answer.map(|a| div().t_small().text_color(c(t.text_muted)).whitespace_normal().child(a)));
+        .when(!args.is_empty(), |d| {
+            d.child(crate::view::receipt_args_el(&args, t))
+        })
+        .children(answer.map(|a| {
+            div()
+                .t_small()
+                .text_color(c(t.text_muted))
+                .whitespace_normal()
+                .child(a)
+        }));
     let height = tool_receipt_height(tool);
-    div().w_full().ml(zpx(-FOLD_INSET)).flex().flex_col().child(header).children(fold_body(body, item.row_id(), expanded, height, rc))
+    div()
+        .w_full()
+        .ml(zpx(-FOLD_INSET))
+        .flex()
+        .flex_col()
+        .child(header)
+        .children(fold_body(body, item.row_id(), expanded, height, rc))
 }
 
 fn tool_receipt_height(tool: &ToolEntry) -> f32 {
     receipt_body_height(tool)
 }
-
-
 
 /// How long after a toggle a folded row is still animating.
 const FOLD_WINDOW: std::time::Duration = std::time::Duration::from_millis(260);
@@ -4558,14 +5790,23 @@ fn chevron(expanded: bool, row_id: &str, rc: &RowContext) -> gpui::Div {
             .into_any_element(),
         None => turned(icon, if expanded { 1. } else { 0. }).into_any_element(),
     };
-    div().flex_none().text_color(c(rc.tokens.text_faint)).child(icon)
+    div()
+        .flex_none()
+        .text_color(c(rc.tokens.text_faint))
+        .child(icon)
 }
 
 /// A folded row's body. Opening grows it from nothing to about `height` px
 /// while it fades in (200 ms, decelerating); closing shrinks and fades it out
 /// (160 ms, accelerating), after which it is gone. `height` is an estimate:
 /// once open, the body takes its real height.
-fn fold_body(body: gpui::Div, row_id: &str, expanded: bool, height: f32, rc: &RowContext) -> Option<AnyElement> {
+fn fold_body(
+    body: gpui::Div,
+    row_id: &str,
+    expanded: bool,
+    height: f32,
+    rc: &RowContext,
+) -> Option<AnyElement> {
     use gpui::AnimationExt as _;
     let Some(n) = recent_toggle(row_id, rc) else {
         return expanded.then(|| body.into_any_element());
@@ -4595,7 +5836,6 @@ fn fold_body(body: gpui::Div, row_id: &str, expanded: bool, height: f32, rc: &Ro
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4620,11 +5860,17 @@ mod tests {
     fn history_and_a_fresh_open_render_rows_without_motion() {
         let mut idle = live_transcript();
         idle.upsert_message("a", "assistant", vec![para("a#0", "old")]);
-        assert!(idle.items[0].enter.is_none(), "an idle chat's rows don't animate");
+        assert!(
+            idle.items[0].enter.is_none(),
+            "an idle chat's rows don't animate"
+        );
         let mut opening = TranscriptState::new(false);
         opening.animate_new = true;
         opening.upsert_message("a", "assistant", vec![para("a#0", "loaded")]);
-        assert!(opening.items[0].enter.is_none(), "rows right after open are the load, not live");
+        assert!(
+            opening.items[0].enter.is_none(),
+            "rows right after open are the load, not live"
+        );
         let mut reduced = TranscriptState::new(true);
         reduced.opened_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         reduced.animate_new = true;
@@ -4645,7 +5891,13 @@ mod tests {
         transcript.upsert_message(
             "a",
             "assistant",
-            vec![para("a#0", "one two"), para("a#1", "b"), para("a#2", "c"), para("a#3", "d"), para("a#4", "e")],
+            vec![
+                para("a#0", "one two"),
+                para("a#1", "b"),
+                para("a#2", "c"),
+                para("a#3", "d"),
+                para("a#4", "e"),
+            ],
         );
         let stamps: Vec<_> = transcript.items.iter().map(|r| r.enter.unwrap()).collect();
         assert_eq!(stamps[0], first);
@@ -4658,18 +5910,35 @@ mod tests {
         transcript.upsert_message(
             "a",
             "assistant",
-            vec![para("a#0", "one two"), para("a#1", "b"), para("a#2", "c"), para("a#3", "d"), para("a#4", "e")],
+            vec![
+                para("a#0", "one two"),
+                para("a#1", "b"),
+                para("a#2", "c"),
+                para("a#3", "d"),
+                para("a#4", "e"),
+            ],
         );
-        assert_eq!(transcript.items.iter().map(|r| r.enter).collect::<Vec<_>>(), before);
+        assert_eq!(
+            transcript.items.iter().map(|r| r.enter).collect::<Vec<_>>(),
+            before
+        );
     }
 
     #[test]
     fn removed_live_rows_fade_out_then_are_reaped() {
         let mut transcript = live_transcript();
         transcript.animate_new = true;
-        transcript.upsert_message("a", "assistant", vec![para("a#0", "keep"), para("a#1", "go")]);
+        transcript.upsert_message(
+            "a",
+            "assistant",
+            vec![para("a#0", "keep"), para("a#1", "go")],
+        );
         transcript.upsert_message("a", "assistant", vec![para("a#0", "keep")]);
-        assert_eq!(transcript.items.len(), 2, "the dropped row stays as a ghost");
+        assert_eq!(
+            transcript.items.len(),
+            2,
+            "the dropped row stays as a ghost"
+        );
         assert!(transcript.items[1].leaving.is_some());
         assert_eq!(message_text(&transcript.items, 1).as_deref(), Some("keep"));
         let now = std::time::Instant::now();
@@ -4679,22 +5948,42 @@ mod tests {
         assert_eq!(transcript.items.len(), 1);
         assert_eq!(transcript.items[0].row_id(), "a#0");
         // A row that returns before it's reaped is drawn anew, beside the ghost.
-        transcript.upsert_message("a", "assistant", vec![para("a#0", "keep"), para("a#1", "go")]);
+        transcript.upsert_message(
+            "a",
+            "assistant",
+            vec![para("a#0", "keep"), para("a#1", "go")],
+        );
         transcript.upsert_message("a", "assistant", vec![para("a#0", "keep")]);
-        transcript.upsert_message("a", "assistant", vec![para("a#0", "keep"), para("a#1", "back")]);
-        let live: Vec<_> = transcript.items.iter().filter(|r| r.leaving.is_none()).map(|r| r.row_id().to_string()).collect();
+        transcript.upsert_message(
+            "a",
+            "assistant",
+            vec![para("a#0", "keep"), para("a#1", "back")],
+        );
+        let live: Vec<_> = transcript
+            .items
+            .iter()
+            .filter(|r| r.leaving.is_none())
+            .map(|r| r.row_id().to_string())
+            .collect();
         assert_eq!(live, vec!["a#0", "a#1"]);
     }
 
     #[test]
     fn user_points_are_the_first_row_of_each_user_message() {
         let mut transcript = TranscriptState::new(true);
-        transcript.upsert_message("a", "user", vec![para("a1", "fix the login"), para("a2", "please")]);
+        transcript.upsert_message(
+            "a",
+            "user",
+            vec![para("a1", "fix the login"), para("a2", "please")],
+        );
         transcript.upsert_message("b", "assistant", vec![para("b1", "done")]);
         transcript.upsert_message("c", "user", vec![para("c1", "  now\nadd a test  ")]);
         assert_eq!(
             transcript.user_points(),
-            vec![(0, "fix the login".to_string()), (3, "now add a test".to_string())]
+            vec![
+                (0, "fix the login".to_string()),
+                (3, "now add a test".to_string())
+            ]
         );
         transcript.scroll_to_row(3);
         assert!(!transcript.stick_to_bottom);
@@ -4710,7 +5999,13 @@ mod tests {
             {"id": "y", "name": "remote.png", "mime": "image/png", "path": null}
         ]});
         let refs = ImageRef::parse_list(&view);
-        assert_eq!(refs[0], ImageRef { name: "shot.png".into(), path: Some("/data/attachments/x".into()) });
+        assert_eq!(
+            refs[0],
+            ImageRef {
+                name: "shot.png".into(),
+                path: Some("/data/attachments/x".into())
+            }
+        );
         assert_eq!(refs[1].path, None);
         assert!(ImageRef::parse_list(&serde_json::json!({})).is_empty());
     }
@@ -4725,7 +6020,10 @@ mod tests {
         let tools = ToolEntry::parse_list(&view);
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[1].state, "error");
-        assert_eq!(tool_group_labels(&tools), ("Running bash".to_string(), vec!["bash", "read"]));
+        assert_eq!(
+            tool_group_labels(&tools),
+            ("Running bash".to_string(), vec!["bash", "read"])
+        );
         assert_eq!(tool_group_labels(&tools[..1]).0, "Ran bash");
         assert_eq!(tool_group_labels(&tools[..2]).0, "Ran 2 tools");
         assert!(ToolEntry::parse_list(&serde_json::json!({"text": "x"})).is_empty());
@@ -4733,11 +6031,26 @@ mod tests {
 
     #[test]
     fn browser_tools_read_as_steps_not_mcp_names() {
-        let tool = |name: &str, state: &str| ToolEntry { tool_id: name.into(), name: name.into(), state: state.into(), summary: String::new(), ..Default::default() };
+        let tool = |name: &str, state: &str| ToolEntry {
+            tool_id: name.into(),
+            name: name.into(),
+            state: state.into(),
+            summary: String::new(),
+            ..Default::default()
+        };
         let shot = browser_step("mcp__keel_browser__browser_screenshot").unwrap();
-        assert_eq!((shot.doing, shot.done, shot.icon), ("Taking screenshot", "Took screenshot", Icon::Camera));
-        assert_eq!(browser_step("mcp__keel-browser__navigate").unwrap().done, "Opened page");
-        assert_eq!(browser_step("browser_open_pane").unwrap().doing, "Opening browser");
+        assert_eq!(
+            (shot.doing, shot.done, shot.icon),
+            ("Taking screenshot", "Took screenshot", Icon::Camera)
+        );
+        assert_eq!(
+            browser_step("mcp__keel-browser__navigate").unwrap().done,
+            "Opened page"
+        );
+        assert_eq!(
+            browser_step("browser_open_pane").unwrap().doing,
+            "Opening browser"
+        );
         assert_eq!(browser_step("mcp__github__create_issue"), None);
         assert_eq!(browser_step("Bash"), None);
 
@@ -4749,8 +6062,14 @@ mod tests {
         ];
         assert_eq!(tool_group_labels(&run).0, "Taking screenshot");
 
-        let mixed = [tool("Bash", "done"), tool("mcp__keel_browser__browser_screenshot", "done")];
-        assert_eq!(tool_group_labels(&mixed), ("Ran 2 tools".to_string(), vec!["Bash", "Took screenshot"]));
+        let mixed = [
+            tool("Bash", "done"),
+            tool("mcp__keel_browser__browser_screenshot", "done"),
+        ];
+        assert_eq!(
+            tool_group_labels(&mixed),
+            ("Ran 2 tools".to_string(), vec!["Bash", "Took screenshot"])
+        );
         assert_eq!(tool_group_labels(&mixed[1..]).0, "Took screenshot");
     }
 
@@ -4764,7 +6083,10 @@ mod tests {
         transcript.handle_scroll(px(30.0), zpx(-12.0));
         transcript.set_stick(transcript.stick_to_bottom);
         assert!(!transcript.stick_to_bottom);
-        assert!(!transcript.list_state.is_following_tail(), "Tail would snap to the end");
+        assert!(
+            !transcript.list_state.is_following_tail(),
+            "Tail would snap to the end"
+        );
     }
 
     #[test]
@@ -4805,7 +6127,10 @@ mod tests {
         // Exactly one row (the tail) remeasured per delta; the first row untouched.
         assert_eq!(transcript.items.len(), 2);
         assert_eq!(transcript.measure_count, initial + 3);
-        assert_eq!(transcript.items[1].block, para("msg_turn#1", "Start word1 word2 word3"));
+        assert_eq!(
+            transcript.items[1].block,
+            para("msg_turn#1", "Start word1 word2 word3")
+        );
     }
 
     /// A reopened chat publishes rows as they are ready: the tool-only turn
@@ -4814,11 +6139,30 @@ mod tests {
     fn late_message_slots_in_before_later_ones() {
         let mut transcript = TranscriptState::new(false);
         let later = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
-        transcript.upsert_message_before("a1", "assistant", vec![para("a1#0", "tools")], &later(&["u2", "a2"]));
+        transcript.upsert_message_before(
+            "a1",
+            "assistant",
+            vec![para("a1#0", "tools")],
+            &later(&["u2", "a2"]),
+        );
         transcript.upsert_message_before("a2", "assistant", vec![para("a2#0", "more")], &[]);
-        transcript.upsert_message_before("u1", "user", vec![para("u1#0", "summon"), para("u1#1", "it")], &later(&["a1", "u2", "a2"]));
-        transcript.upsert_message_before("u2", "user", vec![para("u2#0", "issue?")], &later(&["a2"]));
-        let order: Vec<_> = transcript.items.iter().map(|r| r.row_id().to_string()).collect();
+        transcript.upsert_message_before(
+            "u1",
+            "user",
+            vec![para("u1#0", "summon"), para("u1#1", "it")],
+            &later(&["a1", "u2", "a2"]),
+        );
+        transcript.upsert_message_before(
+            "u2",
+            "user",
+            vec![para("u2#0", "issue?")],
+            &later(&["a2"]),
+        );
+        let order: Vec<_> = transcript
+            .items
+            .iter()
+            .map(|r| r.row_id().to_string())
+            .collect();
         assert_eq!(order, ["u1#0", "u1#1", "a1#0", "u2#0", "a2#0"]);
     }
 
@@ -4839,7 +6183,11 @@ mod tests {
         transcript.upsert_message("u1", "user", vec![para("u1#0", "hi")]);
         assert_eq!(transcript.measure_count, before);
 
-        let ids: Vec<_> = transcript.items.iter().map(|r| r.row_id().to_string()).collect();
+        let ids: Vec<_> = transcript
+            .items
+            .iter()
+            .map(|r| r.row_id().to_string())
+            .collect();
         assert_eq!(ids, vec!["u1#0", "m1#0", "m1#1"]);
         assert_eq!(transcript.list_state.item_count(), 3);
 
@@ -4865,7 +6213,9 @@ mod tests {
         let h1 = transcript.compute_block_height(&block, width);
         // Header 28 + 2×10 padding + 3×18 lines + border 2, plus 8 margin.
         assert_eq!(h1, zpx(112.0));
-        let h2 = transcript.height_memo.get("m_code#0", block.content_len(), width);
+        let h2 = transcript
+            .height_memo
+            .get("m_code#0", block.content_len(), width);
         assert_eq!(h2, Some(h1));
     }
 
@@ -4889,7 +6239,11 @@ mod tests {
         assert!(h_error > h_collapsed + 50.0);
 
         // When user overrides to collapsed (=0), it returns base height
-        let h_overridden_closed = tool_group_height("group", &[error_tool.clone()], &[("group~t2".into(), false)]);
+        let h_overridden_closed = tool_group_height(
+            "group",
+            &[error_tool.clone()],
+            &[("group~t2".into(), false)],
+        );
         assert_eq!(h_overridden_closed, crate::trace_view::LINE_H * 1.0 + 4.0);
     }
 
@@ -4930,9 +6284,20 @@ mod tests {
 
     #[test]
     fn rows_are_spaced_by_what_they_follow() {
-        let row = |m: &str, role: &str, block: TranscriptBlock| TranscriptRowItem::new(m, role, block);
-        let h = |level: u8| TranscriptBlock::Heading { id: "h".into(), level, content: "Where things stand".into(), spans: Vec::new() };
-        let tools = || TranscriptBlock::ToolGroup { id: "t".into(), tools: Vec::new(), expanded: false, overrides: Vec::new() };
+        let row =
+            |m: &str, role: &str, block: TranscriptBlock| TranscriptRowItem::new(m, role, block);
+        let h = |level: u8| TranscriptBlock::Heading {
+            id: "h".into(),
+            level,
+            content: "Where things stand".into(),
+            spans: Vec::new(),
+        };
+        let tools = || TranscriptBlock::ToolGroup {
+            id: "t".into(),
+            tools: Vec::new(),
+            expanded: false,
+            overrides: Vec::new(),
+        };
         let p1 = row("a", "assistant", para("a#0", "one"));
         let p2 = row("a", "assistant", para("a#1", "two"));
         let h2 = row("a", "assistant", h(2));
@@ -4967,8 +6332,26 @@ mod tests {
     fn message_text_joins_a_message_on_its_last_row() {
         let rows = vec![
             TranscriptRowItem::new("u", "user", para("u#0", "hi")),
-            TranscriptRowItem::new("a", "assistant", TranscriptBlock::Heading { id: "a#0".into(), level: 2, content: "Plan".into(), spans: Vec::new() }),
-            TranscriptRowItem::new("a", "assistant", TranscriptBlock::ToolGroup { id: "a#1".into(), tools: Vec::new(), expanded: false, overrides: Vec::new() }),
+            TranscriptRowItem::new(
+                "a",
+                "assistant",
+                TranscriptBlock::Heading {
+                    id: "a#0".into(),
+                    level: 2,
+                    content: "Plan".into(),
+                    spans: Vec::new(),
+                },
+            ),
+            TranscriptRowItem::new(
+                "a",
+                "assistant",
+                TranscriptBlock::ToolGroup {
+                    id: "a#1".into(),
+                    tools: Vec::new(),
+                    expanded: false,
+                    overrides: Vec::new(),
+                },
+            ),
             TranscriptRowItem::new("a", "assistant", para("a#2", "done")),
         ];
         assert_eq!(message_text(&rows, 0).as_deref(), Some("hi"));
@@ -4981,14 +6364,23 @@ mod tests {
         assert_eq!(url_host("https://apnews.com/article/123"), "apnews.com");
         assert_eq!(url_host("https://www.bbc.co.uk/news"), "bbc.co.uk");
         assert_eq!(url_host("http://localhost:3000/app"), "localhost:3000");
-        assert_eq!(url_host("https://github.com/rust-lang/rust?tab=readme"), "github.com");
+        assert_eq!(
+            url_host("https://github.com/rust-lang/rust?tab=readme"),
+            "github.com"
+        );
     }
 
     #[test]
     fn url_chip_label_preserves_anchor_or_formats_url() {
         assert_eq!(url_chip_label("AP", "https://apnews.com"), "AP");
         assert_eq!(url_chip_label("BBC News", "https://bbc.com"), "BBC News");
-        assert_eq!(url_chip_label("https://example.com/very/long/nested/path/to/resource", "https://example.com"), "example.com/…");
+        assert_eq!(
+            url_chip_label(
+                "https://example.com/very/long/nested/path/to/resource",
+                "https://example.com"
+            ),
+            "example.com/…"
+        );
     }
 
     #[test]
@@ -5018,16 +6410,40 @@ mod tests {
 
     #[test]
     fn looks_like_file_path_identifies_relative_and_typed_files() {
-        assert_eq!(looks_like_file_path("interface/http/handler/auth_handler.go", false).as_deref(), Some("interface/http/handler/auth_handler.go"));
-        assert_eq!(looks_like_file_path("app/auth/usecase/auth_usecase.go", false).as_deref(), Some("app/auth/usecase/auth_usecase.go"));
-        assert_eq!(looks_like_file_path("docs/wiki/how-to-login-oidc-manual.md", false).as_deref(), Some("docs/wiki/how-to-login-oidc-manual.md"));
-        assert_eq!(looks_like_file_path("Cargo.toml", true).as_deref(), Some("Cargo.toml"));
-        assert_eq!(looks_like_file_path("main.rs", true).as_deref(), Some("main.rs"));
-        assert_eq!(looks_like_file_path("Makefile", false).as_deref(), Some("Makefile"));
-        assert_eq!(looks_like_file_path(".gitignore", false).as_deref(), Some(".gitignore"));
+        assert_eq!(
+            looks_like_file_path("interface/http/handler/auth_handler.go", false).as_deref(),
+            Some("interface/http/handler/auth_handler.go")
+        );
+        assert_eq!(
+            looks_like_file_path("app/auth/usecase/auth_usecase.go", false).as_deref(),
+            Some("app/auth/usecase/auth_usecase.go")
+        );
+        assert_eq!(
+            looks_like_file_path("docs/wiki/how-to-login-oidc-manual.md", false).as_deref(),
+            Some("docs/wiki/how-to-login-oidc-manual.md")
+        );
+        assert_eq!(
+            looks_like_file_path("Cargo.toml", true).as_deref(),
+            Some("Cargo.toml")
+        );
+        assert_eq!(
+            looks_like_file_path("main.rs", true).as_deref(),
+            Some("main.rs")
+        );
+        assert_eq!(
+            looks_like_file_path("Makefile", false).as_deref(),
+            Some("Makefile")
+        );
+        assert_eq!(
+            looks_like_file_path(".gitignore", false).as_deref(),
+            Some(".gitignore")
+        );
         assert_eq!(looks_like_file_path("v1.2.3", true), None);
         assert_eq!(looks_like_file_path("3.14", true), None);
-        assert_eq!(looks_like_file_path("https://example.com/foo.go", true), None);
+        assert_eq!(
+            looks_like_file_path("https://example.com/foo.go", true),
+            None
+        );
         // Web endpoints should not be confused with file paths:
         assert_eq!(looks_like_file_path("/llms.txt", true), None);
         assert_eq!(looks_like_file_path("/robots.txt", true), None);
@@ -5037,7 +6453,10 @@ mod tests {
         assert_eq!(looks_like_file_path("/api/v1/users?page=1", true), None);
         assert_eq!(looks_like_file_path("/users/{id}", true), None);
         // Absolute filesystem path to a real path prefix:
-        assert_eq!(looks_like_file_path("/Users/user/project/main.rs", true).as_deref(), Some("/Users/user/project/main.rs"));
+        assert_eq!(
+            looks_like_file_path("/Users/user/project/main.rs", true).as_deref(),
+            Some("/Users/user/project/main.rs")
+        );
     }
 }
 
@@ -5053,9 +6472,18 @@ fn fence_props(
     rc: &RowContext,
 ) -> crate::code_block::CodeBlockProps {
     let row = item.row_id();
-    let wrap = rc.open_lines.get(&format!("{row}~wrap")).copied().unwrap_or(false);
-    let more = rc.open_lines.get(&format!("{row}~more")).copied().unwrap_or(false);
-    let mut props = crate::code_block::CodeBlockProps::new(row, content, crate::code_block::CodeSize::Full);
+    let wrap = rc
+        .open_lines
+        .get(&format!("{row}~wrap"))
+        .copied()
+        .unwrap_or(false);
+    let more = rc
+        .open_lines
+        .get(&format!("{row}~more"))
+        .copied()
+        .unwrap_or(false);
+    let mut props =
+        crate::code_block::CodeBlockProps::new(row, content, crate::code_block::CodeSize::Full);
     props.language = language.clone();
     props.spans = Some(spans.clone());
     props.closed = closed;

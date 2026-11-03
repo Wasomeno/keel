@@ -42,6 +42,8 @@ def main():
         os.makedirs(stub_dir, exist_ok=True)
         with open(os.path.join(stub_dir, "argv"), "w") as handle:
             handle.write("\n".join(sys.argv))
+        with open(os.path.join(stub_dir, "argv.json"), "w") as handle:
+            json.dump(sys.argv, handle)
         with open(os.path.join(stub_dir, "env"), "w") as handle:
             for key, value in sorted(os.environ.items()):
                 handle.write(f"{key}={value}\n")

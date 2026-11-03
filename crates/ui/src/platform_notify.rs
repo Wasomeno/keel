@@ -37,7 +37,8 @@ pub fn banner_permission() -> BannerPermission {
 }
 
 /// System Settings → Notifications, on Keel's page.
-pub const NOTIFICATION_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.keel.dev";
+pub const NOTIFICATION_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.keel.dev";
 
 /// What clicked banners and `keel://` links ask of the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +96,12 @@ pub fn request_permission() {
 /// Look the permission up again (at most every 2 s): it can be turned on
 /// or off in System Settings at any time.
 pub fn refresh_permission() {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    if banner_permission() == BannerPermission::Unavailable || now.saturating_sub(CHECKED_AT.load(Ordering::Relaxed)) < 2000 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    if banner_permission() == BannerPermission::Unavailable
+        || now.saturating_sub(CHECKED_AT.load(Ordering::Relaxed)) < 2000
+    {
         return;
     }
     CHECKED_AT.store(now, Ordering::Relaxed);
@@ -107,7 +112,9 @@ pub fn refresh_permission() {
 /// Opens Keel's page in System Settings → Notifications.
 pub fn open_notification_settings() {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("/usr/bin/open").arg(NOTIFICATION_SETTINGS_URL).spawn();
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg(NOTIFICATION_SETTINGS_URL)
+        .spawn();
 }
 
 /// The Dock icon's badge; `None` clears it.
@@ -175,8 +182,9 @@ mod native {
     use objc2::{AnyThread as _, define_class, msg_send};
     use objc2_foundation::{NSBundle, NSDictionary, NSError, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions,
-        UNNotificationRequest, UNNotificationResponse, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
 
     use std::ptr::NonNull;
@@ -203,7 +211,8 @@ mod native {
                 _notification: &UNNotification,
                 completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
             ) {
-                completion.call((UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List,));
+                completion.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List,));
             }
 
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
@@ -216,7 +225,9 @@ mod native {
                 let info = response.notification().request().content().userInfo();
                 let chat = chat_from_payload(|key| {
                     let key = NSString::from_str(key);
-                    info.objectForKey(&key).and_then(|value| value.downcast::<NSString>().ok()).map(|s| s.to_string())
+                    info.objectForKey(&key)
+                        .and_then(|value| value.downcast::<NSString>().ok())
+                        .map(|s| s.to_string())
                 });
                 tracing::info!(target: "keel_ui::notify", chat = ?chat, "banner clicked");
                 // No chat id still brings Keel forward.
@@ -244,7 +255,9 @@ mod native {
         let done = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
             let status = unsafe { settings.as_ref() }.authorizationStatus();
             let value = match status {
-                UNAuthorizationStatus::Authorized | UNAuthorizationStatus::Provisional | UNAuthorizationStatus::Ephemeral => ALLOWED,
+                UNAuthorizationStatus::Authorized
+                | UNAuthorizationStatus::Provisional
+                | UNAuthorizationStatus::Ephemeral => ALLOWED,
                 UNAuthorizationStatus::Denied => DENIED,
                 _ => NOT_ASKED,
             };
@@ -256,7 +269,8 @@ mod native {
                 authorize();
             }
         });
-        UNUserNotificationCenter::currentNotificationCenter().getNotificationSettingsWithCompletionHandler(&done);
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationSettingsWithCompletionHandler(&done);
     }
 
     /// Ask to post banners. macOS prompts once; later calls only report
@@ -265,12 +279,16 @@ mod native {
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let done = RcBlock::new(|granted: Bool, error: *mut NSError| {
             let granted = granted.as_bool();
-            let error = unsafe { error.as_ref() }.map(|e| format!("{} ({})", e.localizedDescription(), e.code()));
+            let error = unsafe { error.as_ref() }
+                .map(|e| format!("{} ({})", e.localizedDescription(), e.code()));
             tracing::info!(target: "keel_ui::notify", granted, ?error, "banner permission asked");
             // Dismissed or refused reads as Denied: settle it from the settings.
             check(false);
         });
-        center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Badge, &done);
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Badge,
+            &done,
+        );
     }
 
     pub fn post(title: &str, body: &str, chat_id: Option<&str>) {
@@ -281,18 +299,22 @@ mod native {
         if let Some(chat_id) = chat_id {
             let [(key, value)] = crate::notify::banner_payload(chat_id);
             let (key, value) = (NSString::from_str(key), NSString::from_str(&value));
-            let info: Retained<NSDictionary<NSString, NSString>> = NSDictionary::from_slices(&[&*key], &[&*value]);
-            let info: Retained<NSDictionary<AnyObject, AnyObject>> = unsafe { Retained::cast_unchecked(info) };
+            let info: Retained<NSDictionary<NSString, NSString>> =
+                NSDictionary::from_slices(&[&*key], &[&*value]);
+            let info: Retained<NSDictionary<AnyObject, AnyObject>> =
+                unsafe { Retained::cast_unchecked(info) };
             unsafe { content.setUserInfo(&info) };
         }
         let id = NSString::from_str(&format!("keel-{}", uuid::Uuid::new_v4()));
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
+        let request =
+            UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
         let done = RcBlock::new(|error: *mut NSError| {
             if let Some(error) = unsafe { error.as_ref() } {
                 tracing::warn!(target: "keel_ui::notify", error = %error.localizedDescription(), "banner not posted");
             }
         });
-        UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, Some(&done));
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&done));
     }
 }
 
@@ -316,12 +338,15 @@ mod mac {
             return;
         };
         let label = label.map(NSString::from_str);
-        NSApplication::sharedApplication(mtm).dockTile().setBadgeLabel(label.as_deref());
+        NSApplication::sharedApplication(mtm)
+            .dockTile()
+            .setBadgeLabel(label.as_deref());
     }
 
     pub fn bounce() {
         if let Some(mtm) = MainThreadMarker::new() {
-            NSApplication::sharedApplication(mtm).requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+            NSApplication::sharedApplication(mtm)
+                .requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
         }
     }
 
@@ -333,7 +358,11 @@ mod mac {
         let Some(path) = path.to_str() else {
             return false;
         };
-        let Some(sound) = NSSound::initWithContentsOfFile_byReference(NSSound::alloc(), &NSString::from_str(path), true) else {
+        let Some(sound) = NSSound::initWithContentsOfFile_byReference(
+            NSSound::alloc(),
+            &NSString::from_str(path),
+            true,
+        ) else {
             return false;
         };
         sound.setVolume(volume.clamp(0., 1.));

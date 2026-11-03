@@ -83,13 +83,17 @@ impl HoverTips {
     }
 
     fn warm(&self, now: Instant) -> bool {
-        self.shown.is_some() || self.hidden_at.is_some_and(|at| now.saturating_duration_since(at) < TIP_WARM)
+        self.shown.is_some()
+            || self
+                .hidden_at
+                .is_some_and(|at| now.saturating_duration_since(at) < TIP_WARM)
     }
 
     /// The hover delay that began at `since` ran out: show its tooltip if
     /// the pointer is still on that button. True when one appeared.
     pub(super) fn ripen(&mut self, id: &'static str, since: Instant, now: Instant) -> bool {
-        if self.hovered != Some((id, since)) || self.shown.is_some() || self.suppressed == Some(id) {
+        if self.hovered != Some((id, since)) || self.shown.is_some() || self.suppressed == Some(id)
+        {
             return false;
         }
         if self.leaving.is_some_and(|(l, _)| l == id) {
@@ -112,7 +116,10 @@ impl HoverTips {
     /// Forget everything (the toolbar went away).
     pub(super) fn clear(&mut self) {
         let bounds = self.bounds.clone();
-        *self = Self { bounds, ..Self::default() };
+        *self = Self {
+            bounds,
+            ..Self::default()
+        };
     }
 
     /// Which tooltip to draw now and its look: (id, opacity, y offset).
@@ -155,7 +162,9 @@ impl HoverTips {
         let margin = f32::from(zpx(8.));
         let center = f32::from(anchor.origin.x) + f32::from(anchor.size.width) / 2.;
         let x = (center - w / 2.).min(viewport - w - margin).max(margin);
-        let y = f32::from(anchor.origin.y + anchor.size.height) + f32::from(zpx(TIP_GAP)) + f32::from(zpx(dy));
+        let y = f32::from(anchor.origin.y + anchor.size.height)
+            + f32::from(zpx(TIP_GAP))
+            + f32::from(zpx(dy));
         Some(
             gpui::deferred(
                 gpui::anchored()
@@ -173,7 +182,11 @@ impl HoverTips {
 /// the same rim and radius as menus) with a smaller, softer shadow, as
 /// it's a small thing close to its button; the shortcut, if any, as a
 /// muted keycap.
-pub(super) fn capsule(t: Tokens, text: impl Into<gpui::SharedString>, keys: Option<&'static str>) -> gpui::Div {
+pub(super) fn capsule(
+    t: Tokens,
+    text: impl Into<gpui::SharedString>,
+    keys: Option<&'static str>,
+) -> gpui::Div {
     div()
         .relative()
         .flex()
@@ -225,13 +238,20 @@ pub(super) fn set_reduced(on: bool) {
 }
 
 fn tips_warm(now: Instant) -> bool {
-    ALIVE.with(Cell::get) > 0 || GONE_AT.with(Cell::get).is_some_and(|at| now.saturating_duration_since(at) < TIP_WARM)
+    ALIVE.with(Cell::get) > 0
+        || GONE_AT
+            .with(Cell::get)
+            .is_some_and(|at| now.saturating_duration_since(at) < TIP_WARM)
 }
 
 /// How long gpui waits before a tooltip: [`TIP_DELAY`] cold, none while
 /// one shows or just went (moving along a row of buttons).
 pub(super) fn delay() -> Duration {
-    if tips_warm(Instant::now()) { Duration::ZERO } else { TIP_DELAY }
+    if tips_warm(Instant::now()) {
+        Duration::ZERO
+    } else {
+        TIP_DELAY
+    }
 }
 
 /// A gpui tooltip's entrance: a short fade as it drops [`TIP_RISE`] onto
@@ -274,7 +294,14 @@ fn capsule_width(window: &gpui::Window, text: &str, keys: Option<&str>) -> f32 {
         let system = window.text_system();
         let font = system.resolve_font(&gpui::font(crate::style::SANS));
         let size = zpx(size);
-        s.chars().map(|ch| system.advance(font, size, ch).map(|a| f32::from(a.width)).unwrap_or(f32::from(size) * 0.6)).sum::<f32>()
+        s.chars()
+            .map(|ch| {
+                system
+                    .advance(font, size, ch)
+                    .map(|a| f32::from(a.width))
+                    .unwrap_or(f32::from(size) * 0.6)
+            })
+            .sum::<f32>()
     };
     let z = |v: f32| f32::from(zpx(v));
     let key = keys.map_or(0., |k| z(6.) + measure(k, KEY_TEXT) + z(8.) + 2.);
@@ -299,7 +326,10 @@ mod tests {
         assert!(first.animate);
         let (o, dy, moving) = first.look(first.born);
         assert!(o == 0. && dy == -TIP_RISE && moving);
-        assert_eq!(first.look(first.born + Duration::from_millis(TIP_IN as u64)), (1., 0., false));
+        assert_eq!(
+            first.look(first.born + Duration::from_millis(TIP_IN as u64)),
+            (1., 0., false)
+        );
         assert_eq!(delay(), Duration::ZERO);
         drop(first);
         // Straight onto a neighbour: no wait and no entrance.
@@ -335,7 +365,10 @@ mod tests {
         assert!(tips.ripen("back", t0, at(t0, 400)));
         let (id, o, dy, moving) = tips.phase(at(t0, 400), false).unwrap();
         assert_eq!(id, "back");
-        assert!(o < 0.05 && dy < -2.9 && moving, "the entrance starts faded, 3 px up");
+        assert!(
+            o < 0.05 && dy < -2.9 && moving,
+            "the entrance starts faded, 3 px up"
+        );
         let (_, o, dy, moving) = tips.phase(at(t0, 560), false).unwrap();
         assert!(o == 1. && dy == 0. && !moving);
         // Left before the delay: never shows.

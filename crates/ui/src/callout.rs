@@ -54,8 +54,14 @@ mod tests {
 
     #[test]
     fn an_unknown_kind_is_a_note_and_blank_text_is_dropped() {
-        let note = Callout::from_spec(&json!({ "component": "callout", "kind": "aside", "text": " The watcher. " })).unwrap();
-        assert_eq!((note.kind, note.text.as_str(), note.label()), (Kind::Note, "The watcher.", "Note"));
+        let note = Callout::from_spec(
+            &json!({ "component": "callout", "kind": "aside", "text": " The watcher. " }),
+        )
+        .unwrap();
+        assert_eq!(
+            (note.kind, note.text.as_str(), note.label()),
+            (Kind::Note, "The watcher.", "Note")
+        );
         assert!(Callout::from_spec(&json!({ "component": "callout", "text": "  " })).is_none());
         assert!(Callout::from_spec(&json!({ "component": "chart", "text": "x" })).is_none());
     }

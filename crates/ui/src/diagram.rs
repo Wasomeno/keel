@@ -47,7 +47,10 @@ pub fn parse(language: Option<&str>, source: &str) -> Option<Diagram> {
         return None;
     }
     let diagram = parse_boxes(source)?;
-    (diagram.nodes.len() <= MAX_NODES && diagram.edges.len() <= MAX_EDGES && faithful(&diagram, source)).then_some(diagram)
+    (diagram.nodes.len() <= MAX_NODES
+        && diagram.edges.len() <= MAX_EDGES
+        && faithful(&diagram, source))
+    .then_some(diagram)
 }
 
 /// Characters of a label the painter draws; longer labels are cut.
@@ -58,7 +61,12 @@ pub const LABEL_CHARS: usize = 24;
 /// branches, a box with a ragged edge) reads better as the drawing itself.
 fn faithful(diagram: &Diagram, source: &str) -> bool {
     // A lone `v` is an arrowhead, not a word.
-    let words = |s: &str| s.split_whitespace().filter(|w| *w != "v").map(|w| w.chars().filter(|c| c.is_alphanumeric()).count()).sum::<usize>();
+    let words = |s: &str| {
+        s.split_whitespace()
+            .filter(|w| *w != "v")
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).count())
+            .sum::<usize>()
+    };
     let drawn: usize = diagram
         .nodes
         .iter()
@@ -74,17 +82,70 @@ fn faithful(diagram: &Diagram, source: &str) -> bool {
 fn is_box_char(c: char) -> bool {
     matches!(
         c,
-        '┌' | '┐' | '└' | '┘' | '╭' | '╮' | '╰' | '╯' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│' | '━' | '┃'
-            | '+' | '-' | '|'
+        '┌' | '┐'
+            | '└'
+            | '┘'
+            | '╭'
+            | '╮'
+            | '╰'
+            | '╯'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '─'
+            | '│'
+            | '━'
+            | '┃'
+            | '+'
+            | '-'
+            | '|'
     )
 }
 
 fn is_horiz(c: char) -> bool {
-    matches!(c, '─' | '━' | '-' | '┌' | '┐' | '└' | '┘' | '╭' | '╮' | '╰' | '╯' | '├' | '┤' | '┬' | '┴' | '┼' | '+')
+    matches!(
+        c,
+        '─' | '━'
+            | '-'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '╭'
+            | '╮'
+            | '╰'
+            | '╯'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '+'
+    )
 }
 
 fn is_vert(c: char) -> bool {
-    matches!(c, '│' | '┃' | '|' | '┌' | '┐' | '└' | '┘' | '╭' | '╮' | '╰' | '╯' | '├' | '┤' | '┬' | '┴' | '┼' | '+')
+    matches!(
+        c,
+        '│' | '┃'
+            | '|'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '╭'
+            | '╮'
+            | '╰'
+            | '╯'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '+'
+    )
 }
 
 struct Grid {
@@ -94,7 +155,11 @@ struct Grid {
 
 impl Grid {
     fn get(&self, x: usize, y: usize) -> char {
-        self.rows.get(y).and_then(|r| r.get(x)).copied().unwrap_or(' ')
+        self.rows
+            .get(y)
+            .and_then(|r| r.get(x))
+            .copied()
+            .unwrap_or(' ')
     }
 }
 
@@ -120,7 +185,10 @@ fn parse_boxes(source: &str) -> Option<Diagram> {
                 continue;
             }
             let mut x2 = x + 1;
-            while x2 < grid.width && is_horiz(grid.get(x2, y)) && !matches!(grid.get(x2, y), '┐' | '╮' | '+') {
+            while x2 < grid.width
+                && is_horiz(grid.get(x2, y))
+                && !matches!(grid.get(x2, y), '┐' | '╮' | '+')
+            {
                 x2 += 1;
             }
             if x2 == x + 1 || !matches!(grid.get(x2, y), '┐' | '╮' | '+') {
@@ -128,7 +196,10 @@ fn parse_boxes(source: &str) -> Option<Diagram> {
                 continue;
             }
             let mut y2 = y + 1;
-            while y2 < grid.rows.len() && is_vert(grid.get(x, y2)) && !matches!(grid.get(x, y2), '└' | '╰' | '+') {
+            while y2 < grid.rows.len()
+                && is_vert(grid.get(x, y2))
+                && !matches!(grid.get(x, y2), '└' | '╰' | '+')
+            {
                 y2 += 1;
             }
             let closed = y2 > y + 1
@@ -156,7 +227,12 @@ fn parse_boxes(source: &str) -> Option<Diagram> {
     for (i, (x, y, x2, y2, label)) in boxes.iter().enumerate() {
         let id = format!("n{i}");
         id_at.insert((*x, *y), id.clone());
-        nodes.push(Node { id, label: label.clone(), x: *x, y: *y });
+        nodes.push(Node {
+            id,
+            label: label.clone(),
+            x: *x,
+            y: *y,
+        });
         let _ = (x2, y2);
     }
 
@@ -166,21 +242,41 @@ fn parse_boxes(source: &str) -> Option<Diagram> {
         // Right and left: scan the mid-row for an arrow that lands on another box.
         let mid_y = y + (y2 - y) / 2;
         if let Some((other, dir, label)) = h_link(&grid, &boxes, *x2, mid_y, true) {
-            edges.push(Edge { from: id.clone(), to: id_at[&other].clone(), label, dir });
+            edges.push(Edge {
+                from: id.clone(),
+                to: id_at[&other].clone(),
+                label,
+                dir,
+            });
         }
         if let Some((other, dir, label)) = h_link(&grid, &boxes, *x, mid_y, false)
             && matches!(dir, Dir::Left)
         {
-            edges.push(Edge { from: id.clone(), to: id_at[&other].clone(), label, dir });
+            edges.push(Edge {
+                from: id.clone(),
+                to: id_at[&other].clone(),
+                label,
+                dir,
+            });
         }
         let mid_x = x + (x2 - x) / 2;
         if let Some((other, dir, label)) = v_link(&grid, &boxes, mid_x, *y2, true) {
-            edges.push(Edge { from: id.clone(), to: id_at[&other].clone(), label, dir });
+            edges.push(Edge {
+                from: id.clone(),
+                to: id_at[&other].clone(),
+                label,
+                dir,
+            });
         }
         if let Some((other, dir, label)) = v_link(&grid, &boxes, mid_x, *y, false)
             && matches!(dir, Dir::Up)
         {
-            edges.push(Edge { from: id, to: id_at[&other].clone(), label, dir });
+            edges.push(Edge {
+                from: id,
+                to: id_at[&other].clone(),
+                label,
+                dir,
+            });
         }
     }
     // A box pointed at from both ends of one connector shows up twice. Keep one.
@@ -195,7 +291,9 @@ fn box_label(grid: &Grid, x: usize, y: usize, x2: usize, y2: usize) -> String {
     for row in y + 1..y2 {
         let text: String = (x + 1..x2).map(|i| grid.get(i, row)).collect();
         let text = text.trim().to_string();
-        if text.chars().any(|c| !is_box_char(c) && c != ' ') && text.chars().count() > best.chars().count() {
+        if text.chars().any(|c| !is_box_char(c) && c != ' ')
+            && text.chars().count() > best.chars().count()
+        {
             best = text;
         }
     }
@@ -219,7 +317,10 @@ fn h_link(
             return None;
         }
         let c = grid.get(x, y);
-        if matches!(c, '─' | '━' | '-' | '►' | '▶' | '→' | '>' | '◄' | '◀' | '←' | '<') {
+        if matches!(
+            c,
+            '─' | '━' | '-' | '►' | '▶' | '→' | '>' | '◄' | '◀' | '←' | '<'
+        ) {
             saw = true;
             dir = match c {
                 '►' | '▶' | '→' | '>' => Dir::Right,
@@ -276,9 +377,10 @@ fn v_link(
         if c == ' ' && saw {
             continue;
         }
-        if let Some((bx, by, ..)) = boxes.iter().find(|(bx, by, bx2, by2, _)| {
-            y == if down { *by } else { *by2 } && x > *bx && x < *bx2
-        }) {
+        if let Some((bx, by, ..)) = boxes
+            .iter()
+            .find(|(bx, by, bx2, by2, _)| y == if down { *by } else { *by2 } && x > *bx && x < *bx2)
+        {
             return saw.then_some(((*bx, *by), dir, String::new()));
         }
         return None;
@@ -322,20 +424,43 @@ fn layout(nodes: Vec<Node>, edges: Vec<Edge>) -> Diagram {
         let r = rank[id];
         let y = slot.entry(r).or_insert(0);
         let node = nodes.iter().find(|n| n.id == *id).unwrap();
-        placed.push(Node { id: id.clone(), label: node.label.clone(), x: r, y: *y });
+        placed.push(Node {
+            id: id.clone(),
+            label: node.label.clone(),
+            x: r,
+            y: *y,
+        });
         *y += 1;
     }
-    let down = edges.iter().filter(|e| matches!(e.dir, Dir::Down | Dir::Up)).count()
-        > edges.iter().filter(|e| matches!(e.dir, Dir::Right | Dir::Left)).count();
-    Diagram { nodes: placed, edges, down }
+    let down = edges
+        .iter()
+        .filter(|e| matches!(e.dir, Dir::Down | Dir::Up))
+        .count()
+        > edges
+            .iter()
+            .filter(|e| matches!(e.dir, Dir::Right | Dir::Left))
+            .count();
+    Diagram {
+        nodes: placed,
+        edges,
+        down,
+    }
 }
 
 /// Pixel size of a rendered diagram, for the row-height memo.
 /// `width` is the column the diagram has to fit. `0` means "as wide as the graph".
 pub fn size(diagram: &Diagram, width: f32) -> (f32, f32) {
     let placed = place(diagram, width);
-    let right = placed.nodes.values().map(|b| b.0 + b.2).fold(0_f32, f32::max);
-    let bottom = placed.nodes.values().map(|b| b.1 + b.3).fold(0_f32, f32::max);
+    let right = placed
+        .nodes
+        .values()
+        .map(|b| b.0 + b.2)
+        .fold(0_f32, f32::max);
+    let bottom = placed
+        .nodes
+        .values()
+        .map(|b| b.1 + b.3)
+        .fold(0_f32, f32::max);
     ((right + 16.).max(120.), bottom + 16.)
 }
 
@@ -418,7 +543,10 @@ fn size_wide(diagram: &Diagram) -> (f32, f32) {
         col_w.entry(n.x).and_modify(|c| *c = c.max(w)).or_insert(w);
     }
     let ranks = diagram.nodes.iter().map(|n| n.x).max().unwrap_or(0) + 1;
-    let width: f32 = (0..ranks).map(|r| col_w.get(&r).copied().unwrap_or(BOX_MIN_W) + GAP_X).sum::<f32>() + 16.;
+    let width: f32 = (0..ranks)
+        .map(|r| col_w.get(&r).copied().unwrap_or(BOX_MIN_W) + GAP_X)
+        .sum::<f32>()
+        + 16.;
     (width, 0.)
 }
 
@@ -465,7 +593,10 @@ mod tests {
     #[test]
     fn junk_and_other_languages_stay_code() {
         assert!(parse(Some("rust"), "fn main() {}").is_none());
-        assert!(parse(Some("mermaid"), "graph TD\n  A --> B").is_none(), "mermaid is merman's");
+        assert!(
+            parse(Some("mermaid"), "graph TD\n  A --> B").is_none(),
+            "mermaid is merman's"
+        );
         assert!(parse(Some("diagram"), "just words").is_none());
     }
 
@@ -473,7 +604,10 @@ mod tests {
     fn ascii_plus_boxes_and_bare_arrows() {
         let src = "+---+\n| A |\n+-+-+\n  |\n  v\n+---+\n| B |\n+---+";
         let d = parse(Some("diagram"), src).unwrap();
-        assert_eq!(d.nodes.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(), vec!["A", "B"]);
+        assert_eq!(
+            d.nodes.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
         assert_eq!(d.edges.len(), 1);
         assert!(d.down);
     }

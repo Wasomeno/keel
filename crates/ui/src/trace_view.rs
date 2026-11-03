@@ -7,7 +7,10 @@
 //! the view's motion ticker repaints while any of those windows is open. No
 //! `with_animation`, so nothing nests and nothing repeats on its own.
 
-use gpui::{AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder};
+use gpui::{
+    AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, prelude::FluentBuilder,
+};
 
 use crate::code_block::{self, CodeAction, CodeBlockProps, CodeSize, CodeVariant, LineVariant};
 use crate::icons::Icon;
@@ -50,7 +53,11 @@ pub const TRANSITION_WINDOW_MS: i64 = (AUTO_CLOSE_DELAY_MS + CLOSE_MS + 120.) as
 
 /// `t` in 0..1 of a `ms`-long window that started `elapsed_ms` ago.
 fn progress(elapsed_ms: f32, ms: f32) -> f32 {
-    if ms <= 0. { 1. } else { (elapsed_ms / ms).clamp(0., 1.) }
+    if ms <= 0. {
+        1.
+    } else {
+        (elapsed_ms / ms).clamp(0., 1.)
+    }
 }
 
 /// How open a fold is: 0 closed, 1 open, between while it moves.
@@ -68,26 +75,48 @@ pub struct Fold {
 impl Fold {
     fn rest(open: bool) -> Self {
         let v = if open { 1. } else { 0. };
-        Self { open, height: v, opacity: v, chevron: v }
+        Self {
+            open,
+            height: v,
+            opacity: v,
+            chevron: v,
+        }
     }
 
     /// `open` reached `elapsed_ms` ago. Opening glides (0.32,0.72,0,1) over
     /// 220 ms with the fade on its first 60%; closing eases in-out over 220 ms
     /// with the fade on its first 160 ms.
     pub fn at(open: bool, elapsed_ms: Option<f32>, reduced: bool) -> Self {
-        let Some(ms) = elapsed_ms.filter(|ms| *ms >= 0.) else { return Self::rest(open) };
+        let Some(ms) = elapsed_ms.filter(|ms| *ms >= 0.) else {
+            return Self::rest(open);
+        };
         if reduced {
             // Opacity only, 120 ms.
             let p = progress(ms, 120.);
             let o = if open { p } else { 1. - p };
-            return Self { open, height: if open || p < 1. { 1. } else { 0. }, opacity: o, chevron: if open { 1. } else { 0. } };
+            return Self {
+                open,
+                height: if open || p < 1. { 1. } else { 0. },
+                opacity: o,
+                chevron: if open { 1. } else { 0. },
+            };
         }
         if open {
             let h = glide_curve(progress(ms, OPEN_MS));
-            Self { open, height: h, opacity: ease_out(progress(ms, OPEN_MS * 0.6)), chevron: h }
+            Self {
+                open,
+                height: h,
+                opacity: ease_out(progress(ms, OPEN_MS * 0.6)),
+                chevron: h,
+            }
         } else {
             let h = 1. - ease_in_out(progress(ms, CLOSE_MS));
-            Self { open, height: h, opacity: (1. - ease_in_out(progress(ms, CLOSE_MS))).powf(1.2), chevron: h }
+            Self {
+                open,
+                height: h,
+                opacity: (1. - ease_in_out(progress(ms, CLOSE_MS))).powf(1.2),
+                chevron: h,
+            }
         }
     }
 
@@ -104,20 +133,30 @@ impl Fold {
 /// When a line opens on its own: errors.
 /// Running terminal commands stay minimized on default to eliminate layout shifts.
 /// The user's choice (`over`) wins and animates from its toggle instant.
-pub fn line_fold(step: &TraceStep, over: Option<bool>, toggled_ms: Option<f32>, now_ms: i64, reduced: bool) -> Fold {
+pub fn line_fold(
+    step: &TraceStep,
+    over: Option<bool>,
+    toggled_ms: Option<f32>,
+    now_ms: i64,
+    reduced: bool,
+) -> Fold {
     if let Some(open) = over {
         return Fold::at(open, toggled_ms, reduced);
     }
     let since_end = step.ended_ms.map(|end| (now_ms - end) as f32);
     match step.status {
-        StepStatus::Error if has_body(step) => Fold::at(true, since_end.map(|ms| ms - ERROR_OPEN_DELAY_MS), reduced),
+        StepStatus::Error if has_body(step) => {
+            Fold::at(true, since_end.map(|ms| ms - ERROR_OPEN_DELAY_MS), reduced)
+        }
         _ => Fold::rest(false),
     }
 }
 
 fn has_body(step: &TraceStep) -> bool {
     match &step.body {
-        StepBody::None | StepBody::Shots(_) | StepBody::Terminal { .. } => !step.children.is_empty(),
+        StepBody::None | StepBody::Shots(_) | StepBody::Terminal { .. } => {
+            !step.children.is_empty()
+        }
         StepBody::Output { tail, .. } => !tail.trim().is_empty(),
         StepBody::Text(text) => !text.trim().is_empty(),
         StepBody::Plan(entries) => !entries.is_empty(),
@@ -158,20 +197,40 @@ pub fn glyph_half_width(chars: usize) -> f32 {
 /// raised-cosine falloff, 1 at the center and 0 one half-width away.
 pub fn glyph_weight(x: f32, center: f32, half: f32) -> f32 {
     let d = (x - center) / half;
-    if d.abs() >= 1. { 0. } else { 0.5 + 0.5 * (std::f32::consts::PI * d).cos() }
+    if d.abs() >= 1. {
+        0.
+    } else {
+        0.5 + 0.5 * (std::f32::consts::PI * d).cos()
+    }
 }
 
 fn lerp_color(a: gpui::Hsla, b: gpui::Hsla, t: f32) -> gpui::Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
     let m = |x: f32, y: f32| x + (y - x) * t;
-    gpui::Rgba { r: m(a.r, b.r), g: m(a.g, b.g), b: m(a.b, b.b), a: m(a.a, b.a) }.into()
+    gpui::Rgba {
+        r: m(a.r, b.r),
+        g: m(a.g, b.g),
+        b: m(a.b, b.b),
+        a: m(a.a, b.a),
+    }
+    .into()
 }
 
 /// `text` as styled text whose glyphs brighten toward `peak` where the
 /// highlight passes. `offset` and `total` place it within the whole title
 /// (the verb and the subject share one sweep).
-fn shimmer_text(text: String, offset: usize, total: usize, center: Option<f32>, half: f32, base: gpui::Hsla, peak: gpui::Hsla) -> gpui::StyledText {
-    let Some(center) = center else { return gpui::StyledText::new(text) };
+fn shimmer_text(
+    text: String,
+    offset: usize,
+    total: usize,
+    center: Option<f32>,
+    half: f32,
+    base: gpui::Hsla,
+    peak: gpui::Hsla,
+) -> gpui::StyledText {
+    let Some(center) = center else {
+        return gpui::StyledText::new(text);
+    };
     let n = total.max(1) as f32;
     let mut runs: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = Vec::new();
     for (k, (at, ch)) in text.char_indices().enumerate() {
@@ -180,7 +239,13 @@ fn shimmer_text(text: String, offset: usize, total: usize, center: Option<f32>, 
             continue;
         }
         let color = lerp_color(base, peak, w * GLYPH_PEAK);
-        runs.push((at..at + ch.len_utf8(), gpui::HighlightStyle { color: Some(color), ..Default::default() }));
+        runs.push((
+            at..at + ch.len_utf8(),
+            gpui::HighlightStyle {
+                color: Some(color),
+                ..Default::default()
+            },
+        ));
     }
     gpui::StyledText::new(text).with_highlights(runs)
 }
@@ -211,7 +276,10 @@ pub fn entry_height(age_ms: f32, k: usize, reduced: bool) -> f32 {
     if reduced {
         return 1.;
     }
-    ease_out(progress(age_ms - STAGGER_MS * k.min(STAGGER_CAP) as f32, ENTER_HEIGHT_MS))
+    ease_out(progress(
+        age_ms - STAGGER_MS * k.min(STAGGER_CAP) as f32,
+        ENTER_HEIGHT_MS,
+    ))
 }
 
 fn icon_for(step: &TraceStep, name: &str) -> Icon {
@@ -251,7 +319,15 @@ fn split_title(step: &TraceStep) -> (String, String) {
 }
 
 fn mono_subject(kind: StepKind) -> bool {
-    matches!(kind, StepKind::Read | StepKind::Edit | StepKind::Delete | StepKind::Move | StepKind::Execute | StepKind::Search)
+    matches!(
+        kind,
+        StepKind::Read
+            | StepKind::Edit
+            | StepKind::Delete
+            | StepKind::Move
+            | StepKind::Execute
+            | StepKind::Search
+    )
 }
 
 /// Paths keep their file name: the middle goes.
@@ -260,8 +336,15 @@ fn middle_ellipsis(path: &str, max: usize) -> String {
     if n <= max || !path.contains('/') {
         return path.to_string();
     }
-    let keep_tail = path.rsplit('/').next().map_or(0, |f| f.chars().count() + 1).min(max.saturating_sub(4));
-    let head: String = path.chars().take(max.saturating_sub(keep_tail + 1)).collect();
+    let keep_tail = path
+        .rsplit('/')
+        .next()
+        .map_or(0, |f| f.chars().count() + 1)
+        .min(max.saturating_sub(4));
+    let head: String = path
+        .chars()
+        .take(max.saturating_sub(keep_tail + 1))
+        .collect();
     let tail: String = path.chars().skip(n - keep_tail).collect();
     format!("{head}…{tail}")
 }
@@ -286,7 +369,16 @@ pub struct LineCtx<'a> {
 
 impl<'a> LineCtx<'a> {
     pub fn new(line_id: String, name: &'a str) -> Self {
-        Self { line_id, name, over: None, shimmer: false, burst: 0, command: None, title: None, row_toggle: false }
+        Self {
+            line_id,
+            name,
+            over: None,
+            shimmer: false,
+            burst: 0,
+            command: None,
+            title: None,
+            row_toggle: false,
+        }
     }
 }
 
@@ -294,10 +386,21 @@ impl<'a> LineCtx<'a> {
 pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext) -> AnyElement {
     let t = rc.tokens;
     let now_ms = rc.now_ms;
-    let toggled_ms = rc.toggles.get(&lc.line_id).map(|(_, at)| rc.now.saturating_duration_since(*at).as_secs_f32() * 1000.);
+    let toggled_ms = rc
+        .toggles
+        .get(&lc.line_id)
+        .map(|(_, at)| rc.now.saturating_duration_since(*at).as_secs_f32() * 1000.);
     let expandable = has_body(step);
-    let fold = if expandable { line_fold(step, lc.over, toggled_ms, now_ms, rc.reduced) } else { Fold::rest(false) };
-    let clock = rc.now.saturating_duration_since(rc.clock_epoch).as_secs_f32() * 1000.;
+    let fold = if expandable {
+        line_fold(step, lc.over, toggled_ms, now_ms, rc.reduced)
+    } else {
+        Fold::rest(false)
+    };
+    let clock = rc
+        .now
+        .saturating_duration_since(rc.clock_epoch)
+        .as_secs_f32()
+        * 1000.;
     let phase = (lc.burst as f32 * 0.17).fract();
 
     let (head, subject) = match &lc.title {
@@ -308,30 +411,57 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         StepStatus::Error => (t.danger, t.text, t.danger),
         StepStatus::Running => (t.text_muted, t.text_muted, t.text_muted),
         StepStatus::Pending => (t.text_faint, t.text_faint, t.text_faint),
-        StepStatus::Cancelled => (t.text_faint, t.text_faint, t.text_faint & 0xFFFF_FF00 | 0x99),
+        StepStatus::Cancelled => (
+            t.text_faint,
+            t.text_faint,
+            t.text_faint & 0xFFFF_FF00 | 0x99,
+        ),
         StepStatus::Done => (t.text_muted, t.text_muted, t.text_faint),
     };
     // A just-finished line crossfades its icon tint from the running one.
-    let since_end = step.ended_ms.map(|e| (now_ms - e) as f32).unwrap_or(f32::MAX);
-    let settle = if rc.reduced { 1. } else { ease_out(progress(since_end, STATUS_FADE_MS)) };
+    let since_end = step
+        .ended_ms
+        .map(|e| (now_ms - e) as f32)
+        .unwrap_or(f32::MAX);
+    let settle = if rc.reduced {
+        1.
+    } else {
+        ease_out(progress(since_end, STATUS_FADE_MS))
+    };
     let description = match (&step.description, step.status, step.started_ms) {
         (Some(d), _, _) => Some(d.clone()),
-        (None, StepStatus::Running, Some(start)) if now_ms - start >= 3_000 => Some(crate::trace::format_duration(((now_ms - start) / 1_000 * 1_000) as u64)),
+        (None, StepStatus::Running, Some(start)) if now_ms - start >= 3_000 => Some(
+            crate::trace::format_duration(((now_ms - start) / 1_000 * 1_000) as u64),
+        ),
         _ => None,
     };
 
     // Running to done: the old title (still shimmering) and icon fade out
     // over the new ones in STATUS_FADE_MS, instead of a swap.
-    let was = (!rc.reduced && lc.title.is_none() && step.status != StepStatus::Running && since_end < STATUS_FADE_MS).then(|| {
-        let mut was = step.clone();
-        was.status = StepStatus::Running;
-        was
-    });
-    let was_title = was.as_ref().map(split_title).filter(|old| *old != (head.clone(), subject.clone()));
-    let was_icon = was.as_ref().map(|w| icon_for(w, lc.name)).filter(|old| *old != icon_for(step, lc.name));
+    let was = (!rc.reduced
+        && lc.title.is_none()
+        && step.status != StepStatus::Running
+        && since_end < STATUS_FADE_MS)
+        .then(|| {
+            let mut was = step.clone();
+            was.status = StepStatus::Running;
+            was
+        });
+    let was_title = was
+        .as_ref()
+        .map(split_title)
+        .filter(|old| *old != (head.clone(), subject.clone()));
+    let was_icon = was
+        .as_ref()
+        .map(|w| icon_for(w, lc.name))
+        .filter(|old| *old != icon_for(step, lc.name));
 
     // Running: the icon itself breathes (no badge dot over it).
-    let breathe = if step.status == StepStatus::Running && !rc.reduced { 0.5 + 0.5 * (dot_opacity(clock, phase) - 0.35) / 0.65 } else { 1. };
+    let breathe = if step.status == StepStatus::Running && !rc.reduced {
+        0.5 + 0.5 * (dot_opacity(clock, phase) - 0.35) / 0.65
+    } else {
+        1.
+    };
     let icon = div()
         .relative()
         .flex_none()
@@ -341,14 +471,30 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         .justify_center()
         .text_color(c(icon_color))
         .opacity((0.6 + 0.4 * settle) * breathe)
-        .child(div().when(was_icon.is_some(), |d| d.opacity(settle)).child(icon_for(step, lc.name).el(zpx(14.))))
+        .child(
+            div()
+                .when(was_icon.is_some(), |d| d.opacity(settle))
+                .child(icon_for(step, lc.name).el(zpx(14.))),
+        )
         .children(was_icon.map(|old| {
-            div().absolute().inset_0().flex().items_center().justify_center().opacity(1. - settle).child(old.el(zpx(14.)))
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(1. - settle)
+                .child(old.el(zpx(14.)))
         }));
 
     let mono = mono_subject(step.kind);
     let shown_subject = |subject: &str| {
-        if mono && matches!(step.kind, StepKind::Read | StepKind::Edit | StepKind::Delete | StepKind::Move) {
+        if mono
+            && matches!(
+                step.kind,
+                StepKind::Read | StepKind::Edit | StepKind::Delete | StepKind::Move
+            )
+        {
             middle_ellipsis(subject, 64)
         } else {
             subject.to_string()
@@ -357,31 +503,52 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
     // The shimmer lights the glyphs only: per-character colors from a soft
     // moving highlight, no band painted over the line.
     let peak = c(t.text);
-    let title_row = |head: String, subject_text: String, shimmer: bool, head_color: u32, subject_color: u32| {
-        let total = head.chars().count() + usize::from(!subject_text.is_empty()) + subject_text.chars().count();
-        let half = glyph_half_width(total);
-        let center = (shimmer && !rc.reduced).then(|| glyph_center(clock, phase, half)).flatten();
-        let head_len = head.chars().count();
-        let head_el = shimmer_text(head, 0, total, center, half, c(head_color), peak);
-        let subject_el = (!subject_text.is_empty()).then(|| shimmer_text(subject_text, head_len + 1, total, center, half, c(subject_color), peak));
-        div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .gap(zpx(4.))
-            .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).text_color(c(head_color)).child(head_el))
-            .when_some(subject_el, |d, subject_el| {
-                d.child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(c(subject_color))
-                        .when(mono, |d| d.font_family(MONO).text_size(zpx(11.5)))
-                        .child(subject_el),
+    let title_row =
+        |head: String, subject_text: String, shimmer: bool, head_color: u32, subject_color: u32| {
+            let total = head.chars().count()
+                + usize::from(!subject_text.is_empty())
+                + subject_text.chars().count();
+            let half = glyph_half_width(total);
+            let center = (shimmer && !rc.reduced)
+                .then(|| glyph_center(clock, phase, half))
+                .flatten();
+            let head_len = head.chars().count();
+            let head_el = shimmer_text(head, 0, total, center, half, c(head_color), peak);
+            let subject_el = (!subject_text.is_empty()).then(|| {
+                shimmer_text(
+                    subject_text,
+                    head_len + 1,
+                    total,
+                    center,
+                    half,
+                    c(subject_color),
+                    peak,
                 )
-            })
-    };
+            });
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(zpx(4.))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(head_color))
+                        .child(head_el),
+                )
+                .when_some(subject_el, |d, subject_el| {
+                    d.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(c(subject_color))
+                            .when(mono, |d| d.font_family(MONO).text_size(zpx(11.5)))
+                            .child(subject_el),
+                    )
+                })
+        };
     let subject_text = shown_subject(&subject);
     let fading = was_title.is_some();
     let title = div()
@@ -392,7 +559,10 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         .whitespace_nowrap()
         .text_ellipsis()
         .t_small()
-        .child(title_row(head, subject_text, lc.shimmer, head_color, subject_color).when(fading, |d| d.opacity(settle)))
+        .child(
+            title_row(head, subject_text, lc.shimmer, head_color, subject_color)
+                .when(fading, |d| d.opacity(settle)),
+        )
         .children(was_title.map(|(old_head, old_subject)| {
             // The running look it had: muted, and its shimmer fading with it.
             div()
@@ -400,28 +570,49 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
                 .top_0()
                 .left_0()
                 .opacity(1. - settle)
-                .child(title_row(old_head, shown_subject(&old_subject), true, t.text_muted, t.text_muted))
+                .child(title_row(
+                    old_head,
+                    shown_subject(&old_subject),
+                    true,
+                    t.text_muted,
+                    t.text_muted,
+                ))
         }));
 
     let desc = description.map(|text| {
         let diffstat = matches!(step.body, StepBody::Diff { .. }) && text.starts_with('+');
-        let el = div().flex_none().t_caption().text_color(c(t.text_faint)).whitespace_nowrap();
+        let el = div()
+            .flex_none()
+            .t_caption()
+            .text_color(c(t.text_faint))
+            .whitespace_nowrap();
         if diffstat {
             let (add, del) = text.split_once(' ').unwrap_or((&text, ""));
             el.font_family(MONO)
                 .flex()
                 .gap(zpx(4.))
-                .child(div().text_color(c(t.success).opacity(0.85)).child(add.to_string()))
-                .child(div().text_color(c(t.danger).opacity(0.85)).child(del.to_string()))
+                .child(
+                    div()
+                        .text_color(c(t.success).opacity(0.85))
+                        .child(add.to_string()),
+                )
+                .child(
+                    div()
+                        .text_color(c(t.danger).opacity(0.85))
+                        .child(del.to_string()),
+                )
         } else {
             el.child(text)
         }
     });
 
     let chevron = expandable.then(|| {
-        let turned = Icon::ChevronDown
-            .el(zpx(12.))
-            .with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2 * (1. - fold.chevron))));
+        let turned =
+            Icon::ChevronDown
+                .el(zpx(12.))
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                    -std::f32::consts::FRAC_PI_2 * (1. - fold.chevron),
+                )));
         div().flex_none().text_color(c(t.text_faint)).child(turned)
     });
 
@@ -443,28 +634,59 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         .children(desc)
         .children(chevron)
         .when(expandable, |d| {
-            d.cursor_pointer().hover(|s| s.bg(c(t.hover))).active(|s| s.bg(c(t.selected))).on_click(move |_, _, cx| {
-                let row_id = if row_toggle { line_id.clone() } else { format!("{line_id}={}", if open_now { 0 } else { 1 }) };
-                on_action(RowAction::Toggle { row_id }, cx);
-            })
+            d.cursor_pointer()
+                .hover(|s| s.bg(c(t.hover)))
+                .active(|s| s.bg(c(t.selected)))
+                .on_click(move |_, _, cx| {
+                    let row_id = if row_toggle {
+                        line_id.clone()
+                    } else {
+                        format!("{line_id}={}", if open_now { 0 } else { 1 })
+                    };
+                    on_action(RowAction::Toggle { row_id }, cx);
+                })
         });
 
     let body = (expandable && fold.visible()).then(|| {
         let content = render_body(step, &lc, depth, rc);
-        let el = div().ml(zpx(15.)).pl(zpx(12.)).py(zpx(4.)).border_l_1().border_color(c(t.border)).flex().flex_col().gap(zpx(4.)).child(content);
+        let el = div()
+            .ml(zpx(15.))
+            .pl(zpx(12.))
+            .py(zpx(4.))
+            .border_l_1()
+            .border_color(c(t.border))
+            .flex()
+            .flex_col()
+            .gap(zpx(4.))
+            .child(content);
         fold_clip(el, &lc.line_id, body_height(step), fold, rc)
     });
 
-    let age = step.started_ms.map(|s| (now_ms - s) as f32).unwrap_or(f32::MAX);
+    let age = step
+        .started_ms
+        .map(|s| (now_ms - s) as f32)
+        .unwrap_or(f32::MAX);
     let window = ENTER_MS + STAGGER_MS * STAGGER_CAP as f32 + 20.;
-    let (opacity, rise) = if age < window { entry(age, lc.burst, rc.reduced) } else { (1., 0.) };
-    let opening = if age < window && !fold.visible() { entry_height(age, lc.burst, rc.reduced) } else { 1. };
+    let (opacity, rise) = if age < window {
+        entry(age, lc.burst, rc.reduced)
+    } else {
+        (1., 0.)
+    };
+    let opening = if age < window && !fold.visible() {
+        entry_height(age, lc.burst, rc.reduced)
+    } else {
+        1.
+    };
     div()
         .w_full()
         .flex()
         .flex_col()
-        .when(opacity < 1., |d| d.opacity(opacity).relative().top(zpx(rise)))
-        .when(opening < 1., |d| d.max_h(zpx(LINE_H * opening)).overflow_hidden())
+        .when(opacity < 1., |d| {
+            d.opacity(opacity).relative().top(zpx(rise))
+        })
+        .when(opening < 1., |d| {
+            d.max_h(zpx(LINE_H * opening)).overflow_hidden()
+        })
         .child(line)
         .children(body)
         .into_any_element()
@@ -478,14 +700,20 @@ fn fold_clip(el: gpui::Div, line_id: &str, est: f32, fold: Fold, rc: &RowContext
     let key = format!("fold:{line_id}");
     let heights = rc.row_heights.clone();
     let already_measured = heights.borrow().contains_key(&key);
-    let natural = heights.borrow().get(&key).copied().map_or(zpx(est), gpui::px);
+    let natural = heights
+        .borrow()
+        .get(&key)
+        .copied()
+        .map_or(zpx(est), gpui::px);
     if fold.settled() && fold.open {
         if already_measured {
             return div().relative().child(el).into_any_element();
         }
         let measure = gpui::canvas(
             move |bounds, _, _| {
-                heights.borrow_mut().insert(key, f32::from(bounds.size.height));
+                heights
+                    .borrow_mut()
+                    .insert(key, f32::from(bounds.size.height));
             },
             |_, _, _, _| {},
         )
@@ -497,7 +725,9 @@ fn fold_clip(el: gpui::Div, line_id: &str, est: f32, fold: Fold, rc: &RowContext
     }
     let measure = gpui::canvas(
         move |bounds, _, _| {
-            heights.borrow_mut().insert(key, f32::from(bounds.size.height));
+            heights
+                .borrow_mut()
+                .insert(key, f32::from(bounds.size.height));
         },
         |_, _, _, _| {},
     )
@@ -505,12 +735,23 @@ fn fold_clip(el: gpui::Div, line_id: &str, est: f32, fold: Fold, rc: &RowContext
     .top_0()
     .left_0()
     .size_full();
-    let nudge = if fold.open { 4. * (1. - fold.height) } else { 0. };
+    let nudge = if fold.open {
+        4. * (1. - fold.height)
+    } else {
+        0.
+    };
     div()
         .overflow_hidden()
         .h(natural * fold.height)
         .opacity(fold.opacity)
-        .child(div().relative().flex_none().top(zpx(nudge)).child(el).child(measure))
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .top(zpx(nudge))
+                .child(el)
+                .child(measure),
+        )
         .into_any_element()
 }
 
@@ -518,12 +759,22 @@ fn fold_clip(el: gpui::Div, line_id: &str, est: f32, fold: Fold, rc: &RowContext
 fn body_height(step: &TraceStep) -> f32 {
     let pad = 8. + 2.;
     match &step.body {
-        StepBody::Output { tail, .. } => (tail.lines().count().max(1) as f32 * 16. + 16. + 2. + 16.).min(code_block::COMPACT_CAP + 2.) + pad,
+        StepBody::Output { tail, .. } => {
+            (tail.lines().count().max(1) as f32 * 16. + 16. + 2. + 16.)
+                .min(code_block::COMPACT_CAP + 2.)
+                + pad
+        }
         StepBody::Diff { new, old, .. } => {
             let n = new.lines().count() + old.as_deref().map_or(0, |o| o.lines().count());
             (n.max(1) as f32 * 16. + 18.).min(code_block::COMPACT_CAP + 2.) + pad
         }
-        StepBody::Text(text) => text.lines().map(|l| l.chars().count() / 90 + 1).sum::<usize>() as f32 * 16. + pad,
+        StepBody::Text(text) => {
+            text.lines()
+                .map(|l| l.chars().count() / 90 + 1)
+                .sum::<usize>() as f32
+                * 16.
+                + pad
+        }
         StepBody::Plan(entries) => entries.len() as f32 * LINE_H + pad,
         StepBody::Links(links) => links.len().max(1) as f32 * LINE_H + pad,
         StepBody::Browser(b) => b.rows.len() as f32 * BROWSER_ROW_H + BROWSER_ROW_H + 4. + pad,
@@ -535,23 +786,62 @@ fn copy_action(rc: &RowContext, row_id: String) -> code_block::OnCodeAction {
     let on_action = rc.on_action.clone();
     std::rc::Rc::new(move |action, cx| match action {
         CodeAction::Copy { text } => {
-            on_action(RowAction::Copy { row_id: row_id.clone(), content: text }, cx);
+            on_action(
+                RowAction::Copy {
+                    row_id: row_id.clone(),
+                    content: text,
+                },
+                cx,
+            );
         }
-        CodeAction::ShowFull { content, title, error } | CodeAction::OpenViewer { content, title, error } => {
-            on_action(RowAction::OpenFullOutput { title, content, error }, cx);
+        CodeAction::ShowFull {
+            content,
+            title,
+            error,
+        }
+        | CodeAction::OpenViewer {
+            content,
+            title,
+            error,
+        } => {
+            on_action(
+                RowAction::OpenFullOutput {
+                    title,
+                    content,
+                    error,
+                },
+                cx,
+            );
         }
         _ => {}
     })
 }
 
-fn compact(rc: &RowContext, id: &str, content: String, variants: Option<Vec<LineVariant>>, error: bool, title: Option<String>) -> AnyElement {
+fn compact(
+    rc: &RowContext,
+    id: &str,
+    content: String,
+    variants: Option<Vec<LineVariant>>,
+    error: bool,
+    title: Option<String>,
+) -> AnyElement {
     let mut props = CodeBlockProps::new(id.to_string(), content, CodeSize::Compact);
     props.title = title;
     props.line_variants = variants;
-    props.variant = if error { CodeVariant::Destructive } else { CodeVariant::Default };
+    props.variant = if error {
+        CodeVariant::Destructive
+    } else {
+        CodeVariant::Default
+    };
     props.copied = rc.copied.as_deref() == Some(id);
     props.reduced = rc.reduced;
-    code_block::render(&props, rc.tokens, &rc.syntax, rc.viewport_h, copy_action(rc, id.to_string()))
+    code_block::render(
+        &props,
+        rc.tokens,
+        &rc.syntax,
+        rc.viewport_h,
+        copy_action(rc, id.to_string()),
+    )
 }
 
 fn render_body(step: &TraceStep, lc: &LineCtx, depth: usize, rc: &RowContext) -> AnyElement {
@@ -561,23 +851,37 @@ fn render_body(step: &TraceStep, lc: &LineCtx, depth: usize, rc: &RowContext) ->
         StepBody::Output { tail, error } => {
             let tail = tail.trim_end_matches('\n');
             let (title, content) = match &lc.command {
-                Some(cmd) if !cmd.is_empty() => (Some(format!("$ {cmd}")), format!("$ {cmd}\n{tail}")),
-                _ => (Some(lc.name.to_string()).filter(|s| !s.is_empty()), tail.to_string()),
+                Some(cmd) if !cmd.is_empty() => {
+                    (Some(format!("$ {cmd}")), format!("$ {cmd}\n{tail}"))
+                }
+                _ => (
+                    Some(lc.name.to_string()).filter(|s| !s.is_empty()),
+                    tail.to_string(),
+                ),
             };
             compact(rc, &id, content, None, *error, title)
         }
         StepBody::Diff { old, new, .. } => {
             let lines = match old {
                 Some(old) => code_block::diff_lines(old, new),
-                None if new.lines().any(|l| l.starts_with("@@")) => {
-                    code_block::parse_unified(new).into_iter().map(|l| (l.variant, l.text)).collect()
-                }
-                None => new.lines().map(|l| (LineVariant::Added, l.to_string())).collect(),
+                None if new.lines().any(|l| l.starts_with("@@")) => code_block::parse_unified(new)
+                    .into_iter()
+                    .map(|l| (l.variant, l.text))
+                    .collect(),
+                None => new
+                    .lines()
+                    .map(|l| (LineVariant::Added, l.to_string()))
+                    .collect(),
             };
             let (content, variants) = code_block::join_diff(&lines);
             compact(rc, &id, content, Some(variants), false, None)
         }
-        StepBody::Text(text) => div().t_small().text_color(c(t.text_muted)).whitespace_normal().child(text.clone()).into_any_element(),
+        StepBody::Text(text) => div()
+            .t_small()
+            .text_color(c(t.text_muted))
+            .whitespace_normal()
+            .child(text.clone())
+            .into_any_element(),
         StepBody::Plan(entries) => plan_entries(entries, &lc.line_id, rc),
         StepBody::Browser(b) => browser_body(b, &lc.line_id, rc),
         // Sources a web search or read used: the site, then the address.
@@ -593,7 +897,12 @@ fn render_body(step: &TraceStep, lc: &LineCtx, depth: usize, rc: &RowContext) ->
                     .t_small()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(div().flex_none().text_color(c(t.text_muted)).child(link.title.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(t.text_muted))
+                            .child(link.title.clone()),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -626,11 +935,18 @@ const BROWSER_ROW_H: f32 = 18.;
 
 /// A browser action's body: URL, title and result as short rows, and a
 /// "Raw" toggle that shows the tool's own output in a compact code block.
-fn browser_body(b: &crate::browser_trace::BrowserBody, line_id: &str, rc: &RowContext) -> AnyElement {
+fn browser_body(
+    b: &crate::browser_trace::BrowserBody,
+    line_id: &str,
+    rc: &RowContext,
+) -> AnyElement {
     let t = rc.tokens;
     let raw_id = format!("{line_id}~raw");
     let raw_open = rc.open_lines.get(&raw_id).copied().unwrap_or(false);
-    let toggled_ms = rc.toggles.get(&raw_id).map(|(_, at)| rc.now.saturating_duration_since(*at).as_secs_f32() * 1000.);
+    let toggled_ms = rc
+        .toggles
+        .get(&raw_id)
+        .map(|(_, at)| rc.now.saturating_duration_since(*at).as_secs_f32() * 1000.);
     let fold = Fold::at(raw_open, toggled_ms, rc.reduced);
     let rows = b.rows.iter().map(|(label, value)| {
         let error = *label == "Error";
@@ -640,7 +956,14 @@ fn browser_body(b: &crate::browser_trace::BrowserBody, line_id: &str, rc: &RowCo
             .flex_row()
             .items_baseline()
             .gap(zpx(8.))
-            .child(div().flex_none().w(zpx(40.)).t_caption().text_color(c(t.text_faint)).child(*label))
+            .child(
+                div()
+                    .flex_none()
+                    .w(zpx(40.))
+                    .t_caption()
+                    .text_color(c(t.text_faint))
+                    .child(*label),
+            )
             .child(
                 div()
                     .min_w_0()
@@ -650,7 +973,9 @@ fn browser_body(b: &crate::browser_trace::BrowserBody, line_id: &str, rc: &RowCo
                     .text_ellipsis()
                     .t_small()
                     .text_color(c(if error { t.danger } else { t.text_muted }))
-                    .when(matches!(*label, "URL" | "Saved"), |d| d.font_family(MONO).text_size(zpx(11.5)))
+                    .when(matches!(*label, "URL" | "Saved"), |d| {
+                        d.font_family(MONO).text_size(zpx(11.5))
+                    })
                     .child(value.clone()),
             )
     });
@@ -670,19 +995,33 @@ fn browser_body(b: &crate::browser_trace::BrowserBody, line_id: &str, rc: &RowCo
             .t_caption()
             .text_color(c(t.text_faint))
             .hover(|s| s.bg(c(t.hover)).text_color(c(t.text_muted)))
-            .child(
-                Icon::ChevronDown
-                    .el(zpx(10.))
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2 * (1. - fold.chevron)))),
-            )
+            .child(Icon::ChevronDown.el(zpx(10.)).with_transformation(
+                gpui::Transformation::rotate(gpui::radians(
+                    -std::f32::consts::FRAC_PI_2 * (1. - fold.chevron),
+                )),
+            ))
             .child("Raw")
             .on_click(move |_, _, cx| {
-                on_action(RowAction::Toggle { row_id: format!("{toggle_id}={}", if raw_open { 0 } else { 1 }) }, cx);
+                on_action(
+                    RowAction::Toggle {
+                        row_id: format!("{toggle_id}={}", if raw_open { 0 } else { 1 }),
+                    },
+                    cx,
+                );
             })
     });
     let raw = (fold.visible() && !b.raw.trim().is_empty()).then(|| {
-        let est = (b.raw.lines().count().max(1) as f32 * 16. + 18.).min(code_block::COMPACT_CAP + 2.) + 2.;
-        let el = div().w_full().pt(zpx(2.)).child(compact(rc, &format!("{line_id}-raw"), b.raw.clone(), None, b.error, None));
+        let est = (b.raw.lines().count().max(1) as f32 * 16. + 18.)
+            .min(code_block::COMPACT_CAP + 2.)
+            + 2.;
+        let el = div().w_full().pt(zpx(2.)).child(compact(
+            rc,
+            &format!("{line_id}-raw"),
+            b.raw.clone(),
+            None,
+            b.error,
+            None,
+        ));
         div().w_full().child(fold_clip(el, &raw_id, est, fold, rc))
     });
     div()
@@ -728,7 +1067,11 @@ fn plan_entries(entries: &[PlanItem], line_id: &str, rc: &RowContext) -> AnyElem
                 StepStatus::Running => t.text,
                 _ => t.text_muted,
             };
-            let clock = rc.now.saturating_duration_since(rc.clock_epoch).as_secs_f32() * 1000.;
+            let clock = rc
+                .now
+                .saturating_duration_since(rc.clock_epoch)
+                .as_secs_f32()
+                * 1000.;
             div()
                 .id(ElementId::Name(format!("{line_id}-plan{ix}").into()))
                 .h(zpx(LINE_H))
@@ -745,7 +1088,9 @@ fn plan_entries(entries: &[PlanItem], line_id: &str, rc: &RowContext) -> AnyElem
                         .items_center()
                         .justify_center()
                         .text_color(c(color))
-                        .when(step.status == StepStatus::Running && !rc.reduced, |d| d.opacity(dot_opacity(clock, 0.)))
+                        .when(step.status == StepStatus::Running && !rc.reduced, |d| {
+                            d.opacity(dot_opacity(clock, 0.))
+                        })
                         .child(icon.el(zpx(12.))),
                 )
                 .child(
@@ -788,11 +1133,26 @@ fn fold_repeats(steps: Vec<(TraceStep, String)>) -> Vec<(TraceStep, String, usiz
 
 /// A run of tool calls: one line each, reads and searches folded into an
 /// "Explored" line once there are three in a row.
-pub fn render_tool_group(item: &TranscriptRowItem, tools: &[ToolEntry], overrides: &[(String, bool)], rc: &RowContext) -> gpui::Div {
+pub fn render_tool_group(
+    item: &TranscriptRowItem,
+    tools: &[ToolEntry],
+    overrides: &[(String, bool)],
+    rc: &RowContext,
+) -> gpui::Div {
     let group_id = item.row_id().to_string();
-    let over = |line: &str| overrides.iter().find(|(id, _)| id == line).map(|(_, open)| *open);
-    let names: std::collections::HashMap<&str, &ToolEntry> = tools.iter().map(|t| (t.tool_id.as_str(), t)).collect();
-    let steps: Vec<(TraceStep, String)> = tools.iter().filter(|t| !t.is_receipt()).map(|t| (TraceStep::from(t), t.name.clone())).collect();
+    let over = |line: &str| {
+        overrides
+            .iter()
+            .find(|(id, _)| id == line)
+            .map(|(_, open)| *open)
+    };
+    let names: std::collections::HashMap<&str, &ToolEntry> =
+        tools.iter().map(|t| (t.tool_id.as_str(), t)).collect();
+    let steps: Vec<(TraceStep, String)> = tools
+        .iter()
+        .filter(|t| !t.is_receipt())
+        .map(|t| (TraceStep::from(t), t.name.clone()))
+        .collect();
     let folded = fold_repeats(steps);
     let mut repeat: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut plain: Vec<TraceStep> = Vec::new();
@@ -826,7 +1186,8 @@ pub fn render_tool_group(item: &TranscriptRowItem, tools: &[ToolEntry], override
                 let shimmer = running && shimmers < MAX_SHIMMERS;
                 shimmers += usize::from(shimmer);
                 let b = next_burst(step.started_ms);
-                let command = (step.kind == StepKind::Execute).then(|| tool.map(|t| t.detail.clone()).unwrap_or_default());
+                let command = (step.kind == StepKind::Execute)
+                    .then(|| tool.map(|t| t.detail.clone()).unwrap_or_default());
                 let mut lc = LineCtx::new(line_id.clone(), tool.map_or("", |t| t.name.as_str()));
                 lc.over = over(&line_id);
                 lc.shimmer = shimmer;
@@ -835,9 +1196,14 @@ pub fn render_tool_group(item: &TranscriptRowItem, tools: &[ToolEntry], override
                 lines.push(render_line(&step, lc, 0, rc));
             }
             TraceNode::Browsed(group) => {
-                let first = group.steps.first().map(|s| s.id.clone()).unwrap_or_default();
+                let first = group
+                    .steps
+                    .first()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default();
                 let line_id = crate::turn::line_id(&group_id, &format!("browsed-{first}"));
-                let mut parent = TraceStep::plan(format!("browsed-{first}"), Vec::new(), group.status);
+                let mut parent =
+                    TraceStep::plan(format!("browsed-{first}"), Vec::new(), group.status);
                 parent.kind = StepKind::Browser;
                 parent.browser = Some(crate::browser_trace::BrowserOp::Navigate);
                 parent.subject = String::new();
@@ -857,9 +1223,14 @@ pub fn render_tool_group(item: &TranscriptRowItem, tools: &[ToolEntry], override
                 lines.push(render_line(&parent, lc, 0, rc));
             }
             TraceNode::Explored(group) => {
-                let first = group.steps.first().map(|s| s.id.clone()).unwrap_or_default();
+                let first = group
+                    .steps
+                    .first()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default();
                 let line_id = crate::turn::line_id(&group_id, &format!("explored-{first}"));
-                let mut parent = TraceStep::plan(format!("explored-{first}"), Vec::new(), group.status);
+                let mut parent =
+                    TraceStep::plan(format!("explored-{first}"), Vec::new(), group.status);
                 parent.kind = StepKind::Search;
                 parent.subject = String::new();
                 parent.body = StepBody::None;
@@ -879,11 +1250,22 @@ pub fn render_tool_group(item: &TranscriptRowItem, tools: &[ToolEntry], override
             }
         }
     }
-    div().w_full().ml(zpx(-INSET)).py(zpx(2.)).flex().flex_col().children(lines)
+    div()
+        .w_full()
+        .ml(zpx(-INSET))
+        .py(zpx(2.))
+        .flex()
+        .flex_col()
+        .children(lines)
 }
 
 /// Thinking: "Thought" with its text behind a rail.
-pub fn render_reasoning(item: &TranscriptRowItem, content: &str, expanded: bool, rc: &RowContext) -> gpui::Div {
+pub fn render_reasoning(
+    item: &TranscriptRowItem,
+    content: &str,
+    expanded: bool,
+    rc: &RowContext,
+) -> gpui::Div {
     let mut step = TraceStep::plan(item.row_id().to_string(), Vec::new(), StepStatus::Done);
     step.kind = StepKind::Think;
     step.verb = crate::trace::verb_for(StepKind::Think, "think");
@@ -892,23 +1274,49 @@ pub fn render_reasoning(item: &TranscriptRowItem, content: &str, expanded: bool,
     let mut lc = LineCtx::new(item.row_id().to_string(), "think");
     lc.over = Some(expanded);
     lc.row_toggle = true;
-    div().w_full().ml(zpx(-INSET)).child(render_line(&step, lc, 0, rc))
+    div()
+        .w_full()
+        .ml(zpx(-INSET))
+        .child(render_line(&step, lc, 0, rc))
 }
 
 /// The agent's plan. Open while any entry is in progress.
-pub fn render_plan(item: &TranscriptRowItem, entries: &[PlanItem], live: bool, expanded: Option<bool>, rc: &RowContext) -> gpui::Div {
-    let status = if live { StepStatus::Running } else { StepStatus::Done };
+pub fn render_plan(
+    item: &TranscriptRowItem,
+    entries: &[PlanItem],
+    live: bool,
+    expanded: Option<bool>,
+    rc: &RowContext,
+) -> gpui::Div {
+    let status = if live {
+        StepStatus::Running
+    } else {
+        StepStatus::Done
+    };
     let step = TraceStep::plan(item.row_id().to_string(), entries.to_vec(), status);
     let mut lc = LineCtx::new(item.row_id().to_string(), "plan");
     lc.over = expanded.or(Some(live));
     lc.shimmer = live;
-    div().w_full().ml(zpx(-INSET)).py(zpx(2.)).child(render_line(&step, lc, 0, rc))
+    div()
+        .w_full()
+        .ml(zpx(-INSET))
+        .py(zpx(2.))
+        .child(render_line(&step, lc, 0, rc))
 }
 
 /// A turn's steps, folded into an editorial byline.
-pub fn render_turn_summary(item: &TranscriptRowItem, label: &str, failed: bool, expanded: bool, rc: &RowContext) -> gpui::Div {
+pub fn render_turn_summary(
+    item: &TranscriptRowItem,
+    label: &str,
+    failed: bool,
+    expanded: bool,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
-    let toggled_ms = rc.toggles.get(item.row_id()).map(|(_, at)| rc.now.saturating_duration_since(*at).as_secs_f32() * 1000.);
+    let toggled_ms = rc
+        .toggles
+        .get(item.row_id())
+        .map(|(_, at)| rc.now.saturating_duration_since(*at).as_secs_f32() * 1000.);
     let fold = Fold::at(expanded, toggled_ms, rc.reduced);
     let row_id = item.row_id().to_string();
     let on_action = rc.on_action.clone();
@@ -934,7 +1342,14 @@ pub fn render_turn_summary(item: &TranscriptRowItem, label: &str, failed: bool, 
                 .cursor_pointer()
                 .hover(|s| s.bg(c(t.hover)))
                 .active(|s| s.opacity(0.75))
-                .on_click(move |_, _, cx| on_action(RowAction::Toggle { row_id: row_id.clone() }, cx))
+                .on_click(move |_, _, cx| {
+                    on_action(
+                        RowAction::Toggle {
+                            row_id: row_id.clone(),
+                        },
+                        cx,
+                    )
+                })
                 .child(
                     div()
                         .flex_none()
@@ -958,17 +1373,24 @@ pub fn render_turn_summary(item: &TranscriptRowItem, label: &str, failed: bool, 
                         .flex_none()
                         .text_color(c(t.text_faint))
                         .group_hover(group, |s| s.text_color(c(t.text_muted)))
-                        .child(
-                            Icon::ChevronDown
-                                .el(zpx(9.5))
-                                .with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2 * (1. - fold.chevron)))),
-                        ),
+                        .child(Icon::ChevronDown.el(zpx(9.5)).with_transformation(
+                            gpui::Transformation::rotate(gpui::radians(
+                                -std::f32::consts::FRAC_PI_2 * (1. - fold.chevron),
+                            )),
+                        )),
                 ),
         )
 }
 
 /// A spawned subagent: "Running the research agent", ↗ opens its session.
-pub fn render_subagent(item: &TranscriptRowItem, subagent_id: &str, name: &str, state: &str, summary: &str, rc: &RowContext) -> gpui::Div {
+pub fn render_subagent(
+    item: &TranscriptRowItem,
+    subagent_id: &str,
+    name: &str,
+    state: &str,
+    summary: &str,
+    rc: &RowContext,
+) -> gpui::Div {
     let t = rc.tokens;
     let status = match state {
         "running" | "" => StepStatus::Running,
@@ -980,8 +1402,21 @@ pub fn render_subagent(item: &TranscriptRowItem, subagent_id: &str, name: &str, 
     step.kind = StepKind::Subagent;
     step.verb = crate::trace::verb_for(StepKind::Subagent, "agent");
     let label = name.trim();
-    step.subject = if label.is_empty() || label == "subagent" { "subagent".into() } else if label.ends_with("agent") { label.to_string() } else { format!("{label} agent") };
-    step.body = if status == StepStatus::Error && !summary.is_empty() { StepBody::Output { tail: summary.to_string(), error: true } } else { StepBody::None };
+    step.subject = if label.is_empty() || label == "subagent" {
+        "subagent".into()
+    } else if label.ends_with("agent") {
+        label.to_string()
+    } else {
+        format!("{label} agent")
+    };
+    step.body = if status == StepStatus::Error && !summary.is_empty() {
+        StepBody::Output {
+            tail: summary.to_string(),
+            error: true,
+        }
+    } else {
+        StepBody::None
+    };
     let id = subagent_id.to_string();
     let on_action = rc.on_action.clone();
     let mut lc = LineCtx::new(item.row_id().to_string(), "agent");
@@ -997,7 +1432,14 @@ pub fn render_subagent(item: &TranscriptRowItem, subagent_id: &str, name: &str, 
             .rounded(RADIUS_MD)
             .cursor_pointer()
             .hover(|s| s.bg(c(t.hover)))
-            .on_click(move |_, _, cx| on_action(RowAction::OpenSubagent { subagent_id: id.clone() }, cx))
+            .on_click(move |_, _, cx| {
+                on_action(
+                    RowAction::OpenSubagent {
+                        subagent_id: id.clone(),
+                    },
+                    cx,
+                )
+            })
             .child(line)
             .child(
                 div()
@@ -1030,14 +1472,19 @@ pub fn row_animating(item: &TranscriptRowItem) -> bool {
 
 /// Wall-clock ms, the timebase tool timings use.
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 pub fn tools_animating(tools: &[ToolEntry], now_ms: i64) -> bool {
     tools.iter().any(|t| {
         t.is_live()
-            || t.ended_ms.is_some_and(|e| now_ms - e < TRANSITION_WINDOW_MS)
-            || t.started_ms.is_some_and(|s| now_ms - s < (ENTER_MS + STAGGER_MS * STAGGER_CAP as f32) as i64 + 40)
+            || t.ended_ms
+                .is_some_and(|e| now_ms - e < TRANSITION_WINDOW_MS)
+            || t.started_ms.is_some_and(|s| {
+                now_ms - s < (ENTER_MS + STAGGER_MS * STAGGER_CAP as f32) as i64 + 40
+            })
     })
 }
 
@@ -1050,10 +1497,18 @@ mod tests {
         let start = Fold::at(true, Some(0.), false);
         assert!(start.height < 1e-3);
         let mid = Fold::at(true, Some(160.), false);
-        assert!(mid.height > 0.5 && mid.height < 1., "glide leads: {}", mid.height);
+        assert!(
+            mid.height > 0.5 && mid.height < 1.,
+            "glide leads: {}",
+            mid.height
+        );
         assert!(Fold::at(true, Some(OPEN_MS), false).settled());
         let closing = Fold::at(false, Some(CLOSE_MS / 2.), false);
-        assert!(closing.height > 0.3 && closing.height < 0.7, "in-out is near half at half time: {}", closing.height);
+        assert!(
+            closing.height > 0.3 && closing.height < 0.7,
+            "in-out is near half at half time: {}",
+            closing.height
+        );
         assert!(Fold::at(false, Some(CLOSE_MS), false).settled());
         assert!(!Fold::at(false, Some(CLOSE_MS), false).visible());
         // No stamp: rest.
@@ -1132,7 +1587,10 @@ mod tests {
     fn step(status: StepStatus, ended: Option<i64>) -> TraceStep {
         let mut s = TraceStep::plan("x", Vec::new(), status);
         s.kind = StepKind::Execute;
-        s.body = StepBody::Output { tail: "out".into(), error: status == StepStatus::Error };
+        s.body = StepBody::Output {
+            tail: "out".into(),
+            error: status == StepStatus::Error,
+        };
         s.ended_ms = ended;
         s
     }
@@ -1141,13 +1599,49 @@ mod tests {
     fn streamed_output_defaults_to_closed_and_opens_on_user_or_error() {
         // Minimized on default when running and when done
         assert!(!line_fold(&step(StepStatus::Running, None), None, None, 0, false).open);
-        assert!(!line_fold(&step(StepStatus::Done, Some(1_000)), None, None, 1_300, false).open);
-        assert!(!line_fold(&step(StepStatus::Done, Some(1_000)), None, None, 3_000, false).visible());
+        assert!(
+            !line_fold(
+                &step(StepStatus::Done, Some(1_000)),
+                None,
+                None,
+                1_300,
+                false
+            )
+            .open
+        );
+        assert!(
+            !line_fold(
+                &step(StepStatus::Done, Some(1_000)),
+                None,
+                None,
+                3_000,
+                false
+            )
+            .visible()
+        );
         // The user's choice wins (can be opened manually while running or done)
         assert!(line_fold(&step(StepStatus::Running, None), Some(true), None, 0, false).open);
-        assert!(line_fold(&step(StepStatus::Done, Some(1_000)), Some(true), None, 3_000, false).open);
+        assert!(
+            line_fold(
+                &step(StepStatus::Done, Some(1_000)),
+                Some(true),
+                None,
+                3_000,
+                false
+            )
+            .open
+        );
         // Error auto-opens
-        assert!(line_fold(&step(StepStatus::Error, Some(1_000)), None, None, 3_000, false).open);
+        assert!(
+            line_fold(
+                &step(StepStatus::Error, Some(1_000)),
+                None,
+                None,
+                3_000,
+                false
+            )
+            .open
+        );
     }
 
     #[test]
@@ -1158,13 +1652,19 @@ mod tests {
         s.subject = "pnpm test".into();
         assert_eq!(split_title(&s), ("Ran".into(), "pnpm test".into()));
         s.status = StepStatus::Error;
-        assert_eq!(split_title(&s), ("Failed to run".into(), "pnpm test".into()));
+        assert_eq!(
+            split_title(&s),
+            ("Failed to run".into(), "pnpm test".into())
+        );
     }
 
     #[test]
     fn long_paths_keep_the_file_name() {
         let p = "crates/ui/src/view/very/deep/nested/folder/structure/that/goes/on/transcript.rs";
         let short = middle_ellipsis(p, 40);
-        assert!(short.ends_with("/transcript.rs") && short.contains('…') && short.chars().count() <= 40, "{short}");
+        assert!(
+            short.ends_with("/transcript.rs") && short.contains('…') && short.chars().count() <= 40,
+            "{short}"
+        );
     }
 }

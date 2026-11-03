@@ -50,8 +50,11 @@ pub enum FileError {
 /// Changed files under `cwd`, as `git status` sees them, with line counts.
 pub fn changes(cwd: &Path) -> Result<Vec<Change>, String> {
     // v2: every record starts with its kind, so nothing leading gets trimmed.
-    let status = run_git_cmd_sync(cwd, &["status", "--porcelain=v2", "-z", "--untracked-files=all"])
-        .map_err(|_| "not a git repository".to_string())?;
+    let status = run_git_cmd_sync(
+        cwd,
+        &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+    )
+    .map_err(|_| "not a git repository".to_string())?;
     let mut out = Vec::new();
     let mut records = status.split('\0').filter(|r| !r.is_empty());
     while let Some(record) = records.next() {
@@ -88,7 +91,12 @@ pub fn changes(cwd: &Path) -> Result<Vec<Change>, String> {
             _ => continue,
         };
         if !path.is_empty() {
-            out.push(Change { path, status, added: None, removed: None });
+            out.push(Change {
+                path,
+                status,
+                added: None,
+                removed: None,
+            });
         }
         if out.len() >= MAX_ENTRIES {
             break;
@@ -101,7 +109,9 @@ pub fn changes(cwd: &Path) -> Result<Vec<Change>, String> {
         let mut records = numstat.split('\0');
         while let Some(record) = records.next() {
             let mut fields = record.splitn(3, '\t');
-            let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next()) else {
+            let (Some(added), Some(removed), Some(path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
                 continue;
             };
             // A rename names its paths in the next two records.
@@ -144,7 +154,11 @@ pub fn summarize(changes: &[Change]) -> GitSummary {
         files: changes.len(),
         untracked: changes.iter().filter(|c| c.status == '?').count(),
         added: changes.iter().filter_map(|c| c.added).map(u64::from).sum(),
-        removed: changes.iter().filter_map(|c| c.removed).map(u64::from).sum(),
+        removed: changes
+            .iter()
+            .filter_map(|c| c.removed)
+            .map(u64::from)
+            .sum(),
         ..GitSummary::default()
     }
 }
@@ -165,8 +179,14 @@ fn check_rel(rel: &str) -> Result<(), FileError> {
     let bad = rel.is_empty()
         || rel.starts_with('/')
         || rel.contains('\0')
-        || rel.split('/').any(|c| c.is_empty() || c == "." || c == ".." || c.eq_ignore_ascii_case(".git"));
-    if bad { Err(FileError::Rejected("path rejected".into())) } else { Ok(()) }
+        || rel
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == ".." || c.eq_ignore_ascii_case(".git"));
+    if bad {
+        Err(FileError::Rejected("path rejected".into()))
+    } else {
+        Ok(())
+    }
 }
 
 /// One file's unified diff against HEAD. An untracked file reads as all
@@ -174,10 +194,34 @@ fn check_rel(rel: &str) -> Result<(), FileError> {
 pub fn diff(cwd: &Path, rel: &str) -> Result<(String, bool), FileError> {
     check_rel(rel)?;
     let git = |args: &[&str]| run_git_cmd_sync(cwd, args).map_err(FileError::Rejected);
-    let mut patch = git(&["--literal-pathspecs", "diff", "HEAD", "--no-color", "--no-ext-diff", "--", rel])
-        .or_else(|_| git(&["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--", rel]))?;
+    let mut patch = git(&[
+        "--literal-pathspecs",
+        "diff",
+        "HEAD",
+        "--no-color",
+        "--no-ext-diff",
+        "--",
+        rel,
+    ])
+    .or_else(|_| {
+        git(&[
+            "--literal-pathspecs",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--",
+            rel,
+        ])
+    })?;
     if patch.is_empty() {
-        let status = git(&["--literal-pathspecs", "status", "--porcelain=v2", "--untracked-files=all", "--", rel])?;
+        let status = git(&[
+            "--literal-pathspecs",
+            "status",
+            "--porcelain=v2",
+            "--untracked-files=all",
+            "--",
+            rel,
+        ])?;
         if status.starts_with('?') {
             let (content, _) = read(cwd, rel)?;
             patch = added_patch(rel, &content);
@@ -189,7 +233,10 @@ pub fn diff(cwd: &Path, rel: &str) -> Result<(String, bool), FileError> {
 /// A whole file as a new-file patch.
 fn added_patch(rel: &str, content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let mut patch = format!("--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1,{} @@\n", lines.len());
+    let mut patch = format!(
+        "--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
     for line in lines {
         patch.push('+');
         patch.push_str(line);
@@ -215,13 +262,19 @@ fn cut(mut text: String) -> (String, bool) {
 /// One folder of `cwd` (`rel` empty for the top): folders first, then
 /// files, each by name. `.git` and git-ignored entries are left out.
 pub fn list_dir(cwd: &Path, rel: &str) -> Result<Vec<Entry>, FileError> {
-    let root = cwd.canonicalize().map_err(|_| FileError::Rejected("folder missing".into()))?;
+    let root = cwd
+        .canonicalize()
+        .map_err(|_| FileError::Rejected("folder missing".into()))?;
     let dir = if rel.is_empty() {
         root.clone()
     } else {
         check_rel(rel)?;
         // A symlinked folder may only lead somewhere inside the root.
-        root.join(rel).canonicalize().ok().filter(|d| d.starts_with(&root) && d.is_dir()).ok_or_else(|| FileError::Rejected("not a folder".into()))?
+        root.join(rel)
+            .canonicalize()
+            .ok()
+            .filter(|d| d.starts_with(&root) && d.is_dir())
+            .ok_or_else(|| FileError::Rejected("not a folder".into()))?
     };
     let ignored = ignored_in(cwd, rel);
     let mut entries: Vec<Entry> = std::fs::read_dir(&dir)
@@ -238,18 +291,40 @@ pub fn list_dir(cwd: &Path, rel: &str) -> Result<Vec<Entry>, FileError> {
         })
         .take(MAX_ENTRIES)
         .collect();
-    entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    entries.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     Ok(entries)
 }
 
 /// Names directly in `rel` that git ignores. Ignored folders come back
 /// whole (`--directory`), so this never walks into `node_modules`.
 fn ignored_in(cwd: &Path, rel: &str) -> std::collections::HashSet<String> {
-    let spec = if rel.is_empty() { ".".to_string() } else { format!("{rel}/") };
-    let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
+    let spec = if rel.is_empty() {
+        ".".to_string()
+    } else {
+        format!("{rel}/")
+    };
+    let prefix = if rel.is_empty() {
+        String::new()
+    } else {
+        format!("{rel}/")
+    };
     let listed = run_git_cmd_sync(
         cwd,
-        &["--literal-pathspecs", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", &spec],
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--",
+            &spec,
+        ],
     )
     .unwrap_or_default();
     listed
@@ -269,7 +344,9 @@ fn hash(content: &str) -> String {
 fn reject(code: keel_proto::RpcErrorCode) -> FileError {
     match code {
         keel_proto::RpcErrorCode::PayloadTooLarge => FileError::TooLarge,
-        _ => FileError::Rejected("can't open this file (binary, missing, or outside the folder)".into()),
+        _ => FileError::Rejected(
+            "can't open this file (binary, missing, or outside the folder)".into(),
+        ),
     }
 }
 
@@ -278,7 +355,9 @@ fn reject(code: keel_proto::RpcErrorCode) -> FileError {
 /// lead outside the folder.
 pub fn locate(cwd: &Path, rel: &str) -> Result<(std::path::PathBuf, u64), FileError> {
     check_rel(rel)?;
-    let root = cwd.canonicalize().map_err(|_| FileError::Rejected("folder missing".into()))?;
+    let root = cwd
+        .canonicalize()
+        .map_err(|_| FileError::Rejected("folder missing".into()))?;
     let path = root
         .join(rel)
         .canonicalize()
@@ -346,10 +425,23 @@ mod tests {
         std::fs::write(dir.join("new file.md"), "hi\n").unwrap();
         let mut got = changes(&dir).unwrap();
         got.sort_by(|a, b| a.path.cmp(&b.path));
-        let view: Vec<_> = got.iter().map(|c| (c.path.as_str(), c.status, c.added, c.removed)).collect();
-        assert_eq!(view, vec![("gone.txt", 'D', Some(0), Some(1)), ("new file.md", '?', None, None), ("src/a.rs", 'M', Some(2), Some(1))]);
+        let view: Vec<_> = got
+            .iter()
+            .map(|c| (c.path.as_str(), c.status, c.added, c.removed))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("gone.txt", 'D', Some(0), Some(1)),
+                ("new file.md", '?', None, None),
+                ("src/a.rs", 'M', Some(2), Some(1))
+            ]
+        );
         let (patch, cut) = diff(&dir, "src/a.rs").unwrap();
-        assert!(!cut && patch.contains("-two") && patch.contains("+three"), "{patch}");
+        assert!(
+            !cut && patch.contains("-two") && patch.contains("+three"),
+            "{patch}"
+        );
         let (patch, _) = diff(&dir, "new file.md").unwrap();
         assert!(patch.ends_with("@@ -0,0 +1,1 @@\n+hi\n"), "{patch}");
         assert!(diff(&dir, "../etc/passwd").is_err());
@@ -370,14 +462,22 @@ mod tests {
 
     #[test]
     fn summary_counts_files_lines_and_untracked() {
-        let change = |path: &str, status, added, removed| Change { path: path.into(), status, added, removed };
+        let change = |path: &str, status, added, removed| Change {
+            path: path.into(),
+            status,
+            added,
+            removed,
+        };
         let got = summarize(&[
             change("a.rs", 'M', Some(3), Some(1)),
             change("new.md", '?', None, None),
             change("logo.png", 'M', None, None),
             change("gone.txt", 'D', Some(0), Some(4)),
         ]);
-        assert_eq!((got.files, got.untracked, got.added, got.removed), (4, 1, 3, 5));
+        assert_eq!(
+            (got.files, got.untracked, got.added, got.removed),
+            (4, 1, 3, 5)
+        );
         assert_eq!(summarize(&[]), GitSummary::default());
 
         let dir = repo("summary");
@@ -385,7 +485,11 @@ mod tests {
         std::fs::write(dir.join("src/a.rs"), "one\n2\nthree\n").unwrap();
         std::fs::write(dir.join("new file.md"), "hi\n").unwrap();
         let got = git_summary(&dir).unwrap();
-        assert_eq!((got.files, got.untracked, got.added, got.removed), (2, 1, 2, 1), "{got:?}");
+        assert_eq!(
+            (got.files, got.untracked, got.added, got.removed),
+            (2, 1, 2, 1),
+            "{got:?}"
+        );
         assert!(got.branch.is_some() && got.detached.is_none(), "{got:?}");
         let plain = std::env::temp_dir().join(format!("keel-files-plain-{}", std::process::id()));
         std::fs::create_dir_all(&plain).unwrap();
@@ -399,8 +503,21 @@ mod tests {
         let dir = repo("list");
         std::fs::create_dir_all(dir.join("target/debug")).unwrap();
         std::fs::write(dir.join("target/debug/big"), "x").unwrap();
-        let names = |rel: &str| list_dir(&dir, rel).unwrap().into_iter().map(|e| (e.name, e.dir)).collect::<Vec<_>>();
-        assert_eq!(names(""), vec![("src".into(), true), (".gitignore".into(), false), ("gone.txt".into(), false)]);
+        let names = |rel: &str| {
+            list_dir(&dir, rel)
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.name, e.dir))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(""),
+            vec![
+                ("src".into(), true),
+                (".gitignore".into(), false),
+                ("gone.txt".into(), false)
+            ]
+        );
         assert_eq!(names("src"), vec![("a.rs".into(), false)]);
         assert!(list_dir(&dir, "..").is_err());
         assert!(list_dir(&dir, ".git").is_err());
@@ -415,8 +532,14 @@ mod tests {
         let next = write(&dir, "src/a.rs", "mine\n", &base).unwrap();
         // The agent writes in between: the stale base no longer matches.
         std::fs::write(dir.join("src/a.rs"), "agent\n").unwrap();
-        assert_eq!(write(&dir, "src/a.rs", "mine again\n", &next), Err(FileError::Conflict));
-        assert_eq!(std::fs::read_to_string(dir.join("src/a.rs")).unwrap(), "agent\n");
+        assert_eq!(
+            write(&dir, "src/a.rs", "mine again\n", &next),
+            Err(FileError::Conflict)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/a.rs")).unwrap(),
+            "agent\n"
+        );
         assert!(read(&dir, ".git/config").is_err());
         let _ = std::fs::remove_dir_all(dir);
     }

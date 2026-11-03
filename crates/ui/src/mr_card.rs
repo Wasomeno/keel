@@ -26,11 +26,19 @@ impl MrCard {
             iid: spec["iid"].as_u64()?,
         };
         let snap = MrSnapshot::parse(&spec["snap"]);
-        Some(Self { mr, snap, offer_merge: spec["offer_merge"] == true })
+        Some(Self {
+            mr,
+            snap,
+            offer_merge: spec["offer_merge"] == true,
+        })
     }
 
     pub fn url(&self) -> String {
-        if self.snap.web_url.is_empty() { self.mr.web_url() } else { self.snap.web_url.clone() }
+        if self.snap.web_url.is_empty() {
+            self.mr.web_url()
+        } else {
+            self.snap.web_url.clone()
+        }
     }
 
     /// For the transcript's height memo: changes when the state does.

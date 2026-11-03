@@ -31,7 +31,12 @@ pub(super) struct Fold {
 impl Fold {
     pub(super) fn new(opening: bool) -> Self {
         let to = if opening { 1. } else { 0. };
-        Self { at: None, from: 1. - to, from_chevron: 1. - to, to }
+        Self {
+            at: None,
+            from: 1. - to,
+            from_chevron: 1. - to,
+            to,
+        }
     }
 
     pub(super) fn opening(&self) -> bool {
@@ -46,7 +51,12 @@ impl Fold {
     /// Back the other way, from wherever it is now.
     pub(super) fn reverse(&mut self, now: Instant) {
         let (p, ch) = (self.content(now), self.chevron(now));
-        *self = Self { at: self.at.map(|_| now), from: p, from_chevron: ch, to: 1. - self.to };
+        *self = Self {
+            at: self.at.map(|_| now),
+            from: p,
+            from_chevron: ch,
+            to: 1. - self.to,
+        };
     }
 
     fn run(&self, now: Instant, from: f32, full: Duration) -> f32 {
@@ -57,7 +67,11 @@ impl Fold {
     }
 
     fn eased(&self, k: f32, from: f32) -> f32 {
-        let e = if self.opening() { ease_out_strong(k) } else { ease_out(k) };
+        let e = if self.opening() {
+            ease_out_strong(k)
+        } else {
+            ease_out(k)
+        };
         from + (self.to - from) * e
     }
 
@@ -69,12 +83,30 @@ impl Fold {
 
     /// How far open the chevron is (it settles a little sooner).
     pub(super) fn chevron(&self, now: Instant) -> f32 {
-        let k = self.run(now, self.from_chevron, if self.opening() { CHEVRON_OPEN } else { CHEVRON_CLOSE });
+        let k = self.run(
+            now,
+            self.from_chevron,
+            if self.opening() {
+                CHEVRON_OPEN
+            } else {
+                CHEVRON_CLOSE
+            },
+        );
         self.eased(k, self.from_chevron)
     }
 
     pub(super) fn done(&self, now: Instant) -> bool {
-        self.at.is_some() && self.run(now, self.from, if self.opening() { OPEN } else { CLOSE }) >= 1. && self.run(now, self.from_chevron, if self.opening() { CHEVRON_OPEN } else { CHEVRON_CLOSE }) >= 1.
+        self.at.is_some()
+            && self.run(now, self.from, if self.opening() { OPEN } else { CLOSE }) >= 1.
+            && self.run(
+                now,
+                self.from_chevron,
+                if self.opening() {
+                    CHEVRON_OPEN
+                } else {
+                    CHEVRON_CLOSE
+                },
+            ) >= 1.
     }
 }
 
@@ -102,7 +134,15 @@ pub(super) struct TreeFold<R> {
 impl<R> TreeFold<R> {
     /// A folder toggled: `old` and `new` are the rows before and after,
     /// `at` the folder's row. Toggling the moving folder again reverses it.
-    pub(super) fn toggled(prev: Option<Self>, key: &str, at: Option<usize>, old: Rc<Vec<R>>, new: Rc<Vec<R>>, now: Instant, reduced: bool) -> Option<Self> {
+    pub(super) fn toggled(
+        prev: Option<Self>,
+        key: &str,
+        at: Option<usize>,
+        old: Rc<Vec<R>>,
+        new: Rc<Vec<R>>,
+        now: Instant,
+        reduced: bool,
+    ) -> Option<Self> {
         if reduced {
             return None;
         }
@@ -113,7 +153,14 @@ impl<R> TreeFold<R> {
         let opening = new.len() >= old.len();
         let children = new.len().abs_diff(old.len());
         let before = old.len();
-        Some(Self { key: key.to_string(), motion: Fold::new(opening), start: at? + 1, children, before, rows: (children > 0).then(|| if opening { new } else { old }) })
+        Some(Self {
+            key: key.to_string(),
+            motion: Fold::new(opening),
+            start: at? + 1,
+            children,
+            before,
+            rows: (children > 0).then(|| if opening { new } else { old }),
+        })
     }
 
     /// The children arrived after the folder opened (a folder read from
@@ -138,10 +185,21 @@ impl<R> TreeFold<R> {
 /// its visible height and its offset in the slot. Children are clipped
 /// from the bottom and the rows after them follow the edge, so the list
 /// keeps one row per slot without uneven heights.
-pub(super) fn slot_rows(slot: usize, len: usize, start: usize, children: usize, reveal: f32, row_h: f32) -> Vec<(usize, f32, f32)> {
+pub(super) fn slot_rows(
+    slot: usize,
+    len: usize,
+    start: usize,
+    children: usize,
+    reveal: f32,
+    row_h: f32,
+) -> Vec<(usize, f32, f32)> {
     const EPS: f32 = 0.01;
     if slot < start {
-        return if slot < len { vec![(slot, row_h, 0.)] } else { Vec::new() };
+        return if slot < len {
+            vec![(slot, row_h, 0.)]
+        } else {
+            Vec::new()
+        };
     }
     let (lo, hi) = (slot as f32 * row_h, (slot + 1) as f32 * row_h);
     let base = start as f32 * row_h;
@@ -178,7 +236,14 @@ pub(super) fn slot_rows(slot: usize, len: usize, start: usize, children: usize, 
 
 /// One slot of a fixed-height list while a folder moves: the rows whose
 /// top lands in it, the folder's children clipped, faded and drifting in.
-pub(super) fn slot(id: usize, entries: Vec<(usize, f32, f32)>, children: std::ops::Range<usize>, open: f32, row_h: f32, row: &dyn Fn(usize) -> AnyElement) -> AnyElement {
+pub(super) fn slot(
+    id: usize,
+    entries: Vec<(usize, f32, f32)>,
+    children: std::ops::Range<usize>,
+    open: f32,
+    row_h: f32,
+    row: &dyn Fn(usize) -> AnyElement,
+) -> AnyElement {
     div()
         .id(("fold-slot", id))
         .relative()
@@ -186,9 +251,23 @@ pub(super) fn slot(id: usize, entries: Vec<(usize, f32, f32)>, children: std::op
         .w_full()
         .children(entries.into_iter().map(|(ix, shown, dy)| {
             let child = children.contains(&ix);
-            div().absolute().left_0().right_0().top(zpx(dy)).h(zpx(shown)).overflow_hidden().child(
-                div().w_full().when(child, |d| d.relative().top(zpx(-3. * (1. - open))).opacity(0.25 + 0.75 * open)).child(row(ix)),
-            )
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(zpx(dy))
+                .h(zpx(shown))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w_full()
+                        .when(child, |d| {
+                            d.relative()
+                                .top(zpx(-3. * (1. - open)))
+                                .opacity(0.25 + 0.75 * open)
+                        })
+                        .child(row(ix)),
+                )
         }))
         .into_any_element()
 }
@@ -264,10 +343,16 @@ mod tests {
     fn half_open_children_are_clipped_and_the_rest_follow() {
         // 30px of 80 open: a full child, a 10px child, then the next row.
         assert_eq!(slot_rows(3, 10, 3, 4, 30., 20.), vec![(3, 20., 0.)]);
-        assert_eq!(slot_rows(4, 10, 3, 4, 30., 20.), vec![(4, 10., 0.), (7, 20., 10.)]);
+        assert_eq!(
+            slot_rows(4, 10, 3, 4, 30., 20.),
+            vec![(4, 10., 0.), (7, 20., 10.)]
+        );
         assert_eq!(slot_rows(5, 10, 3, 4, 30., 20.), vec![(8, 20., 10.)]);
         // Every row drawn once.
-        let mut seen: Vec<usize> = (0..10).flat_map(|s| slot_rows(s, 10, 3, 4, 30., 20.)).map(|r| r.0).collect();
+        let mut seen: Vec<usize> = (0..10)
+            .flat_map(|s| slot_rows(s, 10, 3, 4, 30., 20.))
+            .map(|r| r.0)
+            .collect();
         seen.sort();
         assert_eq!(seen, vec![0, 1, 2, 3, 4, 7, 8, 9]);
     }

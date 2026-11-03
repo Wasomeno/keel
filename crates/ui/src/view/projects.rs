@@ -8,7 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-use gpui::{AnyElement, ClickEvent, Context, ElementId, Entity, IntoElement, Window, anchored, deferred, div, point, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, ElementId, Entity, IntoElement, Window, anchored, deferred,
+    div, point, prelude::*, px,
+};
 use gpui_base::input::InputState;
 use keel_proto::projects::{self, Project, ProjectFolder};
 use keel_theme::Tokens;
@@ -16,7 +19,7 @@ use keel_theme::Tokens;
 use super::composer_view::Picker;
 use super::files_panel::fold;
 use super::session_summary::SUMMARY_HOVER_DELAY;
-use super::sidebar::{filled_button, text_button};
+use super::sidebar::{SECTION_HEADER_HEIGHT, filled_button, text_button};
 use super::{KeelWindow, floating_menu_at, menu_item, menu_label, menu_separator, status_dot};
 use crate::icons::Icon;
 use crate::motion::{ease_out, ease_out_strong};
@@ -96,7 +99,9 @@ struct FolderStatus {
 impl Projects {
     pub(super) fn load(data_dir: &Path) -> Self {
         let path = data_dir.join(projects::FILE);
-        let store = std::fs::read_to_string(&path).map(|text| projects::Projects::parse(&text)).unwrap_or_default();
+        let store = std::fs::read_to_string(&path)
+            .map(|text| projects::Projects::parse(&text))
+            .unwrap_or_default();
         Self {
             data_dir: data_dir.to_path_buf(),
             store,
@@ -120,7 +125,10 @@ impl Projects {
     fn save(&self) {
         let path = self.data_dir.join(projects::FILE);
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, self.store.to_json()).and_then(|()| std::fs::rename(&tmp, &path)).is_err() {
+        if std::fs::write(&tmp, self.store.to_json())
+            .and_then(|()| std::fs::rename(&tmp, &path))
+            .is_err()
+        {
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -154,7 +162,11 @@ impl Projects {
 
     fn project_id_for_path(&self, path: &str) -> Option<String> {
         let path = norm_path(path);
-        self.store.projects.iter().find(|p| p.folders.iter().any(|f| paths_eq(&f.path, &path))).map(|p| p.id.clone())
+        self.store
+            .projects
+            .iter()
+            .find(|p| p.folders.iter().any(|f| paths_eq(&f.path, &path)))
+            .map(|p| p.id.clone())
     }
 
     /// The project a new chat in `cwd` should join, and the scope to store.
@@ -165,7 +177,13 @@ impl Projects {
     }
 
     pub(super) fn record_chat(&mut self, chat: &str, project: &str, scope: Vec<String>) {
-        self.store.chats.insert(chat.to_string(), projects::ChatScope { project: project.to_string(), scope });
+        self.store.chats.insert(
+            chat.to_string(),
+            projects::ChatScope {
+                project: project.to_string(),
+                scope,
+            },
+        );
         self.draft_scope.remove(project);
         self.save();
     }
@@ -173,10 +191,20 @@ impl Projects {
     /// Folder chip text when `path` is one of a project's folders.
     pub(super) fn folder_chip(&self, path: Option<&str>, fallback: String) -> String {
         let Some(path) = path else { return fallback };
-        let Some(id) = self.project_id_for_path(path) else { return fallback };
-        let Some(project) = self.store.project(&id) else { return fallback };
-        let Some(folder) = project.folders.iter().find(|f| paths_eq(&f.path, path)) else { return fallback };
-        if project.folders.first().is_some_and(|f| f.alias == folder.alias) {
+        let Some(id) = self.project_id_for_path(path) else {
+            return fallback;
+        };
+        let Some(project) = self.store.project(&id) else {
+            return fallback;
+        };
+        let Some(folder) = project.folders.iter().find(|f| paths_eq(&f.path, path)) else {
+            return fallback;
+        };
+        if project
+            .folders
+            .first()
+            .is_some_and(|f| f.alias == folder.alias)
+        {
             project.name.clone()
         } else {
             format!("{} · {}", project.name, folder.alias)
@@ -185,11 +213,20 @@ impl Projects {
 
     /// Alias and the folder's own name, one per folder, for the files tree.
     pub(super) fn file_roots(&self, chat: Option<&str>) -> Vec<(String, String)> {
-        let Some(id) = chat.and_then(|c| self.store.chats.get(c)).map(|l| l.project.clone()) else {
+        let Some(id) = chat
+            .and_then(|c| self.store.chats.get(c))
+            .map(|l| l.project.clone())
+        else {
             return Vec::new();
         };
-        let Some(project) = self.store.project(&id) else { return Vec::new() };
-        project.folders.iter().map(|f| (f.alias.clone(), base_name(&f.path))).collect()
+        let Some(project) = self.store.project(&id) else {
+            return Vec::new();
+        };
+        project
+            .folders
+            .iter()
+            .map(|f| (f.alias.clone(), base_name(&f.path)))
+            .collect()
     }
 
     /// An absolute path inside a project folder, as `@alias/rest`.
@@ -197,7 +234,10 @@ impl Projects {
         if path.is_empty() || path.starts_with('@') {
             return path.to_string();
         }
-        let Some(id) = chat.and_then(|c| self.store.chats.get(c)).map(|l| l.project.clone()) else {
+        let Some(id) = chat
+            .and_then(|c| self.store.chats.get(c))
+            .map(|l| l.project.clone())
+        else {
             return path.to_string();
         };
         map_alias_path(self.store.project(&id), path).unwrap_or_else(|| path.to_string())
@@ -218,12 +258,18 @@ impl Projects {
         if let Some(id) = cwd.and_then(|c| self.project_id_for_path(c)) {
             return Some(id);
         }
-        self.picked.clone().filter(|id| self.store.project(id).is_some())
+        self.picked
+            .clone()
+            .filter(|id| self.store.project(id).is_some())
     }
 
     /// Absolute folder paths `@` should index, when this chat or the next
     /// folder belongs to a project.
-    pub(super) fn mention_dirs(&self, chat: Option<&str>, cwd: Option<&str>) -> Option<Vec<String>> {
+    pub(super) fn mention_dirs(
+        &self,
+        chat: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Option<Vec<String>> {
         let id = self.scope_project_id(chat, cwd)?;
         let project = self.store.project(&id)?;
         Some(project.folders.iter().map(|f| norm_path(&f.path)).collect())
@@ -231,17 +277,26 @@ impl Projects {
 
     pub(super) fn mention_label(&self, chat: Option<&str>, cwd: Option<&str>) -> Option<String> {
         let id = self.scope_project_id(chat, cwd)?;
-        self.store.project(&id).map(|p| format!("Files across {}", p.name))
+        self.store
+            .project(&id)
+            .map(|p| format!("Files across {}", p.name))
     }
 
     /// `@` paths across every folder (`api/src/x.ts`), or `None` outside a project.
-    pub(super) fn mention_paths(&self, chat: Option<&str>, cwd: Option<&str>, cached: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    pub(super) fn mention_paths(
+        &self,
+        chat: Option<&str>,
+        cwd: Option<&str>,
+        cached: &HashMap<String, Vec<String>>,
+    ) -> Option<Vec<String>> {
         let id = self.scope_project_id(chat, cwd)?;
         let project = self.store.project(&id)?;
         let mut out = Vec::new();
         for folder in &project.folders {
             let key = norm_path(&folder.path);
-            let Some(list) = cached.get(&key).or_else(|| cached.get(&folder.path)) else { continue };
+            let Some(list) = cached.get(&key).or_else(|| cached.get(&folder.path)) else {
+                continue;
+            };
             for path in list {
                 out.push(format!("{}/{}", folder.alias, path));
             }
@@ -249,9 +304,19 @@ impl Projects {
         Some(out)
     }
 
-    pub(super) fn mention_loading(&self, chat: Option<&str>, cwd: Option<&str>, cached: &HashMap<String, Vec<String>>, loading: &HashSet<String>) -> bool {
-        let Some(id) = self.scope_project_id(chat, cwd) else { return false };
-        let Some(project) = self.store.project(&id) else { return false };
+    pub(super) fn mention_loading(
+        &self,
+        chat: Option<&str>,
+        cwd: Option<&str>,
+        cached: &HashMap<String, Vec<String>>,
+        loading: &HashSet<String>,
+    ) -> bool {
+        let Some(id) = self.scope_project_id(chat, cwd) else {
+            return false;
+        };
+        let Some(project) = self.store.project(&id) else {
+            return false;
+        };
         project.folders.iter().any(|f| {
             let key = norm_path(&f.path);
             let ready = cached.contains_key(&key) || cached.contains_key(&f.path);
@@ -269,8 +334,13 @@ impl Projects {
     }
 
     fn scope_aliases(&self, id: &str, chat: Option<&str>) -> Vec<String> {
-        let Some(project) = self.store.project(id) else { return Vec::new() };
-        projects::in_scope(project, &self.scope_of(id, chat)).into_iter().map(|f| f.alias.clone()).collect()
+        let Some(project) = self.store.project(id) else {
+            return Vec::new();
+        };
+        projects::in_scope(project, &self.scope_of(id, chat))
+            .into_iter()
+            .map(|f| f.alias.clone())
+            .collect()
     }
 
     fn write_scope(&mut self, id: &str, chat: Option<&str>, scope: Vec<String>) {
@@ -286,19 +356,32 @@ impl Projects {
     }
 
     fn toggle_scope_alias(&mut self, id: &str, chat: Option<&str>, alias: &str) {
-        let Some(project) = self.store.project(id).cloned() else { return };
+        let Some(project) = self.store.project(id).cloned() else {
+            return;
+        };
         if project.folders.first().is_some_and(|f| f.alias == alias) {
             return;
         }
         let mut scope = self.scope_of(id, chat);
         if scope.is_empty() {
-            scope = project.folders.iter().skip(1).map(|f| f.alias.clone()).filter(|a| a != alias).collect();
+            scope = project
+                .folders
+                .iter()
+                .skip(1)
+                .map(|f| f.alias.clone())
+                .filter(|a| a != alias)
+                .collect();
         } else if let Some(ix) = scope.iter().position(|a| a == alias) {
             scope.remove(ix);
         } else {
             scope.push(alias.to_string());
         }
-        let rest: Vec<_> = project.folders.iter().skip(1).map(|f| f.alias.clone()).collect();
+        let rest: Vec<_> = project
+            .folders
+            .iter()
+            .skip(1)
+            .map(|f| f.alias.clone())
+            .collect();
         if !rest.is_empty() && rest.iter().all(|a| scope.iter().any(|s| s == a)) {
             scope.clear();
         }
@@ -310,13 +393,20 @@ impl Projects {
         if !Path::new(&path).is_dir() {
             return;
         }
-        let Some(project) = self.store.projects.iter_mut().find(|p| p.id == id) else { return };
+        let Some(project) = self.store.projects.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
         if project.folders.iter().any(|f| paths_eq(&f.path, &path)) {
             return;
         }
         let taken: Vec<String> = project.folders.iter().map(|f| f.alias.clone()).collect();
         let alias = projects::default_alias(&path, &taken);
-        project.folders.push(ProjectFolder { path, alias, letter: String::new(), note: String::new() });
+        project.folders.push(ProjectFolder {
+            path,
+            alias,
+            letter: String::new(),
+            note: String::new(),
+        });
         self.save();
     }
 
@@ -383,13 +473,21 @@ impl Projects {
     pub(super) fn card_branches(&self, chat: &str) -> Option<(String, Vec<CardBranch>)> {
         let id = self.chat_project_id(chat)?;
         let project = self.store.project(&id)?;
-        let scope = self.store.chats.get(chat).map(|l| l.scope.clone()).unwrap_or_default();
+        let scope = self
+            .store
+            .chats
+            .get(chat)
+            .map(|l| l.scope.clone())
+            .unwrap_or_default();
         let name = project.name.clone();
         let lines = projects::in_scope(project, &scope)
             .into_iter()
             .map(|folder| {
                 let key = norm_path(&folder.path);
-                let status = self.status.get(&key).or_else(|| self.status.get(&folder.path));
+                let status = self
+                    .status
+                    .get(&key)
+                    .or_else(|| self.status.get(&folder.path));
                 let note = match status {
                     Some(s) if !s.exists => "missing".into(),
                     Some(s) if !s.repo => "not a repo".into(),
@@ -439,7 +537,11 @@ fn folder_changes_text(changes: Option<u32>, repo: bool, exists: bool) -> String
 }
 
 fn base_name(path: &str) -> String {
-    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).to_string()
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn expand_user_path(path: &str) -> String {
@@ -497,7 +599,10 @@ fn map_alias_path(project: Option<&Project>, path: &str) -> Option<String> {
         }
         let prefix = format!("{root}/");
         if path.starts_with(&prefix) && best.as_ref().is_none_or(|(n, _)| root.len() > *n) {
-            best = Some((root.len(), format!("@{}/{}", folder.alias, &path[prefix.len()..])));
+            best = Some((
+                root.len(),
+                format!("@{}/{}", folder.alias, &path[prefix.len()..]),
+            ));
         }
     }
     best.map(|(_, mapped)| mapped)
@@ -528,7 +633,14 @@ pub(super) fn mark(letter: impl Into<gpui::SharedString>, ix: usize, t: Tokens) 
 }
 
 fn faint(text: impl Into<gpui::SharedString>, t: Tokens) -> gpui::Div {
-    div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().t_small().text_color(c(t.text_faint)).child(text.into())
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .t_small()
+        .text_color(c(t.text_faint))
+        .child(text.into())
 }
 
 fn ago(ms: i64) -> String {
@@ -551,12 +663,22 @@ enum Clock {
     Run,
 }
 
-fn timed<E: IntoElement + 'static>(el: E, id: String, total: f32, clock: Clock, f: impl Fn(E, f32) -> E + 'static) -> AnyElement {
+fn timed<E: IntoElement + 'static>(
+    el: E,
+    id: String,
+    total: f32,
+    clock: Clock,
+    f: impl Fn(E, f32) -> E + 'static,
+) -> AnyElement {
     use gpui::AnimationExt as _;
     match clock {
         Clock::Rest => f(el, f32::MAX).into_any_element(),
         Clock::Run => el
-            .with_animation(ElementId::Name(id.into()), gpui::Animation::new(Duration::from_secs_f32(total / 1000.)), move |el, d| f(el, d * total))
+            .with_animation(
+                ElementId::Name(id.into()),
+                gpui::Animation::new(Duration::from_secs_f32(total / 1000.)),
+                move |el, d| f(el, d * total),
+            )
             .into_any_element(),
     }
 }
@@ -566,7 +688,11 @@ fn step(ms: f32, delay: f32, dur: f32) -> f32 {
 }
 
 fn fold_progress(ms: f32, opening: bool, open_ms: f32, close_ms: f32) -> f32 {
-    if opening { ease_out_strong(step(ms, 0., open_ms)) } else { 1. - ease_out(step(ms, 0., close_ms)) }
+    if opening {
+        ease_out_strong(step(ms, 0., open_ms))
+    } else {
+        1. - ease_out(step(ms, 0., close_ms))
+    }
 }
 
 fn input_text(input: &Entity<InputState>, cx: &Context<KeelWindow>) -> String {
@@ -576,44 +702,76 @@ fn input_text(input: &Entity<InputState>, cx: &Context<KeelWindow>) -> String {
 pub(super) fn render_projects_label(t: Tokens) -> gpui::Stateful<gpui::Div> {
     div()
         .id("projects-group-label")
-        .h(zpx(32.))
+        .h(zpx(SECTION_HEADER_HEIGHT))
         .flex_none()
-        .px_2()
+        .pl_1()
+        .pr_1()
         .flex()
         .flex_row()
         .items_center()
+        .gap_1()
+        .t_caption()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(c(t.text_faint))
         .child(
             div()
-                .px_2()
-                .t_caption()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(c(t.text_faint))
-                .child("Projects"),
+                .size(zpx(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::FolderTree.el(zpx(12.))),
         )
+        .child("Projects")
 }
 
 /// A project collapsible chevron's turn: pointing down (0 rad) when open,
 /// right (-π/2 rad) when folded.
 pub(super) fn chevron_turn_radians(folded: bool) -> f32 {
-    if folded { -std::f32::consts::FRAC_PI_2 } else { 0. }
+    if folded {
+        -std::f32::consts::FRAC_PI_2
+    } else {
+        0.
+    }
 }
 
 impl KeelWindow {
     fn project_clock(&self) -> Clock {
-        if self.reduced() || self.projects.instant { Clock::Rest } else { Clock::Run }
+        if self.reduced() || self.projects.instant {
+            Clock::Rest
+        } else {
+            Clock::Run
+        }
     }
 
-    fn sheet_row(&self, path: String, alias: String, letter: String, window: &mut Window, cx: &mut Context<Self>) -> SheetRow {
+    fn sheet_row(
+        &self,
+        path: String,
+        alias: String,
+        letter: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> SheetRow {
         let alias_in = cx.new(|cx| InputState::new(window, cx).placeholder("alias"));
         alias_in.update(cx, |s, cx| s.set_value(alias, window, cx));
         let letter_in = cx.new(|cx| InputState::new(window, cx).placeholder(""));
         if !letter.is_empty() {
             letter_in.update(cx, |s, cx| s.set_value(letter, window, cx));
         }
-        SheetRow { path, alias: alias_in, letter: letter_in }
+        SheetRow {
+            path,
+            alias: alias_in,
+            letter: letter_in,
+        }
     }
 
-    fn begin_sheet(&mut self, name: &str, folders: Vec<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_sheet(
+        &mut self,
+        name: &str,
+        folders: Vec<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_picker(Some(Picker::Folder), cx);
         let name_in = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         if !name.is_empty() {
@@ -624,7 +782,11 @@ impl KeelWindow {
             rows.push(self.sheet_row(path, alias, String::new(), window, cx));
         }
         let generation = self.projects.sheet.as_ref().map_or(0, |s| s.generation) + 1;
-        self.projects.sheet = Some(Sheet { name: name_in, rows, generation });
+        self.projects.sheet = Some(Sheet {
+            name: name_in,
+            rows,
+            generation,
+        });
         self.projects.sheet_error = None;
     }
 
@@ -635,11 +797,18 @@ impl KeelWindow {
             return;
         }
         let taken = {
-            let Some(sheet) = &self.projects.sheet else { return };
+            let Some(sheet) = &self.projects.sheet else {
+                return;
+            };
             if sheet.rows.iter().any(|r| paths_eq(&r.path, &path)) {
                 return;
             }
-            sheet.rows.iter().map(|r| input_text(&r.alias, cx)).filter(|s| !s.is_empty()).collect::<Vec<_>>()
+            sheet
+                .rows
+                .iter()
+                .map(|r| input_text(&r.alias, cx))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
         };
         let alias = projects::default_alias(&path, &taken);
         let row = self.sheet_row(path, alias, String::new(), window, cx);
@@ -651,12 +820,20 @@ impl KeelWindow {
 
     fn commit_sheet(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let draft = {
-            let Some(sheet) = &self.projects.sheet else { return None };
+            let Some(sheet) = &self.projects.sheet else {
+                return None;
+            };
             let name = input_text(&sheet.name, cx);
             let rows: Vec<(String, String, String)> = sheet
                 .rows
                 .iter()
-                .map(|row| (norm_path(&row.path), input_text(&row.alias, cx), input_text(&row.letter, cx)))
+                .map(|row| {
+                    (
+                        norm_path(&row.path),
+                        input_text(&row.alias, cx),
+                        input_text(&row.letter, cx),
+                    )
+                })
                 .collect();
             (name, rows)
         };
@@ -668,9 +845,15 @@ impl KeelWindow {
         let mut folders = Vec::new();
         let mut taken = Vec::new();
         for (path, alias, letter) in rows {
-            let letter = letter.chars().next().map(|c| c.to_string()).unwrap_or_default();
+            let letter = letter
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_default();
             if !projects::valid_alias(&alias) {
-                self.projects.sheet_error = Some(format!("\"{alias}\" can't be an alias. Use letters, digits, - and _."));
+                self.projects.sheet_error = Some(format!(
+                    "\"{alias}\" can't be an alias. Use letters, digits, - and _."
+                ));
                 return None;
             }
             if taken.iter().any(|t| t == &alias) {
@@ -678,7 +861,12 @@ impl KeelWindow {
                 return None;
             }
             taken.push(alias.clone());
-            folders.push(ProjectFolder { path, alias, letter, note: String::new() });
+            folders.push(ProjectFolder {
+                path,
+                alias,
+                letter,
+                note: String::new(),
+            });
         }
         if folders.is_empty() {
             self.projects.sheet_error = Some("Add a folder.".into());
@@ -719,7 +907,13 @@ impl KeelWindow {
 
     /// `ui-dev.sock` commands that drive the real project list.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
-    pub(super) fn project_dev(&mut self, cmd: &str, arg: &str, window: &mut Window, cx: &mut Context<Self>) -> String {
+    pub(super) fn project_dev(
+        &mut self,
+        cmd: &str,
+        arg: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> String {
         self.projects.instant = true;
         let result = match cmd {
             "project_create" => self.dev_project_create(arg),
@@ -736,7 +930,11 @@ impl KeelWindow {
                     self.use_folder_for_new_chat(path, cx);
                     "ok".into()
                 }
-                None => self.projects.sheet_error.clone().unwrap_or_else(|| "error: could not create".into()),
+                None => self
+                    .projects
+                    .sheet_error
+                    .clone()
+                    .unwrap_or_else(|| "error: could not create".into()),
             },
             "project_sheet" => {
                 if arg.is_empty() || arg == "off" {
@@ -818,7 +1016,12 @@ impl KeelWindow {
                 return format!("error: {alias} is used twice");
             }
             taken.push(alias.clone());
-            rows.push(ProjectFolder { path: norm_path(&path), alias, letter: String::new(), note: String::new() });
+            rows.push(ProjectFolder {
+                path: norm_path(&path),
+                alias,
+                letter: String::new(),
+                note: String::new(),
+            });
         }
         let id = uuid::Uuid::new_v4().to_string();
         self.projects.store.projects.push(Project {
@@ -833,7 +1036,9 @@ impl KeelWindow {
     }
 
     fn dev_project_note(&mut self, arg: &str) -> String {
-        let Some((id, rest)) = match_named(&self.projects.store, arg).map(|(project, rest)| (project.id.clone(), rest.to_string())) else {
+        let Some((id, rest)) = match_named(&self.projects.store, arg)
+            .map(|(project, rest)| (project.id.clone(), rest.to_string()))
+        else {
             return "error: no such project".into();
         };
         let mut words = rest.splitn(2, char::is_whitespace);
@@ -869,15 +1074,23 @@ impl KeelWindow {
         let Some(path) = project.primary().map(|f| f.path.clone()) else {
             return "error: project has no folder".into();
         };
-        let Some(client) = self.client.clone() else { return "error: no engine".into() };
+        let Some(client) = self.client.clone() else {
+            return "error: no engine".into();
+        };
         let harness = self.selected_harness.clone();
         let model = self.selected_model.clone();
         let effort = self.selected_effort.clone();
         let permission = self.effective_permission().as_str().to_string();
         let title = project.name.clone();
         cx.spawn(async move |this, cx| {
-            let space = client.call("create_space", serde_json::json!({ "path": path })).await;
-            let Some(space_id) = space.ok().and_then(|v| v.get("space_id").and_then(|s| s.as_str()).map(str::to_string)) else {
+            let space = client
+                .call("create_space", serde_json::json!({ "path": path }))
+                .await;
+            let Some(space_id) = space.ok().and_then(|v| {
+                v.get("space_id")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string)
+            }) else {
                 return;
             };
             let created = client
@@ -897,11 +1110,22 @@ impl KeelWindow {
             let _ = this.update(cx, |this, cx| {
                 this.state.record_created_space(&space_id, &path);
                 this.projects.picked = Some(id.clone());
-                if let Some(chat_id) = created.ok().and_then(|v| v.get("chat_id").and_then(|s| s.as_str()).map(str::to_string)) {
+                if let Some(chat_id) = created.ok().and_then(|v| {
+                    v.get("chat_id")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_string)
+                }) {
                     this.projects.record_chat(&chat_id, &id, Vec::new());
                     let now = AppState::now_ms();
                     let chat = this.state.chats.entry(chat_id.clone()).or_insert_with(|| {
-                        crate::state::ChatItem::test(&chat_id, &space_id, &title, keel_proto::ChatStatus::Idle, now, now)
+                        crate::state::ChatItem::test(
+                            &chat_id,
+                            &space_id,
+                            &title,
+                            keel_proto::ChatStatus::Idle,
+                            now,
+                            now,
+                        )
                     });
                     chat.harness = harness;
                     chat.model = model;
@@ -923,7 +1147,12 @@ impl KeelWindow {
             self.projects.home = None;
             return "ok".into();
         }
-        let Some(project) = (if arg.is_empty() { self.projects.store.projects.first() } else { self.projects.find(arg) }).cloned() else {
+        let Some(project) = (if arg.is_empty() {
+            self.projects.store.projects.first()
+        } else {
+            self.projects.find(arg)
+        })
+        .cloned() else {
             return "error: no such project".into();
         };
         self.close_pages();
@@ -934,22 +1163,33 @@ impl KeelWindow {
     }
 
     fn dev_project_unfold(&mut self, arg: &str, open: bool) -> String {
-        let id = if arg.is_empty() { self.projects.store.projects.first().map(|p| p.id.clone()) } else { self.projects.find(arg).map(|p| p.id.clone()) };
-        let Some(id) = id else { return "error: no such project".into() };
+        let id = if arg.is_empty() {
+            self.projects.store.projects.first().map(|p| p.id.clone())
+        } else {
+            self.projects.find(arg).map(|p| p.id.clone())
+        };
+        let Some(id) = id else {
+            return "error: no such project".into();
+        };
         if open {
             self.projects.unfolded.insert(id.clone());
         } else {
             self.projects.unfolded.remove(&id);
         }
         self.glide_gen += 1;
-        self.space_fold_gen.insert(format!("p:{id}"), self.glide_gen);
+        self.space_fold_gen
+            .insert(format!("p:{id}"), self.glide_gen);
         "ok".into()
     }
 
     fn dev_project_scope(&mut self, cx: &mut Context<Self>) -> String {
         let chat = self.current_chat.as_deref();
         let cwd = self.mention_root();
-        if self.projects.scope_project_id(chat, cwd.as_deref()).is_none() {
+        if self
+            .projects
+            .scope_project_id(chat, cwd.as_deref())
+            .is_none()
+        {
             return "error: no project in scope".into();
         }
         self.set_picker(None, cx);
@@ -959,23 +1199,36 @@ impl KeelWindow {
     }
 
     fn refresh_folder_status(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.projects.home.clone() else { return };
+        let Some(id) = self.projects.home.clone() else {
+            return;
+        };
         self.refresh_project_folders(&id, cx);
     }
 
     /// Branch and change count for each folder of `id`, once.
     pub(super) fn refresh_project_folders(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(paths) = self.projects.store.project(id).map(|p| p.folders.iter().map(|f| norm_path(&f.path)).collect::<Vec<_>>()) else {
+        let Some(paths) = self.projects.store.project(id).map(|p| {
+            p.folders
+                .iter()
+                .map(|f| norm_path(&f.path))
+                .collect::<Vec<_>>()
+        }) else {
             return;
         };
-        let Some(client) = self.client.clone() else { return };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         for path in paths {
-            if self.projects.status.contains_key(&path) || !self.projects.status_wait.insert(path.clone()) {
+            if self.projects.status.contains_key(&path)
+                || !self.projects.status_wait.insert(path.clone())
+            {
                 continue;
             }
             let client = client.clone();
             cx.spawn(async move |this, cx| {
-                let res = client.call("folder_status", serde_json::json!({ "cwd": path })).await;
+                let res = client
+                    .call("folder_status", serde_json::json!({ "cwd": path }))
+                    .await;
                 let _ = this.update(cx, |this, cx| {
                     this.projects.status_wait.remove(&path);
                     this.projects.status.insert(path, status_from(res));
@@ -990,25 +1243,46 @@ impl KeelWindow {
         let query = self.picker_query.to_lowercase();
         let mut rows: Vec<AnyElement> = vec![menu_label("Projects", t).into_any_element()];
         for project in &self.projects.store.projects {
-            if !query.is_empty() && !project.name.to_lowercase().contains(&query) && !project.folders.iter().any(|f| f.alias.contains(&query)) {
+            if !query.is_empty()
+                && !project.name.to_lowercase().contains(&query)
+                && !project.folders.iter().any(|f| f.alias.contains(&query))
+            {
                 continue;
             }
             let id = project.id.clone();
-            let path = project.primary().map(|f| f.path.clone()).unwrap_or_default();
-            let aliases = project.folders.iter().map(|f| f.alias.as_str()).collect::<Vec<_>>().join(", ");
+            let path = project
+                .primary()
+                .map(|f| f.path.clone())
+                .unwrap_or_default();
+            let aliases = project
+                .folders
+                .iter()
+                .map(|f| f.alias.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             let n = project.folders.len();
-            let row = menu_item(format!("project-{id}"), t, true, self.projects.picked.as_deref() == Some(id.as_str()))
-                .child(div().flex_none().text_color(c(t.text)).child(project.name.clone()))
-                .child(faint(format!("{n} folders · {aliases}"), t))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.projects.instant = false;
-                    this.projects.picked = Some(id.clone());
-                    this.projects.close_sheet();
-                    this.set_picker(None, cx);
-                    if !path.is_empty() {
-                        this.use_folder_for_new_chat(path.clone(), cx);
-                    }
-                }));
+            let row = menu_item(
+                format!("project-{id}"),
+                t,
+                true,
+                self.projects.picked.as_deref() == Some(id.as_str()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(t.text))
+                    .child(project.name.clone()),
+            )
+            .child(faint(format!("{n} folders · {aliases}"), t))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.projects.instant = false;
+                this.projects.picked = Some(id.clone());
+                this.projects.close_sheet();
+                this.set_picker(None, cx);
+                if !path.is_empty() {
+                    this.use_folder_for_new_chat(path.clone(), cx);
+                }
+            }));
             rows.push(row.into_any_element());
         }
         rows.push(
@@ -1026,16 +1300,24 @@ impl KeelWindow {
     }
 
     pub(super) fn render_project_sheet(&self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
-        let Some(sheet) = &self.projects.sheet else { return div().into_any_element() };
+        let Some(sheet) = &self.projects.sheet else {
+            return div().into_any_element();
+        };
         let clock = self.project_clock();
         let generation = sheet.generation;
         let rows_n = sheet.rows.len() + 1;
         let total = SHEET_GROW.max(60. + ROW_STAGGER * rows_n as f32 + ROW_IN);
         let stagger = move |el: gpui::Stateful<gpui::Div>, ix: usize| {
-            timed(el, format!("project-sheet-row-{generation}-{ix}"), total, clock, move |el, ms| {
-                let k = ease_out(step(ms, 60. + ROW_STAGGER * ix as f32, ROW_IN));
-                el.opacity(k).relative().top(zpx(4. * (1. - k)))
-            })
+            timed(
+                el,
+                format!("project-sheet-row-{generation}-{ix}"),
+                total,
+                clock,
+                move |el, ms| {
+                    let k = ease_out(step(ms, 60. + ROW_STAGGER * ix as f32, ROW_IN));
+                    el.opacity(k).relative().top(zpx(4. * (1. - k)))
+                },
+            )
         };
         let back = cx.listener(|this, _: &ClickEvent, _, cx| {
             this.projects.instant = true;
@@ -1060,7 +1342,13 @@ impl KeelWindow {
                     .child(Icon::Back.el(zpx(13.)))
                     .on_click(back),
             )
-            .child(div().t_body().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child("New project"));
+            .child(
+                div()
+                    .t_body()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(c(t.text))
+                    .child("New project"),
+            );
         let name = div()
             .mx_1()
             .h(zpx(30.))
@@ -1076,11 +1364,20 @@ impl KeelWindow {
             .t_body()
             .text_color(c(t.text))
             .child(div().flex_1().min_w_0().child(sheet.name.clone()));
-        let mut col: Vec<AnyElement> = vec![header.into_any_element(), name.into_any_element(), menu_label("Folders", t).mt_1().into_any_element()];
+        let mut col: Vec<AnyElement> = vec![
+            header.into_any_element(),
+            name.into_any_element(),
+            menu_label("Folders", t).mt_1().into_any_element(),
+        ];
         for (ix, row) in sheet.rows.iter().enumerate() {
             let alias = input_text(&row.alias, cx);
             let letter = input_text(&row.letter, cx);
-            let shown = letter.chars().next().or_else(|| alias.chars().next()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+            let shown = letter
+                .chars()
+                .next()
+                .or_else(|| alias.chars().next())
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".into());
             let name = base_name(&row.path);
             let line = div()
                 .id(ElementId::Name(format!("project-sheet-folder-{ix}").into()))
@@ -1121,8 +1418,28 @@ impl KeelWindow {
                         .text_color(c(hue(ix, t)))
                         .child(div().size_full().min_w_0().child(row.letter.clone())),
                 )
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(c(t.text_muted)).child(name))
-                .when(ix == 0, |d| d.child(div().flex_none().px_1p5().rounded(RADIUS_SM).bg(c(t.hover)).t_caption().text_color(c(t.text_faint)).child("starts here")));
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(c(t.text_muted))
+                        .child(name),
+                )
+                .when(ix == 0, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .px_1p5()
+                            .rounded(RADIUS_SM)
+                            .bg(c(t.hover))
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child("starts here"),
+                    )
+                });
             col.push(stagger(line, ix));
         }
         let add = menu_item("project-sheet-add", t, true, false)
@@ -1133,7 +1450,14 @@ impl KeelWindow {
         col.push(stagger(add, sheet.rows.len()));
         col.push(menu_separator(t).into_any_element());
         if let Some(err) = &self.projects.sheet_error {
-            col.push(div().px_2().t_small().text_color(c(t.warning)).child(err.clone()).into_any_element());
+            col.push(
+                div()
+                    .px_2()
+                    .t_small()
+                    .text_color(c(t.warning))
+                    .child(err.clone())
+                    .into_any_element(),
+            );
         }
         col.push(
             div()
@@ -1143,43 +1467,65 @@ impl KeelWindow {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(div().t_small().text_color(c(t.text_faint)).child("Chats start in the first folder. Point at the others by name, like @api/src."))
+                .child(div().t_small().text_color(c(t.text_faint)).child(
+                    "Chats start in the first folder. Point at the others by name, like @api/src.",
+                ))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .justify_end()
                         .gap_1()
-                        .child(text_button("project-sheet-cancel", "Cancel", t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.projects.instant = true;
-                            this.projects.close_sheet();
-                            cx.notify();
-                        })))
-                        .child(filled_button("project-sheet-create", "Create project", t.accent, t).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            if let Some(path) = this.commit_sheet(cx) {
+                        .child(text_button("project-sheet-cancel", "Cancel", t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.projects.instant = true;
-                                this.set_picker(None, cx);
-                                this.use_folder_for_new_chat(path, cx);
-                            }
-                            cx.notify();
-                        }))),
+                                this.projects.close_sheet();
+                                cx.notify();
+                            }),
+                        ))
+                        .child(
+                            filled_button("project-sheet-create", "Create project", t.accent, t)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if let Some(path) = this.commit_sheet(cx) {
+                                        this.projects.instant = true;
+                                        this.set_picker(None, cx);
+                                        this.use_folder_for_new_chat(path, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
                 )
                 .into_any_element(),
         );
-        timed(div().flex().flex_col().children(col), format!("project-sheet-{generation}"), total, clock, |el, ms| {
-            let k = ease_out(step(ms, 0., SHEET_GROW));
-            if k >= 1. {
-                return el;
-            }
-            el.max_h(zpx(140. + 260. * k)).overflow_hidden().opacity(0.5 + 0.5 * k)
-        })
+        timed(
+            div().flex().flex_col().children(col),
+            format!("project-sheet-{generation}"),
+            total,
+            clock,
+            |el, ms| {
+                let k = ease_out(step(ms, 0., SHEET_GROW));
+                if k >= 1. {
+                    return el;
+                }
+                el.max_h(zpx(140. + 260. * k))
+                    .overflow_hidden()
+                    .opacity(0.5 + 0.5 * k)
+            },
+        )
     }
 
     fn pick_sheet_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: true, prompt: Some("Add folders".into()) });
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add folders".into()),
+        });
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = this.update(cx, |this, cx| {
                     for path in paths {
@@ -1196,7 +1542,7 @@ impl KeelWindow {
         &mut self,
         project: Project,
         open: bool,
-        first: bool,
+        _first: bool,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1210,8 +1556,13 @@ impl KeelWindow {
             .project_chats(&id)
             .into_iter()
             .filter_map(|(cid, _, _)| self.state.chats.get(&cid))
-            .map(|item| keel_proto::display_status(item.status, item.last_seen_at, AppState::now_ms()))
-            .find(|s| *s == keel_proto::DisplayStatus::AwaitingInput || *s == keel_proto::DisplayStatus::Running)
+            .map(|item| {
+                keel_proto::display_status(item.status, item.last_seen_at, AppState::now_ms())
+            })
+            .find(|s| {
+                *s == keel_proto::DisplayStatus::AwaitingInput
+                    || *s == keel_proto::DisplayStatus::Running
+            })
             .unwrap_or(keel_proto::DisplayStatus::Idle);
         let collapsed = !open;
         let turn = chevron_turn_radians;
@@ -1223,19 +1574,23 @@ impl KeelWindow {
                 chevron
                     .with_animation(
                         ElementId::Name(format!("project-side-chevron-{id}-{generation}").into()),
-                        gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
+                        gpui::Animation::new(crate::motion::FAST)
+                            .with_easing(crate::motion::ease_out),
                         move |icon, delta| {
-                            icon.with_transformation(gpui::Transformation::rotate(gpui::radians(from + (to - from) * delta)))
+                            icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                from + (to - from) * delta,
+                            )))
                         },
                     )
                     .into_any_element()
             }
-            _ => chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(turn(collapsed)))).into_any_element(),
+            _ => chevron
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(turn(collapsed))))
+                .into_any_element(),
         };
         div()
             .id(ElementId::Name(format!("project-header-{id}").into()))
             .flex_none()
-            .when(!first, |d| d.pt(zpx(10.)))
             .child(
                 div()
                     .id(ElementId::Name(group.clone().into()))
@@ -1279,7 +1634,8 @@ impl KeelWindow {
                     )
                     .when(collapsed, |d| {
                         d.children(match urgent {
-                            keel_proto::DisplayStatus::AwaitingInput | keel_proto::DisplayStatus::Running => {
+                            keel_proto::DisplayStatus::AwaitingInput
+                            | keel_proto::DisplayStatus::Running => {
                                 status_dot(urgent, &format!("project-{id}"), t, reduced)
                             }
                             _ => None,
@@ -1302,22 +1658,29 @@ impl KeelWindow {
                             .opacity(if home_open { 1. } else { 0. })
                             .group_hover(group, |s| s.opacity(1.))
                             .child(
-                                super::sidebar::header_button(format!("project-home-{id}"), Icon::AppWindow, t)
-                                    .tooltip(move |_, cx| cx.new(|_| super::dotify_ui::Tip::new("Project home", t)).into())
-                                    .tooltip_show_delay(super::tooltip::delay())
-                                    .on_click(cx.listener({
-                                        let id = id.clone();
-                                        move |this, _: &ClickEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.projects.instant = false;
-                                            this.projects.folder_card = None;
-                                            this.projects.folder_card_suppressed = Some(id.clone());
-                                            this.close_pages();
-                                            this.projects.home = Some(id.clone());
-                                            this.refresh_folder_status(cx);
-                                            cx.notify();
-                                        }
-                                    })),
+                                super::sidebar::header_button(
+                                    format!("project-home-{id}"),
+                                    Icon::AppWindow,
+                                    t,
+                                )
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| super::dotify_ui::Tip::new("Project home", t))
+                                        .into()
+                                })
+                                .tooltip_show_delay(super::tooltip::delay())
+                                .on_click(cx.listener({
+                                    let id = id.clone();
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.projects.instant = false;
+                                        this.projects.folder_card = None;
+                                        this.projects.folder_card_suppressed = Some(id.clone());
+                                        this.close_pages();
+                                        this.projects.home = Some(id.clone());
+                                        this.refresh_folder_status(cx);
+                                        cx.notify();
+                                    }
+                                })),
                             ),
                     )
                     .on_hover(cx.listener({
@@ -1332,7 +1695,12 @@ impl KeelWindow {
 
     /// Folder detail for the project under the pointer. Same surface as the
     /// session summary card, held just long enough to cross onto it.
-    pub(super) fn render_project_folder_card(&mut self, t: Tokens, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_project_folder_card(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.state.ui_settings.sidebar_collapsed {
             self.projects.folder_card = None;
             return None;
@@ -1364,13 +1732,15 @@ impl KeelWindow {
         let appear = if reduced {
             1.
         } else {
-            let enter_x = (elapsed.saturating_sub(SUMMARY_HOVER_DELAY).as_secs_f32() / 0.18).min(1.);
+            let enter_x =
+                (elapsed.saturating_sub(SUMMARY_HOVER_DELAY).as_secs_f32() / 0.18).min(1.);
             let mut a = ease_out(enter_x);
             if enter_x < 1. {
                 window.request_animation_frame();
             }
             if let Some(left) = left {
-                let exit_x = (left.elapsed().as_secs_f32() / FOLDER_CARD_LEAVE.as_secs_f32()).clamp(0., 1.);
+                let exit_x =
+                    (left.elapsed().as_secs_f32() / FOLDER_CARD_LEAVE.as_secs_f32()).clamp(0., 1.);
                 a *= 1. - ease_out(exit_x);
             }
             a
@@ -1381,7 +1751,10 @@ impl KeelWindow {
             }
             return None;
         }
-        let primary = project.primary().map(|f| f.alias.clone()).unwrap_or_else(|| "the first folder".into());
+        let primary = project
+            .primary()
+            .map(|f| f.alias.clone())
+            .unwrap_or_else(|| "the first folder".into());
         let mut rows: Vec<AnyElement> = Vec::new();
         for (ix, folder) in project.folders.iter().enumerate() {
             let branch = self.projects.folder_branch_label(&folder.path);
@@ -1399,8 +1772,23 @@ impl KeelWindow {
                             .gap(zpx(6.))
                             .min_w_0()
                             .child(mark(mark_letter(folder), ix, t))
-                            .child(div().flex_none().t_small().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(folder.alias.clone()))
-                            .child(div().flex_1().min_w_0().truncate().t_small().text_color(c(t.text_muted)).child(base_name(&folder.path))),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .t_small()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(c(t.text))
+                                    .child(folder.alias.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .t_small()
+                                    .text_color(c(t.text_muted))
+                                    .child(base_name(&folder.path)),
+                            ),
                     )
                     .child(
                         div()
@@ -1410,10 +1798,28 @@ impl KeelWindow {
                             .items_center()
                             .gap(zpx(6.))
                             .min_w_0()
-                            .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::Branch.el(zpx(11.))))
-                            .child(div().min_w_0().truncate().t_small().text_color(c(t.text_muted)).child(branch))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(c(t.text_faint))
+                                    .child(Icon::Branch.el(zpx(11.))),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .t_small()
+                                    .text_color(c(t.text_muted))
+                                    .child(branch),
+                            )
                             .child(div().flex_1())
-                            .child(div().flex_none().t_small().text_color(c(t.text_faint)).child(changes)),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .t_small()
+                                    .text_color(c(t.text_faint))
+                                    .child(changes),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -1452,10 +1858,20 @@ impl KeelWindow {
                                     cx.notify();
                                 }
                             }))
-                            .child(div().t_body().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(t.text)).child(project.name.clone()))
+                            .child(
+                                div()
+                                    .t_body()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                                    .child(project.name.clone()),
+                            )
                             .child(div().t_small().text_color(c(t.text_muted)).child({
                                 let n = project.folders.len();
-                                let folders = if n == 1 { "1 folder".into() } else { format!("{n} folders") };
+                                let folders = if n == 1 {
+                                    "1 folder".into()
+                                } else {
+                                    format!("{n} folders")
+                                };
                                 format!("{folders}. Chats start in {primary}.")
                             }))
                             .children(rows),
@@ -1475,9 +1891,19 @@ impl KeelWindow {
     pub(super) fn sidebar_row_ids(&self) -> Vec<String> {
         let mut rows = Vec::new();
         if self.state.space_filter.is_none() {
-            let ids: Vec<String> = self.projects.store.projects.iter().map(|p| p.id.clone()).collect();
+            let ids: Vec<String> = self
+                .projects
+                .store
+                .projects
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
             for id in ids {
-                rows.extend(self.visible_project_chats(&id).into_iter().map(|(chat, _)| chat.id));
+                rows.extend(
+                    self.visible_project_chats(&id)
+                        .into_iter()
+                        .map(|(chat, _)| chat.id),
+                );
             }
         }
         let skip = self.linked_chat_ids();
@@ -1492,15 +1918,21 @@ impl KeelWindow {
 
     /// Sessions of one project. Folded, only the active chat and anything waiting
     /// on you. Unfolded, the three most recent, so the list stays a list.
-    pub(super) fn visible_project_chats(&self, id: &str) -> Vec<(keel_proto::AttentionChat, keel_proto::DisplayStatus)> {
+    pub(super) fn visible_project_chats(
+        &self,
+        id: &str,
+    ) -> Vec<(keel_proto::AttentionChat, keel_proto::DisplayStatus)> {
         let now = AppState::now_ms();
         let active = self.state.active_tab.as_deref();
         let open = self.projects.unfolded.contains(id);
         let mut out = Vec::new();
         for (chat_id, _, _) in self.project_chats(id) {
-            let Some(item) = self.state.chats.get(&chat_id) else { continue };
+            let Some(item) = self.state.chats.get(&chat_id) else {
+                continue;
+            };
             let status = keel_proto::display_status(item.status, item.last_seen_at, now);
-            let pinned = status == keel_proto::DisplayStatus::AwaitingInput || active == Some(chat_id.as_str());
+            let pinned = status == keel_proto::DisplayStatus::AwaitingInput
+                || active == Some(chat_id.as_str());
             if !open && !pinned {
                 continue;
             }
@@ -1521,7 +1953,13 @@ impl KeelWindow {
         out
     }
 
-    fn hover_project_folders(&mut self, id: &str, y: f32, over_header: bool, cx: &mut Context<Self>) {
+    fn hover_project_folders(
+        &mut self,
+        id: &str,
+        y: f32,
+        over_header: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !over_header {
             if self.projects.folder_card_suppressed.as_deref() == Some(id) {
                 self.projects.folder_card_suppressed = None;
@@ -1554,7 +1992,9 @@ impl Projects {
         // cancel the pending card immediately. No leave timer or ghost card.
         if over_header == Some(false) {
             if let Some(card) = &self.folder_card {
-                if !card.over_card && now.saturating_duration_since(card.since) < SUMMARY_HOVER_DELAY {
+                if !card.over_card
+                    && now.saturating_duration_since(card.since) < SUMMARY_HOVER_DELAY
+                {
                     self.folder_card = None;
                     return;
                 }
@@ -1569,7 +2009,14 @@ impl Projects {
             left: None,
         });
         if card.id != id {
-            *card = FolderCard { id: id.to_string(), y, since: now, over_header: false, over_card: false, left: None };
+            *card = FolderCard {
+                id: id.to_string(),
+                y,
+                since: now,
+                over_header: false,
+                over_card: false,
+                left: None,
+            };
         }
         card.y = y;
         if let Some(on) = over_header {
@@ -1587,8 +2034,15 @@ impl Projects {
 }
 
 impl KeelWindow {
-    fn set_folder_card(&mut self, id: &str, y: f32, over_header: Option<bool>, over_card: Option<bool>) {
-        self.projects.set_folder_card(id, y, over_header, over_card, std::time::Instant::now());
+    fn set_folder_card(
+        &mut self,
+        id: &str,
+        y: f32,
+        over_header: Option<bool>,
+        over_card: Option<bool>,
+    ) {
+        self.projects
+            .set_folder_card(id, y, over_header, over_card, std::time::Instant::now());
     }
 
     pub(super) fn toggle_project_fold(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1602,17 +2056,29 @@ impl KeelWindow {
             self.projects.unfolded.insert(id.to_string());
         }
         self.glide_gen += 1;
-        self.space_fold_gen.insert(format!("p:{id}"), self.glide_gen);
+        self.space_fold_gen
+            .insert(format!("p:{id}"), self.glide_gen);
         cx.notify();
     }
 
     pub(super) fn render_project_home(&mut self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
         self.refresh_folder_status(cx);
-        let Some(id) = self.projects.home.clone() else { return div().into_any_element() };
-        let Some(project) = self.projects.store.project(&id).cloned() else { return div().into_any_element() };
+        let Some(id) = self.projects.home.clone() else {
+            return div().into_any_element();
+        };
+        let Some(project) = self.projects.store.project(&id).cloned() else {
+            return div().into_any_element();
+        };
         let (folded, fold_gen) = (self.projects.home_folded, self.projects.home_fold_gen);
-        let clock = if fold_gen == 0 || self.projects.instant || self.reduced() { Clock::Rest } else { self.project_clock() };
-        let (open_ms, close_ms) = (fold::OPEN.as_secs_f32() * 1000., fold::CLOSE.as_secs_f32() * 1000.);
+        let clock = if fold_gen == 0 || self.projects.instant || self.reduced() {
+            Clock::Rest
+        } else {
+            self.project_clock()
+        };
+        let (open_ms, close_ms) = (
+            fold::OPEN.as_secs_f32() * 1000.,
+            fold::CLOSE.as_secs_f32() * 1000.,
+        );
         let total = if folded { close_ms } else { open_ms };
         let opening = !folded;
         let section = |label: &'static str, count: usize| {
@@ -1626,12 +2092,31 @@ impl KeelWindow {
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(c(t.text_muted))
                 .child(label)
-                .child(div().t_caption().font_family(MONO).font_weight(gpui::FontWeight::NORMAL).text_color(c(t.text_faint)).child(count.to_string()))
+                .child(
+                    div()
+                        .t_caption()
+                        .font_family(MONO)
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(c(t.text_faint))
+                        .child(count.to_string()),
+                )
         };
-        let chevron = timed(Icon::ChevronDown.el(zpx(12.)), format!("project-home-chevron-{fold_gen}"), total, clock, move |el, ms| {
-            let open = if clock_is_rest(clock) { if opening { 1. } else { 0. } } else { fold_progress(ms, opening, open_ms, close_ms) };
-            el.with_transformation(gpui::Transformation::rotate(gpui::percentage(fold::chevron_turn(open))))
-        });
+        let chevron = timed(
+            Icon::ChevronDown.el(zpx(12.)),
+            format!("project-home-chevron-{fold_gen}"),
+            total,
+            clock,
+            move |el, ms| {
+                let open = if clock_is_rest(clock) {
+                    if opening { 1. } else { 0. }
+                } else {
+                    fold_progress(ms, opening, open_ms, close_ms)
+                };
+                el.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                    fold::chevron_turn(open),
+                )))
+            },
+        );
         let folders_header = div()
             .id("project-home-folders-toggle")
             .flex()
@@ -1640,7 +2125,15 @@ impl KeelWindow {
             .gap_1()
             .ml(zpx(-20.))
             .cursor_pointer()
-            .child(div().size(zpx(16.)).flex().items_center().justify_center().text_color(c(t.text_faint)).child(chevron))
+            .child(
+                div()
+                    .size(zpx(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(c(t.text_faint))
+                    .child(chevron),
+            )
             .child(section("Folders", project.folders.len()))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.projects.instant = false;
@@ -1648,12 +2141,25 @@ impl KeelWindow {
                 this.projects.home_fold_gen += 1;
                 cx.notify();
             }));
-        let primary = project.primary().map(|f| f.alias.clone()).unwrap_or_default();
+        let primary = project
+            .primary()
+            .map(|f| f.alias.clone())
+            .unwrap_or_default();
         let n = project.folders.len();
         let rows = project.folders.iter().enumerate().map(|(ix, f)| {
             let key = norm_path(&f.path);
             let status = self.projects.status.get(&key);
-            let branch = status.map(|s| if !s.branch.is_empty() { s.branch.clone() } else if !s.repo { "not a repo".into() } else { "detached".into() }).unwrap_or_else(|| "…".into());
+            let branch = status
+                .map(|s| {
+                    if !s.branch.is_empty() {
+                        s.branch.clone()
+                    } else if !s.repo {
+                        "not a repo".into()
+                    } else {
+                        "detached".into()
+                    }
+                })
+                .unwrap_or_else(|| "…".into());
             let changes = status
                 .map(|s| match s.changes {
                     Some(0) | None if s.repo => "clean".into(),
@@ -1683,7 +2189,14 @@ impl KeelWindow {
                         .items_center()
                         .gap_2()
                         .child(mark(mark_letter(f), ix, t))
-                        .child(div().flex_none().t_body().font_weight(gpui::FontWeight::MEDIUM).text_color(c(t.text)).child(f.alias.clone()))
+                        .child(
+                            div()
+                                .flex_none()
+                                .t_body()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(c(t.text))
+                                .child(f.alias.clone()),
+                        )
                         .child(div().flex_1())
                         .child(
                             div()
@@ -1695,7 +2208,14 @@ impl KeelWindow {
                                 .t_small()
                                 .text_color(c(t.text_faint))
                                 .child(Icon::Branch.el(zpx(12.)))
-                                .child(div().max_w(zpx(170.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(branch)),
+                                .child(
+                                    div()
+                                        .max_w(zpx(170.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(branch),
+                                ),
                         )
                         .child(
                             div()
@@ -1716,18 +2236,39 @@ impl KeelWindow {
                         .items_center()
                         .gap_2()
                         .t_small()
-                        .when(!f.note.is_empty(), |d| d.child(div().flex_none().text_color(c(t.text_muted)).child(f.note.clone())))
-                        .child(faint(display_path(&f.path), t).font_family(MONO).t_caption()),
+                        .when(!f.note.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(c(t.text_muted))
+                                    .child(f.note.clone()),
+                            )
+                        })
+                        .child(
+                            faint(display_path(&f.path), t)
+                                .font_family(MONO)
+                                .t_caption(),
+                        ),
                 )
         });
         let list_h = HOME_ROW_H * n as f32;
-        let list = timed(div().flex().flex_col().children(rows), format!("project-home-fold-{fold_gen}"), total, clock, move |el, ms| {
-            let p = if clock_is_rest(clock) { if opening { 1. } else { 0. } } else { fold_progress(ms, opening, open_ms, close_ms) };
-            if p >= 1. {
-                return el;
-            }
-            el.h(zpx(list_h * p)).overflow_hidden().opacity(p)
-        });
+        let list = timed(
+            div().flex().flex_col().children(rows),
+            format!("project-home-fold-{fold_gen}"),
+            total,
+            clock,
+            move |el, ms| {
+                let p = if clock_is_rest(clock) {
+                    if opening { 1. } else { 0. }
+                } else {
+                    fold_progress(ms, opening, open_ms, close_ms)
+                };
+                if p >= 1. {
+                    return el;
+                }
+                el.h(zpx(list_h * p)).overflow_hidden().opacity(p)
+            },
+        );
         let add = div()
             .id("project-home-add")
             .h(zpx(30.))
@@ -1743,16 +2284,27 @@ impl KeelWindow {
             .text_color(c(t.text_faint))
             .cursor_pointer()
             .hover(|s| s.bg(c(t.hover)).text_color(c(t.text_muted)))
-            .child(div().w(zpx(14.)).flex().justify_center().child(Icon::Plus.el(zpx(12.))))
+            .child(
+                div()
+                    .w(zpx(14.))
+                    .flex()
+                    .justify_center()
+                    .child(Icon::Plus.el(zpx(12.))),
+            )
             .child("Add folder")
             .child(div().flex_1())
             .child("or drop one here")
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.pick_home_folder(window, cx)))
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.pick_home_folder(window, cx)),
+            )
             .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                let Some(id) = this.projects.home.clone() else { return };
+                let Some(id) = this.projects.home.clone() else {
+                    return;
+                };
                 for path in paths.paths() {
                     if path.is_dir() {
-                        this.projects.add_folder(&id, path.to_string_lossy().into_owned());
+                        this.projects
+                            .add_folder(&id, path.to_string_lossy().into_owned());
                     }
                 }
                 this.projects.status.clear();
@@ -1761,34 +2313,68 @@ impl KeelWindow {
             }));
         let chats = self.project_chats(&id);
         let chat_n = chats.len();
-        let chat_rows = chats.into_iter().enumerate().map(|(n, (chat_id, title, when))| {
-            let scope = self.projects.store.chats.get(&chat_id).map(|l| l.scope.clone()).unwrap_or_default();
-            let letters = projects::in_scope(&project, &scope);
-            div()
-                .id(ElementId::Name(format!("project-home-chat-{n}").into()))
-                .h(zpx(34.))
-                .px_2()
-                .ml(zpx(-8.))
-                .mr(zpx(-8.))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .rounded(RADIUS_MD)
-                .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().t_body().text_color(c(t.text_muted)).child(title))
-                .child(div().flex_none().flex().flex_row().gap_0p5().children(letters.iter().map(|f| {
-                    let ix = project.folders.iter().position(|g| g.alias == f.alias).unwrap_or(0);
-                    mark(mark_letter(f), ix, t)
-                })))
-                .child(div().flex_none().w(zpx(72.)).flex().justify_end().t_small().text_color(c(t.text_faint)).child(ago(when)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.projects.home = None;
-                    this.state.open_or_focus_tab(&chat_id);
-                    cx.notify();
-                }))
-        });
+        let chat_rows = chats
+            .into_iter()
+            .enumerate()
+            .map(|(n, (chat_id, title, when))| {
+                let scope = self
+                    .projects
+                    .store
+                    .chats
+                    .get(&chat_id)
+                    .map(|l| l.scope.clone())
+                    .unwrap_or_default();
+                let letters = projects::in_scope(&project, &scope);
+                div()
+                    .id(ElementId::Name(format!("project-home-chat-{n}").into()))
+                    .h(zpx(34.))
+                    .px_2()
+                    .ml(zpx(-8.))
+                    .mr(zpx(-8.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_MD)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(c(t.hover)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .t_body()
+                            .text_color(c(t.text_muted))
+                            .child(title),
+                    )
+                    .child(div().flex_none().flex().flex_row().gap_0p5().children(
+                        letters.iter().map(|f| {
+                            let ix = project
+                                .folders
+                                .iter()
+                                .position(|g| g.alias == f.alias)
+                                .unwrap_or(0);
+                            mark(mark_letter(f), ix, t)
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(zpx(72.))
+                            .flex()
+                            .justify_end()
+                            .t_small()
+                            .text_color(c(t.text_faint))
+                            .child(ago(when)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.projects.home = None;
+                        this.state.open_or_focus_tab(&chat_id);
+                        cx.notify();
+                    }))
+            });
         let blurb = format!("{n} folders the agent works across. New chats start in {primary}.");
         div()
             .id("project-home")
@@ -1805,8 +2391,19 @@ impl KeelWindow {
                     .pb(zpx(32.))
                     .flex()
                     .flex_col()
-                    .child(div().t_title().text_color(c(t.text)).child(project.name.clone()))
-                    .child(div().mt_1().t_small().text_color(c(t.text_faint)).child(blurb))
+                    .child(
+                        div()
+                            .t_title()
+                            .text_color(c(t.text))
+                            .child(project.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .t_small()
+                            .text_color(c(t.text_faint))
+                            .child(blurb),
+                    )
                     .child(div().mt(zpx(28.)).child(folders_header))
                     .child(list)
                     .child(add)
@@ -1817,14 +2414,24 @@ impl KeelWindow {
     }
 
     fn pick_home_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.projects.home.clone() else { return };
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: true, prompt: Some("Add folders".into()) });
+        let Some(id) = self.projects.home.clone() else {
+            return;
+        };
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add folders".into()),
+        });
         let _ = window;
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 for path in paths {
-                    this.projects.add_folder(&id, path.to_string_lossy().into_owned());
+                    this.projects
+                        .add_folder(&id, path.to_string_lossy().into_owned());
                 }
                 this.projects.status.clear();
                 this.refresh_folder_status(cx);
@@ -1834,17 +2441,43 @@ impl KeelWindow {
         .detach();
     }
 
-    pub(super) fn project_scope_chip(&mut self, t: Tokens, compact: u8, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn project_scope_chip(
+        &mut self,
+        t: Tokens,
+        compact: u8,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let chat = self.current_chat.clone();
         let cwd = self.mention_root();
-        let id = self.projects.scope_project_id(chat.as_deref(), cwd.as_deref())?;
+        let id = self
+            .projects
+            .scope_project_id(chat.as_deref(), cwd.as_deref())?;
         let project = self.projects.store.project(&id)?.clone();
         let open = self.projects.scope_open;
         let aliases = self.projects.scope_aliases(&id, chat.as_deref());
-        let n = if aliases.is_empty() { project.folders.len() } else { aliases.len() };
+        let n = if aliases.is_empty() {
+            project.folders.len()
+        } else {
+            aliases.len()
+        };
         let label = match compact {
-            0 => if aliases.is_empty() { "Folders".into() } else { aliases.join(", ") },
-            1 => if n == 1 { aliases.first().cloned().unwrap_or_else(|| "1 folder".into()) } else { format!("{n} folders") },
+            0 => {
+                if aliases.is_empty() {
+                    "Folders".into()
+                } else {
+                    aliases.join(", ")
+                }
+            }
+            1 => {
+                if n == 1 {
+                    aliases
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "1 folder".into())
+                } else {
+                    format!("{n} folders")
+                }
+            }
             _ => String::new(),
         };
         let phase = self.menu_phase("project-scope-menu", open, cx);
@@ -1854,7 +2487,13 @@ impl KeelWindow {
                 menu_label("Folders this chat works in", t).into_any_element(),
                 menu_item("project-scope-all", t, true, scope.is_empty())
                     .child(div().flex_1().child("All folders"))
-                    .child(div().flex_none().t_small().text_color(c(t.text_faint)).child(project.folders.len().to_string()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .t_small()
+                            .text_color(c(t.text_faint))
+                            .child(project.folders.len().to_string()),
+                    )
                     .on_click(cx.listener({
                         let id = id.clone();
                         let chat = chat.clone();
@@ -1878,7 +2517,8 @@ impl KeelWindow {
                             let id = id.clone();
                             let chat = chat.clone();
                             move |this, _: &ClickEvent, _, cx| {
-                                this.projects.toggle_scope_alias(&id, chat.as_deref(), &alias);
+                                this.projects
+                                    .toggle_scope_alias(&id, chat.as_deref(), &alias);
                                 cx.notify();
                             }
                         }))
@@ -1886,13 +2526,31 @@ impl KeelWindow {
                 );
             }
             items.push(menu_separator(t).into_any_element());
-            items.push(div().px_2().pt_0p5().pb_1().t_small().text_color(c(t.text_faint)).child("The others stay reachable with @.").into_any_element());
+            items.push(
+                div()
+                    .px_2()
+                    .pt_0p5()
+                    .pb_1()
+                    .t_small()
+                    .text_color(c(t.text_faint))
+                    .child("The others stay reachable with @.")
+                    .into_any_element(),
+            );
             let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
                 this.note_menu_dismissed("project-scope-menu");
                 this.projects.scope_open = false;
                 cx.notify();
             });
-            floating_menu_at("project-scope-menu", t, 280., true, leaving, self.reduced(), dismiss, items)
+            floating_menu_at(
+                "project-scope-menu",
+                t,
+                280.,
+                true,
+                leaving,
+                self.reduced(),
+                dismiss,
+                items,
+            )
         });
         let chip = div()
             .id("project-scope-chip")
@@ -1912,10 +2570,25 @@ impl KeelWindow {
             .overflow_hidden()
             .child(Icon::Folder.el(zpx(12.)).flex_none())
             .when(!label.is_empty(), |d| {
-                d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                d.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                )
             })
-            .child(div().flex_none().text_color(c(t.text_faint)).child(Icon::ChevronDown.el(zpx(10.))))
-            .tooltip(move |_, cx| cx.new(|_| super::dotify_ui::Tip::new("Folders the agent works in", t)).into())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(t.text_faint))
+                    .child(Icon::ChevronDown.el(zpx(10.))),
+            )
+            .tooltip(move |_, cx| {
+                cx.new(|_| super::dotify_ui::Tip::new("Folders the agent works in", t))
+                    .into()
+            })
             .tooltip_show_delay(super::tooltip::delay())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if this.menu_just_dismissed("project-scope-menu") {
@@ -1927,7 +2600,15 @@ impl KeelWindow {
                 this.projects.scope_open = next;
                 cx.notify();
             }));
-        Some(div().relative().min_w_0().flex_shrink(1.).children(menu).child(chip).into_any_element())
+        Some(
+            div()
+                .relative()
+                .min_w_0()
+                .flex_shrink(1.)
+                .children(menu)
+                .child(chip)
+                .into_any_element(),
+        )
     }
 }
 
@@ -1959,26 +2640,58 @@ fn status_from(res: Result<serde_json::Value, String>) -> FolderStatus {
         };
     };
     let exists = v.get("exists").and_then(|s| s.as_bool()).unwrap_or(true);
-    let branch = v.get("branch").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    let detached = v.get("detached").and_then(|s| s.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    let branch = v
+        .get("branch")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let detached = v
+        .get("detached")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let changes = v.get("changes").and_then(|s| s.as_u64()).map(|n| n as u32);
     let files = v
         .get("files")
         .and_then(|s| s.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let file_details = v
         .get("file_details")
-        .and_then(|d| serde_json::from_value::<Vec<crate::view::session_card::GitFileChange>>(d.clone()).ok())
+        .and_then(|d| {
+            serde_json::from_value::<Vec<crate::view::session_card::GitFileChange>>(d.clone()).ok()
+        })
         .unwrap_or_default();
-    let total_additions = v.get("total_additions").and_then(|n| n.as_u64()).unwrap_or_else(|| {
-        file_details.iter().filter_map(|f| f.added).map(u64::from).sum()
-    });
-    let total_deletions = v.get("total_deletions").and_then(|n| n.as_u64()).unwrap_or_else(|| {
-        file_details.iter().filter_map(|f| f.removed).map(u64::from).sum()
-    });
+    let total_additions = v
+        .get("total_additions")
+        .and_then(|n| n.as_u64())
+        .unwrap_or_else(|| {
+            file_details
+                .iter()
+                .filter_map(|f| f.added)
+                .map(u64::from)
+                .sum()
+        });
+    let total_deletions = v
+        .get("total_deletions")
+        .and_then(|n| n.as_u64())
+        .unwrap_or_else(|| {
+            file_details
+                .iter()
+                .filter_map(|f| f.removed)
+                .map(u64::from)
+                .sum()
+        });
     let repo = changes.is_some() || !branch.is_empty() || detached.is_some();
-    let branch = if branch.is_empty() { detached.unwrap_or_default() } else { branch };
+    let branch = if branch.is_empty() {
+        detached.unwrap_or_default()
+    } else {
+        branch
+    };
     FolderStatus {
         branch,
         changes,
@@ -2002,7 +2715,10 @@ fn match_named<'a>(store: &'a projects::Projects, arg: &'a str) -> Option<(&'a P
             }
             let hit = if arg.eq_ignore_ascii_case(key) {
                 Some(key.len())
-            } else if arg.len() > key.len() && arg.as_bytes().get(key.len()) == Some(&b' ') && arg[..key.len()].eq_ignore_ascii_case(key) {
+            } else if arg.len() > key.len()
+                && arg.as_bytes().get(key.len()) == Some(&b' ')
+                && arg[..key.len()].eq_ignore_ascii_case(key)
+            {
                 Some(key.len())
             } else {
                 None
@@ -2033,7 +2749,13 @@ mod tests {
     fn spec_parses_a_spaced_name() {
         let (name, folders) = parse_spec("Resona RIF web=/tmp/web api=/tmp/api").unwrap();
         assert_eq!(name, "Resona RIF");
-        assert_eq!(folders, vec![("web".into(), "/tmp/web".into()), ("api".into(), "/tmp/api".into())]);
+        assert_eq!(
+            folders,
+            vec![
+                ("web".into(), "/tmp/web".into()),
+                ("api".into(), "/tmp/api".into())
+            ]
+        );
     }
 
     #[test]
@@ -2042,13 +2764,27 @@ mod tests {
             id: "p".into(),
             name: "P".into(),
             folders: vec![
-                ProjectFolder { path: "/r/web".into(), alias: "web".into(), ..Default::default() },
-                ProjectFolder { path: "/r/api".into(), alias: "api".into(), ..Default::default() },
+                ProjectFolder {
+                    path: "/r/web".into(),
+                    alias: "web".into(),
+                    ..Default::default()
+                },
+                ProjectFolder {
+                    path: "/r/api".into(),
+                    alias: "api".into(),
+                    ..Default::default()
+                },
             ],
             created_at: 0,
         };
-        assert_eq!(map_alias_path(Some(&project), "/r/api/src/x.ts").as_deref(), Some("@api/src/x.ts"));
-        assert_eq!(map_alias_path(Some(&project), "/r/web").as_deref(), Some("@web"));
+        assert_eq!(
+            map_alias_path(Some(&project), "/r/api/src/x.ts").as_deref(),
+            Some("@api/src/x.ts")
+        );
+        assert_eq!(
+            map_alias_path(Some(&project), "/r/web").as_deref(),
+            Some("@web")
+        );
         assert_eq!(map_alias_path(Some(&project), "/other/x"), None);
     }
 
@@ -2072,7 +2808,8 @@ mod tests {
 
     #[test]
     fn project_folder_card_hover_out_cancels_before_delay_and_click_suppresses() {
-        let temp_dir = std::env::temp_dir().join(format!("keel-test-projects-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("keel-test-projects-{}", std::process::id()));
         let mut projects = Projects::load(&temp_dir);
         let t0 = std::time::Instant::now();
 
@@ -2097,7 +2834,10 @@ mod tests {
 
         // Card was already ripe, so leaving gives grace period to cross into card
         assert!(projects.folder_card.is_some());
-        assert_eq!(projects.folder_card.as_ref().unwrap().left, Some(t_leave_late));
+        assert_eq!(
+            projects.folder_card.as_ref().unwrap().left,
+            Some(t_leave_late)
+        );
 
         // 4. Moving pointer over card clears left
         let t_on_card = t_leave_late + std::time::Duration::from_millis(50);

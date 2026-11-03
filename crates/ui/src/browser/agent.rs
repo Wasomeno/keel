@@ -10,7 +10,11 @@ use std::collections::VecDeque;
 /// Settings → Browser's list, one site per comma, space, or line.
 pub fn parse_sites(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for s in text.split([',', '\n', ' ', '\t', ';']).map(str::trim).filter(|s| !s.is_empty()) {
+    for s in text
+        .split([',', '\n', ' ', '\t', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let s = s.trim_end_matches('/').to_ascii_lowercase();
         if !out.contains(&s) {
             out.push(s);
@@ -25,7 +29,10 @@ fn split_url(url: &str) -> Option<(String, String, u16, String)> {
     let scheme = scheme.to_ascii_lowercase();
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, path) = rest.split_at(end);
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a).to_ascii_lowercase();
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, a)| a)
+        .to_ascii_lowercase();
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if !h.ends_with(']') || authority.starts_with('[') => match p.parse::<u16>() {
             Ok(p) => (h.to_string(), Some(p)),
@@ -67,10 +74,16 @@ pub fn site_allowed(url: &str, sites: &[String]) -> bool {
             Some((s, r)) => (Some(s.to_string()), r.to_string()),
             None => (None, entry.clone()),
         };
-        let Some((_, e_host, e_port, e_path)) = split_url(&format!("{}://{rest}", want_scheme.as_deref().unwrap_or("x"))) else {
+        let Some((_, e_host, e_port, e_path)) = split_url(&format!(
+            "{}://{rest}",
+            want_scheme.as_deref().unwrap_or("x")
+        )) else {
             return false;
         };
-        let explicit_port = rest.split(['/', '?', '#']).next().is_some_and(|a| a.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()));
+        let explicit_port = rest.split(['/', '?', '#']).next().is_some_and(|a| {
+            a.rsplit_once(':')
+                .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+        });
         if want_scheme.as_ref().is_some_and(|s| *s != scheme) {
             return false;
         }
@@ -78,8 +91,15 @@ pub fn site_allowed(url: &str, sites: &[String]) -> bool {
             return false;
         }
         let host_ok = match e_host.strip_prefix("*.") {
-            Some(base) => host.len() > base.len() && host.ends_with(base) && host[..host.len() - base.len()].ends_with('.'),
-            None => host == e_host || (host.ends_with(&e_host) && host[..host.len() - e_host.len()].ends_with('.')),
+            Some(base) => {
+                host.len() > base.len()
+                    && host.ends_with(base)
+                    && host[..host.len() - base.len()].ends_with('.')
+            }
+            None => {
+                host == e_host
+                    || (host.ends_with(&e_host) && host[..host.len() - e_host.len()].ends_with('.'))
+            }
         };
         host_ok && (e_path.is_empty() || path.starts_with(&e_path))
     })
@@ -97,7 +117,10 @@ pub struct Fifo<T> {
 
 impl<T> Default for Fifo<T> {
     fn default() -> Self {
-        Self { items: VecDeque::new(), busy: false }
+        Self {
+            items: VecDeque::new(),
+            busy: false,
+        }
     }
 }
 
@@ -189,7 +212,13 @@ const DIFF_LINES: usize = 60;
 
 /// The page part of a reply: `next` in full, or its change from `prev`.
 pub fn snapshot_reply(prev: Option<&Snap>, next: &Snap, want: SnapWant) -> String {
-    let full = || if next.text.is_empty() { "(no interactive elements)".to_string() } else { next.text.clone() };
+    let full = || {
+        if next.text.is_empty() {
+            "(no interactive elements)".to_string()
+        } else {
+            next.text.clone()
+        }
+    };
     match want {
         SnapWant::None => return String::new(),
         SnapWant::Full => return full(),
@@ -209,7 +238,11 @@ pub fn snapshot_reply(prev: Option<&Snap>, next: &Snap, want: SnapWant) -> Strin
     if changed >= new.len() || changed >= new.len().max(8) * 3 / 5 {
         return format!("Page snapshot (most of it changed):\n{}", full());
     }
-    let mut out = format!("Changes since your last snapshot (+{} −{}, refs unchanged elsewhere):", added.len(), removed.len());
+    let mut out = format!(
+        "Changes since your last snapshot (+{} −{}, refs unchanged elsewhere):",
+        added.len(),
+        removed.len()
+    );
     for (sign, lines) in [("+", &added), ("−", &removed)] {
         for line in lines.iter().take(DIFF_LINES) {
             out.push('\n');
@@ -332,7 +365,11 @@ impl ConsoleLog {
             _ => 1,
         };
         self.unseen_errors = 0;
-        let picked: Vec<&ConsoleEntry> = self.entries.iter().filter(|e| rank(&e.level) >= min).collect();
+        let picked: Vec<&ConsoleEntry> = self
+            .entries
+            .iter()
+            .filter(|e| rank(&e.level) >= min)
+            .collect();
         let skip = picked.len().saturating_sub(limit.max(1));
         let mut out = String::new();
         if picked.is_empty() {
@@ -346,13 +383,23 @@ impl ConsoleLog {
                 out.push_str(&format!("({skip} older not shown)\n"));
             }
             for e in &picked[skip..] {
-                let frame = if e.frame.is_empty() { String::new() } else { format!(" [{}]", e.frame) };
-                out.push_str(&format!("[{:>7.1}s {}{}] {}\n", e.at, e.level, frame, e.text));
+                let frame = if e.frame.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", e.frame)
+                };
+                out.push_str(&format!(
+                    "[{:>7.1}s {}{}] {}\n",
+                    e.at, e.level, frame, e.text
+                ));
             }
             out.pop();
         }
         if self.dropped > 0 {
-            out.push_str(&format!("\n({} oldest messages dropped; the buffer keeps {CONSOLE_CAP})", self.dropped));
+            out.push_str(&format!(
+                "\n({} oldest messages dropped; the buffer keeps {CONSOLE_CAP})",
+                self.dropped
+            ));
         }
         if clear {
             self.entries.clear();
@@ -400,8 +447,17 @@ pub const DIALOG_DEFAULT_ACCEPT: bool = false;
 
 impl DialogInfo {
     pub fn describe(&self) -> String {
-        let site = if self.site.is_empty() { "the page".to_string() } else { self.site.clone() };
-        let mut s = format!("{} opened a {} dialog: {:?}", site, self.kind.name(), clip(&self.message, 300));
+        let site = if self.site.is_empty() {
+            "the page".to_string()
+        } else {
+            self.site.clone()
+        };
+        let mut s = format!(
+            "{} opened a {} dialog: {:?}",
+            site,
+            self.kind.name(),
+            clip(&self.message, 300)
+        );
         if let Some(d) = self.default_text.as_deref().filter(|d| !d.is_empty()) {
             s.push_str(&format!(" (default answer {:?})", clip(d, 100)));
         }
@@ -413,15 +469,27 @@ impl DialogInfo {
         format!(
             "{}. The page is paused until it is answered: call browser_handle_dialog with accept true or false{}. Unanswered, it is {} in {}s.",
             self.describe(),
-            if self.kind == DialogKind::Prompt { " (and text for the answer)" } else { "" },
-            if DIALOG_DEFAULT_ACCEPT { "accepted" } else { "dismissed" },
+            if self.kind == DialogKind::Prompt {
+                " (and text for the answer)"
+            } else {
+                ""
+            },
+            if DIALOG_DEFAULT_ACCEPT {
+                "accepted"
+            } else {
+                "dismissed"
+            },
             DIALOG_TIMEOUT_SECS
         )
     }
 }
 
 fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() > n { s.chars().take(n).collect::<String>() + "…" } else { s.to_string() }
+    if s.chars().count() > n {
+        s.chars().take(n).collect::<String>() + "…"
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -478,7 +546,10 @@ mod tests {
 
     #[test]
     fn the_settings_field_parses_into_sites() {
-        assert_eq!(parse_sites(" Example.com, localhost:3000\n*.dev.io/  example.com "), sites(&["example.com", "localhost:3000", "*.dev.io"]));
+        assert_eq!(
+            parse_sites(" Example.com, localhost:3000\n*.dev.io/  example.com "),
+            sites(&["example.com", "localhost:3000", "*.dev.io"])
+        );
         assert!(parse_sites("  ").is_empty());
     }
 
@@ -516,27 +587,59 @@ mod tests {
     }
 
     fn snap(url: &str, text: &str) -> Snap {
-        Snap { url: url.into(), text: text.into() }
+        Snap {
+            url: url.into(),
+            text: text.into(),
+        }
     }
 
     #[test]
     fn a_reply_carries_the_change_since_the_last_snapshot() {
-        let before = snap("https://a.io/#x", "- main:\n  - textbox \"Q\" [ref=e1]\n  - button \"Go\" [ref=e2]\n  - link \"A\" [ref=e3]\n  - link \"B\" [ref=e4]\n  - link \"C\" [ref=e5]\n  - link \"D\" [ref=e6]\n  - link \"E\" [ref=e7]\n  - link \"F\" [ref=e8]\n  - link \"G\" [ref=e9]");
-        let after = snap("https://a.io/#y", &before.text.replace("[ref=e1]", "[ref=e1]: hi").replace("  - link \"G\" [ref=e9]", "  - link \"G\" [ref=e9]\n  - alert \"Saved\""));
+        let before = snap(
+            "https://a.io/#x",
+            "- main:\n  - textbox \"Q\" [ref=e1]\n  - button \"Go\" [ref=e2]\n  - link \"A\" [ref=e3]\n  - link \"B\" [ref=e4]\n  - link \"C\" [ref=e5]\n  - link \"D\" [ref=e6]\n  - link \"E\" [ref=e7]\n  - link \"F\" [ref=e8]\n  - link \"G\" [ref=e9]",
+        );
+        let after = snap(
+            "https://a.io/#y",
+            &before.text.replace("[ref=e1]", "[ref=e1]: hi").replace(
+                "  - link \"G\" [ref=e9]",
+                "  - link \"G\" [ref=e9]\n  - alert \"Saved\"",
+            ),
+        );
         let out = snapshot_reply(Some(&before), &after, SnapWant::Diff);
-        assert!(out.starts_with("Changes since your last snapshot (+2 −1"), "{out}");
-        assert!(out.contains("+ - textbox \"Q\" [ref=e1]: hi") && out.contains("+ - alert \"Saved\"") && out.contains("− - textbox \"Q\" [ref=e1]"), "{out}");
-        assert_eq!(snapshot_reply(Some(&before), &before, SnapWant::Diff), "No change to the page's interactive elements.");
+        assert!(
+            out.starts_with("Changes since your last snapshot (+2 −1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("+ - textbox \"Q\" [ref=e1]: hi")
+                && out.contains("+ - alert \"Saved\"")
+                && out.contains("− - textbox \"Q\" [ref=e1]"),
+            "{out}"
+        );
+        assert_eq!(
+            snapshot_reply(Some(&before), &before, SnapWant::Diff),
+            "No change to the page's interactive elements."
+        );
     }
 
     #[test]
     fn a_new_page_or_a_big_change_sends_the_whole_snapshot() {
         let a = snap("https://a.io/", "- button \"Go\" [ref=e1]");
         let b = snap("https://a.io/next", "- link \"Back\" [ref=e2]");
-        assert_eq!(snapshot_reply(Some(&a), &b, SnapWant::Diff), "Page snapshot:\n- link \"Back\" [ref=e2]");
-        assert_eq!(snapshot_reply(None, &a, SnapWant::Diff), "Page snapshot:\n- button \"Go\" [ref=e1]");
+        assert_eq!(
+            snapshot_reply(Some(&a), &b, SnapWant::Diff),
+            "Page snapshot:\n- link \"Back\" [ref=e2]"
+        );
+        assert_eq!(
+            snapshot_reply(None, &a, SnapWant::Diff),
+            "Page snapshot:\n- button \"Go\" [ref=e1]"
+        );
         let c = snap("https://a.io/", "- link \"X\" [ref=e3]");
-        assert!(snapshot_reply(Some(&a), &c, SnapWant::Diff).starts_with("Page snapshot (most of it changed):"));
+        assert!(
+            snapshot_reply(Some(&a), &c, SnapWant::Diff)
+                .starts_with("Page snapshot (most of it changed):")
+        );
         assert_eq!(snapshot_reply(Some(&a), &c, SnapWant::Full), c.text);
         assert_eq!(snapshot_reply(Some(&a), &c, SnapWant::None), "");
     }
@@ -545,13 +648,27 @@ mod tests {
     fn the_console_keeps_the_newest_and_filters_by_level() {
         let mut log = ConsoleLog::default();
         for i in 0..(CONSOLE_CAP + 5) {
-            log.push(ConsoleEntry { level: if i % 3 == 0 { "error".into() } else { "log".into() }, text: format!("m{i}"), at: i as f32, frame: String::new() });
+            log.push(ConsoleEntry {
+                level: if i % 3 == 0 {
+                    "error".into()
+                } else {
+                    "log".into()
+                },
+                text: format!("m{i}"),
+                at: i as f32,
+                frame: String::new(),
+            });
         }
         assert_eq!(log.len(), CONSOLE_CAP);
         assert!(log.take_unseen_errors() > 0);
         assert_eq!(log.take_unseen_errors(), 0);
         let errors = log.read("error", 2, false);
-        assert!(errors.contains("older not shown") && errors.contains("m303") && !errors.contains("] m304"), "{errors}");
+        assert!(
+            errors.contains("older not shown")
+                && errors.contains("m303")
+                && !errors.contains("] m304"),
+            "{errors}"
+        );
         assert!(errors.contains("5 oldest messages dropped"), "{errors}");
         let all = log.read("all", 1000, true);
         assert!(all.contains("m304") && !all.contains("] m4\n"), "{all}");
@@ -561,12 +678,30 @@ mod tests {
 
     #[test]
     fn dialogs_tell_the_agent_how_to_answer() {
-        let d = DialogInfo { kind: DialogKind::Confirm, message: "Delete it?".into(), default_text: None, site: "a.io".into() };
+        let d = DialogInfo {
+            kind: DialogKind::Confirm,
+            message: "Delete it?".into(),
+            default_text: None,
+            site: "a.io".into(),
+        };
         let ask = d.ask();
-        assert!(ask.starts_with("a.io opened a confirm dialog: \"Delete it?\""), "{ask}");
-        assert!(ask.contains("browser_handle_dialog") && ask.contains("dismissed in 30s"), "{ask}");
-        let p = DialogInfo { kind: DialogKind::Prompt, message: "Name?".into(), default_text: Some("Bob".into()), site: String::new() };
-        assert!(p.ask().contains("default answer \"Bob\"") && p.ask().contains("text for the answer"));
+        assert!(
+            ask.starts_with("a.io opened a confirm dialog: \"Delete it?\""),
+            "{ask}"
+        );
+        assert!(
+            ask.contains("browser_handle_dialog") && ask.contains("dismissed in 30s"),
+            "{ask}"
+        );
+        let p = DialogInfo {
+            kind: DialogKind::Prompt,
+            message: "Name?".into(),
+            default_text: Some("Bob".into()),
+            site: String::new(),
+        };
+        assert!(
+            p.ask().contains("default answer \"Bob\"") && p.ask().contains("text for the answer")
+        );
     }
 
     /// Token-size measurement: `KEEL_MEASURE_DIR=/tmp/keel-snap-measure
@@ -575,17 +710,36 @@ mod tests {
     #[test]
     #[ignore]
     fn measure_action_diffs() {
-        let Ok(dir) = std::env::var("KEEL_MEASURE_DIR") else { return };
+        let Ok(dir) = std::env::var("KEEL_MEASURE_DIR") else {
+            return;
+        };
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let Some(stem) = name.strip_suffix(".act0.txt") else { continue };
-            let read = |suffix: &str| std::fs::read_to_string(format!("{dir}/{stem}{suffix}")).unwrap();
-            let prev = Snap { url: "https://x.test/a".into(), text: read(".act0.txt") };
-            let next = Snap { url: "https://x.test/a".into(), text: read(".act1.txt") };
-            let reply = format!("{}\n{}", read(".act-outcome.txt"), snapshot_reply(Some(&prev), &next, SnapWant::Diff));
+            let Some(stem) = name.strip_suffix(".act0.txt") else {
+                continue;
+            };
+            let read =
+                |suffix: &str| std::fs::read_to_string(format!("{dir}/{stem}{suffix}")).unwrap();
+            let prev = Snap {
+                url: "https://x.test/a".into(),
+                text: read(".act0.txt"),
+            };
+            let next = Snap {
+                url: "https://x.test/a".into(),
+                text: read(".act1.txt"),
+            };
+            let reply = format!(
+                "{}\n{}",
+                read(".act-outcome.txt"),
+                snapshot_reply(Some(&prev), &next, SnapWant::Diff)
+            );
             std::fs::write(format!("{dir}/{stem}.act-reply.txt"), &reply).unwrap();
-            println!("{stem}: diff reply {} bytes (full snapshot {})", reply.len(), next.text.len());
+            println!(
+                "{stem}: diff reply {} bytes (full snapshot {})",
+                reply.len(),
+                next.text.len()
+            );
         }
     }
 }

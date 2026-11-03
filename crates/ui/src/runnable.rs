@@ -21,7 +21,10 @@ pub fn from_spec(spec: &Value) -> Option<Vec<(String, Run)>> {
         .as_array()?
         .iter()
         .filter_map(|item| {
-            let run = Run { command: item["run"].as_str()?.to_string(), risky: item["risky"] == true };
+            let run = Run {
+                command: item["run"].as_str()?.to_string(),
+                risky: item["risky"] == true,
+            };
             Some((item["content"].as_str()?.trim().to_string(), run))
         })
         .filter(|(content, run)| !content.is_empty() && !run.command.trim().is_empty())
@@ -42,6 +45,12 @@ mod tests {
         ] }))
         .unwrap();
         assert_eq!(items[0].0, "$ cargo t\ntest result: ok");
-        assert_eq!(items[1].1, Run { command: "git push --force".into(), risky: true });
+        assert_eq!(
+            items[1].1,
+            Run {
+                command: "git push --force".into(),
+                risky: true
+            }
+        );
     }
 }

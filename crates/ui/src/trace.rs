@@ -103,7 +103,8 @@ pub fn verb_for(kind: StepKind, name: &str) -> Verb {
 }
 
 fn browser_verb(name: &str) -> Verb {
-    let op = browser_trace::tool_base(name).map_or(BrowserOp::Other, |base| browser_trace::op_of(&base));
+    let op =
+        browser_trace::tool_base(name).map_or(BrowserOp::Other, |base| browser_trace::op_of(&base));
     browser_trace::verb(op, &browser_trace::Args::default())
 }
 
@@ -293,7 +294,11 @@ impl From<&ToolEntry> for TraceStep {
 /// A browser tool's line, under any harness's naming: verb and subject from
 /// its arguments and result, a readable body, and its own icon.
 fn browser_step(tool: &ToolEntry) -> Option<TraceStep> {
-    let output = if tool.output_tail.is_empty() { &tool.summary } else { &tool.output_tail };
+    let output = if tool.output_tail.is_empty() {
+        &tool.summary
+    } else {
+        &tool.output_tail
+    };
     let base = browser_trace::tool_base(&tool.name)?;
     let op = browser_trace::op_of(&base);
     let status = status_of(&tool.state);
@@ -304,7 +309,11 @@ fn browser_step(tool: &ToolEntry) -> Option<TraceStep> {
         StepBody::Shots(tool.images.clone())
     } else {
         let body = browser_trace::body(op, &args, &outcome, output, failed);
-        if body.rows.is_empty() && body.raw.trim().is_empty() { StepBody::None } else { StepBody::Browser(body) }
+        if body.rows.is_empty() && body.raw.trim().is_empty() {
+            StepBody::None
+        } else {
+            StepBody::Browser(body)
+        }
     };
     let mut step = TraceStep {
         id: tool.tool_id.clone(),
@@ -335,12 +344,22 @@ enum WebTool {
 
 fn web_tool(name: &str) -> Option<WebTool> {
     // Grok titles its calls "Web search:"; MCP-style names carry a prefix.
-    let n = name.trim().trim_end_matches(':').trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    let n = name
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_");
     let n = n.rsplit("__").next().unwrap_or(&n);
     match n {
-        "web_search" | "websearch" | "search_web" | "google_web_search" | "web_search_preview" => Some(WebTool::Search),
-        "x_search" | "xsearch" | "search_x" | "x_keyword_search" | "x_semantic_search" => Some(WebTool::XSearch),
-        "web_fetch" | "webfetch" | "fetch_url" | "fetch_content" | "open_page" | "browse_page" | "open_url" | "read_url" => Some(WebTool::Fetch),
+        "web_search" | "websearch" | "search_web" | "google_web_search" | "web_search_preview" => {
+            Some(WebTool::Search)
+        }
+        "x_search" | "xsearch" | "search_x" | "x_keyword_search" | "x_semantic_search" => {
+            Some(WebTool::XSearch)
+        }
+        "web_fetch" | "webfetch" | "fetch_url" | "fetch_content" | "open_page" | "browse_page"
+        | "open_url" | "read_url" => Some(WebTool::Fetch),
         _ => None,
     }
 }
@@ -348,7 +367,12 @@ fn web_tool(name: &str) -> Option<WebTool> {
 fn quoted(text: &str) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let short: String = if text.chars().count() > 60 {
-        text.chars().take(59).collect::<String>().trim_end().to_string() + "\u{2026}"
+        text.chars()
+            .take(59)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+            + "\u{2026}"
     } else {
         text
     };
@@ -366,7 +390,10 @@ fn web_progress(text: &str) -> (String, Option<String>) {
             let inner = rest[open + 1..rest.len() - 1].trim();
             let count = inner.split_whitespace().next().unwrap_or_default();
             let is_count = count.split_once('/').is_some_and(|(a, b)| {
-                !a.is_empty() && !b.is_empty() && a.chars().all(|c| c.is_ascii_digit()) && b.chars().all(|c| c.is_ascii_digit())
+                !a.is_empty()
+                    && !b.is_empty()
+                    && a.chars().all(|c| c.is_ascii_digit())
+                    && b.chars().all(|c| c.is_ascii_digit())
             });
             if is_count {
                 progress = Some(count.to_string());
@@ -375,7 +402,17 @@ fn web_progress(text: &str) -> (String, Option<String>) {
         }
     }
     let lower = rest.to_ascii_lowercase();
-    for lead in ["searching the web for", "searching x for", "searched x for", "searching for", "searched for", "searching", "searched", "reading", "fetching"] {
+    for lead in [
+        "searching the web for",
+        "searching x for",
+        "searched x for",
+        "searching for",
+        "searched for",
+        "searching",
+        "searched",
+        "reading",
+        "fetching",
+    ] {
         if lower.starts_with(lead) && rest[lead.len()..].starts_with([' ', ':', '"', '\u{201c}']) {
             rest = rest[lead.len()..].trim_start_matches([' ', ':']).trim();
             break;
@@ -404,9 +441,14 @@ fn is_url(text: &str) -> bool {
 fn web_step(tool: &ToolEntry) -> Option<TraceStep> {
     let mut which = web_tool(&tool.name)?;
     let status = status_of(&tool.state);
-    let output = if tool.output_tail.is_empty() { tool.summary.as_str() } else { tool.output_tail.as_str() };
+    let output = if tool.output_tail.is_empty() {
+        tool.summary.as_str()
+    } else {
+        tool.output_tail.as_str()
+    };
     let detail = tool.detail.trim();
-    let usable = |text: &str| !text.is_empty() && !text.starts_with(['{', '[']) && web_tool(text).is_none();
+    let usable =
+        |text: &str| !text.is_empty() && !text.starts_with(['{', '[']) && web_tool(text).is_none();
     let first = output.lines().next().unwrap_or_default().trim();
     let raw = if usable(detail) {
         detail
@@ -424,27 +466,53 @@ fn web_step(tool: &ToolEntry) -> Option<TraceStep> {
         WebTool::Search => (
             StepKind::Search,
             verb("Search", "Searching", "Searched", "search", "searching"),
-            if target.is_empty() { "the web".to_string() } else { quoted(target) },
+            if target.is_empty() {
+                "the web".to_string()
+            } else {
+                quoted(target)
+            },
         ),
         WebTool::XSearch => (
             StepKind::Search,
-            verb("Search X for", "Searching X for", "Searched X for", "search X for", "searching X for"),
-            if target.is_empty() { String::new() } else { quoted(target) },
+            verb(
+                "Search X for",
+                "Searching X for",
+                "Searched X for",
+                "search X for",
+                "searching X for",
+            ),
+            if target.is_empty() {
+                String::new()
+            } else {
+                quoted(target)
+            },
         ),
         WebTool::Fetch => (
             StepKind::Fetch,
             verb("Read", "Reading", "Read", "read", "reading"),
-            if target.is_empty() { "the page".to_string() } else { fetch_host(target) },
+            if target.is_empty() {
+                "the page".to_string()
+            } else {
+                fetch_host(target)
+            },
         ),
     };
-    let mut urls: Vec<&str> = output.lines().skip(1).map(str::trim).filter(|line| is_url(line)).collect();
+    let mut urls: Vec<&str> = output
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| is_url(line))
+        .collect();
     if which == WebTool::Fetch && is_url(target) && urls.is_empty() {
         urls.push(target);
     }
     let body = if !urls.is_empty() {
         StepBody::Links(
             urls.into_iter()
-                .map(|url| Link { title: fetch_host(url), url: url.to_string() })
+                .map(|url| Link {
+                    title: fetch_host(url),
+                    url: url.to_string(),
+                })
                 .collect(),
         )
     } else if output.trim().is_empty() || output.trim() == target || output.trim() == raw {
@@ -868,7 +936,10 @@ fn weight(step: &TraceStep) -> usize {
 
 fn browsed_group(steps: Vec<TraceStep>) -> TraceGroup {
     let actions: usize = steps.iter().map(weight).sum();
-    let failed = steps.iter().filter(|s| s.status == StepStatus::Error).count();
+    let failed = steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Error)
+        .count();
     let running = steps.iter().rev().find(|s| s.status == StepStatus::Running);
     let host = steps.iter().rev().find_map(|s| match &s.body {
         StepBody::Browser(b) => b.host.clone(),
@@ -894,7 +965,11 @@ fn browsed_group(steps: Vec<TraceStep>) -> TraceGroup {
     } else {
         format!("Browsed{site} \u{b7} {count}")
     };
-    TraceGroup { title, status, steps }
+    TraceGroup {
+        title,
+        status,
+        steps,
+    }
 }
 
 fn foldable(step: &TraceStep) -> bool {
@@ -1509,16 +1584,37 @@ mod browser_line_tests {
         assert_eq!(nav.browser, Some(BrowserOp::Navigate));
         assert_eq!(nav.title(), "Opened traveloka.com/en-id");
 
-        let running = TraceStep::from(&tool("2", "keel-browser__browser_navigate", "running", r#"{"url":"https://www.traveloka.com"}"#, ""));
+        let running = TraceStep::from(&tool(
+            "2",
+            "keel-browser__browser_navigate",
+            "running",
+            r#"{"url":"https://www.traveloka.com"}"#,
+            "",
+        ));
         assert_eq!(running.title(), "Opening traveloka.com");
 
         let pane = TraceStep::from(&tool("4", "keel-browser_browser_open_pane", "done", "", ""));
         assert_eq!(pane.title(), "Opened browser");
-        let pane = TraceStep::from(&tool("4", "mcp__keel_browser__browser_open_pane", "running", "", ""));
+        let pane = TraceStep::from(&tool(
+            "4",
+            "mcp__keel_browser__browser_open_pane",
+            "running",
+            "",
+            "",
+        ));
         assert_eq!(pane.title(), "Opening browser");
 
-        let resona = TraceStep::from(&tool("5", "mcp__keel_browser__browser_navigate", "error", "https://www.resonafinance.co.id/id/about-us/company-profile", "browser request timed out"));
-        assert_eq!(resona.title(), "Couldn't open resonafinance.co.id/id/about-us/company-profile");
+        let resona = TraceStep::from(&tool(
+            "5",
+            "mcp__keel_browser__browser_navigate",
+            "error",
+            "https://www.resonafinance.co.id/id/about-us/company-profile",
+            "browser request timed out",
+        ));
+        assert_eq!(
+            resona.title(),
+            "Couldn't open resonafinance.co.id/id/about-us/company-profile"
+        );
 
         let typed = TraceStep::from(&tool(
             "6",
@@ -1527,15 +1623,38 @@ mod browser_line_tests {
             r##"{"selector":"#q","text":"Jakarta to Bali"}"##,
             "{\n  \"text\": \"typed 15 chars into input#q \\\"Jakarta to Bali\\\", pressed Enter\",\n  \"title\": \"Traveloka\",\n  \"url\": \"https://www.traveloka.com/en-id\"\n}",
         ));
-        assert_eq!(typed.title(), "Typed \u{201c}Jakarta to Bali\u{201d} in input#q");
-        let StepBody::Browser(b) = &typed.body else { panic!("{:?}", typed.body) };
+        assert_eq!(
+            typed.title(),
+            "Typed \u{201c}Jakarta to Bali\u{201d} in input#q"
+        );
+        let StepBody::Browser(b) = &typed.body else {
+            panic!("{:?}", typed.body)
+        };
         assert!(!b.raw.contains("\\\"Jakarta"), "{}", b.raw);
 
-        let scroll = TraceStep::from(&tool("7", "keel-browser:browser_scroll", "done", r#"{"dy":800}"#, ""));
+        let scroll = TraceStep::from(&tool(
+            "7",
+            "keel-browser:browser_scroll",
+            "done",
+            r#"{"dy":800}"#,
+            "",
+        ));
         assert_eq!(scroll.title(), "Scrolled down");
-        let read = TraceStep::from(&tool("8", "mcp__keel_browser__browser_snapshot", "done", "", "{\n  \"text\": \"Flights Hotels\",\n  \"url\": \"https://www.traveloka.com/en-id\"\n}"));
+        let read = TraceStep::from(&tool(
+            "8",
+            "mcp__keel_browser__browser_snapshot",
+            "done",
+            "",
+            "{\n  \"text\": \"Flights Hotels\",\n  \"url\": \"https://www.traveloka.com/en-id\"\n}",
+        ));
         assert_eq!(read.title(), "Read page traveloka.com");
-        let mut shot = tool("9", "mcp__keel_browser__browser_screenshot", "done", "", "Saved to /tmp/s.png");
+        let mut shot = tool(
+            "9",
+            "mcp__keel_browser__browser_screenshot",
+            "done",
+            "",
+            "Saved to /tmp/s.png",
+        );
         shot.images = vec!["/tmp/s.png".into()];
         let shot = TraceStep::from(&shot);
         assert_eq!(shot.title(), "Took screenshot");
@@ -1545,7 +1664,9 @@ mod browser_line_tests {
         let steps = vec![nav, typed, scroll, read, shot];
         let nodes = group_steps(steps);
         assert_eq!(nodes.len(), 1);
-        let TraceNode::Browsed(group) = &nodes[0] else { panic!("{nodes:?}") };
+        let TraceNode::Browsed(group) = &nodes[0] else {
+            panic!("{nodes:?}")
+        };
         assert_eq!(group.title, "Browsed traveloka.com \u{b7} 5 actions");
     }
 
@@ -1553,7 +1674,13 @@ mod browser_line_tests {
     fn other_mcp_tools_are_not_browser_lines() {
         let other = TraceStep::from(&tool("1", "mcp__linear__save_issue", "done", "", "ok"));
         assert_ne!(other.kind, StepKind::Browser);
-        let search = TraceStep::from(&tool("2", "search_tool", "done", "", "{\n  \"results\": [{\"server\": \"keel-browser\"}]}"));
+        let search = TraceStep::from(&tool(
+            "2",
+            "search_tool",
+            "done",
+            "",
+            "{\n  \"results\": [{\"server\": \"keel-browser\"}]}",
+        ));
         assert_ne!(search.kind, StepKind::Browser);
     }
 
@@ -1577,34 +1704,86 @@ mod browser_line_tests {
         let running = web("Web search:", "running", "", "");
         assert_eq!(running.title(), "Searching the web");
         assert_eq!(running.kind, StepKind::Search);
-        let done = web("Web search:", "done", "", "Indonesia haze today\n\nhttps://a.example/x\nhttps://b.example/y");
-        assert_eq!(done.title(), "Searched \u{201c}Indonesia haze today\u{201d}");
-        assert!(matches!(&done.body, StepBody::Links(links) if links.len() == 2 && links[0].title == "a.example"));
-        let page = web("Web search:", "done", "", "https://bernama.com/en/news.php?id=2621719");
+        let done = web(
+            "Web search:",
+            "done",
+            "",
+            "Indonesia haze today\n\nhttps://a.example/x\nhttps://b.example/y",
+        );
+        assert_eq!(
+            done.title(),
+            "Searched \u{201c}Indonesia haze today\u{201d}"
+        );
+        assert!(
+            matches!(&done.body, StepBody::Links(links) if links.len() == 2 && links[0].title == "a.example")
+        );
+        let page = web(
+            "Web search:",
+            "done",
+            "",
+            "https://bernama.com/en/news.php?id=2621719",
+        );
         assert_eq!(page.title(), "Read bernama.com");
         assert_eq!(page.kind, StepKind::Fetch);
-        assert_eq!(web("web_search", "running", "rust gpui", "").title(), "Searching \u{201c}rust gpui\u{201d}");
-        assert_eq!(web("web_fetch", "running", "https://docs.rs/gpui", "").title(), "Reading docs.rs");
-        assert_eq!(web("fetch_content", "running", "https://docs.rs/gpui", "").title(), "Reading docs.rs");
-        assert_eq!(web("x_search", "done", "keel app", "").title(), "Searched X for \u{201c}keel app\u{201d}");
+        assert_eq!(
+            web("web_search", "running", "rust gpui", "").title(),
+            "Searching \u{201c}rust gpui\u{201d}"
+        );
+        assert_eq!(
+            web("web_fetch", "running", "https://docs.rs/gpui", "").title(),
+            "Reading docs.rs"
+        );
+        assert_eq!(
+            web("fetch_content", "running", "https://docs.rs/gpui", "").title(),
+            "Reading docs.rs"
+        );
+        assert_eq!(
+            web("x_search", "done", "keel app", "").title(),
+            "Searched X for \u{201c}keel app\u{201d}"
+        );
         assert_eq!(web("x_search", "running", "", "").title(), "Searching X");
-        assert_eq!(web("WebSearch", "error", "q", "boom").title(), "Failed to search \u{201c}q\u{201d}");
+        assert_eq!(
+            web("WebSearch", "error", "q", "boom").title(),
+            "Failed to search \u{201c}q\u{201d}"
+        );
     }
 
     /// Grok's running search title carries the verb and a counter:
     /// `Searching "<q>" (0/4 completed)`. Only the query is the subject.
     #[test]
     fn grok_search_progress_title_is_parsed() {
-        let running = web("Web search:", "running", "", "Searching \"Indonesia fire haze latest news 2026\" (0/4 completed)");
-        assert_eq!(running.title(), "Searching \u{201c}Indonesia fire haze latest news 2026\u{201d}");
+        let running = web(
+            "Web search:",
+            "running",
+            "",
+            "Searching \"Indonesia fire haze latest news 2026\" (0/4 completed)",
+        );
+        assert_eq!(
+            running.title(),
+            "Searching \u{201c}Indonesia fire haze latest news 2026\u{201d}"
+        );
         assert_eq!(running.description.as_deref(), Some("0/4"));
         assert!(matches!(running.body, StepBody::None));
-        let curly = web("web_search", "running", "Searching \u{201c}rust gpui\u{201d} (2/4)", "");
+        let curly = web(
+            "web_search",
+            "running",
+            "Searching \u{201c}rust gpui\u{201d} (2/4)",
+            "",
+        );
         assert_eq!(curly.title(), "Searching \u{201c}rust gpui\u{201d}");
         assert_eq!(curly.description.as_deref(), Some("2/4"));
-        assert_eq!(web_progress("Indonesia haze today"), ("Indonesia haze today".to_string(), None));
-        assert_eq!(web_progress("Searching for: tokio (1/3 completed)"), ("tokio".to_string(), Some("1/3".to_string())));
+        assert_eq!(
+            web_progress("Indonesia haze today"),
+            ("Indonesia haze today".to_string(), None)
+        );
+        assert_eq!(
+            web_progress("Searching for: tokio (1/3 completed)"),
+            ("tokio".to_string(), Some("1/3".to_string()))
+        );
         // A query that merely starts with the word is left alone.
-        assert_eq!(web_progress("searchingly odd"), ("searchingly odd".to_string(), None));
+        assert_eq!(
+            web_progress("searchingly odd"),
+            ("searchingly odd".to_string(), None)
+        );
     }
 }

@@ -11,6 +11,7 @@ pub mod connections;
 pub mod dotify;
 pub mod files;
 mod genui;
+pub mod skills;
 pub use genui::{ui_call, ui_tools};
 mod journal;
 mod limits;
@@ -36,8 +37,9 @@ use keel_harness::{
     SessionReport, SessionSpec,
 };
 use keel_proto::{
-    AgentEvent, ChatStatus, DocKind, HarnessId, PermissionMode, RpcErrorBody, RpcErrorCode, RpcFailure, RpcRequest,
-    RpcStreamItem, SubscribeEvent, TurnStatus, UserCommand, UserInputAnswer,
+    AgentEvent, ChatStatus, DocKind, HarnessId, PermissionMode, RpcErrorBody, RpcErrorCode,
+    RpcFailure, RpcRequest, RpcStreamItem, SubscribeEvent, TurnStatus, UserCommand,
+    UserInputAnswer,
 };
 use keel_rpc::{EngineHost, Outbound};
 use keel_store::{DocsStore, NativeSession, session_doc_id};
@@ -49,8 +51,9 @@ use uuid::Uuid;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use limits::{
-    COMPACTION_BYTES, HEARTBEAT_MS, INTERRUPT_DEADLINE_MS, MAINTENANCE_MS, MAX_LIVE_RUNS, RETAIN_DAYS, RETAIN_MS,
-    SNAPSHOT_FLUSH_MS, STALL_WATCHDOG_MS, STREAM_COMMIT_MS, WARM_CAP, WARM_DAYS, WARM_MS,
+    COMPACTION_BYTES, HEARTBEAT_MS, INTERRUPT_DEADLINE_MS, MAINTENANCE_MS, MAX_LIVE_RUNS,
+    RETAIN_DAYS, RETAIN_MS, SNAPSHOT_FLUSH_MS, STALL_WATCHDOG_MS, STREAM_COMMIT_MS, WARM_CAP,
+    WARM_DAYS, WARM_MS,
 };
 
 use journal::{Journal, delete_older, journal_path, replay};
@@ -741,7 +744,8 @@ impl Engine {
         let meta = doc.view().meta;
         self.check_model(&meta.harness, model)?;
         // An old client may still send the retired poteto effort.
-        let reasoning = &keel_proto::migrate_effort(reasoning, &self.cached_levels(&meta.harness, model));
+        let reasoning =
+            &keel_proto::migrate_effort(reasoning, &self.cached_levels(&meta.harness, model));
         let now = self.now();
         let mut state = self.lock();
         doc.set_options(model, reasoning)?;
@@ -760,7 +764,11 @@ impl Engine {
         let permission = PermissionMode::parse(permission).as_str();
         let now = self.now();
         let mut state = self.lock();
-        state.store.registry().set_chat_permission(chat_id, permission).map_err(|_| EngineError::UnknownChat)?;
+        state
+            .store
+            .registry()
+            .set_chat_permission(chat_id, permission)
+            .map_err(|_| EngineError::UnknownChat)?;
         state.dirty = true;
         save(&mut state, now, false, self.inner.compaction_bytes)?;
         self.push_registry_chat(&state, chat_id);
@@ -1386,11 +1394,16 @@ impl Engine {
                 // A Keel UI tool's result is the card spec. Store it on this
                 // message now; the host draws it. No second model.
                 if keel_proto::is_ui_tool(&name)
-                    && let Some(spec) = output_tail.lines().rev().find_map(|line| {
-                        let spec = line.trim();
-                        spec.starts_with('{').then(|| serde_json::from_str::<Value>(spec).ok()).flatten()
-                    })
-                    .filter(|spec| spec.get("component").and_then(Value::as_str).is_some())
+                    && let Some(spec) = output_tail
+                        .lines()
+                        .rev()
+                        .find_map(|line| {
+                            let spec = line.trim();
+                            spec.starts_with('{')
+                                .then(|| serde_json::from_str::<Value>(spec).ok())
+                                .flatten()
+                        })
+                        .filter(|spec| spec.get("component").and_then(Value::as_str).is_some())
                     && let Some(doc) = state.store.session(chat_id)
                 {
                     let id = spec["component"].as_str().unwrap_or("ui");
@@ -2494,18 +2507,28 @@ impl Engine {
         // roots, the first being where it runs (its checkout, when it has one).
         let project = self.project_roots(chat_id, &meta.cwd);
         if let Some(p) = &project {
-            let roots: Vec<String> = p.roots.iter().map(|(a, path)| format!("{a}={path}")).collect();
+            let roots: Vec<String> = p
+                .roots
+                .iter()
+                .map(|(a, path)| format!("{a}={path}"))
+                .collect();
             tracing::info!(target: "keel_engine", chat_id, project = %p.name, roots = ?roots, "project roots");
         }
         let initial_text = match &project {
-            Some(_) => keel_proto::projects::resolve_mentions(&command.text, &self.project_mention_roots(chat_id, &meta.cwd)),
+            Some(_) => keel_proto::projects::resolve_mentions(
+                &command.text,
+                &self.project_mention_roots(chat_id, &meta.cwd),
+            ),
             None => command.text.clone(),
         };
         // A session saved on the retired poteto effort runs at `high` (else
         // the model's top level); the harness default when the list isn't
         // loaded.
         let reasoning = if meta.reasoning == keel_proto::RETIRED_POTETO {
-            keel_proto::migrate_effort(&meta.reasoning, &self.cached_levels(&meta.harness, &meta.model))
+            keel_proto::migrate_effort(
+                &meta.reasoning,
+                &self.cached_levels(&meta.harness, &meta.model),
+            )
         } else {
             meta.reasoning
         };
@@ -2516,7 +2539,9 @@ impl Engine {
             engine.store_native(&reported_chat, &native_id, file.as_deref());
         }));
         // Uploads for this chat's browser tab come from its project folder.
-        self.inner.browser.set_root(chat_id, PathBuf::from(&meta.cwd));
+        self.inner
+            .browser
+            .set_root(chat_id, PathBuf::from(&meta.cwd));
         Ok(Start {
             chat_id: chat_id.to_string(),
             run_id: run_id,
@@ -2568,14 +2593,19 @@ impl Engine {
     fn project_roots(&self, chat_id: &str, cwd: &str) -> Option<keel_harness::ProjectRoots> {
         let projects = self.projects();
         let (project, folders) = projects.for_chat(chat_id)?;
-        let mut roots: Vec<(String, String)> =
-            folders.iter().map(|f| (f.alias.clone(), f.path.clone())).collect();
+        let mut roots: Vec<(String, String)> = folders
+            .iter()
+            .map(|f| (f.alias.clone(), f.path.clone()))
+            .collect();
         if let Some(first) = roots.first_mut()
             && !cwd.is_empty()
         {
             first.1 = cwd.to_string();
         }
-        Some(keel_harness::ProjectRoots { name: project.name.clone(), roots })
+        Some(keel_harness::ProjectRoots {
+            name: project.name.clone(),
+            roots,
+        })
     }
 
     /// `@alias/...` in a steer, spelled out like the send's.
@@ -2597,7 +2627,16 @@ impl Engine {
             .folders
             .iter()
             .enumerate()
-            .map(|(i, f)| (f.alias.clone(), if i == 0 && !cwd.is_empty() { cwd.to_string() } else { f.path.clone() }))
+            .map(|(i, f)| {
+                (
+                    f.alias.clone(),
+                    if i == 0 && !cwd.is_empty() {
+                        cwd.to_string()
+                    } else {
+                        f.path.clone()
+                    },
+                )
+            })
             .collect()
     }
 
@@ -3076,7 +3115,13 @@ impl Engine {
     /// `message`). One at a time: a browser sign-in holds a callback port.
     fn rpc_sign_in(&self, id: &str, params: &Value) -> String {
         let provider = params["provider"].as_str().unwrap_or_default().to_string();
-        let Some(harness) = self.inner.harnesses.iter().find(|h| h.id() == HarnessId::Keel).cloned() else {
+        let Some(harness) = self
+            .inner
+            .harnesses
+            .iter()
+            .find(|h| h.id() == HarnessId::Keel)
+            .cloned()
+        else {
             return failure(id, RpcErrorCode::BadParams, "Keel's Pi is not available");
         };
         if tokio::runtime::Handle::try_current().is_err() {
@@ -3090,12 +3135,19 @@ impl Engine {
                     task.abort();
                 }
             }
-            map.insert(provider.clone(), (serde_json::json!({ "state": "starting" }), None));
+            map.insert(
+                provider.clone(),
+                (serde_json::json!({ "state": "starting" }), None),
+            );
         }
         let set = {
             let (sign_ins, provider) = (Arc::clone(&sign_ins), provider.clone());
             move |status: Value| {
-                if let Some(entry) = sign_ins.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&provider) {
+                if let Some(entry) = sign_ins
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_mut(&provider)
+                {
                     entry.0 = status;
                 }
             }
@@ -3106,26 +3158,41 @@ impl Engine {
             async move {
                 let on = |event: keel_harness::SignInEvent| {
                     set(match event {
-                        keel_harness::SignInEvent::Browser { url } => serde_json::json!({ "state": "browser", "url": url }),
+                        keel_harness::SignInEvent::Browser { url } => {
+                            serde_json::json!({ "state": "browser", "url": url })
+                        }
                         keel_harness::SignInEvent::DeviceCode { code, url } => {
                             serde_json::json!({ "state": "device", "code": code, "url": url })
                         }
-                        keel_harness::SignInEvent::Progress(message) => serde_json::json!({ "state": "working", "message": message }),
+                        keel_harness::SignInEvent::Progress(message) => {
+                            serde_json::json!({ "state": "working", "message": message })
+                        }
                     })
                 };
                 let result = harness.sign_in(&provider, &on).await;
                 tracing::info!(target: "keel_engine", provider, ok = result.is_ok(), "sign-in finished");
                 if result.is_ok() {
                     // A new provider brings its models; the next `list_models` asks Pi again.
-                    engine.inner.models.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                    engine
+                        .inner
+                        .models
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clear();
                 }
                 set(match result {
                     Ok(()) => serde_json::json!({ "state": "done" }),
-                    Err(err) => serde_json::json!({ "state": "failed", "message": err.to_string() }),
+                    Err(err) => {
+                        serde_json::json!({ "state": "failed", "message": err.to_string() })
+                    }
                 });
             }
         });
-        if let Some(entry) = sign_ins.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&provider) {
+        if let Some(entry) = sign_ins
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&provider)
+        {
             entry.1 = Some(task.abort_handle());
         }
         success(id, serde_json::json!({ "state": "starting" }))
@@ -3804,56 +3871,76 @@ impl Engine {
             .collect()
     }
 
-/// Ranks changed files so meaningful source code is previewed before noise (dotfiles, lockfiles).
-fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
-    let is_noise = |p: &str| -> bool {
-        let name = p.rsplit('/').next().unwrap_or(p);
-        p.starts_with('.')
-            || p.contains("/.")
-            || name == "package-lock.json"
-            || name == "pnpm-lock.yaml"
-            || name == "yarn.lock"
-            || name == "Cargo.lock"
-            || name == "poetry.lock"
-            || name == "Gemfile.lock"
-    };
+    /// Ranks changed files so meaningful source code is previewed before noise (dotfiles, lockfiles).
+    fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
+        let is_noise = |p: &str| -> bool {
+            let name = p.rsplit('/').next().unwrap_or(p);
+            p.starts_with('.')
+                || p.contains("/.")
+                || name == "package-lock.json"
+                || name == "pnpm-lock.yaml"
+                || name == "yarn.lock"
+                || name == "Cargo.lock"
+                || name == "poetry.lock"
+                || name == "Gemfile.lock"
+        };
 
-    let mut code = Vec::new();
-    let mut config_data = Vec::new();
-    let mut docs = Vec::new();
-    let mut other = Vec::new();
-    let mut noise = Vec::new();
+        let mut code = Vec::new();
+        let mut config_data = Vec::new();
+        let mut docs = Vec::new();
+        let mut other = Vec::new();
+        let mut noise = Vec::new();
 
-    for ch in changes {
-        let p = &ch.path;
-        if is_noise(p) {
-            noise.push(ch);
-        } else {
-            let ext = p.rsplit('.').next().unwrap_or("");
-            if matches!(
-                ext,
-                "rs" | "ts" | "tsx" | "js" | "jsx" | "svelte" | "vue" | "py" | "go" | "rb"
-                    | "php" | "java" | "swift" | "kt" | "c" | "cpp" | "h" | "css" | "scss" | "html"
-            ) {
-                code.push(ch);
-            } else if matches!(ext, "json" | "yaml" | "yml" | "toml" | "sql" | "prisma" | "graphql") {
-                config_data.push(ch);
-            } else if matches!(ext, "md" | "txt") {
-                docs.push(ch);
+        for ch in changes {
+            let p = &ch.path;
+            if is_noise(p) {
+                noise.push(ch);
             } else {
-                other.push(ch);
+                let ext = p.rsplit('.').next().unwrap_or("");
+                if matches!(
+                    ext,
+                    "rs" | "ts"
+                        | "tsx"
+                        | "js"
+                        | "jsx"
+                        | "svelte"
+                        | "vue"
+                        | "py"
+                        | "go"
+                        | "rb"
+                        | "php"
+                        | "java"
+                        | "swift"
+                        | "kt"
+                        | "c"
+                        | "cpp"
+                        | "h"
+                        | "css"
+                        | "scss"
+                        | "html"
+                ) {
+                    code.push(ch);
+                } else if matches!(
+                    ext,
+                    "json" | "yaml" | "yml" | "toml" | "sql" | "prisma" | "graphql"
+                ) {
+                    config_data.push(ch);
+                } else if matches!(ext, "md" | "txt") {
+                    docs.push(ch);
+                } else {
+                    other.push(ch);
+                }
             }
         }
-    }
 
-    let mut result = code;
-    result.extend(config_data);
-    result.extend(docs);
-    result.extend(other);
-    result.extend(noise);
-    result.truncate(12);
-    result
-}
+        let mut result = code;
+        result.extend(config_data);
+        result.extend(docs);
+        result.extend(other);
+        result.extend(noise);
+        result.truncate(12);
+        result
+    }
 
     /// Off the connection's request loop (git runs on its own thread), so a
     /// folder change never waits behind other requests: the immediate reply
@@ -3877,8 +3964,16 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
             let listed = files::changes(cwd).ok();
             let changes_count = listed.as_ref().map(|c| c.len());
             let raw_changes = listed.unwrap_or_default();
-            let total_additions: u64 = raw_changes.iter().filter_map(|c| c.added).map(u64::from).sum();
-            let total_deletions: u64 = raw_changes.iter().filter_map(|c| c.removed).map(u64::from).sum();
+            let total_additions: u64 = raw_changes
+                .iter()
+                .filter_map(|c| c.added)
+                .map(u64::from)
+                .sum();
+            let total_deletions: u64 = raw_changes
+                .iter()
+                .filter_map(|c| c.removed)
+                .map(u64::from)
+                .sum();
             // Rank changed files so meaningful source code is shown before tooling dotfiles.
             let ranked = Engine::rank_changes(raw_changes);
             let files: Vec<String> = ranked.iter().map(|c| c.path.clone()).collect();
@@ -3945,14 +4040,30 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
     /// The session card's project line (see [`files::git_summary`]), off
     /// the dispatch thread. `{"repo": false}` when the chat's folder isn't
     /// a git checkout.
-    fn rpc_chat_git_summary(&self, id: &str, params: &Value, outbound: &keel_rpc::Outbound) -> String {
+    fn rpc_chat_git_summary(
+        &self,
+        id: &str,
+        params: &Value,
+        outbound: &keel_rpc::Outbound,
+    ) -> String {
         let chat_id = params["chat_id"].as_str().unwrap_or_default();
-        let chat = self.lock().store.registry().view().chats.into_iter().find(|c| c.id == chat_id);
+        let chat = self
+            .lock()
+            .store
+            .registry()
+            .view()
+            .chats
+            .into_iter()
+            .find(|c| c.id == chat_id);
         let Some(chat) = chat else {
             return failure(id, RpcErrorCode::UnknownChat, "unknown chat");
         };
         if chat.device_id != self.inner.device_id {
-            return failure(id, RpcErrorCode::NotHost, "this chat's files are on another device");
+            return failure(
+                id,
+                RpcErrorCode::NotHost,
+                "this chat's files are on another device",
+            );
         }
         let (id, outbound, cwd) = (id.to_string(), outbound.clone(), PathBuf::from(&chat.cwd));
         std::thread::spawn(move || {
@@ -3982,15 +4093,30 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
     /// A chat this device hosts, for the session card's branch picker.
     fn hosted_chat(&self, id: &str, params: &Value) -> Result<keel_doc::ChatRow, String> {
         let chat_id = params["chat_id"].as_str().unwrap_or_default();
-        let chat = self.lock().store.registry().view().chats.into_iter().find(|c| c.id == chat_id);
+        let chat = self
+            .lock()
+            .store
+            .registry()
+            .view()
+            .chats
+            .into_iter()
+            .find(|c| c.id == chat_id);
         let Some(chat) = chat else {
             return Err(failure(id, RpcErrorCode::UnknownChat, "unknown chat"));
         };
         if chat.device_id != self.inner.device_id {
-            return Err(failure(id, RpcErrorCode::NotHost, "this chat's files are on another device"));
+            return Err(failure(
+                id,
+                RpcErrorCode::NotHost,
+                "this chat's files are on another device",
+            ));
         }
         if chat.cwd.is_empty() {
-            return Err(failure(id, RpcErrorCode::BadParams, "this chat has no folder"));
+            return Err(failure(
+                id,
+                RpcErrorCode::BadParams,
+                "this chat has no folder",
+            ));
         }
         Ok(chat)
     }
@@ -4022,16 +4148,26 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
     /// sharing its checkout, is mid-turn: an agent would find its files
     /// swapped under it. The chat's branch fields follow at once, the same
     /// way the folder watcher would update them.
-    fn rpc_chat_checkout_branch(&self, id: &str, params: &Value, outbound: &keel_rpc::Outbound) -> String {
+    fn rpc_chat_checkout_branch(
+        &self,
+        id: &str,
+        params: &Value,
+        outbound: &keel_rpc::Outbound,
+    ) -> String {
         let chat = match self.hosted_chat(id, params) {
             Ok(chat) => chat,
             Err(reply) => return reply,
         };
-        let branch = params["branch"].as_str().unwrap_or_default().trim().to_string();
+        let branch = params["branch"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if branch.is_empty() {
             return failure(id, RpcErrorCode::BadParams, "no branch");
         }
-        let worktree = repo::is_engine_worktree(&compute_data_dir(&self.inner.profile), Path::new(&chat.cwd));
+        let worktree =
+            repo::is_engine_worktree(&compute_data_dir(&self.inner.profile), Path::new(&chat.cwd));
         {
             let state = self.lock();
             let view = state.store.registry().view();
@@ -4039,21 +4175,38 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
                 other.id == chat.id
                     || (!worktree
                         && other.device_id == chat.device_id
-                        && (other.cwd == chat.cwd || (!chat.checkout_id.is_empty() && other.checkout_id == chat.checkout_id)))
+                        && (other.cwd == chat.cwd
+                            || (!chat.checkout_id.is_empty()
+                                && other.checkout_id == chat.checkout_id)))
             };
-            let busy = view.chats.iter().filter(|other| shares(other)).find(|other| {
-                state.live.contains_key(&other.id) || matches!(other.status.as_str(), "running" | "awaiting_input")
-            });
+            let busy = view
+                .chats
+                .iter()
+                .filter(|other| shares(other))
+                .find(|other| {
+                    state.live.contains_key(&other.id)
+                        || matches!(other.status.as_str(), "running" | "awaiting_input")
+                });
             if let Some(other) = busy {
-                let who = if other.id == chat.id { "this chat".to_string() } else { format!("\"{}\"", other.title) };
+                let who = if other.id == chat.id {
+                    "this chat".to_string()
+                } else {
+                    format!("\"{}\"", other.title)
+                };
                 return failure(
                     id,
                     RpcErrorCode::Busy,
-                    &format!("An agent is working in this folder ({who}). Switch branches when the turn ends."),
+                    &format!(
+                        "An agent is working in this folder ({who}). Switch branches when the turn ends."
+                    ),
                 );
             }
         }
-        let key = if worktree { format!("{CHAT_KEY}{}", chat.id) } else { chat.space_id.clone() };
+        let key = if worktree {
+            format!("{CHAT_KEY}{}", chat.id)
+        } else {
+            chat.space_id.clone()
+        };
         let (id, outbound, engine) = (id.to_string(), outbound.clone(), self.clone());
         std::thread::spawn(move || {
             let cwd = PathBuf::from(&chat.cwd);
@@ -4062,7 +4215,11 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
                     tracing::info!(target: "keel_engine", chat_id = %chat.id, worktree, "chat checkout switched branch");
                     let status = repo::scan_git_repo_sync(&engine.inner.device_id, &cwd);
                     let current = status.branch.clone();
-                    let _ = engine.inner.events_tx.send(RunEvent::RepoStatus { space_id: key, status, captured_at: engine.now() });
+                    let _ = engine.inner.events_tx.send(RunEvent::RepoStatus {
+                        space_id: key,
+                        status,
+                        captured_at: engine.now(),
+                    });
                     success(&id, serde_json::json!({ "branch": current }))
                 }
                 Err(err) => failure(&id, RpcErrorCode::Conflict, &err),
@@ -4101,7 +4258,13 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
             let roots = self.project_mention_roots(chat_id, &chat.cwd);
             match keel_proto::projects::split_root(&roots, path) {
                 Some((root, rest)) => (PathBuf::from(root), rest.to_string()),
-                None => return failure(id, RpcErrorCode::PathRejected, "not one of this chat's folders"),
+                None => {
+                    return failure(
+                        id,
+                        RpcErrorCode::PathRejected,
+                        "not one of this chat's folders",
+                    );
+                }
             }
         } else {
             (PathBuf::from(&chat.cwd), path.to_string())
@@ -4182,6 +4345,70 @@ fn rank_changes(changes: Vec<files::Change>) -> Vec<files::Change> {
         };
         let commands = commands::list_commands_sync(cwd.as_deref(), agent);
         success(id, serde_json::json!({ "commands": commands }))
+    }
+
+    /// Skills Pi would load for this chat, including ones switched off.
+    fn rpc_list_skills(&self, id: &str, params: &Value) -> String {
+        let cwd = absolute_dir(params.get("cwd"));
+        let Some(agent) = keel_harness::pi_agent_dir() else {
+            return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
+        };
+        match skills::list_skills(cwd.as_deref(), agent) {
+            Ok(skills) => success(id, serde_json::json!({ "skills": skills })),
+            Err(err) => failure(id, RpcErrorCode::Internal, &err),
+        }
+    }
+
+    fn rpc_set_skill_enabled(&self, id: &str, params: &Value) -> String {
+        let Some(path) = params.get("path").and_then(Value::as_str) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let Some(enabled) = params.get("enabled").and_then(Value::as_bool) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let cwd = absolute_dir(params.get("cwd"));
+        let Some(agent) = keel_harness::pi_agent_dir() else {
+            return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
+        };
+        match skills::set_skill_enabled(agent, cwd.as_deref(), Path::new(path), enabled) {
+            Ok(()) => success(id, serde_json::json!({})),
+            Err(err) => failure(id, RpcErrorCode::BadParams, &err),
+        }
+    }
+
+    fn rpc_add_skill(&self, id: &str, params: &Value) -> String {
+        let (Some(source), Some(dest)) = (
+            params.get("source").and_then(Value::as_str),
+            params.get("dest").and_then(Value::as_str),
+        ) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let cwd = absolute_dir(params.get("cwd"));
+        let replace = params
+            .get("replace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let Some(agent) = keel_harness::pi_agent_dir() else {
+            return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
+        };
+        match skills::add_skill(agent, cwd.as_deref(), Path::new(source), dest, replace) {
+            Ok(()) => success(id, serde_json::json!({})),
+            Err(err) => failure(id, RpcErrorCode::BadParams, &err),
+        }
+    }
+
+    fn rpc_remove_skill(&self, id: &str, params: &Value) -> String {
+        let Some(path) = params.get("path").and_then(Value::as_str) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let cwd = absolute_dir(params.get("cwd"));
+        let Some(agent) = keel_harness::pi_agent_dir() else {
+            return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
+        };
+        match skills::remove_skill(agent, cwd.as_deref(), Path::new(path)) {
+            Ok(()) => success(id, serde_json::json!({})),
+            Err(err) => failure(id, RpcErrorCode::BadParams, &err),
+        }
     }
 
     fn rpc_rename_space(&self, id: &str, params: &Value) -> String {
@@ -4407,12 +4634,27 @@ impl EngineHost for Engine {
             "sign_in" => self.rpc_sign_in(&request.id, &request.params),
             "sign_in_status" => {
                 let provider = request.params["provider"].as_str().unwrap_or_default();
-                let status = self.inner.sign_ins.lock().unwrap_or_else(|p| p.into_inner()).get(provider).map(|(v, _)| v.clone());
-                success(&request.id, status.unwrap_or_else(|| serde_json::json!({ "state": "idle" })))
+                let status = self
+                    .inner
+                    .sign_ins
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(provider)
+                    .map(|(v, _)| v.clone());
+                success(
+                    &request.id,
+                    status.unwrap_or_else(|| serde_json::json!({ "state": "idle" })),
+                )
             }
             "sign_in_cancel" => {
                 let provider = request.params["provider"].as_str().unwrap_or_default();
-                if let Some((_, Some(task))) = self.inner.sign_ins.lock().unwrap_or_else(|p| p.into_inner()).remove(provider) {
+                if let Some((_, Some(task))) = self
+                    .inner
+                    .sign_ins
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(provider)
+                {
                     task.abort();
                 }
                 success(&request.id, serde_json::json!({}))
@@ -4451,12 +4693,18 @@ impl EngineHost for Engine {
             "list_paths" => self.rpc_list_paths(&request.id, &request.params),
             "chat_git_summary" => self.rpc_chat_git_summary(&request.id, &request.params, outbound),
             "chat_branches" => self.rpc_chat_branches(&request.id, &request.params, outbound),
-            "chat_checkout_branch" => self.rpc_chat_checkout_branch(&request.id, &request.params, outbound),
+            "chat_checkout_branch" => {
+                self.rpc_chat_checkout_branch(&request.id, &request.params, outbound)
+            }
             "chat_changes" | "chat_diff" | "chat_list_dir" | "chat_read_file"
             | "chat_file_info" | "chat_write_file" => {
                 self.rpc_chat_files(&request.id, &request.method, &request.params)
             }
             "list_commands" => self.rpc_list_commands(&request.id, &request.params),
+            "list_skills" => self.rpc_list_skills(&request.id, &request.params),
+            "set_skill_enabled" => self.rpc_set_skill_enabled(&request.id, &request.params),
+            "add_skill" => self.rpc_add_skill(&request.id, &request.params),
+            "remove_skill" => self.rpc_remove_skill(&request.id, &request.params),
             "queue_command" => self.rpc_queue(&request.id, &request.params),
             "subagent_caps" => self.rpc_subagent_caps(&request.id, &request.params),
             "suggest_prompt" => self.rpc_suggest_prompt(&request.id, &request.params, outbound),
@@ -4759,8 +5007,18 @@ struct Segments {
 impl Segments {
     fn apply(&mut self, event: &mut AgentEvent) {
         let (message_id, part_id, reasoning) = match event {
-            AgentEvent::Text { message_id, part_id, subagent: None, .. } => (message_id, part_id, false),
-            AgentEvent::Reasoning { message_id, part_id, subagent: None, .. } => (message_id, part_id, true),
+            AgentEvent::Text {
+                message_id,
+                part_id,
+                subagent: None,
+                ..
+            } => (message_id, part_id, false),
+            AgentEvent::Reasoning {
+                message_id,
+                part_id,
+                subagent: None,
+                ..
+            } => (message_id, part_id, true),
             AgentEvent::ToolStarted { subagent: None, .. }
             | AgentEvent::Plan { subagent: None, .. }
             | AgentEvent::Question { subagent: None, .. }
@@ -5291,7 +5549,6 @@ fn command_id_of(command: &UserCommand) -> Uuid {
         | UserCommand::Steer { command_id, .. }
         | UserCommand::Interrupt { command_id }
         | UserCommand::Answer { command_id, .. } => *command_id,
-
     }
 }
 
@@ -5347,6 +5604,13 @@ fn fs_read_dirs(path: &std::path::Path) -> Vec<PathBuf> {
     entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect()
+}
+
+fn absolute_dir(value: Option<&Value>) -> Option<PathBuf> {
+    value
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
 }
 
 fn success(id: &str, result: impl Serialize) -> String {

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use keel_proto::{
-    AttentionChat, ChatStatus, DisplayStatus, ThemeChoice, UiSettings,
-    attention_sort, display_status,
+    AttentionChat, ChatStatus, DisplayStatus, ThemeChoice, UiSettings, attention_sort,
+    display_status,
 };
 use keel_theme::{Tokens, resolve_reduced_motion, resolve_theme};
 
@@ -109,7 +109,11 @@ pub const SIDEBAR_MAX: f32 = 400.;
 pub const SIDEBAR_DEFAULT: f32 = 248.;
 
 fn clamp_sidebar(width: f32) -> f32 {
-    if width.is_finite() { width.clamp(SIDEBAR_MIN, SIDEBAR_MAX) } else { SIDEBAR_DEFAULT }
+    if width.is_finite() {
+        width.clamp(SIDEBAR_MIN, SIDEBAR_MAX)
+    } else {
+        SIDEBAR_DEFAULT
+    }
 }
 
 /// Rows an open space shows before "Show N more".
@@ -228,7 +232,10 @@ impl AppState {
         }
         let branch = self.selected_branch.clone().unwrap_or_default();
         Some(if branch.is_empty() {
-            self.detached_head.as_ref().map(|sha| format!("detached @{sha}")).unwrap_or_else(|| "Branch".into())
+            self.detached_head
+                .as_ref()
+                .map(|sha| format!("detached @{sha}"))
+                .unwrap_or_else(|| "Branch".into())
         } else {
             branch
         })
@@ -237,7 +244,13 @@ impl AppState {
     /// A branch listing for `folder` arrived. Ignored when the folder is no
     /// longer the one the branch fields describe. The current branch is
     /// listed first and becomes the selection unless the user picked one.
-    pub fn apply_branches(&mut self, folder: &str, mut branches: Vec<String>, current: Option<String>, detached: Option<String>) {
+    pub fn apply_branches(
+        &mut self,
+        folder: &str,
+        mut branches: Vec<String>,
+        current: Option<String>,
+        detached: Option<String>,
+    ) {
         if self.branch_folder.as_deref() != Some(folder) {
             return;
         }
@@ -319,11 +332,19 @@ impl AppState {
     /// Like [`Self::sidebar_sections`], leaving out chats that belong to a
     /// project. Those sessions live under the project, not under a folder.
     pub fn sidebar_sections_skipping(&self, now: i64, skip: &HashSet<String>) -> Vec<SpaceSection> {
-        let chats: Vec<_> = self.visible_chats(now).into_iter().filter(|(chat, _)| !skip.contains(&chat.id)).collect();
+        let chats: Vec<_> = self
+            .visible_chats(now)
+            .into_iter()
+            .filter(|(chat, _)| !skip.contains(&chat.id))
+            .collect();
         let focused = self.space_filter.is_some();
         // ponytail: matched by folder name, so every device's "No project" counts;
         // a real folder named "No project" would land there too.
-        let is_no_project = |s: &SpaceItem| std::path::Path::new(&s.path).file_name().is_some_and(|n| n == "No project");
+        let is_no_project = |s: &SpaceItem| {
+            std::path::Path::new(&s.path)
+                .file_name()
+                .is_some_and(|n| n == "No project")
+        };
         let mut spaces: Vec<(String, String, bool)> = self
             .spaces
             .values()
@@ -334,7 +355,10 @@ impl AppState {
         // A chat whose space row hasn't synced yet still needs a section.
         for (chat, _) in &chats {
             if !spaces.iter().any(|(id, ..)| id == &chat.space_id) {
-                let at = spaces.iter().position(|(.., loose)| *loose).unwrap_or(spaces.len());
+                let at = spaces
+                    .iter()
+                    .position(|(.., loose)| *loose)
+                    .unwrap_or(spaces.len());
                 spaces.insert(at, (chat.space_id.clone(), "Space".into(), false));
             }
         }
@@ -342,9 +366,14 @@ impl AppState {
         spaces
             .into_iter()
             .map(|(space_id, name, loose)| {
-                let all: Vec<_> = chats.iter().filter(|(c, _)| c.space_id == space_id).cloned().collect();
+                let all: Vec<_> = chats
+                    .iter()
+                    .filter(|(c, _)| c.space_id == space_id)
+                    .cloned()
+                    .collect();
                 // "No project" isn't a real folder: nothing to fold.
-                let collapsed = !focused && !loose && self.ui_settings.collapsed_spaces.contains(&space_id);
+                let collapsed =
+                    !focused && !loose && self.ui_settings.collapsed_spaces.contains(&space_id);
                 let show_all = focused || self.space_show_all.contains(&space_id);
                 let pinned = |(c, s): &(AttentionChat, DisplayStatus)| {
                     *s == DisplayStatus::AwaitingInput || Some(c.id.as_str()) == active
@@ -352,7 +381,9 @@ impl AppState {
                 let rows: Vec<_> = all
                     .iter()
                     .enumerate()
-                    .filter(|(ix, row)| pinned(row) || (!collapsed && (show_all || *ix < SPACE_ROW_CAP)))
+                    .filter(|(ix, row)| {
+                        pinned(row) || (!collapsed && (show_all || *ix < SPACE_ROW_CAP))
+                    })
                     .map(|(_, row)| row.clone())
                     .collect();
                 SpaceSection {
@@ -392,7 +423,12 @@ impl AppState {
 
     /// Closing a tab removes that chat id from openTabs and does not archive.
     pub fn close_tab(&mut self, chat_id: &str) {
-        if let Some(pos) = self.ui_settings.open_tabs.iter().position(|id| id == chat_id) {
+        if let Some(pos) = self
+            .ui_settings
+            .open_tabs
+            .iter()
+            .position(|id| id == chat_id)
+        {
             self.ui_settings.open_tabs.remove(pos);
             if self.active_tab.as_deref() == Some(chat_id) {
                 if self.ui_settings.open_tabs.is_empty() {
@@ -412,7 +448,12 @@ impl AppState {
     /// space this device created (by `created_at`). Never another device's
     /// space as a fallback: `None` means "ask for a folder".
     pub fn target_space_for_new_session(&self) -> Option<SpaceItem> {
-        if let Some(space) = self.new_chat_space.as_ref().and_then(|id| self.spaces.get(id)).filter(|s| !s.tombstoned) {
+        if let Some(space) = self
+            .new_chat_space
+            .as_ref()
+            .and_then(|id| self.spaces.get(id))
+            .filter(|s| !s.tombstoned)
+        {
             return Some(space.clone());
         }
         if let Some(ref space_id) = self.space_filter {
@@ -442,7 +483,11 @@ impl AppState {
     }
 
     pub fn draft(&self, chat_id: &str) -> String {
-        self.ui_settings.drafts.get(chat_id).cloned().unwrap_or_default()
+        self.ui_settings
+            .drafts
+            .get(chat_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Store (or clear) the device-local draft for a chat and persist it.
@@ -450,7 +495,11 @@ impl AppState {
         let changed = if text.is_empty() {
             self.ui_settings.drafts.remove(chat_id).is_some()
         } else {
-            self.ui_settings.drafts.insert(chat_id.to_string(), text.to_string()).as_deref() != Some(text)
+            self.ui_settings
+                .drafts
+                .insert(chat_id.to_string(), text.to_string())
+                .as_deref()
+                != Some(text)
         };
         if changed {
             self.save_settings();
@@ -471,7 +520,9 @@ impl AppState {
             }
         }
 
-        self.ui_settings.open_tabs.retain(|id| !dropped.contains(id));
+        self.ui_settings
+            .open_tabs
+            .retain(|id| !dropped.contains(id));
         if let Some(ref active) = self.active_tab
             && dropped.contains(active)
         {
@@ -505,13 +556,21 @@ impl AppState {
     /// (rows a folded space hides are skipped),
     /// wrapping. With nothing active, the first (or last) row.
     pub fn step_chat(&self, now: i64, delta: isize) -> Option<String> {
-        let rows: Vec<String> =
-            self.sidebar_sections(now).into_iter().flat_map(|s| s.rows).map(|(chat, _)| chat.id).collect();
+        let rows: Vec<String> = self
+            .sidebar_sections(now)
+            .into_iter()
+            .flat_map(|s| s.rows)
+            .map(|(chat, _)| chat.id)
+            .collect();
         if rows.is_empty() {
             return None;
         }
         let len = rows.len() as isize;
-        let next = match self.active_tab.as_ref().and_then(|id| rows.iter().position(|r| r == id)) {
+        let next = match self
+            .active_tab
+            .as_ref()
+            .and_then(|id| rows.iter().position(|r| r == id))
+        {
             Some(ix) => (ix as isize + delta).rem_euclid(len),
             None if delta < 0 => len - 1,
             None => 0,
@@ -542,7 +601,11 @@ impl AppState {
     /// Merge one registry space view. Only fields present in `view` change,
     /// because incremental diffs carry a subset of the row.
     pub fn update_space_from_view(&mut self, id: &str, view: &serde_json::Value) {
-        if view.get("tombstoned").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if view
+            .get("tombstoned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             self.on_space_deleted(id);
             return;
         }
@@ -563,7 +626,11 @@ impl AppState {
 
     /// Merge one registry chat view (see `update_space_from_view`).
     pub fn update_chat_from_view(&mut self, id: &str, view: &serde_json::Value) {
-        if view.get("tombstoned").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if view
+            .get("tombstoned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             if let Some(chat) = self.chats.get_mut(id) {
                 chat.tombstoned = true;
             }
@@ -789,10 +856,8 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("keel-ui-test-{}", uuid::Uuid::new_v4()));
         let mut app = test_app(&temp, "dev1");
 
-        app.spaces.insert(
-            "s1".into(),
-            SpaceItem::test("s1", "Space 1", "/p1", "dev1"),
-        );
+        app.spaces
+            .insert("s1".into(), SpaceItem::test("s1", "Space 1", "/p1", "dev1"));
         app.chats.insert(
             "c1".into(),
             ChatItem::test("c1", "s1", "Chat 1", ChatStatus::Idle, 10, 10),
@@ -857,7 +922,10 @@ mod tests {
             "c1",
             &serde_json::json!({"space_id": "s1", "title": "T", "archived": false, "status": "idle"}),
         );
-        app.update_chat_from_view("c1", &serde_json::json!({"status": "running", "title": "T2"}));
+        app.update_chat_from_view(
+            "c1",
+            &serde_json::json!({"status": "running", "title": "T2"}),
+        );
         let c = &app.chats["c1"];
         assert_eq!(c.space_id, "s1");
         assert_eq!(c.title, "T2");
@@ -903,28 +971,54 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("keel-ui-test-{}", uuid::Uuid::new_v4()));
         let mut app = test_app(&temp, "dev1");
         let now = 100_000;
-        app.spaces.insert("z".into(), SpaceItem::test("z", "zeta", "/z", "dev1"));
-        app.spaces.insert("a".into(), SpaceItem::test("a", "Alpha", "/a", "dev1"));
-        app.spaces.insert("e".into(), SpaceItem::test("e", "empty", "/e", "dev1"));
+        app.spaces
+            .insert("z".into(), SpaceItem::test("z", "zeta", "/z", "dev1"));
+        app.spaces
+            .insert("a".into(), SpaceItem::test("a", "Alpha", "/a", "dev1"));
+        app.spaces
+            .insert("e".into(), SpaceItem::test("e", "empty", "/e", "dev1"));
         for i in 0..7 {
             let id = format!("a{i}");
-            app.chats.insert(id.clone(), ChatItem::test(&id, "a", &id, ChatStatus::Idle, 10 + i, now));
+            app.chats.insert(
+                id.clone(),
+                ChatItem::test(&id, "a", &id, ChatStatus::Idle, 10 + i, now),
+            );
         }
-        app.chats.insert("z0".into(), ChatItem::test("z0", "z", "z0", ChatStatus::AwaitingInput, 1, now));
-        app.chats.insert("z1".into(), ChatItem::test("z1", "z", "z1", ChatStatus::Running, 2, now));
-        app.chats.insert("z2".into(), ChatItem::test("z2", "z", "z2", ChatStatus::Idle, 3, now));
+        app.chats.insert(
+            "z0".into(),
+            ChatItem::test("z0", "z", "z0", ChatStatus::AwaitingInput, 1, now),
+        );
+        app.chats.insert(
+            "z1".into(),
+            ChatItem::test("z1", "z", "z1", ChatStatus::Running, 2, now),
+        );
+        app.chats.insert(
+            "z2".into(),
+            ChatItem::test("z2", "z", "z2", ChatStatus::Idle, 3, now),
+        );
 
-        let names = |app: &AppState| app.sidebar_sections(now).into_iter().map(|s| s.name).collect::<Vec<_>>();
+        let names = |app: &AppState| {
+            app.sidebar_sections(now)
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names(&app), ["Alpha", "empty", "zeta"]);
         // Keel's "No project" folder sits apart, after every real folder.
-        app.spaces.insert("n".into(), SpaceItem::test("n", "Aaa", "/data/No project", "dev1"));
+        app.spaces.insert(
+            "n".into(),
+            SpaceItem::test("n", "Aaa", "/data/No project", "dev1"),
+        );
         assert_eq!(names(&app), ["Alpha", "empty", "zeta", "Aaa"]);
         assert!(app.sidebar_sections(now)[3].loose);
         app.spaces.remove("n");
 
         // Open: capped at five, newest first; the rest wait behind "Show more".
         let alpha = &app.sidebar_sections(now)[0];
-        assert_eq!((alpha.rows.len(), alpha.hidden, alpha.total), (SPACE_ROW_CAP, 2, 7));
+        assert_eq!(
+            (alpha.rows.len(), alpha.hidden, alpha.total),
+            (SPACE_ROW_CAP, 2, 7)
+        );
         assert_eq!(alpha.rows[0].0.id, "a6");
         // ...unless the active chat is further down: it shows anyway.
         app.active_tab = Some("a0".into());
@@ -938,7 +1032,13 @@ mod tests {
         let zeta = &app.sidebar_sections(now)[2];
         assert!(zeta.collapsed);
         assert_eq!(zeta.urgent, DisplayStatus::AwaitingInput);
-        assert_eq!(zeta.rows.iter().map(|(c, _)| c.id.as_str()).collect::<Vec<_>>(), ["z0"]);
+        assert_eq!(
+            zeta.rows
+                .iter()
+                .map(|(c, _)| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z0"]
+        );
         assert_eq!((zeta.total, zeta.hidden), (3, 0));
         // Stepping skips folded rows.
         app.active_tab = Some("z0".into());
@@ -961,23 +1061,44 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("keel-ui-skip-{}", uuid::Uuid::new_v4()));
         let mut app = test_app(&temp, "dev1");
         let now = 100_000;
-        app.spaces.insert("a".into(), SpaceItem::test("a", "Alpha", "/a", "dev1"));
-        app.spaces.insert("n".into(), SpaceItem::test("n", "Loose", "/data/No project", "dev1"));
-        app.chats.insert("folder".into(), ChatItem::test("folder", "a", "Folder", ChatStatus::Idle, 2, now));
-        app.chats.insert("project".into(), ChatItem::test("project", "a", "Project", ChatStatus::Idle, 3, now));
-        app.chats.insert("loose".into(), ChatItem::test("loose", "n", "Loose chat", ChatStatus::Idle, 1, now));
+        app.spaces
+            .insert("a".into(), SpaceItem::test("a", "Alpha", "/a", "dev1"));
+        app.spaces.insert(
+            "n".into(),
+            SpaceItem::test("n", "Loose", "/data/No project", "dev1"),
+        );
+        app.chats.insert(
+            "folder".into(),
+            ChatItem::test("folder", "a", "Folder", ChatStatus::Idle, 2, now),
+        );
+        app.chats.insert(
+            "project".into(),
+            ChatItem::test("project", "a", "Project", ChatStatus::Idle, 3, now),
+        );
+        app.chats.insert(
+            "loose".into(),
+            ChatItem::test("loose", "n", "Loose chat", ChatStatus::Idle, 1, now),
+        );
         let skip = HashSet::from(["project".to_string()]);
         let sections = app.sidebar_sections_skipping(now, &skip);
         let ids = |name: &str| {
             sections
                 .iter()
                 .find(|s| s.name == name)
-                .map(|s| s.rows.iter().map(|(c, _)| c.id.as_str()).collect::<Vec<_>>())
+                .map(|s| {
+                    s.rows
+                        .iter()
+                        .map(|(c, _)| c.id.as_str())
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         };
         assert_eq!(ids("Alpha"), ["folder"]);
         assert_eq!(ids("Loose"), ["loose"]);
-        assert_eq!(sections.iter().find(|s| s.name == "Alpha").map(|s| s.total), Some(1));
+        assert_eq!(
+            sections.iter().find(|s| s.name == "Alpha").map(|s| s.total),
+            Some(1)
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -986,11 +1107,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keel-ui-step-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut app = AppState::new(dir.clone(), "dev".into());
-        app.spaces.insert("s".into(), SpaceItem::test("s", "Space", "/tmp", "dev"));
+        app.spaces
+            .insert("s".into(), SpaceItem::test("s", "Space", "/tmp", "dev"));
         for (id, at) in [("a", 3), ("b", 2), ("c", 1)] {
-            app.chats.insert(id.into(), ChatItem::test(id, "s", id, ChatStatus::Idle, at, at));
+            app.chats.insert(
+                id.into(),
+                ChatItem::test(id, "s", id, ChatStatus::Idle, at, at),
+            );
         }
-        let order: Vec<String> = app.visible_chats(10).into_iter().map(|(c, _)| c.id).collect();
+        let order: Vec<String> = app
+            .visible_chats(10)
+            .into_iter()
+            .map(|(c, _)| c.id)
+            .collect();
         assert_eq!(app.step_chat(10, 1).as_deref(), Some(order[0].as_str()));
         assert_eq!(app.step_chat(10, -1).as_deref(), Some(order[2].as_str()));
         app.active_tab = Some(order[2].clone());
@@ -1032,7 +1161,12 @@ mod tests {
         let mut app = AppState::new(std::env::temp_dir().join("keel-branch-state"), "dev".into());
         let fetch = |app: &mut AppState, current: Option<&str>, detached: Option<&str>| {
             let branches = vec!["a".to_string(), "main".to_string()];
-            app.apply_branches("/repo", branches, current.map(String::from), detached.map(String::from));
+            app.apply_branches(
+                "/repo",
+                branches,
+                current.map(String::from),
+                detached.map(String::from),
+            );
         };
         // A listing for a folder that isn't (or is no longer) the target is dropped.
         fetch(&mut app, Some("main"), None);
@@ -1040,7 +1174,10 @@ mod tests {
         app.branch_folder = Some("/repo".into());
         fetch(&mut app, Some("main"), None);
         assert_eq!(app.selected_branch.as_deref(), Some("main"));
-        assert_eq!(app.available_branches, vec!["main".to_string(), "a".to_string()]);
+        assert_eq!(
+            app.available_branches,
+            vec!["main".to_string(), "a".to_string()]
+        );
         // A manual pick survives a late fetch.
         app.set_branch(Some("a".into()));
         fetch(&mut app, Some("main"), None);
@@ -1082,7 +1219,10 @@ mod tests {
         for ms in [1116, 1133, 1500] {
             assert!(!render(&app, &mut shown, ms), "re-renders don't roll again");
         }
-        assert_eq!((shown.prev.as_str(), shown.now.as_str(), shown.roll), ("main", "dev", 1));
+        assert_eq!(
+            (shown.prev.as_str(), shown.now.as_str(), shown.roll),
+            ("main", "dev", 1)
+        );
 
         // Not a repo: the placeholder, once.
         app.reset_branch_for_folder();

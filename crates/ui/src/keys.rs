@@ -205,6 +205,9 @@ mod tests {
             .into_iter()
             .find(|b| b.action().name().ends_with("OpenSettings"))
             .expect("OpenSettings binding found");
-        assert!(b.predicate().is_none(), "OpenSettings should have no context predicate to toggle from any sheet/focus");
+        assert!(
+            b.predicate().is_none(),
+            "OpenSettings should have no context predicate to toggle from any sheet/focus"
+        );
     }
 }

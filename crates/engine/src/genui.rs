@@ -22,7 +22,6 @@ pub(crate) fn mr_card(mr: &keel_proto::mr::MrRef, snap: &Value, offer_merge: boo
     })
 }
 
-
 const MAX_COMMANDS: usize = 4;
 const MAX_STATS: usize = 3;
 const MAX_FILES: usize = 20;
@@ -33,8 +32,22 @@ const MAX_FAILURES: usize = 6;
 
 /// Words that make a command risky whatever the agent says.
 fn risky_words(command: &str) -> bool {
-    const RISKY: [&str; 14] = ["rm -rf", "rm -r ", "sudo ", "git push", "--force", "git reset --hard", "git clean", "drop ", "deploy",
-        "publish", "kubectl delete", "terraform apply", "mkfs", "> /dev/"];
+    const RISKY: [&str; 14] = [
+        "rm -rf",
+        "rm -r ",
+        "sudo ",
+        "git push",
+        "--force",
+        "git reset --hard",
+        "git clean",
+        "drop ",
+        "deploy",
+        "publish",
+        "kubectl delete",
+        "terraform apply",
+        "mkfs",
+        "> /dev/",
+    ];
     let lower = command.to_ascii_lowercase();
     RISKY.iter().any(|word| lower.contains(word))
 }
@@ -244,7 +257,9 @@ pub fn ui_tools() -> Value {
 /// the `ui` part. Numbers are the agent's; the host drops a spec its card
 /// cannot draw.
 pub fn ui_call(name: &str, args: &Value) -> Option<Result<String, String>> {
-    let tool = UI_TOOLS.iter().find(|tool| name == **tool || name.ends_with(*tool))?;
+    let tool = UI_TOOLS
+        .iter()
+        .find(|tool| name == **tool || name.ends_with(*tool))?;
     let spec = match *tool {
         "show_chart" => chart_spec(args),
         "show_choices" => choices_spec(args),
@@ -270,24 +285,41 @@ pub fn ui_call(name: &str, args: &Value) -> Option<Result<String, String>> {
 }
 
 fn chart_spec(args: &Value) -> Result<Value, String> {
-    let labels = strings(&args["labels"]).filter(|l| (2..=MAX_ROWS).contains(&l.len())).ok_or("a chart needs 2 to 50 labels")?;
-    let series: Vec<Value> = args["series"].as_array().ok_or("series is required")?.iter().filter_map(|s| {
-        let values = s["values"].as_array()?;
-        if values.len() != labels.len() {
-            return None;
-        }
-        let values: Vec<Value> = values.iter().map(|v| {
-            v.as_f64().filter(|n| n.is_finite()).map(|n| json!(n)).unwrap_or(Value::Null)
-        }).collect();
-        if values.iter().filter(|v| !v.is_null()).count() < 2 {
-            return None;
-        }
-        Some(json!({"name": s["name"].as_str().unwrap_or_default(), "values": values}))
-    }).collect();
+    let labels = strings(&args["labels"])
+        .filter(|l| (2..=MAX_ROWS).contains(&l.len()))
+        .ok_or("a chart needs 2 to 50 labels")?;
+    let series: Vec<Value> = args["series"]
+        .as_array()
+        .ok_or("series is required")?
+        .iter()
+        .filter_map(|s| {
+            let values = s["values"].as_array()?;
+            if values.len() != labels.len() {
+                return None;
+            }
+            let values: Vec<Value> = values
+                .iter()
+                .map(|v| {
+                    v.as_f64()
+                        .filter(|n| n.is_finite())
+                        .map(|n| json!(n))
+                        .unwrap_or(Value::Null)
+                })
+                .collect();
+            if values.iter().filter(|v| !v.is_null()).count() < 2 {
+                return None;
+            }
+            Some(json!({"name": s["name"].as_str().unwrap_or_default(), "values": values}))
+        })
+        .collect();
     if series.is_empty() {
         return Err("a series needs two numbers, in the same order as the labels".into());
     }
-    let kind = if args["kind"] == "line" { "line" } else { "bar" };
+    let kind = if args["kind"] == "line" {
+        "line"
+    } else {
+        "bar"
+    };
     Ok(json!({
         "component": "chart",
         "kind": kind,
@@ -298,30 +330,41 @@ fn chart_spec(args: &Value) -> Result<Value, String> {
 }
 
 fn choices_spec(args: &Value) -> Result<Value, String> {
-    let options = strings(&args["options"]).filter(|o| (2..=6).contains(&o.len())).ok_or("choices need 2 to 6 options")?;
-    let recommended = args["recommended"].as_u64().map(|ix| ix as usize).filter(|&ix| ix < options.len());
+    let options = strings(&args["options"])
+        .filter(|o| (2..=6).contains(&o.len()))
+        .ok_or("choices need 2 to 6 options")?;
+    let recommended = args["recommended"]
+        .as_u64()
+        .map(|ix| ix as usize)
+        .filter(|&ix| ix < options.len());
     Ok(json!({"component": "choices", "options": options, "recommended": recommended}))
 }
 
 fn stats_spec(args: &Value) -> Result<Value, String> {
-    let items: Vec<Value> = args["items"].as_array().unwrap_or(&Vec::new()).iter().filter_map(|item| {
-        let (before, after) = (item["before"].as_str()?, item["after"].as_str()?);
-        let (from, to) = (number(before)?, number(after)?);
-        if from == to {
-            return None;
-        }
-        let better = match item["better"].as_str() {
-            Some("lower" | "higher") => item["better"].as_str().unwrap(),
-            _ => "neither",
-        };
-        Some(json!({
-            "label": item["label"].as_str().unwrap_or_default(),
-            "before": before,
-            "after": after,
-            "change": (from != 0.).then(|| (to - from) / from.abs() * 100.),
-            "better": better,
-        }))
-    }).take(MAX_STATS).collect();
+    let items: Vec<Value> = args["items"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|item| {
+            let (before, after) = (item["before"].as_str()?, item["after"].as_str()?);
+            let (from, to) = (number(before)?, number(after)?);
+            if from == to {
+                return None;
+            }
+            let better = match item["better"].as_str() {
+                Some("lower" | "higher") => item["better"].as_str().unwrap(),
+                _ => "neither",
+            };
+            Some(json!({
+                "label": item["label"].as_str().unwrap_or_default(),
+                "before": before,
+                "after": after,
+                "change": (from != 0.).then(|| (to - from) / from.abs() * 100.),
+                "better": better,
+            }))
+        })
+        .take(MAX_STATS)
+        .collect();
     if items.is_empty() {
         return Err("a stat needs two different figures, as written".into());
     }
@@ -329,14 +372,23 @@ fn stats_spec(args: &Value) -> Result<Value, String> {
 }
 
 fn commands_spec(args: &Value) -> Result<Value, String> {
-    let items: Vec<Value> = args["items"].as_array().unwrap_or(&Vec::new()).iter().filter_map(|item| {
-        let (content, run) = (item["content"].as_str()?.trim(), item["run"].as_str()?.trim());
-        if content.is_empty() || run.is_empty() || run.lines().count() > 12 {
-            return None;
-        }
-        let risky = item["risky"] == true || risky_words(run);
-        Some(json!({"content": content, "run": run, "risky": risky}))
-    }).take(MAX_COMMANDS).collect();
+    let items: Vec<Value> = args["items"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|item| {
+            let (content, run) = (
+                item["content"].as_str()?.trim(),
+                item["run"].as_str()?.trim(),
+            );
+            if content.is_empty() || run.is_empty() || run.lines().count() > 12 {
+                return None;
+            }
+            let risky = item["risky"] == true || risky_words(run);
+            Some(json!({"content": content, "run": run, "risky": risky}))
+        })
+        .take(MAX_COMMANDS)
+        .collect();
     if items.is_empty() {
         return Err("a command needs the block text and the command to type".into());
     }
@@ -344,11 +396,14 @@ fn commands_spec(args: &Value) -> Result<Value, String> {
 }
 
 fn files_spec(args: &Value) -> Result<Value, String> {
-    let paths = strings(&args["paths"]).filter(|p| !p.is_empty()).ok_or("files needs the paths this turn changed")?;
+    let paths = strings(&args["paths"])
+        .filter(|p| !p.is_empty())
+        .ok_or("files needs the paths this turn changed")?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     // Host fills git status and line counts against HEAD
-    let mut stats: std::collections::HashMap<String, (char, Option<u32>, Option<u32>)> = std::collections::HashMap::new();
+    let mut stats: std::collections::HashMap<String, (char, Option<u32>, Option<u32>)> =
+        std::collections::HashMap::new();
 
     if let Ok(numstat) = crate::repo::run_git_cmd_sync(&cwd, &["diff", "HEAD", "--numstat", "-z"])
         .or_else(|_| crate::repo::run_git_cmd_sync(&cwd, &["diff", "--numstat", "-z"]))
@@ -356,7 +411,9 @@ fn files_spec(args: &Value) -> Result<Value, String> {
         let mut records = numstat.split('\0');
         while let Some(record) = records.next() {
             let mut fields = record.splitn(3, '\t');
-            let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next()) else {
+            let (Some(added), Some(removed), Some(path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
                 continue;
             };
             let path = if path.is_empty() {
@@ -365,7 +422,10 @@ fn files_spec(args: &Value) -> Result<Value, String> {
             } else {
                 path
             };
-            stats.insert(path.to_string(), ('M', added.parse().ok(), removed.parse().ok()));
+            stats.insert(
+                path.to_string(),
+                ('M', added.parse().ok(), removed.parse().ok()),
+            );
         }
     }
 
@@ -390,7 +450,9 @@ fn files_spec(args: &Value) -> Result<Value, String> {
                 s.0 = status;
             } else {
                 let lines = if status == '?' || status == 'A' {
-                    std::fs::read_to_string(cwd.join(&path)).ok().map(|c| c.lines().count() as u32)
+                    std::fs::read_to_string(cwd.join(&path))
+                        .ok()
+                        .map(|c| c.lines().count() as u32)
                 } else {
                     None
                 };
@@ -428,8 +490,13 @@ fn files_spec(args: &Value) -> Result<Value, String> {
 }
 
 fn steps_spec(args: &Value) -> Result<Value, String> {
-    let items = strings(&args["items"]).filter(|s| (2..=MAX_STEPS).contains(&s.len())).ok_or("steps need 2 to 8 items")?;
-    let current = args["current"].as_u64().map(|ix| ix as usize).filter(|&ix| ix < items.len());
+    let items = strings(&args["items"])
+        .filter(|s| (2..=MAX_STEPS).contains(&s.len()))
+        .ok_or("steps need 2 to 8 items")?;
+    let current = args["current"]
+        .as_u64()
+        .map(|ix| ix as usize)
+        .filter(|&ix| ix < items.len());
     let kind = match args["kind"].as_str() {
         Some("guide") => "guide",
         _ => "task",
@@ -475,11 +542,21 @@ fn diagram_spec(args: &Value) -> Result<Value, String> {
     if source.is_empty() {
         return Err("source must be Mermaid, such as flowchart TD".into());
     }
-    let request = SvgRequest { pipeline: Some(SvgPipeline::resvg_safe()), ..SvgRequest::default() };
+    let request = SvgRequest {
+        pipeline: Some(SvgPipeline::resvg_safe()),
+        ..SvgRequest::default()
+    };
     match Renderer::new().render(RenderRequest::svg(source, OperationControl::new(), request)) {
-        Ok(RenderOutput::Svg(Some(_))) => Ok(json!({"component": "diagram", "format": "mermaid", "source": source})),
-        Ok(_) => Err("Mermaid drew nothing from this source; check the diagram type on the first line".into()),
-        Err(err) => Err(format!("Mermaid could not draw this: {err}. Fix the source and call again.")),
+        Ok(RenderOutput::Svg(Some(_))) => {
+            Ok(json!({"component": "diagram", "format": "mermaid", "source": source}))
+        }
+        Ok(_) => Err(
+            "Mermaid drew nothing from this source; check the diagram type on the first line"
+                .into(),
+        ),
+        Err(err) => Err(format!(
+            "Mermaid could not draw this: {err}. Fix the source and call again."
+        )),
     }
 }
 
@@ -489,7 +566,11 @@ fn tests_spec(args: &Value) -> Result<Value, String> {
     if passed + failed + skipped == 0 {
         return Err("a test card needs the run's counts".into());
     }
-    let failures = strings(&args["failures"]).unwrap_or_default().into_iter().take(MAX_FAILURES).collect::<Vec<_>>();
+    let failures = strings(&args["failures"])
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_FAILURES)
+        .collect::<Vec<_>>();
     Ok(json!({
         "component": "tests",
         "command": args["command"].as_str().unwrap_or("").trim(),
@@ -522,11 +603,23 @@ fn number(cell: &str) -> Option<f64> {
         "M" => 1e6,
         _ => 1.,
     };
-    s[..end].replace(',', "").parse::<f64>().ok().map(|v| v * scale).filter(|v| v.is_finite())
+    s[..end]
+        .replace(',', "")
+        .parse::<f64>()
+        .ok()
+        .map(|v| v * scale)
+        .filter(|v| v.is_finite())
 }
 
 fn strings(value: &Value) -> Option<Vec<String>> {
-    Some(value.as_array()?.iter().filter_map(|v| v.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
+    Some(
+        value
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -538,36 +631,64 @@ mod tests {
 
     #[test]
     fn a_chart_call_becomes_the_same_spec_a_table_would() {
-        let spec = ui_call("show_chart", &json!({
-            "kind": "bar",
-            "x": "crate",
-            "labels": ["ui", "engine"],
-            "series": [
-                {"name": "before (s)", "values": [41.2, 33.5]},
-                {"name": "after (s)", "values": [28.7, 30.1]}
-            ]
-        })).unwrap().unwrap();
+        let spec = ui_call(
+            "show_chart",
+            &json!({
+                "kind": "bar",
+                "x": "crate",
+                "labels": ["ui", "engine"],
+                "series": [
+                    {"name": "before (s)", "values": [41.2, 33.5]},
+                    {"name": "after (s)", "values": [28.7, 30.1]}
+                ]
+            }),
+        )
+        .unwrap()
+        .unwrap();
         let spec: Value = serde_json::from_str(&spec).unwrap();
         assert_eq!(spec["component"], "chart");
         assert_eq!(spec["labels"], json!(["ui", "engine"]));
-        assert_eq!(spec["series"][1], json!({"name": "after (s)", "values": [28.7, 30.1]}));
+        assert_eq!(
+            spec["series"][1],
+            json!({"name": "after (s)", "values": [28.7, 30.1]})
+        );
         // A gap is null, never zero. A one-number series is not a chart.
-        let gapped = ui_call("mcp__keel-ui__show_chart", &json!({
-            "kind": "line", "x": "route", "labels": ["/", "/p"],
-            "series": [{"name": "gzip", "values": [410, null]}]
-        }));
+        let gapped = ui_call(
+            "mcp__keel-ui__show_chart",
+            &json!({
+                "kind": "line", "x": "route", "labels": ["/", "/p"],
+                "series": [{"name": "gzip", "values": [410, null]}]
+            }),
+        );
         assert!(gapped.unwrap().is_err());
         assert!(ui_call("bash", &json!({})).is_none());
     }
 
     #[test]
     fn a_choice_call_keeps_only_a_real_pick() {
-        let spec: Value = serde_json::from_str(&ui_call("show_choices", &json!({
-            "options": ["Redis", "Memory"], "recommended": 1
-        })).unwrap().unwrap()).unwrap();
+        let spec: Value = serde_json::from_str(
+            &ui_call(
+                "show_choices",
+                &json!({
+                    "options": ["Redis", "Memory"], "recommended": 1
+                }),
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(spec["recommended"], 1);
-        assert!(ui_call("show_choices", &json!({"options": ["only"]})).unwrap().is_err());
-        let out = ui_call("show_choices", &json!({"options": ["a", "b"], "recommended": 5})).unwrap().unwrap();
+        assert!(
+            ui_call("show_choices", &json!({"options": ["only"]}))
+                .unwrap()
+                .is_err()
+        );
+        let out = ui_call(
+            "show_choices",
+            &json!({"options": ["a", "b"], "recommended": 5}),
+        )
+        .unwrap()
+        .unwrap();
         assert!(serde_json::from_str::<Value>(&out).unwrap()["recommended"].is_null());
     }
 
@@ -577,17 +698,32 @@ mod tests {
             "items": [{"label": "Build time", "before": "40s", "after": "30s", "better": "lower"}]
         })).unwrap().unwrap()).unwrap();
         assert_eq!(spec["items"][0]["change"], json!(-25.0));
-        assert!(ui_call("show_stats", &json!({"items": [{"label": "x", "before": "1", "after": "1", "better": "lower"}]})).unwrap().is_err());
+        assert!(
+            ui_call(
+                "show_stats",
+                &json!({"items": [{"label": "x", "before": "1", "after": "1", "better": "lower"}]})
+            )
+            .unwrap()
+            .is_err()
+        );
     }
 
     #[test]
     fn a_command_call_marks_a_push_risky_even_if_the_agent_does_not() {
-        let spec: Value = serde_json::from_str(&ui_call("show_commands", &json!({
-            "items": [
-                {"content": "$ cargo t\ntest result: ok", "run": "cargo t"},
-                {"content": "git push --force", "run": "git push --force", "risky": false}
-            ]
-        })).unwrap().unwrap()).unwrap();
+        let spec: Value = serde_json::from_str(
+            &ui_call(
+                "show_commands",
+                &json!({
+                    "items": [
+                        {"content": "$ cargo t\ntest result: ok", "run": "cargo t"},
+                        {"content": "git push --force", "run": "git push --force", "risky": false}
+                    ]
+                }),
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(spec["items"][0]["risky"], false);
         assert_eq!(spec["items"][1]["risky"], true);
     }
@@ -608,49 +744,115 @@ mod tests {
 
     #[test]
     fn explain_cards_keep_a_real_shape_and_drop_a_restatement() {
-        let steps = card(ui_call("show_steps", &json!({
-            "items": ["Read the test", "Close the watcher", "Rerun it"], "current": 1
-        })));
+        let steps = card(ui_call(
+            "show_steps",
+            &json!({
+                "items": ["Read the test", "Close the watcher", "Rerun it"], "current": 1
+            }),
+        ));
         assert_eq!(steps["current"], 1);
         assert_eq!(steps["kind"], "task");
-        let guide_steps = card(ui_call("show_steps", &json!({"items": ["1", "2"], "kind": "guide"})));
+        let guide_steps = card(ui_call(
+            "show_steps",
+            &json!({"items": ["1", "2"], "kind": "guide"}),
+        ));
         assert_eq!(guide_steps["kind"], "guide");
         let task_card = card(ui_call("task_steps", &json!({"items": ["1", "2"]})));
         assert_eq!(task_card["kind"], "task");
-        assert!(ui_call("show_steps", &json!({"items": ["only"]})).unwrap().is_err());
-        assert!(ui_call("show_steps", &json!({"items": ["a", "b"], "current": 9})).unwrap().unwrap().contains("\"current\":null"));
+        assert!(
+            ui_call("show_steps", &json!({"items": ["only"]}))
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            ui_call("show_steps", &json!({"items": ["a", "b"], "current": 9}))
+                .unwrap()
+                .unwrap()
+                .contains("\"current\":null")
+        );
 
-        let note: Value = serde_json::from_str(&ui_call("show_callout", &json!({
-            "kind": "warning", "text": "  Closing the cache drops in-flight reads.  "
-        })).unwrap().unwrap()).unwrap();
+        let note: Value = serde_json::from_str(
+            &ui_call(
+                "show_callout",
+                &json!({
+                    "kind": "warning", "text": "  Closing the cache drops in-flight reads.  "
+                }),
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(note["text"], "Closing the cache drops in-flight reads.");
-        assert!(ui_call("show_callout", &json!({"kind": "note", "text": "x".repeat(161)})).unwrap().is_err());
+        assert!(
+            ui_call(
+                "show_callout",
+                &json!({"kind": "note", "text": "x".repeat(161)})
+            )
+            .unwrap()
+            .is_err()
+        );
 
-        let compared = card(ui_call("show_compare", &json!({
-            "columns": [
-                {"title": "Redis", "points": ["Survives a restart"], "recommended": true},
-                {"title": "Memory", "points": ["Nothing to run"]}
-            ]
-        })));
+        let compared = card(ui_call(
+            "show_compare",
+            &json!({
+                "columns": [
+                    {"title": "Redis", "points": ["Survives a restart"], "recommended": true},
+                    {"title": "Memory", "points": ["Nothing to run"]}
+                ]
+            }),
+        ));
         assert_eq!(compared["columns"][0]["recommended"], true);
-        assert!(ui_call("show_compare", &json!({"columns": [{"title": "Only", "points": ["a"]}]})).unwrap().is_err());
+        assert!(
+            ui_call(
+                "show_compare",
+                &json!({"columns": [{"title": "Only", "points": ["a"]}]})
+            )
+            .unwrap()
+            .is_err()
+        );
 
         let drawn = "flowchart TD\n  A[\"/auth/login\"] -->|click| B{success?}\n  B -->|yes| C[Dashboard<br/>with permissions]";
         let diagram = card(ui_call("show_diagram", &json!({"source": drawn})));
         assert_eq!(diagram["format"], "mermaid");
-        assert!(ui_call("show_diagram", &json!({"source": drawn})).unwrap().unwrap().starts_with("Shown to the user"));
+        assert!(
+            ui_call("show_diagram", &json!({"source": drawn}))
+                .unwrap()
+                .unwrap()
+                .starts_with("Shown to the user")
+        );
         // A source Mermaid can't parse goes back with the reason, so the agent fixes it.
-        let broken = ui_call("show_diagram", &json!({"source": "flowchart TD\n  A[unclosed --> B"})).unwrap().unwrap_err();
-        assert!(broken.starts_with("Mermaid could not draw this"), "{broken}");
-        assert!(ui_call("show_diagram", &json!({"source": "┌───┐\n│ A │\n└───┘"})).unwrap().is_err(), "box art is not Mermaid");
+        let broken = ui_call(
+            "show_diagram",
+            &json!({"source": "flowchart TD\n  A[unclosed --> B"}),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            broken.starts_with("Mermaid could not draw this"),
+            "{broken}"
+        );
+        assert!(
+            ui_call("show_diagram", &json!({"source": "┌───┐\n│ A │\n└───┘"}))
+                .unwrap()
+                .is_err(),
+            "box art is not Mermaid"
+        );
         assert_eq!(diagram["component"], "diagram");
-        assert!(ui_call("show_diagram", &json!({"source": "just words"})).unwrap().is_err());
+        assert!(
+            ui_call("show_diagram", &json!({"source": "just words"}))
+                .unwrap()
+                .is_err()
+        );
 
         let tests: Value = serde_json::from_str(&ui_call("show_tests", &json!({
             "command": "cargo test", "passed": 170, "failed": 2, "failures": ["session::drop_closes_watcher"]
         })).unwrap().unwrap()).unwrap();
         assert_eq!(tests["failed"], 2);
-        assert!(ui_call("show_tests", &json!({"passed": 0, "failed": 0})).unwrap().is_err());
+        assert!(
+            ui_call("show_tests", &json!({"passed": 0, "failed": 0}))
+                .unwrap()
+                .is_err()
+        );
         assert!(keel_proto::is_ui_tool("mcp__keel-ui__show_callout"));
     }
 }

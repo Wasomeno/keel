@@ -40,17 +40,29 @@ pub(super) struct GeoTrace {
 
 impl GeoTrace {
     /// A zero-size canvas recording its parent's painted (x, width) into `cell`.
-    pub fn probe(this: &std::rc::Rc<Self>, which: fn(&Self) -> &std::cell::Cell<(f32, f32, f32)>) -> Option<gpui::AnyElement> {
+    pub fn probe(
+        this: &std::rc::Rc<Self>,
+        which: fn(&Self) -> &std::cell::Cell<(f32, f32, f32)>,
+    ) -> Option<gpui::AnyElement> {
         use gpui::{IntoElement, Styled};
         if !this.on.get() {
             return None;
         }
         let me = this.clone();
         Some(
-            gpui::canvas(move |b, _, _| which(&me).set((f32::from(b.origin.x), f32::from(b.size.width), f32::from(b.size.height))), |_, _, _, _| {})
-                .absolute()
-                .inset_0()
-                .into_any_element(),
+            gpui::canvas(
+                move |b, _, _| {
+                    which(&me).set((
+                        f32::from(b.origin.x),
+                        f32::from(b.size.width),
+                        f32::from(b.size.height),
+                    ))
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
         )
     }
 
@@ -58,7 +70,10 @@ impl GeoTrace {
         if !self.on.get() {
             return;
         }
-        let ms = self.start.get().map_or(0., |at| at.elapsed().as_secs_f32() * 1e3);
+        let ms = self
+            .start
+            .get()
+            .map_or(0., |at| at.elapsed().as_secs_f32() * 1e3);
         let (lx, lw, lh) = self.list.get();
         let (dx, dw, dh) = self.dock.get();
         let (cx, cw, ch) = self.card.get();
@@ -102,18 +117,34 @@ impl GeoTrace {
 }
 
 impl KeelWindow {
-    pub(super) fn dev_command(&mut self, line: &str, window: &mut Window, cx: &mut Context<Self>) -> String {
-        let (cmd, arg) = line.split_once(' ').map_or((line, ""), |(c, a)| (c, a.trim()));
+    pub(super) fn dev_command(
+        &mut self,
+        line: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let (cmd, arg) = line
+            .split_once(' ')
+            .map_or((line, ""), |(c, a)| (c, a.trim()));
         let mut files_out = None;
         let answer = match cmd {
             "state" => return self.dev_state(cx),
             c if c.starts_with("files_") => {
                 // Through the redraw below, so a screenshot shows the change.
                 files_out = self.files_dev(c, arg, window, cx);
-                if files_out.is_some() { "" } else { "unknown files command" }
+                if files_out.is_some() {
+                    ""
+                } else {
+                    "unknown files command"
+                }
             }
             "chats" => {
-                let mut chats: Vec<_> = self.state.chats.values().filter(|c| !c.archived && !c.tombstoned).collect();
+                let mut chats: Vec<_> = self
+                    .state
+                    .chats
+                    .values()
+                    .filter(|c| !c.archived && !c.tombstoned)
+                    .collect();
                 chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
                 let rows: Vec<_> = chats
                     .iter()
@@ -150,9 +181,15 @@ impl KeelWindow {
                 "ok"
             }
             "model" => {
-                let known = self.models.get(&self.selected_harness).is_some_and(|l| l.models.iter().any(|m| m.id == arg));
+                let known = self
+                    .models
+                    .get(&self.selected_harness)
+                    .is_some_and(|l| l.models.iter().any(|m| m.id == arg));
                 if !known {
-                    return format!("error: {arg:?} is not a {} model (open `picker model` to load the list)", self.selected_harness);
+                    return format!(
+                        "error: {arg:?} is not a {} model (open `picker model` to load the list)",
+                        self.selected_harness
+                    );
                 }
                 self.select_model(arg.to_string(), cx);
                 "ok"
@@ -175,6 +212,31 @@ impl KeelWindow {
             }
             "settings" => {
                 self.toggle_settings(cx);
+                "ok"
+            }
+            "scroll_settings" => {
+                let y: f32 = arg.parse().unwrap_or(-320.);
+                self.dotify.settings_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(y)));
+                "ok"
+            }
+            "sound_menu" => {
+                self.show_sound_menu = !self.show_sound_menu;
+                "ok"
+            }
+            "preview_sound" => {
+                self.preview_sound(cx);
+                "ok"
+            }
+            "skills" => {
+                if !self.settings_open {
+                    self.open_settings(cx);
+                }
+                if !self.skills.open {
+                    self.open_skills(cx);
+                }
+                if !arg.is_empty() {
+                    self.dev_toggle_skill_pack(arg, cx);
+                }
                 "ok"
             }
             "sidebar" => {
@@ -218,7 +280,11 @@ impl KeelWindow {
                 "ok"
             }
             "shot" | "browser_shot" => {
-                let path = if arg.is_empty() { "/tmp/keel-cef-shot.png" } else { arg };
+                let path = if arg.is_empty() {
+                    "/tmp/keel-cef-shot.png"
+                } else {
+                    arg
+                };
                 let path = std::path::PathBuf::from(path);
                 let active = self.browser.active;
                 let _ = self.ensure_native_page(active, window, cx);
@@ -242,7 +308,9 @@ impl KeelWindow {
                 let active = self.browser.active;
                 let _ = self.ensure_native_page(active, window, cx);
                 if let Some(native) = self.browser.active_native_page() {
-                    match native.eval_agent_sync(&format!("snapshot({{ mode: {:?} }})", mode), 10000) {
+                    match native
+                        .eval_agent_sync(&format!("snapshot({{ mode: {:?} }})", mode), 10000)
+                    {
                         Ok(snap) => return snap,
                         Err(e) => return format!("error: {e}"),
                     }
@@ -277,7 +345,8 @@ impl KeelWindow {
                     let mut parts = arg.splitn(2, ' ');
                     let target_ref = parts.next().unwrap_or("");
                     let text = parts.next().unwrap_or("");
-                    let code = format!("act('type', {{ ref: {:?}, text: {:?} }})", target_ref, text);
+                    let code =
+                        format!("act('type', {{ ref: {:?}, text: {:?} }})", target_ref, text);
                     match native.eval_agent_sync(&code, 10000) {
                         Ok(res) => {
                             cx.notify();
@@ -311,7 +380,10 @@ impl KeelWindow {
             "mcp_screenshot" => {
                 let mut parts = arg.split_whitespace();
                 let path = parts.next().unwrap_or("/tmp/keel-mcp-shot.png");
-                let full = parts.next().map(|p| p == "full" || p == "true").unwrap_or(false);
+                let full = parts
+                    .next()
+                    .map(|p| p == "full" || p == "true")
+                    .unwrap_or(false);
                 let path = std::path::PathBuf::from(path);
                 let active = self.browser.active;
                 let _ = self.ensure_native_page(active, window, cx);
@@ -319,7 +391,11 @@ impl KeelWindow {
                     match native.screenshot_sync(full, 15000) {
                         Ok(bytes) => {
                             if std::fs::write(&path, &bytes).is_ok() {
-                                return format!("saved: {} ({} bytes)", path.display(), bytes.len());
+                                return format!(
+                                    "saved: {} ({} bytes)",
+                                    path.display(),
+                                    bytes.len()
+                                );
                             } else {
                                 return format!("error: failed to write to {}", path.display());
                             }
@@ -335,7 +411,10 @@ impl KeelWindow {
                 if let Some(native) = self.browser.active_native_page() {
                     let mut parts = arg.splitn(2, ' ');
                     let method = parts.next().unwrap_or("");
-                    let params: serde_json::Value = parts.next().and_then(|p| serde_json::from_str(p).ok()).unwrap_or(serde_json::json!({}));
+                    let params: serde_json::Value = parts
+                        .next()
+                        .and_then(|p| serde_json::from_str(p).ok())
+                        .unwrap_or(serde_json::json!({}));
                     match native.send_cdp_sync(method, params, 10000) {
                         Ok(res) => return res.to_string(),
                         Err(e) => return format!("error: {e}"),
@@ -347,11 +426,15 @@ impl KeelWindow {
                 let active = self.browser.active;
                 let _ = self.ensure_native_page(active, window, cx);
                 if let Some(native) = self.browser.active_native_page() {
-                    match native.send_cdp_sync("Runtime.evaluate", serde_json::json!({
-                        "expression": arg,
-                        "returnByValue": true,
-                        "awaitPromise": true
-                    }), 10000) {
+                    match native.send_cdp_sync(
+                        "Runtime.evaluate",
+                        serde_json::json!({
+                            "expression": arg,
+                            "returnByValue": true,
+                            "awaitPromise": true
+                        }),
+                        10000,
+                    ) {
                         Ok(res) => return res.to_string(),
                         Err(e) => return format!("error: {e}"),
                     }
@@ -361,7 +444,10 @@ impl KeelWindow {
             "browser_state" => {
                 let b = &self.browser;
                 let tab = b.tab();
-                let native_info = b.active_native_page().map(|n| n.debug_info()).unwrap_or(serde_json::Value::Null);
+                let native_info = b
+                    .active_native_page()
+                    .map(|n| n.debug_info())
+                    .unwrap_or(serde_json::Value::Null);
                 return json!({
                     "open": b.open,
                     "expanded": b.expanded,
@@ -378,7 +464,8 @@ impl KeelWindow {
                     "tab_parked": tab.parked,
                     "has_native": tab.native.is_some(),
                     "native": native_info,
-                }).to_string();
+                })
+                .to_string();
             }
             "files" => {
                 self.toggle_files(window, cx);
@@ -435,7 +522,8 @@ impl KeelWindow {
                     "room_l": room_l,
                     "room_r": room_r,
                     "transcript_w": w,
-                }).to_string();
+                })
+                .to_string();
             }
             "branch_bounds" => {
                 let b = self.card_branch_bounds.get();
@@ -452,7 +540,8 @@ impl KeelWindow {
                     }),
                     "picking": self.session_card.picking,
                     "compact": self.session_card.compact,
-                }).to_string();
+                })
+                .to_string();
             }
             "scroll" => {
                 // Like the wheel: positive moves back up the history.
@@ -486,7 +575,11 @@ impl KeelWindow {
             }
             "redraw" => "ok",
             "win_shot" => {
-                let path = if arg.is_empty() { "/tmp/keel-win-shot.png" } else { arg };
+                let path = if arg.is_empty() {
+                    "/tmp/keel-win-shot.png"
+                } else {
+                    arg
+                };
                 #[cfg(target_os = "macos")]
                 {
                     #[repr(C)]
@@ -497,7 +590,8 @@ impl KeelWindow {
                         const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGImage", &[]);
                     }
                     unsafe impl objc2::RefEncode for CGImage {
-                        const ENCODING_REF: objc2::Encoding = objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
+                        const ENCODING_REF: objc2::Encoding =
+                            objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
                     }
                     #[link(name = "CoreGraphics", kind = "framework")]
                     unsafe extern "C" {
@@ -512,32 +606,56 @@ impl KeelWindow {
                     use objc2::MainThreadMarker;
                     use objc2::msg_send;
                     use objc2_app_kit::{NSApplication, NSBitmapImageRep};
-                    use objc2_foundation::{NSDictionary, NSData, NSRect, NSPoint, NSSize};
+                    use objc2_foundation::{NSData, NSDictionary, NSPoint, NSRect, NSSize};
                     if let Some(mtm) = MainThreadMarker::new() {
                         for window in NSApplication::sharedApplication(mtm).windows().iter() {
                             let wid: isize = unsafe { msg_send![&**window, windowNumber] };
                             if wid > 0 && window.title().to_string().contains("Keel") {
                                 let rect = NSRect {
-                                    origin: NSPoint { x: f64::INFINITY, y: f64::INFINITY },
-                                    size: NSSize { width: 0.0, height: 0.0 },
+                                    origin: NSPoint {
+                                        x: f64::INFINITY,
+                                        y: f64::INFINITY,
+                                    },
+                                    size: NSSize {
+                                        width: 0.0,
+                                        height: 0.0,
+                                    },
                                 };
-                                let cg_img = unsafe { CGWindowListCreateImage(rect, 8 /* kCGWindowListOptionIncludingWindow */, wid as u32, 1 /* kCGWindowImageBoundsIgnoreFraming */) };
+                                let cg_img = unsafe {
+                                    CGWindowListCreateImage(
+                                        rect, 8, /* kCGWindowListOptionIncludingWindow */
+                                        wid as u32, 1, /* kCGWindowImageBoundsIgnoreFraming */
+                                    )
+                                };
                                 if !cg_img.is_null() {
                                     let rep: *mut NSBitmapImageRep = unsafe {
-                                        let alloc: *mut NSBitmapImageRep = msg_send![objc2::class!(NSBitmapImageRep), alloc];
+                                        let alloc: *mut NSBitmapImageRep =
+                                            msg_send![objc2::class!(NSBitmapImageRep), alloc];
                                         msg_send![alloc, initWithCGImage: cg_img]
                                     };
                                     unsafe { CGImageRelease(cg_img) };
                                     if !rep.is_null() {
                                         let png_type: usize = 4; // NSBitmapImageFileTypePNG = 4
-                                        let props = NSDictionary::<objc2_foundation::NSString, objc2::runtime::AnyObject>::new();
-                                        let data: *mut NSData = unsafe { msg_send![rep, representationUsingType: png_type, properties: &*props] };
+                                        let props = NSDictionary::<
+                                            objc2_foundation::NSString,
+                                            objc2::runtime::AnyObject,
+                                        >::new(
+                                        );
+                                        let data: *mut NSData = unsafe {
+                                            msg_send![rep, representationUsingType: png_type, properties: &*props]
+                                        };
                                         if !data.is_null() {
-                                            let bytes: *const std::ffi::c_void = unsafe { msg_send![data, bytes] };
+                                            let bytes: *const std::ffi::c_void =
+                                                unsafe { msg_send![data, bytes] };
                                             let len: usize = unsafe { msg_send![data, length] };
-                                            let slice = unsafe { std::slice::from_raw_parts(bytes as *const u8, len) };
+                                            let slice = unsafe {
+                                                std::slice::from_raw_parts(bytes as *const u8, len)
+                                            };
                                             if std::fs::write(path, slice).is_ok() {
-                                                return format!("saved bitmap to {path} ({} bytes)", len);
+                                                return format!(
+                                                    "saved bitmap to {path} ({} bytes)",
+                                                    len
+                                                );
                                             }
                                         }
                                     }
@@ -556,7 +674,9 @@ impl KeelWindow {
         cx.spawn(async move |_, cx| {
             for _ in 0..45 {
                 crate::dev_control::redraw();
-                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
             }
         })
         .detach();
@@ -564,7 +684,10 @@ impl KeelWindow {
     }
 
     fn dev_state(&self, cx: &Context<Self>) -> String {
-        let chat = self.current_chat.as_ref().and_then(|id| self.state.chats.get(id));
+        let chat = self
+            .current_chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id));
         let picker = self.open_picker().map(|p| match p {
             Picker::Model => "model",
             Picker::Branch => "branch",
@@ -574,7 +697,12 @@ impl KeelWindow {
         let models: Vec<_> = self
             .models
             .get(&self.selected_harness)
-            .map(|l| l.models.iter().map(|m| json!({"id": m.id, "name": m.name})).collect())
+            .map(|l| {
+                l.models
+                    .iter()
+                    .map(|m| json!({"id": m.id, "name": m.name}))
+                    .collect()
+            })
             .unwrap_or_default();
         json!({
             "chat": self.current_chat,
@@ -589,6 +717,9 @@ impl KeelWindow {
             "picker": picker,
             "project": self.projects.state_json(),
             "settings_open": self.settings_open,
+            "skills_open": self.skills.open,
+            "skill_rows": self.skills.rows.as_ref().and_then(|r| r.as_ref().ok()).map(|r| r.len()),
+            "skill_open": self.skills.expanded_skill.iter().cloned().collect::<Vec<_>>(),
             "window_active": self.window_active,
             "models": models,
         })

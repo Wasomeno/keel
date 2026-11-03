@@ -100,7 +100,6 @@ fn command_of(command: &UserCommand) -> Uuid {
         | UserCommand::Steer { command_id, .. }
         | UserCommand::Interrupt { command_id }
         | UserCommand::Answer { command_id, .. } => *command_id,
-
     }
 }
 
@@ -680,11 +679,15 @@ async fn streaming_never_reorders_and_a_prompt_moves_to_top() {
     ]));
     let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
     let older = chat(&engine);
-    engine.queue_command(&older, send("first")).expect("start older");
+    engine
+        .queue_command(&older, send("first"))
+        .expect("start older");
     until(&engine, || harness.runs() == 1).await;
     clock.set(1_000_010);
     let newer = chat(&engine);
-    engine.queue_command(&newer, send("second")).expect("start newer");
+    engine
+        .queue_command(&newer, send("second"))
+        .expect("start newer");
     until(&engine, || harness.runs() == 2).await;
     let expected = vec![newer.clone(), older.clone()];
     assert_eq!(engine.attention_order(clock.now_ms()), expected);
@@ -694,7 +697,11 @@ async fn streaming_never_reorders_and_a_prompt_moves_to_top() {
         clock.set(1_000_010 + step * STREAM_COMMIT_MS);
         engine.tick();
         engine.drive().await;
-        assert_eq!(engine.attention_order(clock.now_ms()), expected, "commit {step}");
+        assert_eq!(
+            engine.attention_order(clock.now_ms()),
+            expected,
+            "commit {step}"
+        );
     }
     assert!(engine.message_text(&older).iter().any(|t| t.contains('a')));
 
@@ -702,13 +709,20 @@ async fn streaming_never_reorders_and_a_prompt_moves_to_top() {
     for step in 1..=6 {
         clock.set(1_000_010 + step * 15_000);
         engine.tick();
-        assert_eq!(engine.attention_order(clock.now_ms()), expected, "quiet {step}");
+        assert_eq!(
+            engine.attention_order(clock.now_ms()),
+            expected,
+            "quiet {step}"
+        );
     }
     assert_eq!(engine.chat_status(&older).as_deref(), Some("running"));
 
     // The user prompts the older chat: it moves to the top.
     clock.set(1_200_000);
-    assert_eq!(engine.queue_command(&older, steer("go on")).expect("steer"), QueueStatus::Processed);
+    assert_eq!(
+        engine.queue_command(&older, steer("go on")).expect("steer"),
+        QueueStatus::Processed
+    );
     let lifted = vec![older.clone(), newer.clone()];
     assert_eq!(engine.attention_order(clock.now_ms()), lifted);
     // ...and its new output still doesn't move anything.
@@ -718,7 +732,11 @@ async fn streaming_never_reorders_and_a_prompt_moves_to_top() {
     }
     clock.set(1_200_000 + STREAM_COMMIT_MS);
     engine.tick();
-    assert!(engine.message_text(&older).iter().any(|t| t.contains('b')), "{:?}", engine.message_text(&older));
+    assert!(
+        engine.message_text(&older).iter().any(|t| t.contains('b')),
+        "{:?}",
+        engine.message_text(&older)
+    );
     assert_eq!(engine.attention_order(clock.now_ms()), lifted);
 }
 
@@ -2109,10 +2127,20 @@ async fn a_space_from_another_device_has_no_files_here() {
     }
     let (outbound, _rx) = Outbound::pair();
     for (method, params) in [
-        ("read_workspace_file", json!({ "space_id": "theirs", "rel_path": "a" })),
-        ("write_workspace_file", json!({ "space_id": "theirs", "rel_path": "a", "content": "x" })),
+        (
+            "read_workspace_file",
+            json!({ "space_id": "theirs", "rel_path": "a" }),
+        ),
+        (
+            "write_workspace_file",
+            json!({ "space_id": "theirs", "rel_path": "a", "content": "x" }),
+        ),
     ] {
-        let req = RpcRequest { id: "r".into(), method: method.into(), params };
+        let req = RpcRequest {
+            id: "r".into(),
+            method: method.into(),
+            params,
+        };
         let resp: Value = serde_json::from_str(&engine.handle(&req, &outbound).unwrap()).unwrap();
         assert_eq!(resp["error"]["code"], "not_host", "{method}");
     }
@@ -2277,40 +2305,108 @@ async fn chat_checkout_branch_switches_the_chats_checkout_or_refuses_when_dirty(
         .create_chat_full(repo_dir.to_str().unwrap(), "mock", "mock", false, None)
         .unwrap();
     let (outbound, mut rx) = Outbound::pair();
-    async fn call(engine: &Engine, outbound: &Outbound, rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>, method: &str, params: Value) -> Value {
-        let request = RpcRequest { id: method.into(), method: method.into(), params };
-        let first: Value = serde_json::from_str(&engine.handle(&request, outbound).unwrap()).unwrap();
+    async fn call(
+        engine: &Engine,
+        outbound: &Outbound,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        let request = RpcRequest {
+            id: method.into(),
+            method: method.into(),
+            params,
+        };
+        let first: Value =
+            serde_json::from_str(&engine.handle(&request, outbound).unwrap()).unwrap();
         if first.get("id").is_some() {
             return first;
         }
-        let pushed = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        let pushed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         serde_json::from_str(&pushed).unwrap()
     }
 
     // The listing is this chat's checkout (the card pins `current` first).
-    let list = call(&engine, &outbound, &mut rx, "chat_branches", json!({ "chat_id": chat_id })).await;
+    let list = call(
+        &engine,
+        &outbound,
+        &mut rx,
+        "chat_branches",
+        json!({ "chat_id": chat_id }),
+    )
+    .await;
     assert_eq!(list["result"]["current"], json!("main"), "{list}");
-    assert_eq!(list["result"]["branches"], json!(["feat", "main"]), "{list}");
+    assert_eq!(
+        list["result"]["branches"],
+        json!(["feat", "main"]),
+        "{list}"
+    );
 
     // Dirty tree: refused with the guard's message, still on main.
     fs::write(repo_dir.join("a.txt"), "changed\n").unwrap();
-    let refused = call(&engine, &outbound, &mut rx, "chat_checkout_branch", json!({ "chat_id": chat_id, "branch": "feat" })).await;
-    let message = refused["error"]["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.starts_with("Uncommitted changes in repo"), "{refused}");
-    assert_eq!(repo::current_head_sync(&repo_dir).unwrap(), repo::Head::Branch("main".into()));
+    let refused = call(
+        &engine,
+        &outbound,
+        &mut rx,
+        "chat_checkout_branch",
+        json!({ "chat_id": chat_id, "branch": "feat" }),
+    )
+    .await;
+    let message = refused["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.starts_with("Uncommitted changes in repo"),
+        "{refused}"
+    );
+    assert_eq!(
+        repo::current_head_sync(&repo_dir).unwrap(),
+        repo::Head::Branch("main".into())
+    );
 
     // Clean: switched in place.
     repo::run_git_cmd_sync(&repo_dir, &["checkout", "--", "a.txt"]).unwrap();
-    let done = call(&engine, &outbound, &mut rx, "chat_checkout_branch", json!({ "chat_id": chat_id, "branch": "feat" })).await;
+    let done = call(
+        &engine,
+        &outbound,
+        &mut rx,
+        "chat_checkout_branch",
+        json!({ "chat_id": chat_id, "branch": "feat" }),
+    )
+    .await;
     assert_eq!(done["result"]["branch"], json!("feat"), "{done}");
-    assert_eq!(repo::current_head_sync(&repo_dir).unwrap(), repo::Head::Branch("feat".into()));
+    assert_eq!(
+        repo::current_head_sync(&repo_dir).unwrap(),
+        repo::Head::Branch("feat".into())
+    );
 
     // Unknown chats and option-looking names are refused.
-    let unknown = call(&engine, &outbound, &mut rx, "chat_checkout_branch", json!({ "chat_id": "nope", "branch": "main" })).await;
+    let unknown = call(
+        &engine,
+        &outbound,
+        &mut rx,
+        "chat_checkout_branch",
+        json!({ "chat_id": "nope", "branch": "main" }),
+    )
+    .await;
     assert!(unknown.get("error").is_some(), "{unknown}");
-    let flag = call(&engine, &outbound, &mut rx, "chat_checkout_branch", json!({ "chat_id": chat_id, "branch": "--force" })).await;
+    let flag = call(
+        &engine,
+        &outbound,
+        &mut rx,
+        "chat_checkout_branch",
+        json!({ "chat_id": chat_id, "branch": "--force" }),
+    )
+    .await;
     assert!(flag.get("error").is_some(), "{flag}");
-    assert_eq!(repo::current_head_sync(&repo_dir).unwrap(), repo::Head::Branch("feat".into()));
+    assert_eq!(
+        repo::current_head_sync(&repo_dir).unwrap(),
+        repo::Head::Branch("feat".into())
+    );
 }
 
 /// Each run streams whatever the test pushes on that run's channel, and the
@@ -3375,7 +3471,10 @@ async fn text_with_the_same_part_id_stays_in_its_own_message() {
 
 #[test]
 fn keel_is_the_only_harness() {
-    let ids: Vec<&str> = super::cli_harnesses().iter().map(|h| super::harness_name(h.id())).collect();
+    let ids: Vec<&str> = super::cli_harnesses()
+        .iter()
+        .map(|h| super::harness_name(h.id()))
+        .collect();
     assert_eq!(ids, ["keel"]);
     assert_eq!(super::cli_harnesses()[0].display_name(), "Keel");
 }
@@ -3387,9 +3486,19 @@ fn harness_ids_round_trip_and_old_ones_are_gone() {
         let name = super::harness_name(id);
         assert_eq!(super::parse_harness(name), Some(id), "{name}");
         assert_eq!(serde_json::to_value(id).unwrap(), json!(name));
-        assert_eq!(serde_json::from_value::<HarnessId>(json!(name)).unwrap(), id);
+        assert_eq!(
+            serde_json::from_value::<HarnessId>(json!(name)).unwrap(),
+            id
+        );
     }
-    for old in ["pi", "claude_code", "codex", "grok", "command_code", "antigravity"] {
+    for old in [
+        "pi",
+        "claude_code",
+        "codex",
+        "grok",
+        "command_code",
+        "antigravity",
+    ] {
         assert_eq!(super::parse_harness(old), None, "{old}");
     }
 }
@@ -3401,7 +3510,13 @@ fn boot_drops_chats_of_removed_harnesses() {
     let mut store = DocsStore::open(tmp.path().join("profile")).expect("store");
     put_chat(&mut store, DEVICE, "c-keep", DEVICE, 5_000, false, "idle");
     put_chat(&mut store, DEVICE, "c-old", DEVICE, 5_000, false, "idle");
-    let mut row = store.registry().view().chats.into_iter().find(|c| c.id == "c-old").expect("row");
+    let mut row = store
+        .registry()
+        .view()
+        .chats
+        .into_iter()
+        .find(|c| c.id == "c-old")
+        .expect("row");
     row.harness = "codex".to_string();
     store.registry().put_chat(&row).expect("codex row");
     store.commit(5_000).expect("commit");
@@ -3414,6 +3529,14 @@ fn boot_drops_chats_of_removed_harnesses() {
         harnesses: vec![Arc::new(MockHarness::echo())],
         compaction_bytes: COMPACTION_BYTES,
     });
-    let ids: Vec<String> = engine.lock().store.registry().view().chats.into_iter().map(|c| c.id).collect();
+    let ids: Vec<String> = engine
+        .lock()
+        .store
+        .registry()
+        .view()
+        .chats
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
     assert_eq!(ids, ["c-keep"]);
 }

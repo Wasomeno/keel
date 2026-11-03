@@ -28,25 +28,52 @@ pub enum Step {
         summary: String,
     },
     /// A chart the engine's generative UI added (a `ui` part).
-    Chart { id: String, chart: crate::chart::Chart },
+    Chart {
+        id: String,
+        chart: crate::chart::Chart,
+    },
     /// Choice buttons the engine's generative UI added (a `ui` part).
-    Choices { id: String, choices: crate::choices::Choices },
+    Choices {
+        id: String,
+        choices: crate::choices::Choices,
+    },
     /// A test result card the engine's generative UI added (a `ui` part).
-    Tests { id: String, run: crate::test_run::TestRun },
+    Tests {
+        id: String,
+        run: crate::test_run::TestRun,
+    },
     /// A merge request card the engine's generative UI added (a `ui` part).
-    Mr { id: String, card: crate::mr_card::MrCard },
+    Mr {
+        id: String,
+        card: crate::mr_card::MrCard,
+    },
     /// Stat tiles the engine's generative UI added (a `ui` part).
-    Stats { id: String, items: Vec<crate::stats::Stat> },
+    Stats {
+        id: String,
+        items: Vec<crate::stats::Stat>,
+    },
     /// The turn's changed files the engine's generative UI added (a `ui` part).
-    Files { id: String, card: crate::file_changes::FileChanges },
+    Files {
+        id: String,
+        card: crate::file_changes::FileChanges,
+    },
     /// Shell blocks to give a Run button, by their text (a `ui` part).
     Commands(Vec<(String, crate::runnable::Run)>),
     /// Numbered steps the engine's generative UI added (a `ui` part).
-    Steps { id: String, steps: crate::steps::Steps },
+    Steps {
+        id: String,
+        steps: crate::steps::Steps,
+    },
     /// One sentence pulled out of the reply (a `ui` part).
-    Callout { id: String, callout: crate::callout::Callout },
+    Callout {
+        id: String,
+        callout: crate::callout::Callout,
+    },
     /// Side-by-side claims (a `ui` part).
-    Compare { id: String, columns: Vec<crate::compare::Column> },
+    Compare {
+        id: String,
+        columns: Vec<crate::compare::Column>,
+    },
     /// A box drawing (a `ui` part).
     Diagram { id: String, flow: crate::flow::Flow },
     /// The agent's plan (a `plan` part); one per message, replaced whole.
@@ -65,17 +92,47 @@ pub enum DocStep {
         state: String,
         summary: String,
     },
-    Chart { id: String, chart: crate::chart::Chart },
-    Choices { id: String, choices: crate::choices::Choices },
-    Tests { id: String, run: crate::test_run::TestRun },
-    Mr { id: String, card: crate::mr_card::MrCard },
-    Stats { id: String, items: Vec<crate::stats::Stat> },
-    Files { id: String, card: crate::file_changes::FileChanges },
+    Chart {
+        id: String,
+        chart: crate::chart::Chart,
+    },
+    Choices {
+        id: String,
+        choices: crate::choices::Choices,
+    },
+    Tests {
+        id: String,
+        run: crate::test_run::TestRun,
+    },
+    Mr {
+        id: String,
+        card: crate::mr_card::MrCard,
+    },
+    Stats {
+        id: String,
+        items: Vec<crate::stats::Stat>,
+    },
+    Files {
+        id: String,
+        card: crate::file_changes::FileChanges,
+    },
     Commands(Vec<(String, crate::runnable::Run)>),
-    Steps { id: String, steps: crate::steps::Steps },
-    Callout { id: String, callout: crate::callout::Callout },
-    Compare { id: String, columns: Vec<crate::compare::Column> },
-    Diagram { id: String, flow: crate::flow::Flow },
+    Steps {
+        id: String,
+        steps: crate::steps::Steps,
+    },
+    Callout {
+        id: String,
+        callout: crate::callout::Callout,
+    },
+    Compare {
+        id: String,
+        columns: Vec<crate::compare::Column>,
+    },
+    Diagram {
+        id: String,
+        flow: crate::flow::Flow,
+    },
     Plan(Vec<crate::trace::PlanItem>),
 }
 
@@ -109,13 +166,19 @@ pub fn view_text(view: &serde_json::Value) -> Option<String> {
 /// and `parts_len` is the count afterwards. A frame without `parts_from` is a
 /// whole view from an older engine. `None` when the frame does not fit the
 /// stored view (it is dropped; the next whole push repairs it).
-pub fn apply_message_frame(stored: Option<serde_json::Value>, frame: &serde_json::Value) -> Option<serde_json::Value> {
+pub fn apply_message_frame(
+    stored: Option<serde_json::Value>,
+    frame: &serde_json::Value,
+) -> Option<serde_json::Value> {
     use serde_json::Value;
     let Some(from) = frame.get("parts_from").and_then(Value::as_u64) else {
         return Some(frame.clone());
     };
     let from = from as usize;
-    let body_from = frame.get("body_from").and_then(Value::as_u64).map(|b| b as usize);
+    let body_from = frame
+        .get("body_from")
+        .and_then(Value::as_u64)
+        .map(|b| b as usize);
     let mut view = match stored {
         Some(view) if view.get("parts").is_some_and(Value::is_array) => view,
         _ if from == 0 && body_from.is_none() => serde_json::json!({ "parts": [] }),
@@ -158,7 +221,12 @@ pub fn apply_message_frame(stored: Option<serde_json::Value>, frame: &serde_json
 pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
     let mut out: Vec<DocStep> = Vec::new();
     let Some(parts) = view.get("parts").and_then(|v| v.as_array()) else {
-        let s = |k: &str| view.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let s = |k: &str| {
+            view.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
         let reasoning = s("reasoning");
         if !reasoning.is_empty() {
             out.push(DocStep::Reasoning(reasoning));
@@ -174,7 +242,12 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
         return out;
     };
     for part in parts {
-        let s = |k: &str| part.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let s = |k: &str| {
+            part.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
         match s("kind").as_str() {
             "text" => {
                 let body = s("body");
@@ -201,7 +274,11 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
                 // A question's receipt is a row of its own: never folded
                 // into the tools around it.
                 match out.last_mut() {
-                    Some(DocStep::Tools(tools)) if !tool.is_receipt() && !tools.iter().any(ToolEntry::is_receipt) => tools.push(tool),
+                    Some(DocStep::Tools(tools))
+                        if !tool.is_receipt() && !tools.iter().any(ToolEntry::is_receipt) =>
+                    {
+                        tools.push(tool)
+                    }
                     _ => out.push(DocStep::Tools(vec![tool])),
                 }
             }
@@ -212,7 +289,12 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
                     .into_iter()
                     .flatten()
                     .filter_map(|e| {
-                        let text = |k: &str| e.get(k).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(str::to_string);
+                        let text = |k: &str| {
+                            e.get(k)
+                                .and_then(|v| v.as_str())
+                                .filter(|v| !v.is_empty())
+                                .map(str::to_string)
+                        };
                         Some(crate::trace::PlanItem {
                             content: text("content")?,
                             status: text("status").unwrap_or_else(|| "pending".into()),
@@ -238,7 +320,10 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
                 if let Some(chart) = crate::chart::Chart::from_spec(spec) {
                     out.push(DocStep::Chart { id: s("id"), chart });
                 } else if let Some(choices) = crate::choices::Choices::from_spec(spec) {
-                    out.push(DocStep::Choices { id: s("id"), choices });
+                    out.push(DocStep::Choices {
+                        id: s("id"),
+                        choices,
+                    });
                 } else if let Some(run) = crate::test_run::TestRun::from_spec(spec) {
                     out.push(DocStep::Tests { id: s("id"), run });
                 } else if let Some(card) = crate::mr_card::MrCard::from_spec(spec) {
@@ -252,9 +337,15 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
                 } else if let Some(steps) = crate::steps::Steps::from_spec(spec) {
                     out.push(DocStep::Steps { id: s("id"), steps });
                 } else if let Some(callout) = crate::callout::Callout::from_spec(spec) {
-                    out.push(DocStep::Callout { id: s("id"), callout });
+                    out.push(DocStep::Callout {
+                        id: s("id"),
+                        callout,
+                    });
                 } else if let Some(columns) = crate::compare::from_spec(spec) {
-                    out.push(DocStep::Compare { id: s("id"), columns });
+                    out.push(DocStep::Compare {
+                        id: s("id"),
+                        columns,
+                    });
                 } else if let Some(flow) = crate::flow::Flow::from_spec(spec) {
                     out.push(DocStep::Diagram { id: s("id"), flow });
                 }
@@ -305,23 +396,39 @@ pub fn merge_doc(message_id: &str, old: Vec<Step>, doc: Vec<DocStep>) -> Vec<Ste
             DocStep::Text(text) => {
                 let ordinal = text_count(&out);
                 let mut state = match by_kind[0].pop_front() {
-                    Some(Step::Text(state)) if state.message_id == text_id(message_id, ordinal) => state,
+                    Some(Step::Text(state)) if state.message_id == text_id(message_id, ordinal) => {
+                        state
+                    }
                     _ => MessageBlockState::new(text_id(message_id, ordinal)),
                 };
                 state.set_text(&text);
                 Step::Text(state)
             }
             DocStep::Reasoning(body) => match by_kind[1].pop_front() {
-                Some(Step::Reasoning(live)) if live.len() > body.len() && live.starts_with(&body) => Step::Reasoning(live),
+                Some(Step::Reasoning(live))
+                    if live.len() > body.len() && live.starts_with(&body) =>
+                {
+                    Step::Reasoning(live)
+                }
                 _ => Step::Reasoning(body),
             },
             DocStep::Tools(tools) => {
                 by_kind[2].pop_front();
                 Step::Tools(tools)
             }
-            DocStep::Subagent { subagent_id, name, state, summary } => {
+            DocStep::Subagent {
+                subagent_id,
+                name,
+                state,
+                summary,
+            } => {
                 by_kind[3].pop_front();
-                Step::Subagent { subagent_id, name, state, summary }
+                Step::Subagent {
+                    subagent_id,
+                    name,
+                    state,
+                    summary,
+                }
             }
             DocStep::Chart { id, chart } => {
                 by_kind[4].pop_front();
@@ -469,14 +576,38 @@ pub fn push_reasoning(steps: &mut Vec<Step>, delta: &str, new_step: bool) {
 /// case, a closing period), so a callout that adds a point still shows.
 fn repeats_reply(steps: &[Step]) -> bool {
     let plain = |text: &str| {
-        let words = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let words = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         words.trim_end_matches(['.', '!']).to_string()
     };
-    let reply = plain(&steps.iter().filter_map(|step| if let Step::Text(text) = step { Some(text.full_text.as_str()) } else { None }).collect::<Vec<_>>().join(" "));
-    !reply.is_empty() && steps.iter().any(|step| matches!(step, Step::Callout { callout, .. } if plain(&callout.text) == reply))
+    let reply = plain(
+        &steps
+            .iter()
+            .filter_map(|step| {
+                if let Step::Text(text) = step {
+                    Some(text.full_text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    !reply.is_empty()
+        && steps.iter().any(
+            |step| matches!(step, Step::Callout { callout, .. } if plain(&callout.text) == reply),
+        )
 }
 
-pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bool, out: &mut Vec<TranscriptBlock>) {
+pub fn push_rows(
+    message_id: &str,
+    steps: &[Step],
+    expanded: &dyn Fn(&str) -> bool,
+    out: &mut Vec<TranscriptBlock>,
+) {
     let (mut reasoning_ix, mut tools_ix) = (0usize, 0usize);
     let mut placed: Vec<&String> = Vec::new();
     let runs: Vec<&(String, crate::runnable::Run)> = steps
@@ -501,27 +632,41 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
                 for mut block in blocks {
                     // A shell block the engine marked runnable gets its Run.
                     if let TranscriptBlock::Code { content, run, .. } = &mut block
-                        && let Some((_, found)) = runs.iter().find(|(text, _)| text == content.trim())
+                        && let Some((_, found)) =
+                            runs.iter().find(|(text, _)| text == content.trim())
                     {
                         *run = Some(found.clone());
                     }
                     if let TranscriptBlock::Table { header, rows, .. } = &block {
-                        let header: Vec<&str> = header.iter().map(|cell| cell.text.as_str()).collect();
-                        let rows: Vec<Vec<&str>> =
-                            rows.iter().map(|row| row.iter().map(|cell| cell.text.as_str()).collect()).collect();
-                        if let Some(&(id, chart)) =
-                            charts.iter().find(|(id, chart)| !placed.contains(id) && chart.is_of(&header, &rows))
+                        let header: Vec<&str> =
+                            header.iter().map(|cell| cell.text.as_str()).collect();
+                        let rows: Vec<Vec<&str>> = rows
+                            .iter()
+                            .map(|row| row.iter().map(|cell| cell.text.as_str()).collect())
+                            .collect();
+                        if let Some(&(id, chart)) = charts
+                            .iter()
+                            .find(|(id, chart)| !placed.contains(id) && chart.is_of(&header, &rows))
                         {
                             placed.push(id);
                             let id = format!("{message_id}#ui-{id}");
-                            out.push(TranscriptBlock::Chart { id, chart: chart.clone(), replaces: Some(Box::new(block)) });
+                            out.push(TranscriptBlock::Chart {
+                                id,
+                                chart: chart.clone(),
+                                replaces: Some(Box::new(block)),
+                            });
                             continue;
                         }
                     }
                     out.push(block);
                 }
             }
-            Step::Subagent { subagent_id, name, state, summary } => {
+            Step::Subagent {
+                subagent_id,
+                name,
+                state,
+                summary,
+            } => {
                 let id = format!("{message_id}#sub-{subagent_id}");
                 out.push(TranscriptBlock::Subagent {
                     id,
@@ -532,28 +677,48 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
                 });
             }
             Step::Choices { id, choices } => {
-                out.push(TranscriptBlock::Choices { id: format!("{message_id}#ui-{id}"), choices: choices.clone() });
+                out.push(TranscriptBlock::Choices {
+                    id: format!("{message_id}#ui-{id}"),
+                    choices: choices.clone(),
+                });
             }
             Step::Tests { id, run } => {
-                out.push(TranscriptBlock::Tests { id: format!("{message_id}#ui-{id}"), run: run.clone() });
+                out.push(TranscriptBlock::Tests {
+                    id: format!("{message_id}#ui-{id}"),
+                    run: run.clone(),
+                });
             }
             Step::Commands(_) => {}
             Step::Plan(entries) => {
                 let id = format!("{message_id}#plan");
-                let live = entries.iter().any(|e| matches!(e.status.as_str(), "in_progress" | "inProgress" | "running"));
+                let live = entries
+                    .iter()
+                    .any(|e| matches!(e.status.as_str(), "in_progress" | "inProgress" | "running"));
                 let expanded = match (expanded(&format!("{id}=1")), expanded(&format!("{id}=0"))) {
                     (true, _) => Some(true),
                     (_, true) => Some(false),
                     _ => None,
                 };
-                out.push(TranscriptBlock::Plan { id, entries: entries.clone(), live, expanded });
+                out.push(TranscriptBlock::Plan {
+                    id,
+                    entries: entries.clone(),
+                    live,
+                    expanded,
+                });
             }
             Step::Stats { id, items } => {
-                out.push(TranscriptBlock::Stats { id: format!("{message_id}#ui-{id}"), items: items.clone() });
+                out.push(TranscriptBlock::Stats {
+                    id: format!("{message_id}#ui-{id}"),
+                    items: items.clone(),
+                });
             }
             Step::Files { id, card } => {
                 let row_id = format!("{message_id}#ui-{id}");
-                out.push(TranscriptBlock::FileChanges { id: row_id.clone(), card: card.clone(), expanded: expanded(&row_id) });
+                out.push(TranscriptBlock::FileChanges {
+                    id: row_id.clone(),
+                    card: card.clone(),
+                    expanded: expanded(&row_id),
+                });
             }
             Step::Mr { id, card } => {
                 out.push(TranscriptBlock::MrCard {
@@ -565,16 +730,25 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
             }
             Step::Steps { id, steps } => {
                 if steps.kind == crate::steps::StepKind::Guide {
-                    out.push(TranscriptBlock::Steps { id: format!("{message_id}#ui-{id}"), steps: steps.clone() });
+                    out.push(TranscriptBlock::Steps {
+                        id: format!("{message_id}#ui-{id}"),
+                        steps: steps.clone(),
+                    });
                 }
             }
             // A callout that is the whole reply would show the same sentence twice.
             Step::Callout { .. } if repeats_reply(steps) => {}
             Step::Callout { id, callout } => {
-                out.push(TranscriptBlock::Callout { id: format!("{message_id}#ui-{id}"), callout: callout.clone() });
+                out.push(TranscriptBlock::Callout {
+                    id: format!("{message_id}#ui-{id}"),
+                    callout: callout.clone(),
+                });
             }
             Step::Compare { id, columns } => {
-                out.push(TranscriptBlock::Compare { id: format!("{message_id}#ui-{id}"), columns: columns.clone() });
+                out.push(TranscriptBlock::Compare {
+                    id: format!("{message_id}#ui-{id}"),
+                    columns: columns.clone(),
+                });
             }
             Step::Diagram { id, flow } => {
                 out.push(flow.block(format!("{message_id}#ui-{id}")));
@@ -582,7 +756,11 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
             // Placed where its table was; one whose table isn't found goes last.
             Step::Chart { id, chart } => {
                 if !placed.contains(&id) {
-                    out.push(TranscriptBlock::Chart { id: format!("{message_id}#ui-{id}"), chart: chart.clone(), replaces: None });
+                    out.push(TranscriptBlock::Chart {
+                        id: format!("{message_id}#ui-{id}"),
+                        chart: chart.clone(),
+                        replaces: None,
+                    });
                 }
             }
             Step::Reasoning(body) => {
@@ -601,7 +779,11 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
                     }
                     continue;
                 }
-                out.push(TranscriptBlock::Reasoning { expanded: expanded(&id), id, content: body.trim().to_string() });
+                out.push(TranscriptBlock::Reasoning {
+                    expanded: expanded(&id),
+                    id,
+                    content: body.trim().to_string(),
+                });
             }
             Step::Tools(tools) => {
                 let id = format!("{message_id}#tools{tools_ix}");
@@ -611,10 +793,18 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
                 }
                 if tools.iter().any(ToolEntry::is_receipt) {
                     let id = format!("{message_id}#receipt-{}", tools[0].tool_id);
-                    out.push(TranscriptBlock::ToolGroup { expanded: expanded(&id), id, tools: tools.clone(), overrides: Vec::new() });
+                    out.push(TranscriptBlock::ToolGroup {
+                        expanded: expanded(&id),
+                        id,
+                        tools: tools.clone(),
+                        overrides: Vec::new(),
+                    });
                     continue;
                 }
-                let images: Vec<String> = tools.iter().flat_map(|t| t.images.iter().cloned()).collect();
+                let images: Vec<String> = tools
+                    .iter()
+                    .flat_map(|t| t.images.iter().cloned())
+                    .collect();
                 // A run of tools folds into the group before it; its
                 // screenshots join that group's (visible) image row.
                 let len = out.len();
@@ -630,7 +820,12 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
                     }
                     continue;
                 }
-                if let Some(TranscriptBlock::ToolGroup { tools: group, id: group_id, overrides, .. }) = out.last_mut()
+                if let Some(TranscriptBlock::ToolGroup {
+                    tools: group,
+                    id: group_id,
+                    overrides,
+                    ..
+                }) = out.last_mut()
                     && !group.iter().any(ToolEntry::is_receipt)
                 {
                     overrides.extend(line_overrides(group_id, tools, expanded));
@@ -643,9 +838,17 @@ pub fn push_rows(message_id: &str, steps: &[Step], expanded: &dyn Fn(&str) -> bo
                 }
                 let shots = format!("{id}#shots");
                 let overrides = line_overrides(&id, tools, expanded);
-                out.push(TranscriptBlock::ToolGroup { expanded: expanded(&id), id, tools: tools.clone(), overrides });
+                out.push(TranscriptBlock::ToolGroup {
+                    expanded: expanded(&id),
+                    id,
+                    tools: tools.clone(),
+                    overrides,
+                });
                 if !images.is_empty() {
-                    out.push(TranscriptBlock::Shots { id: shots, paths: images });
+                    out.push(TranscriptBlock::Shots {
+                        id: shots,
+                        paths: images,
+                    });
                 }
             }
         }
@@ -660,10 +863,17 @@ pub fn line_id(group_id: &str, tool_id: &str) -> String {
 
 /// The open/closed choices the user made for these tools' lines and for an
 /// Explored fold that starts at one of them.
-fn line_overrides(group_id: &str, tools: &[ToolEntry], expanded: &dyn Fn(&str) -> bool) -> Vec<(String, bool)> {
+fn line_overrides(
+    group_id: &str,
+    tools: &[ToolEntry],
+    expanded: &dyn Fn(&str) -> bool,
+) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     for tool in tools {
-        for line in [line_id(group_id, &tool.tool_id), line_id(group_id, &format!("explored-{}", tool.tool_id))] {
+        for line in [
+            line_id(group_id, &tool.tool_id),
+            line_id(group_id, &format!("explored-{}", tool.tool_id)),
+        ] {
             if expanded(&format!("{line}=1")) {
                 out.push((line, true));
             } else if expanded(&format!("{line}=0")) {
@@ -686,13 +896,46 @@ mod tests {
             }
             f
         };
-        let v = apply_message_frame(None, &head(0, 1, None, json!([{ "kind": "text", "id": "p", "body": "he" }]))).unwrap();
-        let v = apply_message_frame(Some(v), &head(0, 1, Some(2), json!([{ "kind": "text", "id": "p", "body": "llo" }]))).unwrap();
+        let v = apply_message_frame(
+            None,
+            &head(
+                0,
+                1,
+                None,
+                json!([{ "kind": "text", "id": "p", "body": "he" }]),
+            ),
+        )
+        .unwrap();
+        let v = apply_message_frame(
+            Some(v),
+            &head(
+                0,
+                1,
+                Some(2),
+                json!([{ "kind": "text", "id": "p", "body": "llo" }]),
+            ),
+        )
+        .unwrap();
         assert_eq!(view_text(&v).as_deref(), Some("hello"));
-        let v = apply_message_frame(Some(v), &head(1, 2, None, json!([{ "kind": "tool", "tool_id": "t", "name": "bash", "state": "running" }]))).unwrap();
+        let v = apply_message_frame(
+            Some(v),
+            &head(
+                1,
+                2,
+                None,
+                json!([{ "kind": "tool", "tool_id": "t", "name": "bash", "state": "running" }]),
+            ),
+        )
+        .unwrap();
         assert_eq!(v["parts"].as_array().unwrap().len(), 2);
         // A frame that does not line up is refused rather than corrupting.
-        assert!(apply_message_frame(Some(v.clone()), &head(0, 1, Some(9), json!([{ "body": "x" }]))).is_none());
+        assert!(
+            apply_message_frame(
+                Some(v.clone()),
+                &head(0, 1, Some(9), json!([{ "body": "x" }]))
+            )
+            .is_none()
+        );
         assert!(apply_message_frame(Some(v.clone()), &head(5, 6, None, json!([{}]))).is_none());
         assert!(apply_message_frame(None, &head(1, 2, None, json!([{}]))).is_none());
         // Shrinking truncates; an old whole view replaces.
@@ -711,7 +954,10 @@ mod tests {
             {"kind": "text", "id": "b", "body": "world"},
         ]});
         assert_eq!(view_text(&view).as_deref(), Some("Hello world"));
-        assert_eq!(view_text(&serde_json::json!({"text": "legacy"})).as_deref(), Some("legacy"));
+        assert_eq!(
+            view_text(&serde_json::json!({"text": "legacy"})).as_deref(),
+            Some("legacy")
+        );
         assert_eq!(view_text(&serde_json::json!({})), None);
     }
 
@@ -732,8 +978,10 @@ mod tests {
         let steps = merge_doc("m", Vec::new(), doc_steps(&view));
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
-        assert!(matches!(rows.last(), Some(TranscriptBlock::Chart { id, chart, .. })
-            if id == "m#ui-chart-0" && chart.kind == crate::chart::Kind::Line));
+        assert!(
+            matches!(rows.last(), Some(TranscriptBlock::Chart { id, chart, .. })
+            if id == "m#ui-chart-0" && chart.kind == crate::chart::Kind::Line)
+        );
         assert_eq!(steps.len(), 2);
     }
 
@@ -745,12 +993,37 @@ mod tests {
                 {"kind": "ui", "id": "note", "spec": {"component": "callout", "kind": "result", "text": callout}},
             ]});
             let mut rows = Vec::new();
-            push_rows("m", &merge_doc("m", Vec::new(), doc_steps(&view)), &|_| false, &mut rows);
-            rows.iter().filter(|row| matches!(row, TranscriptBlock::Callout { .. })).count()
+            push_rows(
+                "m",
+                &merge_doc("m", Vec::new(), doc_steps(&view)),
+                &|_| false,
+                &mut rows,
+            );
+            rows.iter()
+                .filter(|row| matches!(row, TranscriptBlock::Callout { .. }))
+                .count()
         };
-        assert_eq!(rows_for("Google is open in the browser.", "Google is open in the browser."), 0);
-        assert_eq!(rows_for("google is open in the  browser", "Google is open in the browser."), 0);
-        assert_eq!(rows_for("Opened it. Google is open in the browser.", "Google is open in the browser."), 1);
+        assert_eq!(
+            rows_for(
+                "Google is open in the browser.",
+                "Google is open in the browser."
+            ),
+            0
+        );
+        assert_eq!(
+            rows_for(
+                "google is open in the  browser",
+                "Google is open in the browser."
+            ),
+            0
+        );
+        assert_eq!(
+            rows_for(
+                "Opened it. Google is open in the browser.",
+                "Google is open in the browser."
+            ),
+            1
+        );
     }
 
     #[test]
@@ -768,15 +1041,30 @@ mod tests {
             {"kind": "ui", "id": "junk", "spec": {"component": "diagram", "source": "just words"}},
         ]});
         let mut rows = Vec::new();
-        push_rows("m", &merge_doc("m", Vec::new(), doc_steps(&view)), &|_| false, &mut rows);
+        push_rows(
+            "m",
+            &merge_doc("m", Vec::new(), doc_steps(&view)),
+            &|_| false,
+            &mut rows,
+        );
         assert!(matches!(rows[0], TranscriptBlock::Steps { ref id, .. } if id == "m#ui-steps"));
-        assert!(!rows.iter().any(|r| matches!(r, TranscriptBlock::Steps { id, .. } if id == "m#ui-task_steps")));
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, TranscriptBlock::Steps { id, .. } if id == "m#ui-task_steps"))
+        );
         assert!(matches!(rows[1], TranscriptBlock::Callout { .. }));
-        assert!(matches!(rows[2], TranscriptBlock::Compare { ref columns, .. } if columns.len() == 2));
+        assert!(
+            matches!(rows[2], TranscriptBlock::Compare { ref columns, .. } if columns.len() == 2)
+        );
         // A diagram card draws as its fence (an old box drawing: a `diagram` one).
-        assert!(matches!(rows[3], TranscriptBlock::Code { language: Some(ref l), .. } if l == "diagram"));
+        assert!(
+            matches!(rows[3], TranscriptBlock::Code { language: Some(ref l), .. } if l == "diagram")
+        );
         // One no fence can draw still shows its source rather than vanishing.
-        assert!(matches!(rows[4], TranscriptBlock::Code { ref id, ref content, .. } if id == "m#ui-junk" && content == "just words"));
+        assert!(
+            matches!(rows[4], TranscriptBlock::Code { ref id, ref content, .. } if id == "m#ui-junk" && content == "just words")
+        );
         assert_eq!(rows.len(), 5);
     }
 
@@ -803,8 +1091,10 @@ mod tests {
         let steps = merge_doc("m", Vec::new(), doc_steps(&view));
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
-        assert!(matches!(rows.last(), Some(TranscriptBlock::Choices { id, choices })
-            if id == "m#ui-choices" && choices.recommended == Some(0)));
+        assert!(
+            matches!(rows.last(), Some(TranscriptBlock::Choices { id, choices })
+            if id == "m#ui-choices" && choices.recommended == Some(0))
+        );
     }
 
     #[test]
@@ -848,12 +1138,17 @@ mod tests {
         }
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
-        let shape: Vec<&str> = rows.iter().map(|r| match r {
-            TranscriptBlock::Table { .. } => "table",
-            TranscriptBlock::Chart { replaces: Some(_), .. } => "chart",
-            TranscriptBlock::Paragraph { .. } => "text",
-            _ => "other",
-        }).collect();
+        let shape: Vec<&str> = rows
+            .iter()
+            .map(|r| match r {
+                TranscriptBlock::Table { .. } => "table",
+                TranscriptBlock::Chart {
+                    replaces: Some(_), ..
+                } => "chart",
+                TranscriptBlock::Paragraph { .. } => "text",
+                _ => "other",
+            })
+            .collect();
         assert_eq!(shape, ["table", "text", "chart", "text"]);
     }
 
@@ -871,7 +1166,10 @@ mod tests {
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
         assert!(matches!(rows[0], TranscriptBlock::Table { .. }));
-        assert!(matches!(rows.last(), Some(TranscriptBlock::Chart { replaces: None, .. })));
+        assert!(matches!(
+            rows.last(),
+            Some(TranscriptBlock::Chart { replaces: None, .. })
+        ));
     }
 
     fn kinds(rows: &[TranscriptBlock]) -> Vec<String> {
@@ -903,10 +1201,11 @@ mod tests {
         let (a, b) = (dir.join("a.png"), dir.join("b.png"));
         std::fs::write(&a, b"png").unwrap();
         std::fs::write(&b, b"png").unwrap();
-        let (a, b) = (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned());
-        let shot = |id: &str, path: &str| {
-            serde_json::json!({"kind": "tool", "tool_id": id, "name": "browser_screenshot", "state": "done", "summary": "", "images": [path, "/no/such/file.png"]})
-        };
+        let (a, b) = (
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        );
+        let shot = |id: &str, path: &str| serde_json::json!({"kind": "tool", "tool_id": id, "name": "browser_screenshot", "state": "done", "summary": "", "images": [path, "/no/such/file.png"]});
         let view = serde_json::json!({"parts": [
             shot("1", &a),
             {"kind": "text", "id": "p", "body": ""},
@@ -917,7 +1216,13 @@ mod tests {
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
         assert_eq!(kinds(&rows)[0], "tools2");
-        assert_eq!(rows[1], TranscriptBlock::Shots { id: "m#tools0#shots".into(), paths: vec![a.clone()] });
+        assert_eq!(
+            rows[1],
+            TranscriptBlock::Shots {
+                id: "m#tools0#shots".into(),
+                paths: vec![a.clone()]
+            }
+        );
         // A second message's screenshot tool folds into the same group and row.
         let more = serde_json::json!({"parts": [shot("3", &b)]});
         let mut steps = merge_doc("m2", Vec::new(), doc_steps(&more));
@@ -925,7 +1230,13 @@ mod tests {
         push_rows("m2", &steps, &|_| false, &mut rows);
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(kinds(&rows)[0], "tools3");
-        assert_eq!(rows[1], TranscriptBlock::Shots { id: "m#tools0#shots".into(), paths: vec![a, b] });
+        assert_eq!(
+            rows[1],
+            TranscriptBlock::Shots {
+                id: "m#tools0#shots".into(),
+                paths: vec![a, b]
+            }
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -948,14 +1259,27 @@ mod tests {
         parsed(&mut steps);
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
-        assert_eq!(kinds(&rows), ["think", "tools1", "Gathering branch state.", "think", "tools2", "Checking the diff."]);
+        assert_eq!(
+            kinds(&rows),
+            [
+                "think",
+                "tools1",
+                "Gathering branch state.",
+                "think",
+                "tools2",
+                "Checking the diff."
+            ]
+        );
     }
 
     #[test]
     fn old_views_fall_back_to_thinking_tools_text() {
         let view = serde_json::json!({"text": "hi", "reasoning": "r", "tools": [{"tool_id": "1", "name": "bash", "state": "done", "summary": ""}]});
         let doc = doc_steps(&view);
-        assert!(matches!(doc.as_slice(), [DocStep::Reasoning(_), DocStep::Tools(_), DocStep::Text(_)]));
+        assert!(matches!(
+            doc.as_slice(),
+            [DocStep::Reasoning(_), DocStep::Tools(_), DocStep::Text(_)]
+        ));
     }
 
     #[test]
@@ -967,7 +1291,9 @@ mod tests {
         let doc = vec![
             DocStep::Reasoning("thinking".into()),
             DocStep::Text("First.".into()),
-            DocStep::Tools(ToolEntry::parse_list(&serde_json::json!({"tools": [tool("1")]}))),
+            DocStep::Tools(ToolEntry::parse_list(
+                &serde_json::json!({"tools": [tool("1")]}),
+            )),
         ];
         steps = merge_doc("m", steps, doc);
         push_text(&mut steps, "m", "Second", false);
@@ -990,7 +1316,9 @@ mod tests {
         // Now the doc has everything, with the tool in between.
         let doc = vec![
             DocStep::Text("Before.".into()),
-            DocStep::Tools(ToolEntry::parse_list(&serde_json::json!({"tools": [tool("1")]}))),
+            DocStep::Tools(ToolEntry::parse_list(
+                &serde_json::json!({"tools": [tool("1")]}),
+            )),
             DocStep::Text("After".into()),
         ];
         steps = merge_doc("m", steps, doc);
@@ -1006,7 +1334,11 @@ mod tests {
     fn tools_group_across_messages_of_a_turn() {
         let tools = ToolEntry::parse_list(&serde_json::json!({"tools": [tool("1")]}));
         let a = merge_doc("a", Vec::new(), vec![DocStep::Tools(tools.clone())]);
-        let b = merge_doc("b", Vec::new(), vec![DocStep::Tools(tools), DocStep::Text("done".into())]);
+        let b = merge_doc(
+            "b",
+            Vec::new(),
+            vec![DocStep::Tools(tools), DocStep::Text("done".into())],
+        );
         let mut rows = Vec::new();
         push_rows("a", &a, &|_| false, &mut rows);
         push_rows("b", &parsed_steps(b), &|_| false, &mut rows);
@@ -1022,12 +1354,21 @@ mod tests {
     #[test]
     fn thinking_rows_in_a_row_are_one_thought() {
         let a = merge_doc("a", Vec::new(), vec![DocStep::Reasoning("first".into())]);
-        let b = merge_doc("b", Vec::new(), vec![DocStep::Reasoning("second".into()), DocStep::Text("done".into())]);
+        let b = merge_doc(
+            "b",
+            Vec::new(),
+            vec![
+                DocStep::Reasoning("second".into()),
+                DocStep::Text("done".into()),
+            ],
+        );
         let mut rows = Vec::new();
         push_rows("a", &a, &|_| false, &mut rows);
         push_rows("b", &parsed_steps(b), &|_| false, &mut rows);
         assert_eq!(kinds(&rows), ["think", "done"]);
-        let TranscriptBlock::Reasoning { content, .. } = &rows[0] else { panic!() };
+        let TranscriptBlock::Reasoning { content, .. } = &rows[0] else {
+            panic!()
+        };
         assert_eq!(content, "first\n\nsecond");
     }
 
@@ -1040,11 +1381,16 @@ mod tests {
         push_text(&mut steps, "m", "Here is what I found.", true);
         let doc = vec![
             DocStep::Text("Looking it up.Here is what I found.".into()),
-            DocStep::Tools(ToolEntry::parse_list(&serde_json::json!({"tools": [tool("1")]}))),
+            DocStep::Tools(ToolEntry::parse_list(
+                &serde_json::json!({"tools": [tool("1")]}),
+            )),
         ];
         let steps = parsed_steps(merge_doc("m", steps, doc));
         let mut rows = Vec::new();
         push_rows("m", &steps, &|_| false, &mut rows);
-        assert_eq!(kinds(&rows), ["Looking it up.Here is what I found.", "tools1"]);
+        assert_eq!(
+            kinds(&rows),
+            ["Looking it up.Here is what I found.", "tools1"]
+        );
     }
 }

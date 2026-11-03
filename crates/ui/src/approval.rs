@@ -22,9 +22,10 @@ pub fn humanize_title(name: &str) -> String {
         "scroll" | "browser_scroll" => "Scroll page",
         "screenshot" | "browser_screenshot" | "take_screenshot" => "Take screenshot",
         "open_pane" | "browser_open_pane" => "Open browser pane",
-        "bash" | "run_command" | "shell" | "run_shell_command" | "execute" | "exec_command" | "run_terminal_cmd" => "Run command",
-        "write" | "write_file" | "edit" | "edit_file" | "multiedit" | "multi_edit" | "str_replace" | "apply_patch"
-        | "notebookedit" | "replace" | "create_file" => "Edit file",
+        "bash" | "run_command" | "shell" | "run_shell_command" | "execute" | "exec_command"
+        | "run_terminal_cmd" => "Run command",
+        "write" | "write_file" | "edit" | "edit_file" | "multiedit" | "multi_edit"
+        | "str_replace" | "apply_patch" | "notebookedit" | "replace" | "create_file" => "Edit file",
         "read" | "read_file" | "view" | "view_file" => "Read file",
         "fetch" | "webfetch" | "web_fetch" | "fetch_url" | "read_url_content" => "Fetch URL",
         "websearch" | "web_search" | "google_web_search" => "Search the web",
@@ -69,7 +70,11 @@ pub enum Glyph {
 pub fn glyph(tool: &ToolAsk) -> Glyph {
     let key = tool.name.to_lowercase();
     if tool.source.as_deref() == Some("keel-browser") || key.starts_with("browser_") {
-        return if key.contains("screenshot") { Glyph::Image } else { Glyph::Browser };
+        return if key.contains("screenshot") {
+            Glyph::Image
+        } else {
+            Glyph::Browser
+        };
     }
     match humanize_title(&tool.name).as_str() {
         "Run command" => Glyph::Command,
@@ -88,7 +93,12 @@ pub fn tool_of(question: &UserInputQuestion) -> ToolAsk {
     }
     let prompt = question.prompt.trim();
     let Some(rest) = prompt.strip_prefix("Allow ") else {
-        return ToolAsk { name: "tool".into(), source: None, description: Some(prompt.to_string()), args: Vec::new() };
+        return ToolAsk {
+            name: "tool".into(),
+            source: None,
+            description: Some(prompt.to_string()),
+            args: Vec::new(),
+        };
     };
     let rest = rest.strip_suffix('?').unwrap_or(rest);
     let (name, detail) = match rest.split_once(": ") {
@@ -96,14 +106,32 @@ pub fn tool_of(question: &UserInputQuestion) -> ToolAsk {
         None => (rest.trim(), None),
     };
     let (name, source) = ToolAsk::split_name(name);
-    let args = detail.map(|d| vec![("input".to_string(), d.to_string())]).unwrap_or_default();
-    ToolAsk { name, source, description: None, args }
+    let args = detail
+        .map(|d| vec![("input".to_string(), d.to_string())])
+        .unwrap_or_default();
+    ToolAsk {
+        name,
+        source,
+        description: None,
+        args,
+    }
 }
 
 // ── Arguments ───────────────────────────────────────────────────────────
 
 /// Keys that say what a call is about, most telling first.
-const PRIMARY: &[&str] = &["url", "command", "cmd", "file_path", "path", "filepath", "notebook_path", "query", "pattern", "input"];
+const PRIMARY: &[&str] = &[
+    "url",
+    "command",
+    "cmd",
+    "file_path",
+    "path",
+    "filepath",
+    "notebook_path",
+    "query",
+    "pattern",
+    "input",
+];
 
 pub fn is_command_key(key: &str) -> bool {
     matches!(key, "command" | "cmd")
@@ -130,7 +158,12 @@ pub fn ordered_args(args: &[(String, String)]) -> Vec<(String, String)> {
 pub fn arg_lines(args: &[(String, String)], cols: usize) -> usize {
     let cols = cols.max(10);
     args.iter()
-        .map(|(_, v)| v.lines().map(|l| l.chars().count().div_ceil(cols).max(1)).sum::<usize>().max(1))
+        .map(|(_, v)| {
+            v.lines()
+                .map(|l| l.chars().count().div_ceil(cols).max(1))
+                .sum::<usize>()
+                .max(1)
+        })
         .sum()
 }
 
@@ -154,7 +187,10 @@ pub fn short_arg(tool: &ToolAsk) -> Option<String> {
     let count = text.chars().count();
     if count > MAX {
         text = if key.contains("path") {
-            format!("…{}", text.chars().skip(count - (MAX - 1)).collect::<String>())
+            format!(
+                "…{}",
+                text.chars().skip(count - (MAX - 1)).collect::<String>()
+            )
         } else {
             format!("{}…", text.chars().take(MAX - 1).collect::<String>())
         };
@@ -224,14 +260,23 @@ pub fn permission_buttons(question: &UserInputQuestion) -> Vec<CardButton> {
                 _ => ButtonStyle::Secondary,
             };
             let key = (pos < 9).then(|| char::from(b'1' + pos as u8));
-            CardButton { option: ix, label, role: option.role, style, key }
+            CardButton {
+                option: ix,
+                label,
+                role: option.role,
+                style,
+                key,
+            }
         })
         .collect()
 }
 
 /// The button Enter starts on: Allow, else the first.
 pub fn default_focus(buttons: &[CardButton]) -> usize {
-    buttons.iter().position(|b| b.role == OptionRole::AllowOnce).unwrap_or(0)
+    buttons
+        .iter()
+        .position(|b| b.role == OptionRole::AllowOnce)
+        .unwrap_or(0)
 }
 
 // ── Keys ────────────────────────────────────────────────────────────────
@@ -296,13 +341,22 @@ fn step(focus: usize, len: usize, forward: bool) -> usize {
     if len == 0 {
         return 0;
     }
-    if forward { (focus + 1) % len } else { (focus + len - 1) % len }
+    if forward {
+        (focus + 1) % len
+    } else {
+        (focus + len - 1) % len
+    }
 }
 
 /// Keys on a permission card: 1/2/3… pick left to right, Enter picks the
 /// focused button (Allow until moved), Cmd+Enter is Allow always, Esc is
 /// Deny, Tab and arrows move the focus.
-pub fn permission_key(buttons: &[CardButton], focus: usize, key: Key, cmd: bool) -> Option<CardKey> {
+pub fn permission_key(
+    buttons: &[CardButton],
+    focus: usize,
+    key: Key,
+    cmd: bool,
+) -> Option<CardKey> {
     let by_role = |role: OptionRole| buttons.iter().position(|b| b.role == role);
     match key {
         Key::Digit(d) => {
@@ -311,9 +365,13 @@ pub fn permission_key(buttons: &[CardButton], focus: usize, key: Key, cmd: bool)
         }
         Key::Enter if cmd => by_role(OptionRole::AllowAlways).map(CardKey::Pick),
         Key::Enter | Key::Space => (focus < buttons.len()).then_some(CardKey::Pick(focus)),
-        Key::Esc => by_role(OptionRole::RejectOnce).or_else(|| by_role(OptionRole::RejectAlways)).map(CardKey::Pick),
+        Key::Esc => by_role(OptionRole::RejectOnce)
+            .or_else(|| by_role(OptionRole::RejectAlways))
+            .map(CardKey::Pick),
         Key::Tab | Key::Right | Key::Down => Some(CardKey::Focus(step(focus, buttons.len(), true))),
-        Key::BackTab | Key::Left | Key::Up => Some(CardKey::Focus(step(focus, buttons.len(), false))),
+        Key::BackTab | Key::Left | Key::Up => {
+            Some(CardKey::Focus(step(focus, buttons.len(), false)))
+        }
         Key::Char(_) => None,
     }
 }
@@ -326,22 +384,38 @@ pub fn question_rows(question: &UserInputQuestion) -> usize {
 /// Keys on a question card: digits pick (multi-select: toggle), O opens
 /// "Other…", arrows and Tab move, Enter chooses the focused row (multi:
 /// submits), Space toggles, Esc skips an optional question.
-pub fn question_key(question: &UserInputQuestion, focus: usize, checked: usize, key: Key, cmd: bool) -> Option<CardKey> {
+pub fn question_key(
+    question: &UserInputQuestion,
+    focus: usize,
+    checked: usize,
+    key: Key,
+    cmd: bool,
+) -> Option<CardKey> {
     let options = question.options.len();
     let rows = question_rows(question);
     let on_other = question.other && focus == options;
     match key {
         Key::Digit(d) => {
             let ix = d as usize - 1;
-            (ix < options).then_some(if question.multi { CardKey::Toggle(ix) } else { CardKey::Pick(ix) })
+            (ix < options).then_some(if question.multi {
+                CardKey::Toggle(ix)
+            } else {
+                CardKey::Pick(ix)
+            })
         }
         Key::Char('o') if question.other => Some(CardKey::OpenOther),
         Key::Char(_) => None,
-        Key::Tab | Key::Down | Key::Right => (rows > 0).then(|| CardKey::Focus(step(focus, rows, true))),
-        Key::BackTab | Key::Up | Key::Left => (rows > 0).then(|| CardKey::Focus(step(focus, rows, false))),
+        Key::Tab | Key::Down | Key::Right => {
+            (rows > 0).then(|| CardKey::Focus(step(focus, rows, true)))
+        }
+        Key::BackTab | Key::Up | Key::Left => {
+            (rows > 0).then(|| CardKey::Focus(step(focus, rows, false)))
+        }
         Key::Space if question.multi && focus < options => Some(CardKey::Toggle(focus)),
         Key::Space | Key::Enter if on_other => Some(CardKey::OpenOther),
-        Key::Enter if question.multi || cmd => (question.multi && checked > 0).then_some(CardKey::Submit),
+        Key::Enter if question.multi || cmd => {
+            (question.multi && checked > 0).then_some(CardKey::Submit)
+        }
         Key::Enter => (focus < options).then_some(CardKey::Pick(focus)),
         Key::Space => None,
         Key::Esc => (!question.required).then_some(CardKey::Skip),
@@ -390,7 +464,12 @@ impl ReceiptLine {
 }
 
 fn one_line(text: &str, max: usize) -> String {
-    let line = text.split('\n').map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(", ");
+    let line = text
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
     if line.chars().count() > max {
         format!("{}…", line.chars().take(max - 1).collect::<String>())
     } else {
@@ -405,16 +484,30 @@ pub fn receipt_line(receipt: &Receipt) -> ReceiptLine {
         .map(|t| humanize_title(&t.name))
         .or_else(|| (!receipt.prompt.trim().is_empty()).then(|| one_line(&receipt.prompt, 60)));
     let arg = receipt.tool.as_ref().and_then(short_arg);
-    let line = |mark, verb: &str, title: Option<String>, arg: Option<String>| ReceiptLine { mark, verb: verb.to_string(), title, arg };
+    let line = |mark, verb: &str, title: Option<String>, arg: Option<String>| ReceiptLine {
+        mark,
+        verb: verb.to_string(),
+        title,
+        arg,
+    };
     match receipt.decision {
         Decision::Allowed => line(Mark::Check, "Allowed", title, arg),
         Decision::AlwaysAllowed => line(Mark::Check, "Always allowed", title, None),
         Decision::Denied => line(Mark::Cross, "Denied", title, None),
         Decision::Answered if receipt.tool.is_some() || receipt.choice.is_some() => {
-            let verb = receipt.choice.clone().or_else(|| receipt.answer.clone()).unwrap_or_else(|| "Answered".into());
+            let verb = receipt
+                .choice
+                .clone()
+                .or_else(|| receipt.answer.clone())
+                .unwrap_or_else(|| "Answered".into());
             line(Mark::Check, &one_line(&verb, 40), title, None)
         }
-        Decision::Answered => line(Mark::Check, "Answered", receipt.answer.as_deref().map(|a| one_line(a, 80)), None),
+        Decision::Answered => line(
+            Mark::Check,
+            "Answered",
+            receipt.answer.as_deref().map(|a| one_line(a, 80)),
+            None,
+        ),
         Decision::Skipped => line(Mark::None, "Skipped question", None, None),
         Decision::Stopped => line(Mark::Stop, "Run stopped", None, None),
         Decision::Canceled => line(Mark::None, "Request canceled", None, None),
@@ -478,11 +571,17 @@ pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     if t >= 1. {
         return 1.;
     }
-    let b = |a: f32, c: f32, s: f32| 3. * a * s * (1. - s).powi(2) + 3. * c * s * s * (1. - s) + s.powi(3);
+    let b = |a: f32, c: f32, s: f32| {
+        3. * a * s * (1. - s).powi(2) + 3. * c * s * s * (1. - s) + s.powi(3)
+    };
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..20 {
         let mid = (lo + hi) / 2.;
-        if b(x1, x2, mid) < t { lo = mid } else { hi = mid }
+        if b(x1, x2, mid) < t {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     b(y1, y2, (lo + hi) / 2.)
 }
@@ -513,20 +612,32 @@ pub struct Look {
 /// reduced motion).
 pub fn card_enter(ms: f32, reduced: bool) -> Look {
     if reduced {
-        return Look { opacity: span(ms, 0., REDUCED_MS), dy: 0. };
+        return Look {
+            opacity: span(ms, 0., REDUCED_MS),
+            dy: 0.,
+        };
     }
     let e = out_quint(span(ms, 0., 220.));
-    Look { opacity: e, dy: 8. * (1. - e) }
+    Look {
+        opacity: e,
+        dy: 8. * (1. - e),
+    }
 }
 
 /// One piece of the card entering after `delay` ms: fade and 4 px rise over
 /// 160 ms. No stagger under reduced motion.
 pub fn part_enter(ms: f32, delay: f32, reduced: bool) -> Look {
     if reduced {
-        return Look { opacity: 1., dy: 0. };
+        return Look {
+            opacity: 1.,
+            dy: 0.,
+        };
     }
     let e = out_quint(span(ms, delay, 160.));
-    Look { opacity: e, dy: 4. * (1. - e) }
+    Look {
+        opacity: e,
+        dy: 4. * (1. - e),
+    }
 }
 
 /// The card leaving at `ms`.
@@ -551,7 +662,16 @@ pub struct ExitFrame {
 pub fn exit_frame(ms: f32, exit: Exit) -> ExitFrame {
     if exit.reduced {
         let x = span(ms, 0., REDUCED_MS);
-        return ExitFrame { check: true, others: 1. - x, chosen: 1. - x, dy: 0., collapse: 1., chrome: 0., receipt: x, receipt_dy: 0. };
+        return ExitFrame {
+            check: true,
+            others: 1. - x,
+            chosen: 1. - x,
+            dy: 0.,
+            collapse: 1.,
+            chrome: 0.,
+            receipt: x,
+            receipt_dy: 0.,
+        };
     }
     if exit.canceled {
         let fade = out_quint(span(ms, 0., 120.));
@@ -594,8 +714,10 @@ pub fn sample_question(kind: &str) -> UserInputQuestion {
                 QuestionKind::Select,
                 "Which layout should the settings page use?\nThe sidebar keeps sections visible; tabs save width.",
                 vec![
-                    QuestionOption::new("sidebar", "Sidebar (Recommended)").with_detail(Some("Sections stay visible while scrolling".into())),
-                    QuestionOption::new("tabs", "Tabs").with_detail(Some("Compact, one section at a time".into())),
+                    QuestionOption::new("sidebar", "Sidebar (Recommended)")
+                        .with_detail(Some("Sections stay visible while scrolling".into())),
+                    QuestionOption::new("tabs", "Tabs")
+                        .with_detail(Some("Compact, one section at a time".into())),
                     QuestionOption::new("single", "Single page"),
                 ],
                 false,
@@ -610,7 +732,8 @@ pub fn sample_question(kind: &str) -> UserInputQuestion {
                 QuestionKind::Select,
                 "Allow navigate?",
                 vec![
-                    QuestionOption::new("proceed_always", "Allow always").with_role(OptionRole::AllowAlways),
+                    QuestionOption::new("proceed_always", "Allow always")
+                        .with_role(OptionRole::AllowAlways),
                     QuestionOption::new("proceed_once", "Allow").with_role(OptionRole::AllowOnce),
                     QuestionOption::new("cancel", "Reject").with_role(OptionRole::RejectOnce),
                 ],
@@ -620,7 +743,10 @@ pub fn sample_question(kind: &str) -> UserInputQuestion {
                 name: "navigate".into(),
                 source: Some("keel-browser".into()),
                 description: None,
-                args: vec![("url".into(), "https://example.com".into()), ("new_tab".into(), "false".into())],
+                args: vec![
+                    ("url".into(), "https://example.com".into()),
+                    ("new_tab".into(), "false".into()),
+                ],
             });
             q
         }
@@ -639,7 +765,8 @@ mod tests {
     fn acp_options() -> Vec<QuestionOption> {
         // Antigravity / Gemini order: always first, reject last.
         vec![
-            QuestionOption::new("proceed_always", "Allow All Edits").with_role(OptionRole::AllowAlways),
+            QuestionOption::new("proceed_always", "Allow All Edits")
+                .with_role(OptionRole::AllowAlways),
             QuestionOption::new("proceed_once", "Allow").with_role(OptionRole::AllowOnce),
             QuestionOption::new("cancel", "Reject").with_role(OptionRole::RejectOnce),
         ]
@@ -657,14 +784,25 @@ mod tests {
         assert_eq!(humanize_title("open_pane"), "Open browser pane");
         assert_eq!(humanize_title("mcp__linear__create_issue"), "Create issue");
         assert_eq!(humanize_title("list_merge_requests"), "List merge requests");
-        assert_eq!(humanize_title("navigate (keel-browser MCP Server)"), "Navigate browser");
+        assert_eq!(
+            humanize_title("navigate (keel-browser MCP Server)"),
+            "Navigate browser"
+        );
     }
 
     #[test]
     fn primary_arg_leads() {
-        let args = vec![("timeout".to_string(), "5".to_string()), ("url".to_string(), "https://www.example.com/".to_string())];
+        let args = vec![
+            ("timeout".to_string(), "5".to_string()),
+            ("url".to_string(), "https://www.example.com/".to_string()),
+        ];
         assert_eq!(ordered_args(&args)[0].0, "url");
-        let tool = ToolAsk { name: "navigate".into(), source: None, description: None, args };
+        let tool = ToolAsk {
+            name: "navigate".into(),
+            source: None,
+            description: None,
+            args,
+        };
         assert_eq!(short_arg(&tool).as_deref(), Some("example.com"));
         assert_eq!(arg_lines(&[("a".into(), "x".repeat(150))], 70), 3);
     }
@@ -673,10 +811,17 @@ mod tests {
     fn buttons_follow_roles_not_positions() {
         let q = ask(acp_options());
         let buttons = permission_buttons(&q);
-        let labels: Vec<_> = buttons.iter().map(|b| (b.label.as_str(), q.options[b.option].id.as_str(), b.key)).collect();
+        let labels: Vec<_> = buttons
+            .iter()
+            .map(|b| (b.label.as_str(), q.options[b.option].id.as_str(), b.key))
+            .collect();
         assert_eq!(
             labels,
-            vec![("Allow", "proceed_once", Some('1')), ("Allow always", "proceed_always", Some('2')), ("Deny", "cancel", Some('3'))]
+            vec![
+                ("Allow", "proceed_once", Some('1')),
+                ("Allow always", "proceed_always", Some('2')),
+                ("Deny", "cancel", Some('3'))
+            ]
         );
         assert_eq!(buttons[0].style, ButtonStyle::Primary);
         assert_eq!(buttons[2].style, ButtonStyle::Ghost);
@@ -687,7 +832,10 @@ mod tests {
             QuestionOption::new("denied", "Deny").with_role(OptionRole::RejectOnce),
             QuestionOption::new("approved", "Allow").with_role(OptionRole::AllowOnce),
         ]);
-        let ids: Vec<_> = permission_buttons(&q).iter().map(|b| q.options[b.option].id.clone()).collect();
+        let ids: Vec<_> = permission_buttons(&q)
+            .iter()
+            .map(|b| q.options[b.option].id.clone())
+            .collect();
         assert_eq!(ids, vec!["approved", "denied", "abort"]);
         assert_eq!(permission_buttons(&q)[2].label, "Deny and stop");
     }
@@ -705,7 +853,10 @@ mod tests {
         assert_eq!(k(Key::Esc, false), Some(CardKey::Pick(2)));
         assert_eq!(k(Key::Tab, false), Some(CardKey::Focus(1)));
         assert_eq!(k(Key::BackTab, false), Some(CardKey::Focus(2)));
-        assert_eq!(permission_key(&buttons, 1, Key::Enter, false), Some(CardKey::Pick(1)));
+        assert_eq!(
+            permission_key(&buttons, 1, Key::Enter, false),
+            Some(CardKey::Pick(1))
+        );
         assert_eq!(parse_key("tab", true), Some(Key::BackTab));
         assert_eq!(parse_key("O", false), Some(Key::Char('o')));
         assert_eq!(parse_key("0", false), None);
@@ -715,54 +866,132 @@ mod tests {
             QuestionOption::new("deny", "Deny").with_role(OptionRole::RejectOnce),
         ]));
         assert_eq!(permission_key(&claude, 0, Key::Enter, true), None);
-        assert_eq!(permission_key(&claude, 0, Key::Esc, false), Some(CardKey::Pick(1)));
+        assert_eq!(
+            permission_key(&claude, 0, Key::Esc, false),
+            Some(CardKey::Pick(1))
+        );
     }
 
     #[test]
     fn question_keys() {
-        let mut q = UserInputQuestion::new("q", QuestionKind::Select, "Color?", vec![QuestionOption::new("b", "Blue"), QuestionOption::new("g", "Green")], false);
+        let mut q = UserInputQuestion::new(
+            "q",
+            QuestionKind::Select,
+            "Color?",
+            vec![
+                QuestionOption::new("b", "Blue"),
+                QuestionOption::new("g", "Green"),
+            ],
+            false,
+        );
         q.other = true;
         assert_eq!(question_rows(&q), 3);
-        assert_eq!(question_key(&q, 0, 0, Key::Digit(2), false), Some(CardKey::Pick(1)));
-        assert_eq!(question_key(&q, 1, 0, Key::Enter, false), Some(CardKey::Pick(1)));
-        assert_eq!(question_key(&q, 2, 0, Key::Enter, false), Some(CardKey::OpenOther));
-        assert_eq!(question_key(&q, 0, 0, Key::Char('o'), false), Some(CardKey::OpenOther));
-        assert_eq!(question_key(&q, 2, 0, Key::Down, false), Some(CardKey::Focus(0)));
+        assert_eq!(
+            question_key(&q, 0, 0, Key::Digit(2), false),
+            Some(CardKey::Pick(1))
+        );
+        assert_eq!(
+            question_key(&q, 1, 0, Key::Enter, false),
+            Some(CardKey::Pick(1))
+        );
+        assert_eq!(
+            question_key(&q, 2, 0, Key::Enter, false),
+            Some(CardKey::OpenOther)
+        );
+        assert_eq!(
+            question_key(&q, 0, 0, Key::Char('o'), false),
+            Some(CardKey::OpenOther)
+        );
+        assert_eq!(
+            question_key(&q, 2, 0, Key::Down, false),
+            Some(CardKey::Focus(0))
+        );
         assert_eq!(question_key(&q, 0, 0, Key::Esc, false), Some(CardKey::Skip));
         q.multi = true;
-        assert_eq!(question_key(&q, 0, 0, Key::Digit(1), false), Some(CardKey::Toggle(0)));
-        assert_eq!(question_key(&q, 1, 0, Key::Space, false), Some(CardKey::Toggle(1)));
+        assert_eq!(
+            question_key(&q, 0, 0, Key::Digit(1), false),
+            Some(CardKey::Toggle(0))
+        );
+        assert_eq!(
+            question_key(&q, 1, 0, Key::Space, false),
+            Some(CardKey::Toggle(1))
+        );
         assert_eq!(question_key(&q, 0, 0, Key::Enter, false), None);
-        assert_eq!(question_key(&q, 0, 1, Key::Enter, false), Some(CardKey::Submit));
+        assert_eq!(
+            question_key(&q, 0, 1, Key::Enter, false),
+            Some(CardKey::Submit)
+        );
         q.required = true;
         assert_eq!(question_key(&q, 0, 0, Key::Esc, false), None);
     }
 
     #[test]
     fn receipt_text() {
-        let tool = ToolAsk { name: "navigate".into(), source: Some("keel-browser".into()), description: None, args: vec![("url".into(), "https://example.com".into())] };
-        let r = |decision| Receipt { decision, tool: Some(tool.clone()), prompt: "Allow navigate?".into(), answer: None, choice: None };
-        assert_eq!(receipt_line(&r(Decision::Allowed)).text(), "✓ Allowed · Navigate browser · example.com");
-        assert_eq!(receipt_line(&r(Decision::AlwaysAllowed)).text(), "✓ Always allowed · Navigate browser");
-        assert_eq!(receipt_line(&r(Decision::Denied)).text(), "✕ Denied · Navigate browser");
+        let tool = ToolAsk {
+            name: "navigate".into(),
+            source: Some("keel-browser".into()),
+            description: None,
+            args: vec![("url".into(), "https://example.com".into())],
+        };
+        let r = |decision| Receipt {
+            decision,
+            tool: Some(tool.clone()),
+            prompt: "Allow navigate?".into(),
+            answer: None,
+            choice: None,
+        };
+        assert_eq!(
+            receipt_line(&r(Decision::Allowed)).text(),
+            "✓ Allowed · Navigate browser · example.com"
+        );
+        assert_eq!(
+            receipt_line(&r(Decision::AlwaysAllowed)).text(),
+            "✓ Always allowed · Navigate browser"
+        );
+        assert_eq!(
+            receipt_line(&r(Decision::Denied)).text(),
+            "✕ Denied · Navigate browser"
+        );
         assert_eq!(receipt_line(&r(Decision::Stopped)).text(), "■ Run stopped");
-        assert_eq!(receipt_line(&r(Decision::Canceled)).text(), "Request canceled");
-        let q = Receipt { decision: Decision::Answered, tool: None, prompt: "Color?".into(), answer: Some("Blue\nGreen".into()), choice: None };
+        assert_eq!(
+            receipt_line(&r(Decision::Canceled)).text(),
+            "Request canceled"
+        );
+        let q = Receipt {
+            decision: Decision::Answered,
+            tool: None,
+            prompt: "Color?".into(),
+            answer: Some("Blue\nGreen".into()),
+            choice: None,
+        };
         assert_eq!(receipt_line(&q).text(), "✓ Answered · Blue, Green");
-        let skipped = Receipt { decision: Decision::Skipped, answer: None, ..q };
+        let skipped = Receipt {
+            decision: Decision::Skipped,
+            answer: None,
+            ..q
+        };
         assert_eq!(receipt_line(&skipped).text(), "Skipped question");
     }
 
     #[test]
     fn prompt_only_permissions_still_get_a_tool() {
         let q = ask(vec![]);
-        let tool = tool_of(&UserInputQuestion { prompt: "Allow Bash: ls -la?".into(), ..q });
-        assert_eq!((tool.name.as_str(), tool.args[0].1.as_str()), ("Bash", "ls -la"));
+        let tool = tool_of(&UserInputQuestion {
+            prompt: "Allow Bash: ls -la?".into(),
+            ..q
+        });
+        assert_eq!(
+            (tool.name.as_str(), tool.args[0].1.as_str()),
+            ("Bash", "ls -la")
+        );
     }
 
     #[test]
     fn lifecycle_waiting_answered_receipt_and_cancel() {
-        let answered = Exit { canceled: false, reduced: false };
+        let answered = Exit {
+            canceled: false,
+            reduced: false,
+        };
         assert_eq!(answered.phase(Duration::ZERO), Phase::Answered);
         assert_eq!(answered.phase(Duration::from_millis(379)), Phase::Answered);
         assert_eq!(answered.phase(Duration::from_millis(380)), Phase::Receipt);
@@ -771,12 +1000,18 @@ mod tests {
         let f = exit_frame(380., answered);
         assert!(f.others == 0. && (f.collapse - 1.).abs() < 1e-3 && (f.receipt - 1.).abs() < 1e-3);
 
-        let canceled = Exit { canceled: true, reduced: false };
+        let canceled = Exit {
+            canceled: true,
+            reduced: false,
+        };
         assert_eq!(canceled.phase(Duration::from_millis(100)), Phase::Canceled);
         assert_eq!(canceled.phase(Duration::from_millis(260)), Phase::Receipt);
         assert!(!exit_frame(10., canceled).check);
 
-        let reduced = Exit { canceled: false, reduced: true };
+        let reduced = Exit {
+            canceled: false,
+            reduced: true,
+        };
         assert_eq!(reduced.phase(Duration::from_millis(120)), Phase::Receipt);
         let f = exit_frame(60., reduced);
         assert_eq!((f.collapse, f.dy, f.receipt_dy), (1., 0., 0.));

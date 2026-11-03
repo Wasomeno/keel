@@ -22,8 +22,14 @@ pub struct FileRef {
 
 impl FileRef {
     pub fn new(path: &Path) -> Self {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string_lossy().into_owned());
-        Self { name, path: path.to_string_lossy().into_owned() }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        Self {
+            name,
+            path: path.to_string_lossy().into_owned(),
+        }
     }
 
     pub fn kind(&self) -> FileKind {
@@ -53,8 +59,9 @@ impl FileKind {
             "md" | "markdown" => Self::Markdown,
             "json" | "jsonl" => Self::Json,
             "txt" | "log" | "csv" | "tsv" => Self::Text,
-            "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "py" | "go" | "rb" | "java" | "kt" | "swift" | "c" | "h" | "cpp" | "hpp"
-            | "cs" | "css" | "scss" | "sh" | "bash" | "zsh" | "toml" | "yaml" | "yml" | "xml" | "sql" | "lua" | "php" | "vue"
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "py" | "go" | "rb" | "java" | "kt"
+            | "swift" | "c" | "h" | "cpp" | "hpp" | "cs" | "css" | "scss" | "sh" | "bash"
+            | "zsh" | "toml" | "yaml" | "yml" | "xml" | "sql" | "lua" | "php" | "vue"
             | "svelte" => Self::Code,
             _ => Self::Other,
         }
@@ -78,15 +85,21 @@ impl FileKind {
 }
 
 fn extension(path: &Path) -> String {
-    path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 /// A tool whose job is producing or modifying a file.
 fn writes_files(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["write", "create", "save", "export", "generate", "render", "edit", "patch", "modify", "update", "replace", "append"]
-        .iter()
-        .any(|w| name.contains(w))
+    [
+        "write", "create", "save", "export", "generate", "render", "edit", "patch", "modify",
+        "update", "replace", "append",
+    ]
+    .iter()
+    .any(|w| name.contains(w))
 }
 
 /// Paths a finished file-writing tool names, in its title or result line
@@ -103,8 +116,18 @@ pub fn candidates_in_tool(name: &str, state: &str, summary: &str) -> Vec<String>
 /// Paths on answer lines that say a file was made or edited ("Created pelican.svg", "Added dummy comments in:").
 pub fn candidates_in_text(text: &str) -> Vec<String> {
     const VERBS: [&str; 12] = [
-        "created", "wrote", "written", "saved", "generated", "exported", "rendered",
-        "edited", "modified", "updated", "changed", "added",
+        "created",
+        "wrote",
+        "written",
+        "saved",
+        "generated",
+        "exported",
+        "rendered",
+        "edited",
+        "modified",
+        "updated",
+        "changed",
+        "added",
     ];
     let mut in_list = false;
     let mut out = Vec::new();
@@ -114,7 +137,10 @@ pub fn candidates_in_text(text: &str) -> Vec<String> {
         if VERBS.iter().any(|v| lower.contains(v)) {
             in_list = true;
             out.extend(path_tokens(line));
-        } else if in_list && (trimmed.starts_with(['-', '*', '•']) || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+        } else if in_list
+            && (trimmed.starts_with(['-', '*', '•'])
+                || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        {
             out.extend(path_tokens(line));
         } else if trimmed.is_empty() {
             // Keep in_list across blank lines
@@ -128,23 +154,32 @@ pub fn candidates_in_text(text: &str) -> Vec<String> {
 /// Words in `text` that look like file paths: a stem and a short extension
 /// with a letter in it, not a URL.
 fn path_tokens(text: &str) -> Vec<String> {
-    text.split(|ch: char| ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '*'))
-        .map(|w| w.trim_end_matches(['.', ':', '!', '?']).trim_start_matches(':'))
-        .filter(|w| !w.is_empty() && !w.contains("://") && !w.starts_with('-'))
-        .filter(|w| {
-            let file = w.rsplit('/').next().unwrap_or(w);
-            match file.rsplit_once('.') {
-                Some((stem, ext)) => {
-                    !stem.is_empty()
-                        && (1..=10).contains(&ext.len())
-                        && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
-                        && ext.chars().any(|ch| ch.is_ascii_alphabetic())
-                }
-                None => false,
+    text.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '*'
+            )
+    })
+    .map(|w| {
+        w.trim_end_matches(['.', ':', '!', '?'])
+            .trim_start_matches(':')
+    })
+    .filter(|w| !w.is_empty() && !w.contains("://") && !w.starts_with('-'))
+    .filter(|w| {
+        let file = w.rsplit('/').next().unwrap_or(w);
+        match file.rsplit_once('.') {
+            Some((stem, ext)) => {
+                !stem.is_empty()
+                    && (1..=10).contains(&ext.len())
+                    && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+                    && ext.chars().any(|ch| ch.is_ascii_alphabetic())
             }
-        })
-        .map(str::to_string)
-        .collect()
+            None => false,
+        }
+    })
+    .map(str::to_string)
+    .collect()
 }
 
 /// An existing file for `candidate`: absolute as is, `~/…` from home, or
@@ -152,7 +187,9 @@ fn path_tokens(text: &str) -> Vec<String> {
 pub fn resolve(candidate: &str, roots: &[PathBuf]) -> Option<PathBuf> {
     let path = Path::new(candidate);
     let found = if let Some(rest) = candidate.strip_prefix("~/") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)).filter(|p| p.is_file())
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(rest))
+            .filter(|p| p.is_file())
     } else if path.is_absolute() {
         path.is_file().then(|| path.to_path_buf())
     } else {
@@ -162,7 +199,10 @@ pub fn resolve(candidate: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Unique existing files for `candidates`, in order.
-pub fn resolve_all(candidates: impl IntoIterator<Item = String>, roots: &[PathBuf]) -> Vec<FileRef> {
+pub fn resolve_all(
+    candidates: impl IntoIterator<Item = String>,
+    roots: &[PathBuf],
+) -> Vec<FileRef> {
     let mut out: Vec<FileRef> = Vec::new();
     for candidate in candidates {
         if let Some(path) = resolve(&candidate, roots) {
@@ -208,7 +248,11 @@ pub fn preview_html(path: &Path, bg: u32, fg: u32) -> Option<String> {
             };
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             // Vectors fill the frame; bitmaps keep their size unless too big.
-            let fit = if kind == FileKind::Svg { "width:100%;height:100%;" } else { "" };
+            let fit = if kind == FileKind::Svg {
+                "width:100%;height:100%;"
+            } else {
+                ""
+            };
             Some(format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\"><title>{name}</title><style>\
                  html,body{{margin:0;height:100%;background:{bg};color:{fg};font:12px -apple-system,system-ui,sans-serif}}\
@@ -232,7 +276,10 @@ pub fn preview_html(path: &Path, bg: u32, fg: u32) -> Option<String> {
             }
             let text = std::fs::read_to_string(path).ok()?;
             let mut body = String::new();
-            pulldown_cmark::html::push_html(&mut body, pulldown_cmark::Parser::new_ext(&text, pulldown_cmark::Options::all()));
+            pulldown_cmark::html::push_html(
+                &mut body,
+                pulldown_cmark::Parser::new_ext(&text, pulldown_cmark::Options::all()),
+            );
             Some(format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\"><title>{name}</title><style>\
                  body{{margin:0;background:{bg};color:{fg};font:14px/1.6 -apple-system,system-ui,sans-serif}}\
@@ -254,7 +301,9 @@ pub fn file_url(path: &Path) -> String {
     let mut url = String::from("file://");
     for b in path.to_string_lossy().bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => url.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                url.push(b as char)
+            }
             b => url.push_str(&format!("%{b:02X}")),
         }
     }
@@ -266,7 +315,10 @@ fn css(rgba: u32) -> String {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -276,22 +328,42 @@ mod tests {
     #[test]
     fn tool_results_name_written_files() {
         assert_eq!(
-            candidates_in_tool("write", "done", "Successfully wrote to /Users/k/codetest/pelican-bike.svg"),
+            candidates_in_tool(
+                "write",
+                "done",
+                "Successfully wrote to /Users/k/codetest/pelican-bike.svg"
+            ),
             vec!["/Users/k/codetest/pelican-bike.svg"]
         );
-        assert_eq!(candidates_in_tool("Write", "done", "File created successfully at: /a/b.png"), vec!["/a/b.png"]);
-        assert_eq!(candidates_in_tool("edit_file", "done", "edit src/lib/cms-shared.ts"), vec!["src/lib/cms-shared.ts"]);
-        assert!(candidates_in_tool("write", "running", "Successfully wrote to /a/b.svg").is_empty());
+        assert_eq!(
+            candidates_in_tool("Write", "done", "File created successfully at: /a/b.png"),
+            vec!["/a/b.png"]
+        );
+        assert_eq!(
+            candidates_in_tool("edit_file", "done", "edit src/lib/cms-shared.ts"),
+            vec!["src/lib/cms-shared.ts"]
+        );
+        assert!(
+            candidates_in_tool("write", "running", "Successfully wrote to /a/b.svg").is_empty()
+        );
         assert!(candidates_in_tool("bash", "done", "/a/b.svg").is_empty());
         assert!(candidates_in_tool("read", "done", "/a/b.svg").is_empty());
     }
 
     #[test]
     fn answer_lines_that_create_files() {
-        assert_eq!(candidates_in_text("Created pelican-bike.svg\nOpen it in a browser."), vec!["pelican-bike.svg"]);
-        assert_eq!(candidates_in_text("I saved it to `out/chart.png`."), vec!["out/chart.png"]);
         assert_eq!(
-            candidates_in_text("Added dummy comments in:\n- src/lib/cms-shared.ts\n- src/app/route.ts\n\nNo behavior changes."),
+            candidates_in_text("Created pelican-bike.svg\nOpen it in a browser."),
+            vec!["pelican-bike.svg"]
+        );
+        assert_eq!(
+            candidates_in_text("I saved it to `out/chart.png`."),
+            vec!["out/chart.png"]
+        );
+        assert_eq!(
+            candidates_in_text(
+                "Added dummy comments in:\n- src/lib/cms-shared.ts\n- src/app/route.ts\n\nNo behavior changes."
+            ),
             vec!["src/lib/cms-shared.ts", "src/app/route.ts"]
         );
         assert!(candidates_in_text("See src/main.rs for details.").is_empty());
@@ -304,10 +376,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.svg"), "<svg/>").unwrap();
         let roots = vec![dir.clone()];
-        let files = resolve_all(["a.svg".to_string(), "missing.svg".to_string(), "a.svg".to_string()], &roots);
+        let files = resolve_all(
+            [
+                "a.svg".to_string(),
+                "missing.svg".to_string(),
+                "a.svg".to_string(),
+            ],
+            &roots,
+        );
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "a.svg");
-        assert!(preview_html(Path::new(&files[0].path), 0x111111ff, 0xeeeeeeff).unwrap().contains("data:image/svg+xml;base64,"));
+        assert!(
+            preview_html(Path::new(&files[0].path), 0x111111ff, 0xeeeeeeff)
+                .unwrap()
+                .contains("data:image/svg+xml;base64,")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
