@@ -30,9 +30,9 @@ Download the latest pre-built application for macOS:
 
 | Platform | Format | Size | Download |
 |---|---|---|---|
-| **macOS** (Apple Silicon / arm64) | **Tar XZ Archive** (Smallest) | **139 MB** | [**Keel-0.2.4-macos-arm64.tar.xz**](https://github.com/Wasomeno/keel/releases/download/v0.2.4/Keel-0.2.4-macos-arm64.tar.xz) |
-| **macOS** (Apple Silicon / arm64) | **DMG Installer** | **283 MB** | [**Keel-0.2.4-macos-arm64.dmg**](https://github.com/Wasomeno/keel/releases/download/v0.2.4/Keel-0.2.4-macos-arm64.dmg) |
-| **macOS** (Apple Silicon / arm64) | **Zip Archive** | **214 MB** | [**Keel-0.2.4-macos-arm64.zip**](https://github.com/Wasomeno/keel/releases/download/v0.2.4/Keel-0.2.4-macos-arm64.zip) |
+| **macOS** (Apple Silicon / arm64) | **Tar XZ Archive** (Smallest) | **153 MB** | [**Keel-0.2.5-macos-arm64.tar.xz**](https://github.com/Wasomeno/keel/releases/download/v0.2.5/Keel-0.2.5-macos-arm64.tar.xz) |
+| **macOS** (Apple Silicon / arm64) | **DMG Installer** | **326 MB** | [**Keel-0.2.5-macos-arm64.dmg**](https://github.com/Wasomeno/keel/releases/download/v0.2.5/Keel-0.2.5-macos-arm64.dmg) |
+| **macOS** (Apple Silicon / arm64) | **Zip Archive** | **237 MB** | [**Keel-0.2.5-macos-arm64.zip**](https://github.com/Wasomeno/keel/releases/download/v0.2.5/Keel-0.2.5-macos-arm64.zip) |
 
 *See all assets and checksums on the [Releases page](https://github.com/Wasomeno/keel/releases).*
 
