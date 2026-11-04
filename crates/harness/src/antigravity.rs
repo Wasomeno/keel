@@ -8,9 +8,10 @@
 //! Without one of the two the bridge warns "Run /agy auth" on every start.
 //!
 //! [`sign_in`] does what the bridge's `/agy auth` does: start the server,
+//! and when a `session/new` probe already works, write the marker. Otherwise
 //! send ACP `authenticate` with `oauth-personal`, and when no token file
-//! lands, prove the credentials with a `session/new`. Then it writes the
-//! marker. The server opens its Google page through `BROWSER`, which points
+//! lands, prove the credentials with another `session/new`. Then it writes
+//! the marker. The server opens its Google page through `BROWSER`, which points
 //! at a script that only records the URL, so Keel opens it like the others.
 //! Nothing here reads a credential: the token file is only checked for, and
 //! `settings.json` is read for `auth.type` alone.
@@ -99,6 +100,23 @@ pub(crate) fn account(paths: &Paths) -> AuthAccount {
     }
 }
 
+/// How long each step may take. The browser round trip gets `sign_in`.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// The server's start and `initialize` reply.
+    start: Duration,
+    /// A `session/new` probe.
+    probe: Duration,
+    /// `authenticate`, which waits for the browser.
+    sign_in: Duration,
+}
+
+const LIMITS: Limits = Limits {
+    start: Duration::from_secs(60),
+    probe: Duration::from_secs(30),
+    sign_in: LIMIT,
+};
+
 /// Sign the ACP server in with the Google account's plan and record it for
 /// the bridge. `scratch` holds the browser script and the URL it records.
 pub(crate) async fn sign_in(
@@ -107,9 +125,7 @@ pub(crate) async fn sign_in(
     scratch: &Path,
     on: &(dyn Fn(SignInEvent) + Send + Sync),
 ) -> Result<(), HarnessError> {
-    tokio::time::timeout(LIMIT, run(bin, paths, scratch, on))
-        .await
-        .unwrap_or_else(|_| Err(failed("sign-in timed out")))
+    run(bin, paths, scratch, on, LIMITS).await
 }
 
 async fn run(
@@ -117,6 +133,7 @@ async fn run(
     paths: &Paths,
     scratch: &Path,
     on: &(dyn Fn(SignInEvent) + Send + Sync),
+    limits: Limits,
 ) -> Result<(), HarnessError> {
     // The server reads its auth type at startup.
     if paths.auth_type().is_none() {
@@ -138,6 +155,8 @@ async fn run(
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(io)?;
+    // Kills the server's whole group however this ends, cancel included.
+    let group = Group(child.id().unwrap_or(0));
     let stdin = child.stdin.take().ok_or_else(|| failed("the server has no stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| failed("the server has no stdout"))?;
     let mut rpc = Rpc { stdin, lines: BufReader::new(stdout).lines(), next: 0 };
@@ -155,27 +174,64 @@ async fn run(
             shown = url;
         }
     };
+    let cwd = scratch.to_string_lossy().to_string();
     let out = async {
         let caps = json!({"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false});
-        rpc.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": caps}), &mut watch).await?;
-        rpc.request("authenticate", json!({"methodId": "oauth-personal"}), &mut watch).await?;
+        within(limits.start, "Antigravity's server did not start", rpc.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": caps}), &mut watch)).await?;
+        // Already signed in, by an earlier sign-in or older credentials: a session tells.
+        let probe = json!({"cwd": cwd, "mcpServers": []});
+        if within(limits.probe, "", rpc.request("session/new", probe.clone(), &mut watch)).await.is_ok() {
+            return write_marker(&paths.marker).map_err(io);
+        }
+        on(SignInEvent::Progress("Waiting for Google sign-in".into()));
+        within(limits.sign_in, "sign-in timed out", rpc.request("authenticate", json!({"methodId": "oauth-personal"}), &mut watch)).await?;
         let deadline = tokio::time::Instant::now() + TOKEN_GRACE;
         while !paths.has_token() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if !paths.has_token() {
-            // Signed in from older credentials, or not at all: a session tells.
-            let cwd = scratch.to_string_lossy();
-            rpc.request("session/new", json!({"cwd": cwd, "mcpServers": []}), &mut watch)
+            within(limits.probe, "", rpc.request("session/new", probe, &mut watch))
                 .await
                 .map_err(|_| failed("Antigravity has no usable sign-in yet. Finish it in your browser, then try again"))?;
         }
         write_marker(&paths.marker).map_err(io)
     }
     .await;
-    let _ = child.kill().await;
+    drop(rpc);
+    drop(group);
+    reap(&mut child).await;
     let _ = std::fs::remove_file(&urls);
     out
+}
+
+/// `step`, or `why` once `limit` passes.
+async fn within<T>(
+    limit: Duration,
+    why: &str,
+    step: impl std::future::Future<Output = Result<T, HarnessError>>,
+) -> Result<T, HarnessError> {
+    tokio::time::timeout(limit, step).await.unwrap_or_else(|_| Err(failed(why)))
+}
+
+/// The server's process group, killed on drop.
+struct Group(u32);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        crate::proc::signal_group(self.0, libc::SIGKILL);
+    }
+}
+
+/// Collect the killed server by polling. `Child::wait` waits for SIGCHLD,
+/// which never reaches tokio inside the app, so awaiting it hung sign-in
+/// after the marker was written. Gives up after 2 s; `kill_on_drop` stays.
+async fn reap(child: &mut tokio::process::Child) {
+    for _ in 0..40 {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Newline-delimited JSON-RPC to the ACP server.
@@ -310,7 +366,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use super::{Paths, account, iso_now, sign_in};
+    use std::time::Duration;
+
+    use super::{Limits, Paths, account, iso_now, run, sign_in};
     use crate::SignInEvent;
 
     fn tmp(label: &str) -> PathBuf {
@@ -352,37 +410,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// A stand-in ACP server: answers `initialize` and `authenticate`,
-    /// opens `BROWSER` on the way, then answers `session/new` as told.
-    fn fake_server(dir: &Path, session: &str) -> PathBuf {
+    /// A stand-in ACP server. `mode`: `fast` is signed in already, `browser`
+    /// signs in through `BROWSER` on `authenticate`, `hollow` never does,
+    /// `mute` never answers. It logs each method and leaves a grandchild,
+    /// whose pid it records, to show the whole group goes.
+    fn fake_server(dir: &Path, mode: &str) -> PathBuf {
         let bin = dir.join("fake-acp.sh");
-        let script = format!(
-            "#!/bin/sh\nread l; echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}'\nread l; \"$BROWSER\" 'https://accounts.example/o?state=1'; sleep 1\n\
-             echo '{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{}}}}'\nread l; echo '{session}'\nsleep 5\n"
-        );
+        let script = r#"#!/bin/sh
+d='DIR'; mode='MODE'
+sleep 60 & echo $! > "$d/grandchild.pid"
+reply() { printf '{"jsonrpc":"2.0","id":%s,%s}\n' "$1" "$2"; }
+while read -r l; do
+  id=$(printf '%s' "$l" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  m=$(printf '%s' "$l" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  echo "$m" >> "$d/methods.log"
+  case "$m" in
+    initialize) [ "$mode" = mute ] && sleep 60; reply "$id" '"result":{}' ;;
+    session/new)
+      if [ "$mode" = fast ] || [ -f "$d/signed" ]; then reply "$id" '"result":{"sessionId":"s"}'
+      else reply "$id" '"error":{"code":-32000,"message":"Authentication required"}'; fi ;;
+    authenticate)
+      "$BROWSER" 'https://accounts.example/o?state=1'; sleep 1
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{}}'
+      [ "$mode" = browser ] && touch "$d/signed"
+      reply "$id" '"result":{}' ;;
+  esac
+done
+"#
+        .replace("DIR", &dir.to_string_lossy())
+        .replace("MODE", mode);
         std::fs::write(&bin, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         bin
     }
 
+    fn methods(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("methods.log")).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    /// The fake's grandchild is gone: the server's whole group was killed.
+    fn group_gone(dir: &Path) -> bool {
+        let pid = std::fs::read_to_string(dir.join("grandchild.pid")).unwrap();
+        let alive = std::process::Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success();
+        !alive
+    }
+
+    fn marker_mode(home: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = home.join(".pi/agent/antigravity-bridge/acp-auth-verified.json");
+        std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777
+    }
+
     #[tokio::test]
-    async fn sign_in_writes_the_marker_and_hands_over_the_page() {
-        let home = tmp("sign-in");
+    async fn already_signed_in_skips_the_browser_and_writes_the_marker() {
+        let home = tmp("fast");
         let paths = Paths::under(&home);
-        let bin = fake_server(&home, r#"{"jsonrpc":"2.0","id":3,"result":{"sessionId":"s"}}"#);
+        let bin = fake_server(&home, "fast");
+        let events = Mutex::new(Vec::new());
+        let on = |e: SignInEvent| events.lock().unwrap().push(e);
+        let started = std::time::Instant::now();
+        sign_in(&bin, &paths, &home.join("scratch"), &on).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        assert_eq!(methods(&home), ["initialize", "session/new"]);
+        assert!(!events.into_inner().unwrap().iter().any(|e| matches!(e, SignInEvent::Browser { .. })));
+        assert!(account(&paths).signed_in);
+        assert_eq!(marker_mode(&home), 0o600);
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["auth"]["type"], "oauth-personal");
+        assert!(group_gone(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn sign_in_hands_over_the_page_then_writes_the_marker() {
+        let home = tmp("browser");
+        let paths = Paths::under(&home);
+        let bin = fake_server(&home, "browser");
         let events = Mutex::new(Vec::new());
         let on = |e: SignInEvent| events.lock().unwrap().push(e);
         sign_in(&bin, &paths, &home.join("scratch"), &on).await.unwrap();
         let events = events.into_inner().unwrap();
         assert!(events.contains(&SignInEvent::Browser { url: "https://accounts.example/o?state=1".into() }), "{events:?}");
+        assert_eq!(methods(&home), ["initialize", "session/new", "authenticate", "session/new"]);
         assert!(account(&paths).signed_in);
-        let settings: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap()).unwrap();
-        assert_eq!(settings["auth"]["type"], "oauth-personal");
-        let marker = home.join(".pi/agent/antigravity-bridge/acp-auth-verified.json");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(group_gone(&home));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -391,12 +504,28 @@ mod tests {
         let home = tmp("hollow");
         let paths = Paths::under(&home);
         write(&home.join(".gemini/antigravity-acp/settings.json"), r#"{"auth":{"type":"oauth-personal"},"queuedMessages":"x"}"#);
-        let bin = fake_server(&home, r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Authentication required"}}"#);
+        let bin = fake_server(&home, "hollow");
         let err = sign_in(&bin, &paths, &home.join("scratch"), &|_| {}).await.unwrap_err();
         assert!(err.to_string().contains("no usable sign-in"), "{err}");
         assert!(!account(&paths).signed_in);
         let settings = std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap();
         assert!(settings.contains("queuedMessages"));
+        assert!(group_gone(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn a_silent_server_fails_with_a_reason_and_is_stopped() {
+        let home = tmp("mute");
+        let paths = Paths::under(&home);
+        let bin = fake_server(&home, "mute");
+        let limits = Limits { start: Duration::from_millis(800), probe: Duration::from_millis(800), sign_in: Duration::from_secs(2) };
+        let started = std::time::Instant::now();
+        let err = run(&bin, &paths, &home.join("scratch"), &|_| {}, limits).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        assert!(err.to_string().contains("did not start"), "{err}");
+        assert!(!account(&paths).signed_in);
+        assert!(group_gone(&home));
         let _ = std::fs::remove_dir_all(&home);
     }
 
