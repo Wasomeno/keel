@@ -98,6 +98,7 @@ icons! {
     Agent => "bot",
     Circle => "circle",
     Terminal => "terminal",
+    WrapText => "wrap-text",
     MoveRight => "move-right",
     List => "list",
     ArrowDown => "arrow-down",

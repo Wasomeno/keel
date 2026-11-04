@@ -5,6 +5,7 @@ mod composer_view;
 mod dev;
 mod dotify;
 mod dotify_ui;
+pub(crate) use dotify_ui::Tip;
 mod files_panel;
 mod gitlab;
 mod keyboard;
@@ -20,7 +21,7 @@ mod settings;
 mod sidebar;
 mod terminal_panel;
 mod timer_pill;
-mod tooltip;
+pub(crate) mod tooltip;
 mod updates;
 
 /// A receipt line for the transcript, drawn like the card's own receipt.
@@ -3097,8 +3098,14 @@ impl KeelWindow {
     fn mark_copied(&mut self, row_id: String, cx: &mut Context<Self>) {
         self.copied = Some((row_id, std::time::Instant::now()));
         cx.spawn(async move |this, cx| {
+            // A code block's "Copied" tip holds without frames; wake it for its exit.
+            let hold = Duration::from_millis(crate::code_block::COPIED_HOLD_MS as u64);
+            cx.background_executor().timer(hold).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                return;
+            }
             cx.background_executor()
-                .timer(Duration::from_millis(1500))
+                .timer(Duration::from_millis(1500) - hold)
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this

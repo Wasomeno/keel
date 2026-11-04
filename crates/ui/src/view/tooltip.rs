@@ -27,9 +27,9 @@ pub(super) const TIP_WARM: Duration = Duration::from_millis(500);
 const TIP_IN: f32 = 120.;
 const TIP_OUT: f32 = 100.;
 /// The entrance slides down this far onto its place.
-const TIP_RISE: f32 = 3.;
+pub(crate) const TIP_RISE: f32 = 3.;
 /// Below the button.
-const TIP_GAP: f32 = 6.;
+pub(crate) const TIP_GAP: f32 = 6.;
 const TEXT: f32 = 12.;
 const KEY_TEXT: f32 = 11.;
 
@@ -182,7 +182,7 @@ impl HoverTips {
 /// the same rim and radius as menus) with a smaller, softer shadow, as
 /// it's a small thing close to its button; the shortcut, if any, as a
 /// muted keycap.
-pub(super) fn capsule(
+pub(crate) fn capsule(
     t: Tokens,
     text: impl Into<gpui::SharedString>,
     keys: Option<&'static str>,
@@ -246,7 +246,7 @@ fn tips_warm(now: Instant) -> bool {
 
 /// How long gpui waits before a tooltip: [`TIP_DELAY`] cold, none while
 /// one shows or just went (moving along a row of buttons).
-pub(super) fn delay() -> Duration {
+pub(crate) fn delay() -> Duration {
     if tips_warm(Instant::now()) {
         Duration::ZERO
     } else {

@@ -141,14 +141,14 @@ fn range_label(e: &Entry, offset: i64) -> String {
 
 /// A plain text tooltip. Give the element `.tooltip_show_delay(
 /// tooltip::delay())` too, so a neighbour's shows at once.
-pub(super) struct Tip {
+pub(crate) struct Tip {
     text: SharedString,
     t: Tokens,
     entrance: super::tooltip::Entrance,
 }
 
 impl Tip {
-    pub(super) fn new(text: impl Into<SharedString>, t: Tokens) -> Self {
+    pub(crate) fn new(text: impl Into<SharedString>, t: Tokens) -> Self {
         Self {
             text: text.into(),
             t,

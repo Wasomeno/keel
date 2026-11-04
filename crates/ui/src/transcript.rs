@@ -781,6 +781,11 @@ pub enum RowAction {
         command: String,
         risky: bool,
     },
+    /// A shell fence's "Insert in terminal": type `text` at this chat's
+    /// prompt (a new shell if it has none) without pressing Return.
+    InsertInTerminal {
+        text: String,
+    },
     /// A diagram node: start a question about it in the composer.
     AskAbout {
         label: String,
@@ -816,6 +821,8 @@ pub struct RowContext {
     pub toggles: std::rc::Rc<HashMap<String, (u64, std::time::Instant)>>,
     /// The code row whose copy button shows "Copied".
     pub copied: Option<String>,
+    /// When it was copied: code blocks time their "Copied" feedback from it.
+    pub copied_at: Option<std::time::Instant>,
     pub on_action: OnRowAction,
     /// This row's place in the transcript, for text selection order.
     pub order: u64,
@@ -3663,6 +3670,9 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                         cx,
                     ),
                     CodeAction::Wrap => on_action(toggle("wrap", wrap), cx),
+                    CodeAction::Insert { text } => {
+                        on_action(RowAction::InsertInTerminal { text }, cx)
+                    }
                     CodeAction::ShowMore => on_action(toggle("more", more), cx),
                     CodeAction::Run => {
                         if let Some(run) = &run {
@@ -6491,6 +6501,7 @@ fn fence_props(
     props.wrap = wrap;
     props.expanded = more;
     props.copied = rc.copied.as_deref() == Some(row);
+    props.copied_at = rc.copied_at.filter(|_| props.copied);
     props.toggled_at = rc.toggles.get(&format!("{row}~more")).map(|(_, at)| *at);
     props.reduced = rc.reduced;
     props.runnable = runnable;

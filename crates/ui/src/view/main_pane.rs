@@ -1442,6 +1442,7 @@ impl KeelWindow {
                     reduced: self.reduced(),
                     toggles: std::rc::Rc::new(self.fold_toggles.clone()),
                     copied: self.copied.as_ref().map(|(row, _)| row.clone()),
+                    copied_at: self.copied.as_ref().map(|(_, at)| *at),
                     on_action: std::rc::Rc::new(move |action, cx| {
                         // Opening a file needs the window (the browser pane);
                         // the click is still dispatching, so do it right after.
@@ -1465,12 +1466,13 @@ impl KeelWindow {
                         }
                         // Run and a diagram node also need the window (the
                         // terminal panel, the composer).
-                        if let RowAction::Run { .. } | RowAction::AskAbout { .. } = &action {
+                        if let RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } = &action {
                             let weak = weak.clone();
                             cx.defer(move |cx| {
                                 let _ = handle.update(cx, |_, window, cx| {
                                     weak.update(cx, |view, cx| match action {
                                         RowAction::Run { row_id, command, risky } => view.run_command(row_id, command, risky, window, cx),
+                                        RowAction::InsertInTerminal { text } => view.insert_in_terminal(text, window, cx),
                                         RowAction::AskAbout { label } => view.ask_about(&label, window, cx),
                                         _ => {}
                                     })
@@ -1501,7 +1503,7 @@ impl KeelWindow {
                             RowAction::OpenFullOutput { title, content, error } => {
                                 view.open_lightbox(super::Lightbox::Output { title, content, error }, cx);
                             }
-                            RowAction::OpenFile { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::AskAbout { .. } => {}
+                            RowAction::OpenFile { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } => {}
                         });
                     }),
                     order: 0,

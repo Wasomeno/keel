@@ -834,6 +834,7 @@ fn compact(
         CodeVariant::Default
     };
     props.copied = rc.copied.as_deref() == Some(id);
+    props.copied_at = rc.copied_at.filter(|_| props.copied);
     props.reduced = rc.reduced;
     code_block::render(
         &props,

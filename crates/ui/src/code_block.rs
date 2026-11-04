@@ -96,6 +96,11 @@ pub enum CodeAction {
         error: bool,
     },
     Run,
+    /// Type `text` at this chat's terminal prompt without pressing Return.
+    /// Only shell fences (see [`is_shell`]) that aren't [`CodeBlockProps::runnable`].
+    Insert {
+        text: String,
+    },
     OpenViewer {
         content: String,
         title: Option<String>,
@@ -130,6 +135,9 @@ pub struct CodeBlockProps {
     /// Show-more is open. Compact ignores this and keeps the 256 cap.
     pub expanded: bool,
     pub copied: bool,
+    /// When Copy was clicked: the check's crossfade and the "Copied" tip run
+    /// from here (see [`copy_look`]). `None` with `copied` shows the check, still.
+    pub copied_at: Option<Instant>,
     /// When the show-more toggle happened. `None` snaps to the resting cap.
     pub toggled_at: Option<Instant>,
     pub reduced: bool,
@@ -157,12 +165,111 @@ impl CodeBlockProps {
             closed: true,
             expanded: false,
             copied: false,
+            copied_at: None,
             toggled_at: None,
             reduced: false,
             runnable: false,
             open_viewer: false,
         }
     }
+}
+
+/// Copy feedback, in ms from the click: the check eases in over
+/// [`COPIED_IN_MS`] while the "Copied" tip shows at once (a
+/// [`COPIED_TIP_IN_MS`] fade), holds until [`COPIED_HOLD_MS`], then fades in
+/// [`COPIED_OUT_MS`] and the copy icon eases back over the same.
+pub const COPIED_IN_MS: f32 = 150.;
+pub const COPIED_TIP_IN_MS: f32 = 120.;
+pub const COPIED_HOLD_MS: f32 = 1200.;
+pub const COPIED_OUT_MS: f32 = 100.;
+
+/// The copy button this frame: how far the check has replaced the copy
+/// icon, the "Copied" tip's opacity and y offset, and whether either moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CopyLook {
+    pub check: f32,
+    pub tip: f32,
+    pub tip_dy: f32,
+    pub animating: bool,
+}
+
+/// [`CopyLook`] at `now`. Ease-out throughout; reduced motion swaps without fades.
+pub fn copy_look(copied: bool, copied_at: Option<Instant>, now: Instant, reduced: bool) -> CopyLook {
+    let rest = CopyLook {
+        check: 0.,
+        tip: 0.,
+        tip_dy: 0.,
+        animating: false,
+    };
+    if !copied {
+        return rest;
+    }
+    let Some(at) = copied_at else {
+        return CopyLook { check: 1., ..rest };
+    };
+    let ms = now.saturating_duration_since(at).as_secs_f32() * 1000.;
+    let tip_gone = COPIED_HOLD_MS + COPIED_OUT_MS;
+    let icon_back = tip_gone + COPIED_OUT_MS;
+    if reduced {
+        return CopyLook {
+            check: if ms < icon_back { 1. } else { 0. },
+            tip: if ms < COPIED_HOLD_MS { 1. } else { 0. },
+            ..rest
+        };
+    }
+    let ease = crate::motion::ease_out;
+    let check = if ms < COPIED_IN_MS {
+        ease(ms / COPIED_IN_MS)
+    } else if ms < tip_gone {
+        1.
+    } else if ms < icon_back {
+        1. - ease((ms - tip_gone) / COPIED_OUT_MS)
+    } else {
+        0.
+    };
+    let rise = crate::view::tooltip::TIP_RISE;
+    let (tip, tip_dy) = if ms < COPIED_TIP_IN_MS {
+        let p = ease(ms / COPIED_TIP_IN_MS);
+        (p, -rise * (1. - p))
+    } else if ms < COPIED_HOLD_MS {
+        (1., 0.)
+    } else if ms < tip_gone {
+        (1. - ease((ms - COPIED_HOLD_MS) / COPIED_OUT_MS), 0.)
+    } else {
+        (0., 0.)
+    };
+    CopyLook {
+        check,
+        tip,
+        tip_dy,
+        // Nothing moves during the hold: the owner wakes the block at
+        // [`COPIED_HOLD_MS`] for the exit.
+        animating: ms < COPIED_IN_MS.max(COPIED_TIP_IN_MS)
+            || (ms >= COPIED_HOLD_MS && ms < icon_back),
+    }
+}
+
+/// Fences that hold shell commands: they get "Insert in terminal".
+pub fn is_shell(language: Option<&str>) -> bool {
+    matches!(
+        language.map(|l| l.trim().to_ascii_lowercase()).as_deref(),
+        Some("bash" | "sh" | "zsh" | "shell" | "console")
+    )
+}
+
+/// What "Insert in terminal" types: the block without its trailing newline.
+/// A session with `$ ` prompts gives just its commands, prompts dropped.
+pub fn terminal_text(content: &str) -> Option<String> {
+    let prompted: Vec<&str> = content
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("$ "))
+        .collect();
+    let text = if prompted.is_empty() {
+        content.trim_end().trim_start_matches(['\n', '\r']).to_string()
+    } else {
+        prompted.join("\n").trim_end().to_string()
+    };
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// One unified-diff row. `text` has the leading `+`/`-`/` ` marker removed.
@@ -487,6 +594,7 @@ pub fn render(
     };
     let group: SharedString = format!("code-{}", props.id).into();
     let copy_body = shown.to_string();
+    let copy_moving = copy_look(props.copied, props.copied_at, Instant::now(), props.reduced).animating;
 
     div()
         .group(group.clone())
@@ -558,7 +666,7 @@ pub fn render(
                 move |_, _, cx| on_action(CodeAction::ShowMore, cx)
             }))
         })
-        .when(metrics.animating, |d| {
+        .when(metrics.animating || copy_moving, |d| {
             d.child(
                 gpui::canvas(
                     |_, _, _| (),
@@ -636,6 +744,7 @@ fn header(
                         c(t.hover),
                         c(t.text),
                         true,
+                        Some(("Open in viewer".into(), t)),
                         move |_, _, cx| {
                             on_action(
                                 CodeAction::OpenViewer {
@@ -658,7 +767,21 @@ fn header(
                         c(t.hover),
                         c(t.text),
                         true,
+                        Some(("Run in terminal".into(), t)),
                         move |_, _, cx| on_action(CodeAction::Run, cx),
+                    ))
+                })
+                .when_some(insert_text(props), |d, text| {
+                    let on_action = on_action.clone();
+                    d.child(icon_button(
+                        format!("code-insert-{}", props.id),
+                        Icon::Terminal.el(zpx(12.)).into_any_element(),
+                        c(t.text_faint),
+                        c(t.hover),
+                        c(t.text),
+                        props.closed,
+                        Some(("Insert in terminal".into(), t)),
+                        move |_, _, cx| on_action(CodeAction::Insert { text: text.clone() }, cx),
                     ))
                 })
                 .child(copy_button(props, t, copy_text, on_action)),
@@ -1039,14 +1162,10 @@ fn floating_copy(
     let shown = if props.closed { 1. } else { 0.45 };
     let hover_opacity = shown;
     let focus_opacity = shown;
-    let color = c(if props.copied {
-        t.success
-    } else {
-        t.text_faint
-    });
-    let hover_fg = c(if props.copied { t.success } else { t.text });
+    let color = c(t.text_faint);
+    let hover_fg = c(t.text);
     let hover_bg = c(t.hover);
-    let copied = props.copied;
+    let look = copy_look(props.copied, props.copied_at, Instant::now(), props.reduced);
     let closed = props.closed;
     let id = props.id.clone();
     let mut button = div()
@@ -1063,7 +1182,8 @@ fn floating_copy(
         .border_1()
         .border_color(border_of(t, props.variant))
         .text_color(color)
-        .opacity(0.)
+        // Stays up while "Copied" shows, even if the pointer left.
+        .opacity(if props.copied { shown } else { 0. })
         .group_hover(group, move |s| s.opacity(hover_opacity))
         .focus(move |s| s.opacity(focus_opacity))
         .focusable();
@@ -1075,7 +1195,10 @@ fn floating_copy(
                 on_action(CodeAction::Copy { text: text.clone() }, cx);
             });
     }
-    button.child(copy_icon(copied)).into_any_element()
+    button
+        .child(copy_icon(look, t))
+        .children(copied_tip(look, t))
+        .into_any_element()
 }
 
 fn copy_button(
@@ -1084,44 +1207,102 @@ fn copy_button(
     text: String,
     on_action: OnCodeAction,
 ) -> AnyElement {
-    let color = c(if props.copied {
-        t.success
-    } else {
-        t.text_faint
-    });
-    let hover = c(if props.copied { t.success } else { t.text });
-    icon_button(
+    let look = copy_look(props.copied, props.copied_at, Instant::now(), props.reduced);
+    // While "Copied" shows, the hover tooltip stays away (no "Copy" under it).
+    let tip = (!props.copied).then(|| ("Copy".into(), t));
+    let button = icon_button(
         format!("code-copy-{}", props.id),
-        copy_icon(props.copied),
-        color,
+        copy_icon(look, t),
+        c(t.text_faint),
         c(t.hover),
-        hover,
+        c(t.text),
         props.closed,
+        tip,
         move |_, _, cx| on_action(CodeAction::Copy { text: text.clone() }, cx),
-    )
+    );
+    match copied_tip(look, t) {
+        Some(tip) => div().relative().flex_none().child(button).child(tip).into_any_element(),
+        None => button,
+    }
+}
+
+/// The shell text "Insert in terminal" would type, when the block offers it.
+fn insert_text(props: &CodeBlockProps) -> Option<String> {
+    if props.runnable || !is_shell(props.language.as_deref()) {
+        return None;
+    }
+    terminal_text(&props.content)
 }
 
 fn wrap_button(props: &CodeBlockProps, t: Tokens, on_action: OnCodeAction) -> AnyElement {
     let on = props.wrap;
     icon_button(
         format!("code-wrap-{}", props.id),
-        div()
-            .text_size(zpx(12.))
-            .line_height(zpx(14.))
-            .child("⏎")
-            .into_any_element(),
+        Icon::WrapText.el(zpx(12.)).into_any_element(),
         c(if on { t.text } else { t.text_faint }),
         c(t.hover),
-        c(if on { t.text } else { t.text }),
+        c(t.text),
         true,
+        Some((wrap_label(on).into(), t)),
         move |_, _, cx| on_action(CodeAction::Wrap, cx),
     )
 }
 
-fn copy_icon(copied: bool) -> AnyElement {
-    (if copied { Icon::Check } else { Icon::Copy })
-        .el(zpx(12.))
-        .into_any_element()
+/// The wrap toggle's tooltip: what a click does.
+pub fn wrap_label(wrapped: bool) -> &'static str {
+    if wrapped { "Unwrap lines" } else { "Wrap lines" }
+}
+
+/// Copy and check stacked in one 12 px box, crossfading: no layout shift.
+fn copy_icon(look: CopyLook, t: Tokens) -> AnyElement {
+    let layer = |icon: Icon, opacity: f32| {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(opacity)
+            .child(icon.el(zpx(12.)))
+    };
+    let mut stack = div().relative().flex_none().size(zpx(12.));
+    if look.check < 1. {
+        stack = stack.child(layer(Icon::Copy, 1. - look.check));
+    }
+    if look.check > 0. {
+        stack = stack.child(layer(Icon::Check, look.check).text_color(c(t.success)));
+    }
+    stack.into_any_element()
+}
+
+/// Width of the slot the "Copied" tip centers in, logical px.
+const COPIED_SLOT: f32 = 96.;
+
+/// "Copied" under the button, on the tooltip capsule. Deferred, so the
+/// block's clip and the code below don't cover it; absolute, so nothing moves.
+fn copied_tip(look: CopyLook, t: Tokens) -> Option<AnyElement> {
+    if look.tip <= 0. {
+        return None;
+    }
+    let gap = crate::view::tooltip::TIP_GAP;
+    Some(
+        div()
+            .absolute()
+            .top(zpx(BUTTON + gap))
+            .left(zpx(BUTTON / 2. - COPIED_SLOT / 2.))
+            .w(zpx(COPIED_SLOT))
+            .flex()
+            .justify_center()
+            .child(
+                gpui::deferred(
+                    crate::view::tooltip::capsule(t, "Copied", None)
+                        .top(zpx(look.tip_dy))
+                        .opacity(look.tip),
+                )
+                .with_priority(2),
+            )
+            .into_any_element(),
+    )
 }
 
 fn icon_button(
@@ -1131,6 +1312,7 @@ fn icon_button(
     hover_bg: Hsla,
     hover_fg: Hsla,
     enabled: bool,
+    tip: Option<(SharedString, Tokens)>,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut App) + 'static,
 ) -> AnyElement {
     let button = div()
@@ -1152,6 +1334,12 @@ fn icon_button(
     } else {
         drop(on_click);
         button
+    };
+    let button = match tip.filter(|_| enabled) {
+        Some((text, t)) => button
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new(text.clone(), t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay()),
+        None => button,
     };
     button.child(icon).into_any_element()
 }
@@ -2008,5 +2196,92 @@ diff --git a/b.rs b/b.rs
         assert!(wide.is_char_boundary(cut.start));
         assert!(cut.start > 0);
         assert!(wide[cut.start..].lines().count() <= MAX_RENDERED_LINES);
+    }
+
+    fn look_at(ms: u64, reduced: bool) -> CopyLook {
+        let t0 = Instant::now();
+        copy_look(true, Some(t0), t0 + Duration::from_millis(ms), reduced)
+    }
+
+    #[test]
+    fn copy_swaps_to_a_check_and_shows_copied_at_once() {
+        let start = look_at(0, false);
+        assert!(start.animating);
+        near(start.check, 0.);
+        // Eased out: well past halfway at a third of the way in.
+        assert!(look_at(50, false).check > 0.5);
+        let settled = look_at(COPIED_IN_MS as u64, false);
+        near(settled.check, 1.);
+        near(settled.tip, 1.);
+        near(settled.tip_dy, 0.);
+        // The tip is already visible on the first frames, not after a hover delay.
+        assert!(look_at(40, false).tip > 0.5);
+    }
+
+    #[test]
+    fn copied_holds_without_frames_then_fades_quicker_than_it_came() {
+        let hold = look_at(800, false);
+        assert!(!hold.animating, "no frames while nothing moves");
+        assert_eq!((hold.check, hold.tip), (1., 1.));
+        let leaving = look_at(COPIED_HOLD_MS as u64 + 50, false);
+        assert!(leaving.animating && leaving.tip > 0. && leaving.tip < 1.);
+        assert_eq!(leaving.check, 1., "the check waits for the tip to go");
+        let gone = look_at((COPIED_HOLD_MS + COPIED_OUT_MS) as u64, false);
+        near(gone.tip, 0.);
+        let back = look_at((COPIED_HOLD_MS + 2. * COPIED_OUT_MS) as u64, false);
+        assert_eq!(back, CopyLook { check: 0., tip: 0., tip_dy: 0., animating: false });
+        assert!(COPIED_OUT_MS < COPIED_IN_MS && COPIED_IN_MS < 300.);
+    }
+
+    #[test]
+    fn reduced_motion_swaps_copy_feedback_without_fades() {
+        assert_eq!(
+            look_at(0, true),
+            CopyLook { check: 1., tip: 1., tip_dy: 0., animating: false }
+        );
+        let late = look_at(COPIED_HOLD_MS as u64, true);
+        assert_eq!((late.check, late.tip), (1., 0.));
+        // Not copied: the copy icon at rest, whatever the time.
+        assert_eq!(copy_look(false, Some(Instant::now()), Instant::now(), false).check, 0.);
+        // Copied with no time: a still check, no tip.
+        let still = copy_look(true, None, Instant::now(), false);
+        assert_eq!((still.check, still.tip, still.animating), (1., 0., false));
+    }
+
+    #[test]
+    fn only_shell_fences_offer_insert_in_terminal() {
+        for lang in ["bash", "sh", "zsh", "shell", "console", " Bash "] {
+            assert!(is_shell(Some(lang)), "{lang}");
+        }
+        for lang in ["rust", "python", "text", "fish-ish", ""] {
+            assert!(!is_shell(Some(lang)), "{lang}");
+        }
+        assert!(!is_shell(None));
+        let mut props = CodeBlockProps::new("r", "ls -la\n", CodeSize::Full);
+        assert_eq!(insert_text(&props), None);
+        props.language = Some("bash".into());
+        assert_eq!(insert_text(&props).as_deref(), Some("ls -la"));
+        // A Run button already covers it.
+        props.runnable = true;
+        assert_eq!(insert_text(&props), None);
+    }
+
+    #[test]
+    fn insert_types_the_commands_without_a_trailing_return() {
+        let block = "export CEF_DEBUG_LOG=1\n/Applications/Keel.app/Contents/MacOS/keel --v=1\n\n";
+        assert_eq!(
+            terminal_text(block).as_deref(),
+            Some("export CEF_DEBUG_LOG=1\n/Applications/Keel.app/Contents/MacOS/keel --v=1")
+        );
+        // A console session: just the commands, prompts and output dropped.
+        let session = "$ cargo --version\ncargo 1.90.0\n  $ echo hi\nhi\n";
+        assert_eq!(terminal_text(session).as_deref(), Some("cargo --version\necho hi"));
+        assert_eq!(terminal_text("  \n\n"), None);
+    }
+
+    #[test]
+    fn the_wrap_toggle_says_what_a_click_does() {
+        assert_eq!(wrap_label(false), "Wrap lines");
+        assert_eq!(wrap_label(true), "Unwrap lines");
     }
 }

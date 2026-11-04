@@ -29,11 +29,25 @@ const PAD: f32 = 12.;
 /// One shell in the panel.
 pub(super) struct TermTab {
     id: String,
+    /// The chat whose folder it started in.
+    chat: Option<String>,
     /// The `subscribe_terminal` stream, once known.
     stream: Option<String>,
     emu: Emulator,
     exited: Option<Option<i32>>,
 }
+
+/// What a new shell does once attached.
+enum Then {
+    Nothing,
+    /// Type it and press Return.
+    Run(String),
+    /// Type it at the prompt, as a paste, and leave it there.
+    Insert(String),
+}
+
+/// How long a new shell gets to show its prompt before an insert goes in anyway.
+const PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Panel state kept on the window.
 pub(super) struct TerminalPanel {
@@ -179,7 +193,7 @@ impl KeelWindow {
 
     /// Start a shell in the active chat's folder and attach to it.
     pub(super) fn new_terminal(&mut self, cx: &mut Context<Self>) {
-        self.new_terminal_running(None, cx);
+        self.new_terminal_running(Then::Nothing, cx);
     }
 
     /// Show the panel with a fresh shell that runs `command`. The user
@@ -192,10 +206,37 @@ impl KeelWindow {
     ) {
         self.set_terminal_open(true, window, cx);
         window.focus(&self.terminal.focus, cx);
-        self.new_terminal_running(Some(command), cx);
+        self.new_terminal_running(Then::Run(command), cx);
     }
 
-    fn new_terminal_running(&mut self, command: Option<String>, cx: &mut Context<Self>) {
+    /// Show the panel and type `text` at the prompt of this chat's shell
+    /// (the active tab if it's this chat's, else its latest; a new one if
+    /// none), without Return: the user reads it, then runs it.
+    pub(super) fn insert_in_terminal(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_terminal_open(true, window, cx);
+        window.focus(&self.terminal.focus, cx);
+        let chat = self.current_chat.clone();
+        let panel = &mut self.terminal;
+        match pick_tab(&panel.tabs, panel.active, &chat) {
+            Some(ix) => {
+                panel.active = ix;
+                let tab = &mut panel.tabs[ix];
+                let data = encode_paste(&text, bracketed(&tab.emu));
+                tab.emu.scroll_to_bottom();
+                let id = tab.id.clone();
+                self.terminal_send(id, data, cx);
+                cx.notify();
+            }
+            None => self.new_terminal_running(Then::Insert(text), cx),
+        }
+    }
+
+    fn new_terminal_running(&mut self, then: Then, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -222,6 +263,7 @@ impl KeelWindow {
                 let panel = &mut this.terminal;
                 panel.tabs.push(TermTab {
                     id: id.clone(),
+                    chat: chat_id.clone(),
                     stream: None,
                     emu: Emulator::new(cols, rows),
                     exited: None,
@@ -249,26 +291,47 @@ impl KeelWindow {
                         for event in early {
                             this.apply_terminal_event(&id, event, cx);
                         }
-                        if let (Some(command), Some(client)) =
-                            (command.clone(), this.client.clone())
-                        {
-                            let id = id.clone();
-                            cx.spawn(async move |_, _| {
-                                let data = format!("{command}\r");
-                                let _ = client
-                                    .call(
-                                        "terminal_input",
-                                        serde_json::json!({ "terminal_id": id, "data": data }),
-                                    )
-                                    .await;
-                            })
-                            .detach();
+                        match &then {
+                            Then::Nothing => {}
+                            Then::Run(command) => {
+                                this.terminal_send(id.clone(), format!("{command}\r"), cx)
+                            }
+                            Then::Insert(text) => this.insert_when_ready(id.clone(), text.clone(), cx),
                         }
                     }
                     None => this.report("can't attach to the terminal", "subscribe failed"),
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Paste `text` into a new shell once its prompt is up (it turns on
+    /// bracketed paste then), so a multi-line block isn't run line by line.
+    fn insert_when_ready(&mut self, id: String, text: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let start = std::time::Instant::now();
+            loop {
+                let ready = this.update(cx, |this, _| {
+                    let tab = this.terminal.tabs.iter().find(|t| t.id == id)?;
+                    let on = bracketed(&tab.emu);
+                    (on || start.elapsed() >= PROMPT_WAIT || tab.exited.is_some()).then_some(on)
+                });
+                match ready {
+                    Ok(Some(on)) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.terminal_send(id.clone(), encode_paste(&text, on), cx)
+                        });
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(_) => return,
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            }
         })
         .detach();
     }
@@ -368,10 +431,7 @@ impl KeelWindow {
         let id = tab.id.clone();
         if m.platform && ks.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let bracketed = tab
-                    .emu
-                    .mode()
-                    .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+                let bracketed = bracketed(&tab.emu);
                 tab.emu.scroll_to_bottom();
                 cx.stop_propagation();
                 self.terminal_send(id, encode_paste(&text, bracketed), cx);
@@ -689,3 +749,49 @@ impl KeelWindow {
         }
     }
 }
+
+/// The shell asked for bracketed paste (its prompt is up).
+fn bracketed(emu: &Emulator) -> bool {
+    emu.mode()
+        .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+}
+
+/// Where an insert for `chat` goes: the active tab if it's that chat's and
+/// still running, else that chat's latest running one. `None`: start one.
+fn pick_tab(tabs: &[TermTab], active: usize, chat: &Option<String>) -> Option<usize> {
+    let fits = |t: &TermTab| t.exited.is_none() && &t.chat == chat;
+    if tabs.get(active).is_some_and(fits) {
+        return Some(active);
+    }
+    tabs.iter().rposition(fits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(id: &str, chat: &str, exited: bool) -> TermTab {
+        TermTab {
+            id: id.into(),
+            chat: Some(chat.into()),
+            stream: None,
+            emu: Emulator::new(20, 5),
+            exited: exited.then_some(Some(0)),
+        }
+    }
+
+    #[test]
+    fn an_insert_goes_to_this_chats_running_shell() {
+        let chat = Some("a".to_string());
+        let tabs = vec![tab("1", "a", false), tab("2", "b", false), tab("3", "a", true)];
+        // The active tab when it's this chat's.
+        assert_eq!(pick_tab(&tabs, 0, &chat), Some(0));
+        // Another chat's tab is active: this chat's latest running one.
+        assert_eq!(pick_tab(&tabs, 1, &chat), Some(0));
+        // Exited shells don't count; none left: start a new one.
+        assert_eq!(pick_tab(&tabs[2..], 0, &chat), None);
+        assert_eq!(pick_tab(&tabs, 0, &Some("c".into())), None);
+        assert_eq!(pick_tab(&[], 0, &chat), None);
+    }
+}
+

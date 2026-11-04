@@ -599,6 +599,7 @@ impl KeelWindow {
             reduced: self.reduced(),
             toggles: Rc::new(self.fold_toggles.clone()),
             copied: self.copied.as_ref().map(|(id, _)| id.clone()),
+            copied_at: self.copied.as_ref().map(|(_, at)| *at),
             on_action: Rc::new(move |action, cx| {
                 let _ = weak.update(cx, |view, cx| match action {
                     crate::transcript::RowAction::Toggle { row_id } => view.toggle_row(&row_id, cx),
