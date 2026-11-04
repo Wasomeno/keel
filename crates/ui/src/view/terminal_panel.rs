@@ -484,7 +484,7 @@ impl KeelWindow {
             && self
                 .terminal
                 .anim
-                .is_some_and(|(at, _)| at.elapsed() < self.right_panel_duration());
+                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.right_panel_duration());
         if !open && !toggling {
             return Vec::new();
         }
@@ -720,7 +720,6 @@ impl KeelWindow {
         if let Some((_, n)) = anim {
             use gpui::AnimationExt as _;
             let (from, to) = (self.right_panel_from, self.right_panel_target());
-            let entering = to >= from;
             let curve = gpui::Animation::new(self.right_panel_duration())
                 .with_easing(crate::motion::glide_curve);
             let pane = pane
@@ -729,8 +728,7 @@ impl KeelWindow {
                     curve.clone(),
                     move |el, delta| {
                         let k = from + (to - from) * delta;
-                        el.right(px(-full * (1.0 - k)))
-                            .opacity(crate::motion::panel_opacity(k, entering))
+                        el.right(px(crate::motion::panel_shift(full, k)))
                     },
                 )
                 .into_any_element();

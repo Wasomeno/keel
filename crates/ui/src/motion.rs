@@ -1,7 +1,7 @@
 //! Motion: one place for durations and curves. Nothing runs longer than
-//! 200 ms except loops (spinner, pulse), springs and the two big spatial moves
-//! (sidebar width, new-chat composer drop), and reduced motion turns every
-//! transition into an instant cut.
+//! 200 ms except loops (spinner, pulse), springs, and the long travels
+//! (sidebar width, the new-chat composer drop, and the wide right-side
+//! panels). Reduced motion turns every transition into an instant cut.
 
 pub use crate::hover_fade::{HOVER_IN, HOVER_OUT, HoverFadeExt, reveal_on_hover};
 use crate::style::zpx;
@@ -25,10 +25,11 @@ pub const SPATIAL: Duration = Duration::from_millis(420);
 /// feel each way, the close a touch quicker (<250ms for responsive navigation).
 pub const SHEET_OPEN: Duration = Duration::from_millis(240);
 pub const SHEET_CLOSE: Duration = Duration::from_millis(180);
-/// Right side panels (browser, files, terminal) opening and closing on [`glide_curve`]:
-/// under 300 ms for responsive UI, with closing faster than opening.
-pub const PANEL_OPEN: Duration = Duration::from_millis(260);
-pub const PANEL_CLOSE: Duration = Duration::from_millis(200);
+/// Right side panels (browser, files, terminal) on [`glide_curve`].
+/// A wide pane opens on the long-travel beat ([`SPATIAL`]). The close is
+/// quicker, and still long enough for that width to read as a slide.
+pub const PANEL_OPEN: Duration = SPATIAL;
+pub const PANEL_CLOSE: Duration = Duration::from_millis(320);
 /// A spring settling: long enough for its overshoot to read.
 pub const SPRING: Duration = Duration::from_millis(380);
 /// Loops.
@@ -458,17 +459,11 @@ pub fn sheet_look(t: f32, leaving: bool, reduced: bool) -> (f32, f32) {
     (opacity, dy)
 }
 
-/// How visible a side panel is mid-slide: `k` (0..=1) is how open it is.
-/// Entering: fully visible by 60% of travel so it reads as arriving, not a late fade.
-/// Leaving: fades smoothly from the start so content does not linger across
-/// the screen while moving out.
-pub fn panel_opacity(k: f32, entering: bool) -> f32 {
-    let k = k.clamp(0., 1.);
-    if entering {
-        ease_out((k / 0.6).min(1.))
-    } else {
-        k.powf(1.1)
-    }
+/// How far a right-side pane sits past the window's right edge at open
+/// fraction `k` (0 hidden, 1 flush). The pane stays opaque; the slide is
+/// the whole motion.
+pub fn panel_shift(width: f32, k: f32) -> f32 {
+    -width * (1. - k.clamp(0., 1.))
 }
 
 /// Fade out over [`SPATIAL`].
@@ -1035,18 +1030,14 @@ mod tests {
     }
 
     #[test]
-    fn panel_opacity_enters_early_and_exits_smoothly() {
-        assert_eq!(panel_opacity(0., true), 0.);
-        assert_eq!(panel_opacity(1., true), 1.);
-        assert_eq!(panel_opacity(0.6, true), 1.);
-        assert!(panel_opacity(0.3, true) > 0.8);
-
-        assert_eq!(panel_opacity(0., false), 0.);
-        assert_eq!(panel_opacity(1., false), 1.);
-        let mid = panel_opacity(0.5, false);
-        assert!(mid < 0.55 && mid > 0.4);
-        assert!(PANEL_OPEN < Duration::from_millis(300));
+    fn panel_slide_is_a_long_solid_travel() {
+        assert_eq!(PANEL_OPEN, SPATIAL);
         assert!(PANEL_CLOSE < PANEL_OPEN);
+        assert!(PANEL_CLOSE <= Duration::from_millis(500));
+        assert_eq!(panel_shift(400., 0.), -400.);
+        assert_eq!(panel_shift(400., 0.5), -200.);
+        assert_eq!(panel_shift(400., 1.), 0.);
+        assert_eq!(panel_shift(400., 1.5), 0.);
     }
 
     #[test]

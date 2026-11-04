@@ -284,11 +284,6 @@ impl BrowserPanel {
     }
 }
 
-/// How visible the pane is at `k` of its width, respecting entrance vs exit.
-fn reveal(k: f32, entering: bool) -> f32 {
-    crate::motion::panel_opacity(k, entering)
-}
-
 impl KeelWindow {
     /// The pane belongs to an open chat session only: never the new-chat
     /// screen, Settings, or GitLab. `was_hero` is this frame's hero state.
@@ -1167,8 +1162,6 @@ impl KeelWindow {
 
         // Sliding, the body keeps its settled width and is clipped (nothing
         // reflows); growing, it fills the pane so the page reflows with it.
-        let panel_entering =
-            !self.right_panel_toggling() || self.right_panel_target() >= self.right_panel_from;
         let body = div()
             .size_full()
             .flex()
@@ -1182,7 +1175,7 @@ impl KeelWindow {
             })
             .child(toolbar)
             .children(self.render_browser_tabs(t, cx))
-            .child(self.render_browser_page(t, panel_entering, cx));
+            .child(self.render_browser_page(t, cx));
         let pane = div()
             .id("browser-panel")
             .track_focus(&self.browser.focus)
@@ -1201,12 +1194,11 @@ impl KeelWindow {
         let pane = if let Some((_, n)) = anim {
             use gpui::AnimationExt as _;
             let (from, to) = (self.right_panel_from, self.right_panel_target());
-            let entering = to >= from;
             let curve = gpui::Animation::new(self.right_panel_duration())
                 .with_easing(crate::motion::glide_curve);
             pane.with_animation(("browser-slide", n as usize), curve, move |el, delta| {
                 let k = from + (to - from) * delta;
-                el.right(px(-full * (1.0 - k))).opacity(reveal(k, entering))
+                el.right(px(crate::motion::panel_shift(full, k)))
             })
             .into_any_element()
         } else if open {
@@ -1772,12 +1764,7 @@ impl KeelWindow {
     }
 
     /// The page card: the live page, or a start screen until there's an address.
-    fn render_browser_page(
-        &mut self,
-        t: Tokens,
-        _entering: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_browser_page(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
         let card = div()
             .id("browser-page")
             .relative()

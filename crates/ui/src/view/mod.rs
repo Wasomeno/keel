@@ -1598,8 +1598,8 @@ impl KeelWindow {
     }
 
     /// The duration for the right panel animation, scaling with distance if reversed mid-flight.
-    /// Opening uses [`crate::motion::PANEL_OPEN`] (260 ms) and closing uses
-    /// [`crate::motion::PANEL_CLOSE`] (200 ms) for snappy dismissals.
+    /// Opening uses [`crate::motion::PANEL_OPEN`] ([`crate::motion::SPATIAL`], a wide pane)
+    /// and closing uses [`crate::motion::PANEL_CLOSE`] (320 ms), still quicker than the open.
     pub(super) fn right_panel_duration(&self) -> std::time::Duration {
         let base = if self.right_panel_target() >= self.right_panel_from {
             crate::motion::PANEL_OPEN
@@ -1626,7 +1626,7 @@ impl KeelWindow {
             return self.right_panel_target();
         };
         let dur = self.right_panel_duration();
-        let elapsed = at.elapsed();
+        let elapsed = self.slide_elapsed(at);
         if elapsed >= dur {
             return self.right_panel_target();
         }
