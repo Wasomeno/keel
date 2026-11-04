@@ -486,6 +486,7 @@ impl KeelWindow {
                     self.prompt_suggestion = None;
                 } else {
                     self.prompt_suggestion = Some(arg.to_string());
+                    self.prompt_suggestion_at = Some(std::time::Instant::now());
                 }
                 cx.notify();
                 "ok"

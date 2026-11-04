@@ -132,6 +132,8 @@ pub struct KeelWindow {
     composer: Entity<TextareaState>,
     draft_save: Option<Task<()>>,
     prompt_suggestion: Option<String>,
+    /// When the current suggestion arrived; its pill fades in from there.
+    prompt_suggestion_at: Option<std::time::Instant>,
     suggestion_revision: u64,
     suggestion_key: Option<u64>,
     suggestion_task: Option<Task<()>>,
@@ -1071,6 +1073,7 @@ impl KeelWindow {
             composer,
             draft_save: None,
             prompt_suggestion: None,
+            prompt_suggestion_at: None,
             suggestion_revision: 0,
             suggestion_key: None,
             suggestion_task: None,
@@ -1757,12 +1760,6 @@ impl KeelWindow {
     /// Where the menu `key` is this frame: `None` hidden, `Some(None)` open,
     /// `Some(Some(n))` playing exit `n`. Read against last frame, so a close
     /// from any path (a click away, Escape, a pick) plays the exit.
-    /// Close `key` now, with no exit: keyboard changes don't animate.
-    fn menu_cut(&mut self, key: &str) {
-        self.menus_open.remove(key);
-        self.menus_leaving.remove(key);
-    }
-
     fn menu_phase(
         &mut self,
         key: impl Into<SharedString>,

@@ -534,6 +534,10 @@ impl KeelWindow {
             .then(|| self.prompt_suggestion.clone())
             .flatten();
         let hint = t.text_faint;
+        let pill = suggestion
+            .is_some()
+            .then(|| self.render_suggestion_pill(t, window, cx))
+            .flatten();
         let input = div()
             .id("composer-input")
             .relative()
@@ -545,6 +549,7 @@ impl KeelWindow {
                     // One line, so the box is the empty composer's height.
                     .child(div().w_full().truncate().text_color(c(hint)).child(text))
                     .child(div().absolute().inset_0().child(self.composer.clone()))
+                    .children(pill)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.composer
                             .update(cx, |input, cx| input.focus(window, cx));
@@ -862,7 +867,6 @@ impl KeelWindow {
                         .child(panel)
                         .children(tab)
                         .children((!hero).then(|| self.render_points(t, cx)))
-                        .children(self.render_top_left_accessory(hero, t, cx))
                         .children(self.render_create_error(t, cx)),
                 ),
             )
@@ -879,77 +883,70 @@ impl KeelWindow {
             })
     }
 
-    /// Accessory row above the docked composer's top-left: suggestion hint.
-    fn render_top_left_accessory(
+    /// The "use" pill on the suggestion's first line, top-right of the text
+    /// area. Opaque, so a long suggestion runs under it rather than reflowing.
+    /// Shown only while the suggestion can be taken; typing or taking it
+    /// removes it at once, and it fades in only when a suggestion arrives.
+    fn render_suggestion_pill(
         &mut self,
-        hero: bool,
         t: Tokens,
+        window: &gpui::Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if hero {
+        if !self.can_accept_suggestion(cx) {
             return None;
         }
-        let suggestion = self.render_suggestion_hint(t, cx);
-        suggestion.map(|s| {
-            div()
-                .absolute()
-                .top(zpx(-POINTS_PILL_H - 6.))
-                .left_0()
-                .h(zpx(POINTS_PILL_H))
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(s)
-                .into_any_element()
-        })
-    }
-
-    /// The "use suggestion" hint above the docked composer's top-left.
-    fn render_suggestion_hint(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use gpui::AnimationExt as _;
-        let open = self.can_accept_suggestion(cx);
-        // Typing (or taking the suggestion) hides it at once: keyboard
-        // changes don't animate.
-        if !open && !self.composer.read(cx).value().is_empty() {
-            self.menu_cut("prompt-suggestion-hint");
-            return None;
-        }
-        let phase = self.menu_phase("prompt-suggestion-hint", open, cx)?;
         let shortcut = if cfg!(target_os = "macos") {
             "⌘⇧Space"
         } else {
             "Ctrl+Shift+Space"
         };
-        let hint = div()
-            .id("prompt-suggestion-hint")
-            .px_2()
+        let opacity = match self.prompt_suggestion_at {
+            Some(at) if !self.reduced() => arrival_fade(at.elapsed()),
+            _ => 1.,
+        };
+        if opacity < 1. {
+            window.request_animation_frame();
+        }
+        let pill = div()
+            .id("prompt-suggestion-pill")
+            .flex_none()
             .flex()
+            .flex_row()
             .items_center()
-            .t_caption()
-            .text_color(c(t.text_faint))
+            .gap(zpx(5.))
+            .h(zpx(SUGGESTION_PILL_H))
+            .px(zpx(8.))
+            .rounded_full()
+            .bg(c(t.surface))
+            .t_small()
             .cursor_pointer()
-            .hover(|d| d.text_color(c(t.text_muted)))
-            .child(format!("{shortcut} to use suggestion"))
-            .on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.accept_suggestion(window, cx)),
-            );
-        Some(match phase {
-            _ if self.reduced() => hint.into_any_element(),
-            None => hint
-                .with_animation(
-                    "suggestion-hint-in",
-                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
-                    move |el, d| el.opacity(d),
-                )
+            .opacity(opacity)
+            .hover_fade(c(t.hover), None)
+            .child(
+                div()
+                    .text_color(c(t.text))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(shortcut),
+            )
+            .child(div().text_color(c(t.text_faint)).child("use"))
+            .tooltip(move |_, cx| cx.new(|_| super::Tip::new("Use suggestion", t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                this.accept_suggestion(window, cx)
+            }));
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .h(zpx(crate::style::READING.line))
+                .flex()
+                .items_center()
+                .child(pill)
                 .into_any_element(),
-            Some(n) => hint
-                .with_animation(
-                    ("suggestion-hint-out", n as usize),
-                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
-                    move |el, d| el.opacity(1. - d),
-                )
-                .into_any_element(),
-        })
+        )
     }
 
     /// The session's points. Sits on the
@@ -2820,6 +2817,18 @@ impl ChipWidth {
 const POINTS_PILL_PAD: f32 = 3.;
 const POINTS_MENU_GAP: f32 = 8.;
 const POINTS_CHIP: f32 = 28.;
+/// The suggestion pill's height, inside the reading line (22 px).
+const SUGGESTION_PILL_H: f32 = 20.;
+/// How long a newly arrived suggestion's pill takes to fade in.
+const SUGGESTION_PILL_FADE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The pill's opacity `elapsed` after its suggestion arrived: an ease-out
+/// fade, then fully shown. A suggestion that comes back on its own (the
+/// input emptied again) is long past it, so it appears at once.
+fn arrival_fade(elapsed: std::time::Duration) -> f32 {
+    crate::motion::ease_out((elapsed.as_secs_f32() / SUGGESTION_PILL_FADE.as_secs_f32()).min(1.))
+}
+
 const POINTS_PILL_H: f32 = POINTS_CHIP + 2. * POINTS_PILL_PAD + 2.;
 
 /// One half of the points pill.
@@ -3352,6 +3361,18 @@ fn chip(id: &'static str, t: Tokens, active: bool) -> gpui::Stateful<gpui::Div> 
 #[cfg(test)]
 mod slider_tests {
     use super::*;
+
+    #[test]
+    fn the_suggestion_pill_fades_in_briefly_then_stays() {
+        use std::time::Duration;
+        assert_eq!(arrival_fade(Duration::ZERO), 0.);
+        let mid = arrival_fade(Duration::from_millis(75));
+        assert!(mid > 0.5 && mid < 1., "ease-out is past half by midway: {mid}");
+        assert_eq!(arrival_fade(SUGGESTION_PILL_FADE), 1.);
+        assert_eq!(arrival_fade(Duration::from_secs(5)), 1.);
+        assert!(SUGGESTION_PILL_FADE < Duration::from_millis(300));
+        assert!(SUGGESTION_PILL_H <= crate::style::READING.line);
+    }
 
     #[test]
     fn a_disabled_send_is_the_same_disc_only_dimmed() {

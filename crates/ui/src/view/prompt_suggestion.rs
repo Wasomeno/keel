@@ -53,7 +53,8 @@ impl KeelWindow {
                     }
                     match result {
                         Ok(body) => {
-                            this.prompt_suggestion = body["suggestion"].as_str().map(str::to_string)
+                            this.prompt_suggestion = body["suggestion"].as_str().map(str::to_string);
+                            this.prompt_suggestion_at = Some(std::time::Instant::now());
                         }
                         Err(err) => tracing::info!("prompt suggestion unavailable: {err}"),
                     }
@@ -61,8 +62,8 @@ impl KeelWindow {
                 });
             }));
         }
-        // Long suggestions wrap in the composer's ghost-text layer; the
-        // input library only wraps real text, not its native placeholder.
+        // The suggestion shows in the composer's own ghost-text layer (one
+        // line, under the "use" pill), so the native placeholder steps aside.
         let placeholder = if self.prompt_suggestion.is_some() {
             ""
         } else {
