@@ -56,7 +56,7 @@ mkdir -p "$DEST/pi-packages/pi-commandcode-provider"
 tar xzf "$PI_TAR" -C "$DEST"
 tar xzf "$CC_TAR" -C "$DEST/pi-packages/pi-commandcode-provider" --strip-components 1
 
-# Each into its own folder with its runtime dependencies. Pi itself (the
+# Each into its own folder with its runtime dependencies, then patched. Pi itself (the
 # peers) comes from the host, so peers are skipped, as are install scripts.
 # ponytail: dependencies float within each package's ranges; commit lockfiles if builds must be byte-identical.
 for spec in "${NPM_PACKAGES[@]}"; do
@@ -66,6 +66,12 @@ for spec in "${NPM_PACKAGES[@]}"; do
   tgz=$(cd "$dir" && npm pack --silent "$spec")
   tar xzf "$dir/$tgz" -C "$dir" --strip-components 1
   rm "$dir/$tgz"
+  # Keel's fixes to a package, as scripts/pi-patches/<folder>.patch. A patch
+  # that no longer applies fails the fetch, so a version bump re-checks it.
+  patch_file="scripts/pi-patches/${name##*/}.patch"
+  if [ -f "$patch_file" ]; then
+    patch -d "$dir" -p1 --forward --silent < "$patch_file"
+  fi
   (cd "$dir" && npm install --omit=dev --omit=peer --legacy-peer-deps --ignore-scripts --no-audit --no-fund --no-package-lock --silent)
 done
 echo "Pi $("$DEST/pi/pi" --version), pi-commandcode-provider $CC_VERSION and ${NPM_PACKAGES[*]} in $DEST"

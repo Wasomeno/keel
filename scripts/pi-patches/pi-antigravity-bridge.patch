@@ -1,0 +1,44 @@
+diff --git a/extensions/index.ts b/extensions/index.ts
+index 900dd28..1d87b7d 100644
+--- a/extensions/index.ts
++++ b/extensions/index.ts
+@@ -327,7 +327,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
+ 			if (loadConfig().approvals.mode === "deny" || !ui) return undefined;
+ 			return await withDialogLock(async () => {
+ 				const labels = req.options.map((o) => o.name ?? o.kind ?? o.optionId ?? "?");
+-				const title = req.toolCall?.title ? `agy requests: ${req.toolCall.title}` : "agy requests permission";
++				const where = req.toolCall?.locations?.[0]?.path;
++				const what = req.toolCall?.title ? `${req.toolCall.title}${where ? ` ${where}` : ""}` : undefined;
++				const title = what ? `agy requests: ${what}` : "agy requests permission";
+ 				const picked = await ui.select(title, labels);
+ 				if (picked === undefined) return undefined;
+ 				const idx = labels.indexOf(picked);
+diff --git a/src/acp/connection.ts b/src/acp/connection.ts
+index 7b004cb..b0f3c0b 100644
+--- a/src/acp/connection.ts
++++ b/src/acp/connection.ts
+@@ -115,7 +115,7 @@ export interface AcpPermissionOption {
+ export interface AcpPermissionRequest {
+ 	sessionId?: string;
+ 	options: AcpPermissionOption[];
+-	toolCall?: { toolCallId?: string; kind?: string; title?: string };
++	toolCall?: { toolCallId?: string; kind?: string; title?: string; locations?: Array<{ path?: string }> };
+ }
+ 
+ export type AcpPermissionHandler = (req: AcpPermissionRequest) => Promise<string | null | undefined>;
+diff --git a/src/acp/driver.ts b/src/acp/driver.ts
+index f59fcbf..dd6e391 100644
+--- a/src/acp/driver.ts
++++ b/src/acp/driver.ts
+@@ -123,8 +123,10 @@ export function acpModelSlug(model: string, effort?: string): string {
+  *  modes keep their server-side meaning. Known gap: the CLI's `--mode plan`
+  *  has no ACP equivalent (review 4, finding 4) — plan + acp is refused at the
+  *  command level and fails the turn visibly. */
+-export function acpMode(mode: string, skipPermissions: boolean): string {
++export function acpMode(mode: string, skipPermissions: boolean, override = process.env.AGY_ACP_MODE): string {
+ 	if (skipPermissions) return "yolo";
++	// AGY_ACP_MODE=default also asks before native file edits (auto_edit does not).
++	if (override === "default" || override === "auto_edit") return override;
+ 	return mode === "plan" ? "default" : "auto_edit";
+ }
+ 

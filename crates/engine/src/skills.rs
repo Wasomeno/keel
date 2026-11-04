@@ -1,4 +1,4 @@
-//! Skills Pi 1.3.0 would load for a chat, and the edits that turn one on or
+//! Skills Pi 1.5.0 would load for a chat, and the edits that turn one on or
 //! off. One scan serves Settings and the composer's `/` menu. Pi is not
 //! shelled out to: the rules are the ones in its package manager
 //! (`addAutoDiscoveredResources`, `isEnabledByOverrides`, name collision

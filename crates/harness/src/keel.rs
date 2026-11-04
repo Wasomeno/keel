@@ -49,20 +49,26 @@ pub(crate) fn antigravity_acp_bin() -> Option<PathBuf> {
 /// The bridge drives the ACP engine, so Antigravity asks for its native tools
 /// through ACP `session/request_permission`, which the bridge shows as a Pi
 /// `select` and Keel as a question; headless, it denies. `AGY_APPROVALS`
-/// stays off: its hook gate works only on the stream-json engine. Under full
-/// access Antigravity runs unasked, as Pi does. `permission` is `None` for
-/// probes and sign-in, which ask (and so deny).
+/// stays off: its hook gate works only on the stream-json engine.
+///
+/// The ACP session mode follows Keel's: Ask is `default` (edits and commands
+/// ask), AutoEdit is `auto_edit` (edits pass, commands ask), full access is
+/// `yolo` via `AGY_SKIP_PERMISSIONS`, as Pi runs unasked. `AGY_ACP_MODE` comes
+/// from `scripts/pi-patches/pi-antigravity-bridge.patch`. `permission` is
+/// `None` for probes and sign-in, which ask (and so deny).
 pub(crate) fn antigravity_env(bin: Option<&Path>, permission: Option<PermissionMode>) -> Vec<(&'static str, OsString)> {
     let Some(bin) = bin else {
         return Vec::new();
     };
     let skip = if permission == Some(PermissionMode::FullAccess) { "1" } else { "0" };
+    let mode = if permission == Some(PermissionMode::AutoEdit) { "auto_edit" } else { "default" };
     vec![
         ("AGY_ACP_BIN", bin.as_os_str().to_owned()),
         ("AGY_ENGINE", "acp".into()),
         ("AGY_APPROVALS", "off".into()),
         ("AGY_APPROVALS_MODE", "ask".into()),
         ("AGY_SKIP_PERMISSIONS", skip.into()),
+        ("AGY_ACP_MODE", mode.into()),
     ]
 }
 
@@ -453,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_env_asks_unless_full_access() {
+    fn antigravity_env_follows_the_permission_mode() {
         assert!(antigravity_env(None, Some(PermissionMode::FullAccess)).is_empty());
         let bin = Path::new("/h/agy_acp_server.par");
         let env = |permission| -> Vec<(&str, String)> {
@@ -465,10 +471,12 @@ mod tests {
             ("AGY_APPROVALS", "off".into()),
             ("AGY_APPROVALS_MODE", "ask".into()),
             ("AGY_SKIP_PERMISSIONS", "0".into()),
+            ("AGY_ACP_MODE", "default".into()),
         ];
         assert_eq!(env(None), asking);
         assert_eq!(env(Some(PermissionMode::Ask)), asking);
-        assert_eq!(env(Some(PermissionMode::AutoEdit)), asking);
+        let auto_edit = env(Some(PermissionMode::AutoEdit));
+        assert_eq!((&auto_edit[..4], &auto_edit[4..]), (&asking[..4], &[("AGY_SKIP_PERMISSIONS", "0".to_string()), ("AGY_ACP_MODE", "auto_edit".into())][..]));
         assert_eq!(env(Some(PermissionMode::FullAccess))[4], ("AGY_SKIP_PERMISSIONS", "1".to_string()));
     }
 
