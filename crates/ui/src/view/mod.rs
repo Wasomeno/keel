@@ -134,6 +134,10 @@ pub struct KeelWindow {
     prompt_suggestion: Option<String>,
     /// When the current suggestion arrived; its pill fades in from there.
     prompt_suggestion_at: Option<std::time::Instant>,
+    /// The suggestion pill's entry/exit, and whether a click on it is what
+    /// hid it (that exit plays; keyboard ones cut).
+    suggestion_pill: composer_view::PillMotion,
+    suggestion_pill_clicked: bool,
     suggestion_revision: u64,
     suggestion_key: Option<u64>,
     suggestion_task: Option<Task<()>>,
@@ -1074,6 +1078,8 @@ impl KeelWindow {
             draft_save: None,
             prompt_suggestion: None,
             prompt_suggestion_at: None,
+            suggestion_pill: Default::default(),
+            suggestion_pill_clicked: false,
             suggestion_revision: 0,
             suggestion_key: None,
             suggestion_task: None,

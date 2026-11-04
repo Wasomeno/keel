@@ -534,10 +534,7 @@ impl KeelWindow {
             .then(|| self.prompt_suggestion.clone())
             .flatten();
         let hint = t.text_faint;
-        let pill = suggestion
-            .is_some()
-            .then(|| self.render_suggestion_pill(t, window, cx))
-            .flatten();
+        let pill = self.render_suggestion_pill(t, window, cx);
         let input = div()
             .id("composer-input")
             .relative()
@@ -549,13 +546,13 @@ impl KeelWindow {
                     // One line, so the box is the empty composer's height.
                     .child(div().w_full().truncate().text_color(c(hint)).child(text))
                     .child(div().absolute().inset_0().child(self.composer.clone()))
-                    .children(pill)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.composer
                             .update(cx, |input, cx| input.focus(window, cx));
                     })),
                 None => d.child(self.composer.clone()),
-            });
+            })
+            .children(pill);
         let input = self.ease_input_height(input, hero, window);
         // Hero: the text starts at the top of its area, growing down as it
         // wraps (eased).
@@ -883,59 +880,63 @@ impl KeelWindow {
             })
     }
 
-    /// The "use" pill on the suggestion's first line, top-right of the text
-    /// area. Opaque, so a long suggestion runs under it rather than reflowing.
-    /// Shown only while the suggestion can be taken; typing or taking it
-    /// removes it at once, and it fades in only when a suggestion arrives.
+    /// The shortcut pill on the suggestion's first line, top-right of the
+    /// text area. Opaque, so a long suggestion runs under it rather than
+    /// reflowing. Rises in when a suggestion arrives; sinks out when the
+    /// suggestion goes away or is taken by a click. Keyboard changes (typing,
+    /// the shortcut itself) remove it at once.
     fn render_suggestion_pill(
         &mut self,
         t: Tokens,
         window: &gpui::Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.can_accept_suggestion(cx) {
-            return None;
+        let visible = self.can_accept_suggestion(cx);
+        let exit = std::mem::take(&mut self.suggestion_pill_clicked)
+            || self.composer.read(cx).value().is_empty();
+        let reduced = self.reduced();
+        let (opacity, dy) = self.suggestion_pill.step(
+            visible,
+            self.prompt_suggestion_at,
+            exit,
+            reduced,
+            std::time::Instant::now(),
+        )?;
+        if self.suggestion_pill.animating() {
+            window.request_animation_frame();
         }
         let shortcut = if cfg!(target_os = "macos") {
             "⌘⇧Space"
         } else {
             "Ctrl+Shift+Space"
         };
-        let opacity = match self.prompt_suggestion_at {
-            Some(at) if !self.reduced() => arrival_fade(at.elapsed()),
-            _ => 1.,
-        };
-        if opacity < 1. {
-            window.request_animation_frame();
-        }
         let pill = div()
             .id("prompt-suggestion-pill")
+            .relative()
+            .top(zpx(dy))
             .flex_none()
             .flex()
-            .flex_row()
             .items_center()
-            .gap(zpx(5.))
             .h(zpx(SUGGESTION_PILL_H))
-            .px(zpx(8.))
+            .px(zpx(6.))
             .rounded_full()
-            .bg(c(t.surface))
-            .t_small()
-            .cursor_pointer()
+            .bg(c(mix_rgba(t.floating, t.text, PILL_TINT)))
+            .t_caption()
+            .text_color(c(t.text_muted))
             .opacity(opacity)
-            .hover_fade(c(t.hover), None)
-            .child(
-                div()
-                    .text_color(c(t.text))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(shortcut),
-            )
-            .child(div().text_color(c(t.text_faint)).child("use"))
-            .tooltip(move |_, cx| cx.new(|_| super::Tip::new("Use suggestion", t)).into())
-            .tooltip_show_delay(crate::view::tooltip::delay())
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                cx.stop_propagation();
-                this.accept_suggestion(window, cx)
-            }));
+            .when(visible, |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
+                    .tooltip(move |_, cx| cx.new(|_| super::Tip::new("Use suggestion", t)).into())
+                    .tooltip_show_delay(crate::view::tooltip::delay())
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.suggestion_pill_clicked = true;
+                        this.accept_suggestion(window, cx)
+                    }))
+            })
+            .child(shortcut);
         Some(
             div()
                 .absolute()
@@ -2818,15 +2819,77 @@ const POINTS_PILL_PAD: f32 = 3.;
 const POINTS_MENU_GAP: f32 = 8.;
 const POINTS_CHIP: f32 = 28.;
 /// The suggestion pill's height, inside the reading line (22 px).
-const SUGGESTION_PILL_H: f32 = 20.;
-/// How long a newly arrived suggestion's pill takes to fade in.
-const SUGGESTION_PILL_FADE: std::time::Duration = std::time::Duration::from_millis(150);
+const SUGGESTION_PILL_H: f32 = 18.;
+/// The pill's fill: the composer surface nudged a few percent toward the
+/// text color. Solid, so text under it is hidden, in either scheme.
+const PILL_TINT: f32 = 0.05;
+/// The pill rises this far as it comes in, and sinks it as it goes.
+const PILL_RISE: f32 = 2.;
+const PILL_ENTER: std::time::Duration = std::time::Duration::from_millis(160);
+/// Exits are quicker than entries.
+const PILL_EXIT: std::time::Duration = std::time::Duration::from_millis(110);
 
-/// The pill's opacity `elapsed` after its suggestion arrived: an ease-out
-/// fade, then fully shown. A suggestion that comes back on its own (the
-/// input emptied again) is long past it, so it appears at once.
-fn arrival_fade(elapsed: std::time::Duration) -> f32 {
-    crate::motion::ease_out((elapsed.as_secs_f32() / SUGGESTION_PILL_FADE.as_secs_f32()).min(1.))
+/// `a` mixed toward `b` by `k`, opaque. Colors are `0xRRGGBBAA`.
+fn mix_rgba(a: u32, b: u32, k: f32) -> u32 {
+    let ch = |v: u32, s: u32| ((v >> s) & 0xFF) as f32;
+    let m = |s: u32| ((ch(a, s) + (ch(b, s) - ch(a, s)) * k).round() as u32) << s;
+    m(24) | m(16) | m(8) | 0xFF
+}
+
+/// The suggestion pill's entry and exit, stepped once per frame.
+#[derive(Default, Clone, Copy)]
+pub(super) struct PillMotion {
+    shown: bool,
+    enter: Option<std::time::Instant>,
+    leave: Option<std::time::Instant>,
+}
+
+impl PillMotion {
+    /// This frame's `(opacity, rise offset)`, or `None` when nothing draws.
+    /// The entry plays only if the suggestion `arrived` within its length
+    /// (one that comes back as the input empties appears at once); `exit`
+    /// says whether a hide plays out or cuts.
+    fn step(
+        &mut self,
+        visible: bool,
+        arrived: Option<std::time::Instant>,
+        exit: bool,
+        reduced: bool,
+        now: std::time::Instant,
+    ) -> Option<(f32, f32)> {
+        let progress = |since: std::time::Instant, len: std::time::Duration| {
+            crate::motion::ease_out((now.duration_since(since).as_secs_f32() / len.as_secs_f32()).min(1.))
+        };
+        if visible {
+            if !self.shown {
+                self.shown = true;
+                self.leave = None;
+                self.enter = arrived
+                    .filter(|at| !reduced && now.duration_since(*at) < PILL_ENTER);
+            }
+            let p = self.enter.map_or(1., |at| progress(at, PILL_ENTER));
+            if p >= 1. {
+                self.enter = None;
+            }
+            return Some((p, PILL_RISE * (1. - p)));
+        }
+        if self.shown {
+            self.shown = false;
+            self.enter = None;
+            self.leave = (exit && !reduced).then_some(now);
+        }
+        let p = progress(self.leave?, PILL_EXIT);
+        if p >= 1. {
+            self.leave = None;
+            return None;
+        }
+        Some((1. - p, PILL_RISE * p))
+    }
+
+    /// Whether another frame is needed.
+    fn animating(&self) -> bool {
+        self.enter.is_some() || self.leave.is_some()
+    }
 }
 
 const POINTS_PILL_H: f32 = POINTS_CHIP + 2. * POINTS_PILL_PAD + 2.;
@@ -3363,15 +3426,51 @@ mod slider_tests {
     use super::*;
 
     #[test]
-    fn the_suggestion_pill_fades_in_briefly_then_stays() {
-        use std::time::Duration;
-        assert_eq!(arrival_fade(Duration::ZERO), 0.);
-        let mid = arrival_fade(Duration::from_millis(75));
-        assert!(mid > 0.5 && mid < 1., "ease-out is past half by midway: {mid}");
-        assert_eq!(arrival_fade(SUGGESTION_PILL_FADE), 1.);
-        assert_eq!(arrival_fade(Duration::from_secs(5)), 1.);
-        assert!(SUGGESTION_PILL_FADE < Duration::from_millis(300));
+    fn the_suggestion_pill_rises_in_and_sinks_out_faster() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut m = PillMotion::default();
+        // A fresh suggestion rises in, under 300 ms, then holds.
+        assert_eq!(m.step(true, Some(t0), true, false, t0), Some((0., PILL_RISE)));
+        let (o, dy) = m.step(true, Some(t0), true, false, ms(80)).unwrap();
+        assert!(o > 0.5 && o < 1. && dy > 0. && dy < PILL_RISE, "{o} {dy}");
+        assert!(m.animating());
+        assert_eq!(m.step(true, Some(t0), true, false, ms(160)), Some((1., 0.)));
+        assert!(!m.animating());
+        // Cleared (or clicked): it sinks out, quicker than it came in.
+        assert_eq!(m.step(false, Some(t0), true, false, ms(1000)), Some((1., 0.)));
+        assert!(m.step(false, Some(t0), true, false, ms(1060)).unwrap().0 < 0.5);
+        assert_eq!(m.step(false, Some(t0), true, false, ms(1110)), None);
+        assert!(!m.animating());
+        assert!(PILL_EXIT < PILL_ENTER && PILL_ENTER < Duration::from_millis(300));
+    }
+
+    #[test]
+    fn keyboard_changes_and_reduced_motion_show_the_pill_at_once() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(5);
+        let mut m = PillMotion::default();
+        // Back after the input emptied: no entry.
+        assert_eq!(m.step(true, Some(t0), false, false, later), Some((1., 0.)));
+        // Typing hides it with no exit.
+        assert_eq!(m.step(false, Some(t0), false, false, later), None);
+        assert!(!m.animating());
+        // Reduced motion: neither plays.
+        let mut r = PillMotion::default();
+        assert_eq!(r.step(true, Some(later), true, true, later), Some((1., 0.)));
+        assert_eq!(r.step(false, Some(later), true, true, later), None);
         assert!(SUGGESTION_PILL_H <= crate::style::READING.line);
+    }
+
+    #[test]
+    fn the_pill_fill_is_solid_and_just_off_the_surface() {
+        assert_eq!(mix_rgba(0x00000000, 0xFFFFFFFF, 0.5), 0x808080FF);
+        let fill = mix_rgba(0xEEEAE4FF, 0x1E1D1BFF, PILL_TINT);
+        assert_eq!(fill & 0xFF, 0xFF);
+        let red = (fill >> 24) as i32;
+        assert!((0xEE - red) > 0 && (0xEE - red) < 16, "{fill:08X}");
     }
 
     #[test]

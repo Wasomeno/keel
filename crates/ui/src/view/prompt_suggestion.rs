@@ -63,7 +63,7 @@ impl KeelWindow {
             }));
         }
         // The suggestion shows in the composer's own ghost-text layer (one
-        // line, under the "use" pill), so the native placeholder steps aside.
+        // line, under the shortcut pill), so the native placeholder steps aside.
         let placeholder = if self.prompt_suggestion.is_some() {
             ""
         } else {
