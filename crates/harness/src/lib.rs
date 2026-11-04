@@ -3,6 +3,7 @@
 //! `run` returns a `'static` stream. The engine keeps [`ControlMsg`]'s sender.
 //! The task that owns the child owns `controls.inbound`.
 
+mod antigravity;
 pub mod keel;
 mod mock;
 mod pi;

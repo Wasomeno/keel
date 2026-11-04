@@ -114,6 +114,7 @@ icons! {
     Play => "play",
     Volume2 => "volume-2",
     // Provider logos: Lobe Icons (MIT); Command Code from commandcode.ai.
+    LogoAntigravity => "logo-antigravity",
     LogoClaude => "logo-claude",
     LogoOpenAi => "logo-openai",
     LogoGrok => "logo-grok",
@@ -139,6 +140,7 @@ impl Icon {
             "github-copilot" => Icon::LogoCopilot,
             "commandcode" => Icon::LogoCommandCode,
             "xai" => Icon::LogoGrok,
+            "antigravity" => Icon::LogoAntigravity,
             _ => Icon::Agent,
         }
     }

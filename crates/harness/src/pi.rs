@@ -353,7 +353,14 @@ impl Harness for PiHarness {
             .and_then(|dir| fs::read_to_string(dir.join("auth.json")).ok())
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        auth_rows(&stored)
+        let mut rows = auth_rows(&stored);
+        // Antigravity keeps its own sign-in, and is offered only with its server.
+        if self.profile.keel.is_some() && crate::keel::antigravity_acp_bin().is_some() {
+            if let Some(paths) = crate::antigravity::Paths::of_home() {
+                with_antigravity(&mut rows, crate::antigravity::account(&paths));
+            }
+        }
+        rows
     }
 
     /// `pi --mode rpc` with Keel's login extension, sent `/keel-login`.
@@ -364,6 +371,13 @@ impl Harness for PiHarness {
     async fn sign_in(&self, provider: &str, on: &(dyn Fn(crate::SignInEvent) + Send + Sync)) -> Result<(), HarnessError> {
         if provider.is_empty() || !provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err(HarnessError::Failed(format!("unknown provider {provider:?}")));
+        }
+        if provider == crate::antigravity::PROVIDER && self.profile.keel.is_some() {
+            let bin = crate::keel::antigravity_acp_bin()
+                .ok_or_else(|| HarnessError::Failed("Antigravity's server is not installed".into()))?;
+            let paths = crate::antigravity::Paths::of_home().ok_or_else(|| HarnessError::Failed("no home folder".into()))?;
+            let scratch = crate::pi_agent_dir().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+            return crate::antigravity::sign_in(&bin, &paths, &scratch, on).await;
         }
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
         let extension = crate::keel::login_extension().map_err(failed)?;
@@ -1728,6 +1742,12 @@ fn auth_rows(stored: &serde_json::Map<String, Value>) -> Vec<crate::AuthAccount>
     rows
 }
 
+/// Put the Antigravity row before OpenAI's API key row, the last offered one.
+fn with_antigravity(rows: &mut Vec<crate::AuthAccount>, row: crate::AuthAccount) {
+    let at = rows.iter().position(|r| r.id == "openai").unwrap_or(rows.len());
+    rows.insert(at, row);
+}
+
 /// Where the app bundle or a dev build keeps Pi: `Contents/Resources/pi`
 /// in `Keel.app`, else `pi/` beside the binary (`scripts/fetch-pi.sh`).
 fn bundle_dirs() -> Vec<PathBuf> {
@@ -1892,7 +1912,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        HOMEBREW_PI, INSTALL_HINT, PiHarness, ResolveInput, SIGN_INS, Value, auth_rows, classify_version, compose_path,
+        HOMEBREW_PI, INSTALL_HINT, PiHarness, ResolveInput, SIGN_INS, Value, auth_rows, with_antigravity, classify_version, compose_path,
         SignInLine, extension_line, redact, sign_in_line, split_records,
     };
     use crate::{
@@ -2994,6 +3014,21 @@ mod tests {
         assert_eq!((last.id.as_str(), last.name.as_str(), last.signed_in, last.detail.as_str()), ("zai", "zai", true, "api_key"));
         assert_eq!((rows[0].id.as_str(), rows[0].name.as_str()), ("anthropic", "Claude"));
         assert!(rows.iter().all(|r| !r.detail.contains("secret")));
+    }
+
+    #[test]
+    fn antigravity_sits_before_the_openai_api_key_row() {
+        let mut rows = auth_rows(&serde_json::Map::new());
+        let row = crate::AuthAccount {
+            id: "antigravity".into(),
+            name: "Antigravity".into(),
+            hint: String::new(),
+            signed_in: false,
+            detail: "not signed in".into(),
+        };
+        with_antigravity(&mut rows, row);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids[ids.len() - 2..], ["antigravity", "openai"]);
     }
 
     #[test]
