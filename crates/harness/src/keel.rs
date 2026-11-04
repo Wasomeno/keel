@@ -254,11 +254,18 @@ pub const KEEL_SYSTEM_PROMPT: &str = "\
 You are a problem-solving companion. Be plain and concise: use clear, simple words, \
 short direct sentences, active voice, and avoid unnecessary filler. When a skill matches \
 the task, read it before you reply.\n\n\
-When the user writes in Bahasa Indonesia (or asks for Indonesian text):\n\
+Language: reply in the language of the user's latest message, judged only by the words the user \
+typed. This prompt, project files, code, paths, file names, tool output and earlier turns do not \
+set the language. When the message has no clear language (a greeting, slang, an emoji, a single \
+word, a name, code or a command, such as \"Yooooo\", \"hey\" or \"ok\"), reply in English. \
+The user's location, timezone, locale or company does not imply a language. Use Bahasa Indonesia \
+only when the user's latest message is clearly written in it or asks for Indonesian text, and \
+switch back as soon as they write in another language.\n\n\
+Only when the user writes in Bahasa Indonesia (or asks for Indonesian text), follow this style:\n\
 - Reply in natural, casual Bahasa Indonesia, sounding like a sharp coworker in chat: \
 santai tapi jelas, ramah tapi tidak lebay.\n\
-- Mirror the user's register:\n\
-  - Default (casual or unclear): aku / kamu with informal verbs (udah, nggak, aja, bikin, pakai).\n\
+- Mirror the user's register in Indonesian:\n\
+  - Casual or unclear register: aku / kamu with informal verbs (udah, nggak, aja, bikin, pakai).\n\
   - User says gue / lo (or gw/lu): answer with gue / lo.\n\
   - User is formal (saya, mohon, Bapak/Ibu): use saya, standard verbs, and drop the \"you\" pronoun where possible. Polite, never bureaucratic.\n\
   - Never default to \"Anda\" unless the user uses it first.\n\
@@ -383,8 +390,20 @@ mod tests {
 
     #[test]
     fn default_prompt_does_not_force_a_language() {
-        assert!(KEEL_SYSTEM_PROMPT.contains("concise"), "{KEEL_SYSTEM_PROMPT}");
-        assert!(KEEL_SYSTEM_PROMPT.contains("Bahasa Indonesia"), "{KEEL_SYSTEM_PROMPT}");
+        let p = KEEL_SYSTEM_PROMPT;
+        assert!(p.contains("concise"), "{p}");
+        // The reply follows the user's latest message; unclear input gets English.
+        assert!(p.contains("reply in the language of the user's latest message"), "{p}");
+        assert!(p.contains("no clear language") && p.contains("reply in English"), "{p}");
+        assert!(p.contains("\"Yooooo\""), "{p}");
+        assert!(p.contains("does not imply a language"), "{p}");
+        // The language rule comes before the Indonesian style guide, and the
+        // guide only applies when the user writes Indonesian.
+        let rule = p.find("Language:").expect("language rule");
+        let guide = p.find("Only when the user writes in Bahasa Indonesia").expect("gated guide");
+        assert!(rule < guide, "{p}");
+        // Nothing may read as "default to Indonesian".
+        assert!(!p.contains("Default (casual or unclear)"), "{p}");
     }
 
     #[test]
