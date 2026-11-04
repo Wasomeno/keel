@@ -211,8 +211,6 @@ pub struct KeelWindow {
     /// The composer input's height, easing as lines come and go; its
     /// measured natural height (0 until measured); hero or docked when set.
     composer_h: Option<crate::motion::WidthTween>,
-    /// Send button fill, 0 idle to 1 active. Unset until first painted.
-    send_fill: Option<crate::motion::FillTween>,
     composer_natural: std::rc::Rc<std::cell::Cell<f32>>,
     composer_h_hero: bool,
     /// One line of composer text, tall: the least input height measured.
@@ -1125,7 +1123,6 @@ impl KeelWindow {
             model_roll_up: true,
             branch_chip_w: None,
             composer_h: None,
-            send_fill: None,
             composer_natural: Default::default(),
             composer_h_hero: false,
             composer_line_h: 0.,
@@ -1760,6 +1757,12 @@ impl KeelWindow {
     /// Where the menu `key` is this frame: `None` hidden, `Some(None)` open,
     /// `Some(Some(n))` playing exit `n`. Read against last frame, so a close
     /// from any path (a click away, Escape, a pick) plays the exit.
+    /// Close `key` now, with no exit: keyboard changes don't animate.
+    fn menu_cut(&mut self, key: &str) {
+        self.menus_open.remove(key);
+        self.menus_leaving.remove(key);
+    }
+
     fn menu_phase(
         &mut self,
         key: impl Into<SharedString>,

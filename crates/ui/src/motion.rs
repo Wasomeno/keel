@@ -767,56 +767,6 @@ pub fn elapsed_label(elapsed: Duration) -> String {
     }
 }
 
-/// A 0..1 fill that eases to a new target over [`FAST`], on [`ease_out_strong`]
-/// so the first frames move at once. Retargeting mid-move starts from where
-/// it is. Reduced motion snaps, since the caller passes `animate: false`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FillTween {
-    from: f32,
-    to: f32,
-    start: Option<std::time::Instant>,
-}
-
-impl FillTween {
-    pub fn settled(v: f32) -> Self {
-        Self {
-            from: v,
-            to: v,
-            start: None,
-        }
-    }
-
-    pub fn value_at(&self, now: std::time::Instant) -> f32 {
-        match self.start {
-            Some(start) => {
-                let t = (now.saturating_duration_since(start).as_secs_f32() / FAST.as_secs_f32())
-                    .clamp(0., 1.);
-                self.from + (self.to - self.from) * ease_out_strong(t)
-            }
-            None => self.to,
-        }
-    }
-
-    pub fn animating(&self, now: std::time::Instant) -> bool {
-        self.start
-            .is_some_and(|start| now.saturating_duration_since(start) < FAST)
-    }
-
-    /// Head for `to`. No move when already there. `animate: false` snaps.
-    pub fn retarget(&mut self, to: f32, now: std::time::Instant, animate: bool) {
-        if (to - self.to).abs() < 1e-3 {
-            return;
-        }
-        if !animate {
-            *self = Self::settled(to);
-            return;
-        }
-        self.from = self.value_at(now);
-        self.to = to;
-        self.start = Some(now);
-    }
-}
-
 /// A width that eases to a new target over [`SLOW`] (ease-out). Retargeting
 /// mid-move starts from where it is now, so rapid changes never jump. The
 /// frames themselves are drawn by a gpui animation keyed on [`Self::generation`]
@@ -1037,26 +987,6 @@ mod tests {
         assert_eq!(reorder_offset(-40., REORDER, false), 0.);
         assert_eq!(reorder_offset(-40., ms(0), true), 0.);
         assert!(REORDER >= ms(250) && REORDER <= ms(350));
-    }
-
-    #[test]
-    fn fill_tween_eases_both_ways_and_turns_around_mid_move() {
-        let now = std::time::Instant::now();
-        let mut fill = FillTween::settled(0.);
-        fill.retarget(1., now, true);
-        assert!(fill.value_at(now) < 0.01);
-        let early = now + FAST / 5;
-        let there = fill.value_at(early);
-        // Front-loaded: a fifth of the time has covered more than a fifth of the way.
-        assert!(there > 0.2 && there < 0.95, "{there}");
-        // A clear mid-move heads back from where it is, not from 1.
-        fill.retarget(0., early, true);
-        assert!((fill.value_at(early) - there).abs() < 1e-3);
-        assert!(fill.value_at(early + FAST) < 0.01);
-        // Reduced motion snaps.
-        fill.retarget(1., early, false);
-        assert!((fill.value_at(early) - 1.).abs() < 1e-6);
-        assert!(!fill.animating(early));
     }
 
     #[test]

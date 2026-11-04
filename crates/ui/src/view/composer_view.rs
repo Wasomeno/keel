@@ -11,30 +11,15 @@ use crate::composer::{PrimaryButtonAction, compute_button_action};
 use crate::icons::Icon;
 use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_SM, RADIUS_XL, c};
 
-/// Send button colors at fill `x` (0 idle, 1 active): the idle end is the
-/// same disc at 35% so the blend matches the old snap. Icon ink goes from
-/// muted to the window color with it.
-fn send_look(x: f32, t: Tokens) -> (gpui::Hsla, gpui::Hsla) {
-    let on_bg = c(t.text);
-    let off_bg = gpui::Hsla {
-        a: on_bg.a * 0.35,
-        ..on_bg
-    };
-    let bg = mix_hsla(off_bg, on_bg, x);
-    let fg = mix_hsla(c(t.text_muted), c(t.text_on_accent), x);
-    (bg, fg)
+/// Send button disc and icon ink: the same dark disc whether or not it can
+/// send; disabled only dims the whole button. Swaps at once (it follows
+/// typing, and keyboard changes don't animate).
+fn send_look(enabled: bool, t: Tokens) -> (gpui::Hsla, gpui::Hsla, f32) {
+    (c(t.text), c(t.text_on_accent), if enabled { 1. } else { SEND_DISABLED })
 }
 
-fn mix_hsla(from: gpui::Hsla, to: gpui::Hsla, at: f32) -> gpui::Hsla {
-    let at = at.clamp(0., 1.);
-    let m = |a: f32, b: f32| a + (b - a) * at;
-    gpui::hsla(
-        m(from.h, to.h),
-        m(from.s, to.s),
-        m(from.l, to.l),
-        m(from.a, to.a),
-    )
-}
+/// The disabled send button's opacity.
+const SEND_DISABLED: f32 = 0.45;
 
 /// Which picker menu is open. At most one. Model carries harness and
 /// effort too: one chip in the composer, one menu.
@@ -510,9 +495,7 @@ impl KeelWindow {
 
         let mut scope_chip = self.project_scope_chip(t, if hero { 0 } else { fit.compact }, cx);
 
-        // Round, light-on-dark send; a square for stop. The fill eases between
-        // idle and active so typing the first character (or clearing it) reads
-        // as a state change, not a snap. Stop is its own action and stays put.
+        // Round, light-on-dark send; a square for stop.
         let primary = {
             let has_images = !self.pending_images.is_empty();
             let enabled = self.attaching == 0
@@ -525,12 +508,7 @@ impl KeelWindow {
             } else {
                 Icon::Send
             };
-            let fill = if action == PrimaryButtonAction::Stop {
-                1.
-            } else {
-                self.send_fill(enabled, window)
-            };
-            let (bg, fg) = send_look(fill, t);
+            let (bg, fg, opacity) = send_look(enabled, t);
             div()
                 .id("composer-primary-btn")
                 .relative()
@@ -543,11 +521,9 @@ impl KeelWindow {
                 .rounded_full()
                 .bg(bg)
                 .text_color(fg)
+                .opacity(opacity)
                 .when(enabled, |s| s.cursor_pointer().hover(|s| s.opacity(0.85)))
-                .child(
-                    icon.el(zpx(if icon == Icon::Stop { 10. } else { 15. }))
-                        .opacity(0.35 + 0.65 * fill),
-                )
+                .child(icon.el(zpx(if icon == Icon::Stop { 10. } else { 15. })))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.handle_primary_button(window, cx)
                 }))
@@ -566,7 +542,8 @@ impl KeelWindow {
             .t_reading()
             .map(|d| match suggestion {
                 Some(text) => d
-                    .child(div().w_full().text_color(c(hint)).child(text))
+                    // One line, so the box is the empty composer's height.
+                    .child(div().w_full().truncate().text_color(c(hint)).child(text))
                     .child(div().absolute().inset_0().child(self.composer.clone()))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.composer
@@ -930,8 +907,14 @@ impl KeelWindow {
     /// The "use suggestion" hint above the docked composer's top-left.
     fn render_suggestion_hint(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui::AnimationExt as _;
-        let phase =
-            self.menu_phase("prompt-suggestion-hint", self.can_accept_suggestion(cx), cx)?;
+        let open = self.can_accept_suggestion(cx);
+        // Typing (or taking the suggestion) hides it at once: keyboard
+        // changes don't animate.
+        if !open && !self.composer.read(cx).value().is_empty() {
+            self.menu_cut("prompt-suggestion-hint");
+            return None;
+        }
+        let phase = self.menu_phase("prompt-suggestion-hint", open, cx)?;
         let shortcut = if cfg!(target_os = "macos") {
             "⌘⇧Space"
         } else {
@@ -1794,24 +1777,6 @@ impl KeelWindow {
                     this.open_picker_with_search(picker, window, cx)
                 })),
         )
-    }
-
-    /// How filled the send button is, 0 idle to 1 active. The first paint
-    /// rests at the current state; later flips ease over [`crate::motion::FAST`]
-    /// and retarget if the user types and clears mid-move. Reduced motion cuts.
-    fn send_fill(&mut self, enabled: bool, window: &gpui::Window) -> f32 {
-        let now = std::time::Instant::now();
-        let to = if enabled { 1. } else { 0. };
-        let animate = !self.reduced();
-        match &mut self.send_fill {
-            None => self.send_fill = Some(crate::motion::FillTween::settled(to)),
-            Some(fill) => fill.retarget(to, now, animate),
-        }
-        let fill = self.send_fill.expect("just set").value_at(now);
-        if self.send_fill.is_some_and(|f| f.animating(now)) {
-            window.request_animation_frame();
-        }
-        fill
     }
 
     /// The input in a box whose height eases to the text's as lines come and
@@ -3387,6 +3352,18 @@ fn chip(id: &'static str, t: Tokens, active: bool) -> gpui::Stateful<gpui::Div> 
 #[cfg(test)]
 mod slider_tests {
     use super::*;
+
+    #[test]
+    fn a_disabled_send_is_the_same_disc_only_dimmed() {
+        for dark in [false, true] {
+            let t = keel_theme::resolve_theme(None, dark);
+            let (on_bg, on_fg, on) = send_look(true, t);
+            let (off_bg, off_fg, off) = send_look(false, t);
+            assert_eq!((on_bg, on_fg), (off_bg, off_fg));
+            assert_eq!(on, 1.);
+            assert!(off > 0.3 && off < 0.6, "{off}");
+        }
+    }
 
     #[test]
     fn composer_stacks_when_the_text_would_be_squeezed_with_hysteresis() {

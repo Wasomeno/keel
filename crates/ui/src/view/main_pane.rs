@@ -373,18 +373,13 @@ impl Render for KeelWindow {
                                 // The session card's gutter, as the transcript keeps it
                                 // (gliding with it), so the composer shares its column.
                                 let (room_l, room_r) = self.target_card_column_room(window);
-                                // Under the composer, over the transcript: the band the
-                                // suggestion hint reads on.
-                                let band =
-                                    (!exiting).then(|| self.render_hint_band(t, cx)).flatten();
                                 // Mid-slide the composer shares the transcript's left
                                 // edge, but its width glides to the landing one on the
                                 // same clock (`ColumnGeo::dock_w`): snapping it to the
                                 // landing width made the right edge jump one way, then
                                 // travel back the other.
                                 let dock_w = self.column_slide.map(|_| self.column_last.dock_w);
-                                d.children(band)
-                                    .child(
+                                d.child(
                                         div()
                                             .absolute()
                                             .bottom_0()
@@ -476,8 +471,6 @@ fn hero_title_text() -> gpui::Div {
 
 /// Space under the newest message, on top of the input slot's own 16 px.
 const TAIL_ROOM: f32 = 64.;
-/// The suggestion hint's band: solid from this far above the input slot
-/// (the hint sits 4 px above it, 14 px tall) down to the pane's foot.
 /// How much of the picture the chat glow shows at the pane's foot, and how
 /// far up the pane it rises (fractions).
 const CHAT_GLOW: f32 = 0.08;
@@ -2917,94 +2910,6 @@ impl KeelWindow {
                 .into_any_element(),
         )
     }
-
-    /// While the suggestion hint shows, the transcript fades into the window
-    /// color above the input, so scrolled text never runs behind the hint.
-    /// Paint only: no hitbox, so scrolling and clicks reach the transcript.
-    fn render_hint_band(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        use gpui::AnimationExt as _;
-        let phase =
-            self.menu_phase("prompt-suggestion-band", self.can_accept_suggestion(cx), cx)?;
-        let color = c(t.window);
-        let height = px(self.dock_h.get()) + zpx(HINT_BAND_SOLID + HINT_BAND_RAMP);
-        let ramp = f32::from(zpx(HINT_BAND_RAMP));
-        let band = div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(height)
-            .child(
-                gpui::canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| paint_hint_band(bounds, ramp, color, window),
-                )
-                .absolute()
-                .inset_0(),
-            );
-        Some(match phase {
-            _ if self.reduced() => band.into_any_element(),
-            None => band
-                .with_animation(
-                    "hint-band-in",
-                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
-                    |el, d| el.opacity(crate::motion::unit(d)),
-                )
-                .into_any_element(),
-            Some(n) => band
-                .with_animation(
-                    ("hint-band-out", n as usize),
-                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
-                    |el, d| el.opacity(crate::motion::unit(1. - d)),
-                )
-                .into_any_element(),
-        })
-    }
-}
-
-const HINT_BAND_SOLID: f32 = 14.;
-const HINT_BAND_RAMP: f32 = TAIL_ROOM - HINT_BAND_SOLID;
-const HINT_BAND_STEPS: usize = 8;
-
-/// Clear at the top, eased out to solid `color` over `ramp` px, solid below.
-fn paint_hint_band(
-    bounds: gpui::Bounds<gpui::Pixels>,
-    ramp: f32,
-    color: gpui::Hsla,
-    window: &mut Window,
-) {
-    let scale = window.scale_factor();
-    let top = f32::from(bounds.origin.y);
-    let ramp = ramp.min(f32::from(bounds.size.height));
-    let edge = |y: f32| px(((top + ramp * y) * scale).round() / scale);
-    let alpha = |y: f32| color.a * (1. - (1. - y) * (1. - y));
-    for i in 0..HINT_BAND_STEPS {
-        let (a, b) = (
-            i as f32 / HINT_BAND_STEPS as f32,
-            (i + 1) as f32 / HINT_BAND_STEPS as f32,
-        );
-        let piece = gpui::Bounds::from_corners(
-            gpui::point(bounds.origin.x, edge(a)),
-            gpui::point(bounds.right(), edge(b)),
-        );
-        let stop = |y: f32| gpui::Hsla {
-            a: alpha(y),
-            ..color
-        };
-        window.paint_quad(gpui::fill(
-            piece,
-            gpui::linear_gradient(
-                180.,
-                gpui::linear_color_stop(stop(a), 0.),
-                gpui::linear_color_stop(stop(b), 1.),
-            ),
-        ));
-    }
-    let solid = gpui::Bounds::from_corners(
-        gpui::point(bounds.origin.x, edge(1.)),
-        bounds.bottom_right(),
-    );
-    window.paint_quad(gpui::fill(solid, color));
 }
 
 /// Fixed height of the loader line, so rows below never shift as it appears,

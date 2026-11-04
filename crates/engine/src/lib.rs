@@ -5364,7 +5364,7 @@ fn suggestion_prompt(messages: &[Arc<keel_doc::MessageView>], status: &str) -> S
          - If the chat status is aborted, ask to continue where it stopped.\n\
          Be specific: name the file, feature, error or option involved. Never write generic filler \
          (\"thanks\", \"looks good\", \"can you explain more\", \"what's next?\"). Do not repeat a request \
-         the assistant already finished. Match the user's language, tone and brevity, under 160 characters. \
+         the assistant already finished. Match the user's language, tone and brevity, under 160 characters, with no em dashes. \
          Do not invent facts or propose destructive actions, deployment, publishing or purchases. \
          Reply ONLY with the message on one line, without quotes or a label, or NONE if there is no \
          useful next message. Do not use tools or carry out any work. \
@@ -5377,6 +5377,14 @@ fn suggestion_prompt(messages: &[Arc<keel_doc::MessageView>], status: &str) -> S
 
 fn clean_suggestion(raw: &str) -> Option<String> {
     let text = raw.trim().trim_matches(['"', '“', '”']).trim();
+    // The composer shows it as the user's own words: no em dashes.
+    let text = text
+        .split('—')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = text.as_str();
     (!text.is_empty()
         && !text.eq_ignore_ascii_case("none")
         && !text.chars().any(char::is_control)

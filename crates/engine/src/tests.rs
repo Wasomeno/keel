@@ -3333,6 +3333,18 @@ async fn turn_end_closes_open_subagents() {
     assert_eq!(row.as_deref(), Some("done"));
 }
 
+/// Suggestions read as the user's own words: em dashes become commas.
+#[test]
+fn suggestion_drops_em_dashes() {
+    assert_eq!(
+        super::clean_suggestion("a — add GPU-failure fallback").as_deref(),
+        Some("a, add GPU-failure fallback")
+    );
+    assert_eq!(super::clean_suggestion("fix it—now").as_deref(), Some("fix it, now"));
+    assert_eq!(super::clean_suggestion(" — ").as_deref(), None);
+    assert_eq!(super::clean_suggestion("\"NONE\"").as_deref(), None);
+}
+
 /// The suggestion prompt keeps the latest reply's ending (where its question
 /// or offer is) and the chat's first ask, however long the chat.
 #[test]
