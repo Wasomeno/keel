@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 pub use keel::{KeelProfile, PiProfile, PI_VERSION, pi_agent_dir, set_pi_agent_dir};
 pub use mock::{MockHarness, Step};
-pub use pi::PiHarness;
+pub use pi::{MEMORY_PREAMBLE, MEMORY_PROTO, MEMORY_UNAVAILABLE, PiHarness};
 
 /// Reports a CLI session id and, when the CLI has one, its session file.
 pub type SessionReport = Arc<dyn Fn(String, Option<String>) + Send + Sync>;

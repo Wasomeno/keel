@@ -21,6 +21,7 @@ mod sidebar;
 mod terminal_panel;
 mod timer_pill;
 mod tooltip;
+mod updates;
 
 /// A receipt line for the transcript, drawn like the card's own receipt.
 pub(crate) fn receipt_line_el(line: &crate::approval::ReceiptLine, t: Tokens) -> gpui::Div {
@@ -32,6 +33,7 @@ pub(crate) fn receipt_args_el(args: &[(String, String)], t: Tokens) -> gpui::Div
     question::args_block(args, t, None)
 }
 
+use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -229,6 +231,19 @@ pub struct KeelWindow {
     branch_label_w: f32,
     branch_prev_w: f32,
 
+    pub(super) show_projects_menu: bool,
+    pub(super) project_select_mode: bool,
+    pub(super) selected_projects: Vec<String>,
+    pub(super) project_select_mode_gen: u64,
+    pub(super) project_select_leaving: Option<u64>,
+    pub(super) confirming_delete_projects: Option<Vec<String>>,
+    pub(super) delete_projects_confirm_gen: u64,
+    pub(super) delete_projects_confirm_leaving: Option<(u64, Vec<String>)>,
+
+    pub(super) project_modal_open: bool,
+    pub(super) project_modal_leaving: Option<u64>,
+    pub(super) project_modal_gen: u64,
+
     pub(super) os_reduced_motion: bool,
     /// A drag on the sidebar's edge is in progress.
     resizing_sidebar: bool,
@@ -374,6 +389,12 @@ pub struct KeelWindow {
     /// Settings → Skills, and the filter field on that drill-in.
     skills: settings::SkillsPage,
     skills_filter: Entity<InputState>,
+    /// Settings → Memory.
+    memory: settings::MemoryPage,
+    /// Settings → Updates and the relaunch flow (`updates.rs`).
+    updates: updates::UpdateUi,
+    memory_desc: Entity<InputState>,
+    memory_body: Entity<TextareaState>,
     /// GitLab page (sidebar): open, what it shows, and its project filter.
     gitlab_open: bool,
     gitlab: gitlab::GitlabPage,
@@ -410,6 +431,10 @@ pub struct KeelWindow {
     delete_confirm_gen: u64,
     /// Exit draw: generation + the ids the modal still shows while fading out.
     delete_confirm_leaving: Option<(u64, Vec<String>)>,
+    /// Replays the delete-folder modal's entrance.
+    delete_space_gen: u64,
+    /// Exit draw: generation + the folder the modal still shows while fading out.
+    delete_space_leaving: Option<(u64, String)>,
     /// Entry replay for the select-mode checkmarks and bar.
     select_mode_gen: u64,
     /// Exit generation while the bar and checks fade out after Clear.
@@ -440,6 +465,10 @@ pub struct KeelWindow {
     menus_leaving: HashMap<SharedString, u64>,
     /// Numbers those fades.
     menu_leave_gen: u64,
+    /// Escape asked for the next frame's menu closes to skip their fade.
+    menus_cut: bool,
+    /// Set for one frame from `menus_cut`: menus closing now vanish at once.
+    menus_cut_now: bool,
     /// Branches for the branch menu are being fetched (skeleton rows).
     branches_loading: bool,
     /// The hero's branch listing is current for this showing of the hero;
@@ -675,6 +704,13 @@ impl KeelWindow {
                 .placeholder("Empty allows every site · e.g. github.com, localhost:3000")
         });
         let skills_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name"));
+        let memory_desc =
+            cx.new(|cx| InputState::new(window, cx).placeholder("One line shown in the index"));
+        let memory_body = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(6, 14)
+                .submit_on_enter(false)
+        });
         let gitlab_token = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Personal access token")
@@ -750,7 +786,9 @@ impl KeelWindow {
                 window,
                 |this, _, event: &InputEvent, _, cx| {
                     if let InputEvent::Change = event {
-                        this.skills.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                        this.skills
+                            .list_scroll
+                            .scroll_to_item(0, gpui::ScrollStrategy::Top);
                     }
                     cx.notify()
                 },
@@ -1098,6 +1136,17 @@ impl KeelWindow {
             branch_label: crate::motion::RollingLabel::default(),
             branch_label_w: 0.,
             branch_prev_w: 0.,
+            show_projects_menu: false,
+            project_select_mode: false,
+            selected_projects: Vec::new(),
+            project_select_mode_gen: 0,
+            project_select_leaving: None,
+            confirming_delete_projects: None,
+            delete_projects_confirm_gen: 0,
+            delete_projects_confirm_leaving: None,
+            project_modal_open: false,
+            project_modal_leaving: None,
+            project_modal_gen: 0,
             os_reduced_motion: os_reduced,
             resizing_sidebar: false,
             row_order: HashMap::new(),
@@ -1174,6 +1223,10 @@ impl KeelWindow {
             segmented_gen: 0,
             skills: settings::SkillsPage::default(),
             skills_filter,
+            memory: settings::MemoryPage::default(),
+            updates: updates::UpdateUi::default(),
+            memory_desc,
+            memory_body,
             mention: None,
             mention_shown: None,
             mention_gen: 0,
@@ -1191,6 +1244,8 @@ impl KeelWindow {
             confirming_delete_chats: None,
             delete_confirm_gen: 0,
             delete_confirm_leaving: None,
+            delete_space_gen: 0,
+            delete_space_leaving: None,
             select_mode_gen: 0,
             select_leaving: None,
             rows_exiting: Vec::new(),
@@ -1207,6 +1262,8 @@ impl KeelWindow {
             menus_open: HashSet::new(),
             menus_leaving: HashMap::new(),
             menu_leave_gen: 0,
+            menus_cut: false,
+            menus_cut_now: false,
             branches_loading: false,
             branches_fresh: false,
             branch_fetch_gen: 0,
@@ -1269,6 +1326,7 @@ impl KeelWindow {
         this.mr_start(cx);
         this.dotify_boot(cx);
         this.dotify_dev_hooks(cx);
+        this.updates_boot(cx);
         // Typing works the moment the window opens.
         this.composer.update(cx, |s, cx| s.focus(window, cx));
         this
@@ -1712,6 +1770,12 @@ impl KeelWindow {
             self.menus_leaving.remove(&key);
             self.menus_open.insert(key);
             return Some(None);
+        }
+        if self.menus_cut_now {
+            // Escape: keyboard closes are instant.
+            self.menus_open.remove(&key);
+            self.menus_leaving.remove(&key);
+            return None;
         }
         if self.menus_open.remove(&key) && !self.reduced() {
             self.menu_leave_gen += 1;
@@ -4225,6 +4289,7 @@ impl KeelWindow {
                         if let Some((project, scope)) = link {
                             this.projects.record_chat(&chat_id, &project, scope);
                         }
+                        this.projects.picked = None;
                         if let Some(text) = first_message {
                             this.pending_first_message = Some((chat_id.clone(), text));
                         }
@@ -4398,6 +4463,41 @@ impl KeelWindow {
         cx.notify();
     }
 
+    /// Open the delete-folder confirmation for this folder (space) id.
+    pub(super) fn ask_delete_space(&mut self, id: String, cx: &mut Context<Self>) {
+        self.delete_space_gen += 1;
+        self.delete_space_leaving = None;
+        self.state.confirming_delete_space = Some(id);
+        cx.notify();
+    }
+
+    /// Fade the delete-folder modal out (Cancel, backdrop), like the chats one.
+    pub(super) fn dismiss_delete_space(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.state.confirming_delete_space.take() else {
+            return;
+        };
+        if self.reduced() {
+            cx.notify();
+            return;
+        }
+        self.delete_space_gen += 1;
+        let n = self.delete_space_gen;
+        self.delete_space_leaving = Some((n, id));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.delete_space_leaving.as_ref().is_some_and(|(m, _)| *m == n) {
+                    this.delete_space_leaving = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Fade the delete modal out (Cancel, Escape, backdrop). Keeps the card
     /// on screen for one FAST beat so the exit plays.
     pub(super) fn dismiss_delete_confirm(&mut self, cx: &mut Context<Self>) {
@@ -4467,6 +4567,90 @@ impl KeelWindow {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(super) fn enter_project_select_mode(&mut self, cx: &mut Context<Self>) {
+        if self.project_select_mode {
+            return;
+        }
+        self.project_select_mode = true;
+        self.project_select_mode_gen += 1;
+        self.project_select_leaving = None;
+        cx.notify();
+    }
+
+    pub(super) fn exit_project_select_mode(&mut self, cx: &mut Context<Self>) {
+        self.project_select_mode = false;
+        self.selected_projects.clear();
+        self.project_select_leaving = Some(self.project_select_mode_gen);
+        let n = self.project_select_mode_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.project_select_leaving == Some(n) {
+                    this.project_select_leaving = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn toggle_project_selection(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(pos) = self.selected_projects.iter().position(|p| p == id) {
+            self.selected_projects.remove(pos);
+        } else {
+            self.selected_projects.push(id.to_string());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn ask_delete_projects(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        if !ids.is_empty() {
+            self.delete_projects_confirm_gen = self.delete_projects_confirm_gen.wrapping_add(1);
+            self.confirming_delete_projects = Some(ids);
+            self.delete_projects_confirm_leaving = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn dismiss_delete_projects_confirm(&mut self, cx: &mut Context<Self>) {
+        if let Some(ids) = self.confirming_delete_projects.take() {
+            let confirm_gen = self.delete_projects_confirm_gen;
+            self.delete_projects_confirm_leaving = Some((confirm_gen, ids));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this
+                        .delete_projects_confirm_leaving
+                        .as_ref()
+                        .map(|(n, _)| *n)
+                        == Some(confirm_gen)
+                    {
+                        this.delete_projects_confirm_leaving = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn delete_projects(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        self.dismiss_delete_projects_confirm(cx);
+        self.projects
+            .store
+            .projects
+            .retain(|p| !ids.contains(&p.id));
+        self.projects.save();
+        self.exit_project_select_mode(cx);
         cx.notify();
     }
 
@@ -4785,7 +4969,7 @@ impl KeelWindow {
 // ── Shared widgets ──────────────────────────────────────────────────────
 
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_MD, RADIUS_SM};
+use crate::style::{KeelStyled, RADIUS_MD};
 use gpui::{Anchor, AnyElement, ElementId, div, prelude::*};
 
 /// One row of a menu or picker: full-width, hover overlay, optional check.
@@ -4797,38 +4981,109 @@ fn menu_item(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(ElementId::Name(id.into()))
+        .relative()
+        .flex_none()
+        .min_h(zpx(MENU_ROW_H))
         .px_2()
         .py_1()
-        .rounded(RADIUS_SM)
+        .when(checked, |d| d.pr(zpx(28.)))
+        .rounded(RADIUS_MD)
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
-        .t_body()
+        .t_small()
         .text_color(c(if enabled { t.text } else { t.text_faint }))
-        .when(enabled, |s| s.cursor_pointer().hover(|s| s.bg(c(t.hover))))
+        .when(enabled, |s| {
+            s.cursor_pointer()
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.hover), Some(c(t.selected)))
+                .active(|s| s.opacity(0.85))
+        })
+        // The check sits at the row's right end, so every label starts on
+        // the same inset as the section labels above it.
+        .when(checked, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(zpx(8.))
+                    .flex()
+                    .items_center()
+                    .text_color(c(t.accent))
+                    .child(Icon::Check.el(zpx(14.))),
+            )
+        })
+}
+
+/// Height of one menu row.
+const MENU_ROW_H: f32 = 28.;
+
+/// A menu action: a plain 14 px icon, then whatever the caller adds (the
+/// label, a [`menu_hint`]), on [`menu_item`]'s geometry. `danger` tints
+/// icon, label and hover red.
+fn menu_action(
+    id: impl Into<gpui::SharedString>,
+    icon: impl IntoElement,
+    danger: bool,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
+    let tint: gpui::Hsla = if danger {
+        gpui::rgba(0xff44441c).into()
+    } else {
+        c(t.hover)
+    };
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex_none()
+        .h(zpx(MENU_ROW_H))
+        .px_2()
+        .rounded(RADIUS_MD)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .t_small()
+        .text_color(c(if danger { t.danger } else { t.text }))
+        .hover_fade(tint, (!danger).then(|| c(t.selected)))
+        .active(|s| s.opacity(0.85))
         .child(
             div()
                 .w(zpx(14.))
                 .flex_none()
-                .text_color(c(t.accent))
-                .when(checked, |d| d.child(Icon::Check.el(zpx(13.)))),
+                .flex()
+                .justify_center()
+                .text_color(c(if danger { t.danger } else { t.text_muted }))
+                .child(icon),
         )
 }
 
+/// A faint trailing hint on a menu row, such as a modifier shortcut.
+fn menu_hint(text: impl Into<gpui::SharedString>, t: Tokens) -> gpui::Div {
+    div()
+        .ml_auto()
+        .pl_3()
+        .flex_none()
+        .t_caption()
+        .text_color(c(t.text_faint))
+        .child(text.into())
+}
+
 /// A menu's empty-section placeholder: a muted icon and text on a
-/// [`menu_item`]'s geometry (the icon in its check column, so the text lines
-/// up with the rows'). Static: no id, hover or click, so keyboard and
+/// [`menu_action`]'s geometry (the icon in its icon column). Static: no id, hover or click, so keyboard and
 /// pointer pass it by.
 fn menu_empty_row(icon: Icon, text: impl Into<gpui::SharedString>, t: Tokens) -> gpui::Div {
     div()
+        .flex_none()
+        .h(zpx(MENU_ROW_H))
         .px_2()
-        .py_1()
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
-        .t_body()
+        .t_small()
         .text_color(c(t.text_faint))
         .child(
             div()
@@ -4836,7 +5091,7 @@ fn menu_empty_row(icon: Icon, text: impl Into<gpui::SharedString>, t: Tokens) ->
                 .flex_none()
                 .flex()
                 .justify_center()
-                .child(icon.el(zpx(13.))),
+                .child(icon.el(zpx(14.))),
         )
         .child(
             div()
@@ -4851,8 +5106,9 @@ fn menu_empty_row(icon: Icon, text: impl Into<gpui::SharedString>, t: Tokens) ->
 /// Section label inside a menu.
 fn menu_label(text: impl Into<gpui::SharedString>, t: Tokens) -> gpui::Div {
     div()
+        .flex_none()
         .px_2()
-        .pt_1p5()
+        .pt_1()
         .pb_0p5()
         .t_caption()
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -4861,7 +5117,7 @@ fn menu_label(text: impl Into<gpui::SharedString>, t: Tokens) -> gpui::Div {
 }
 
 fn menu_separator(t: Tokens) -> gpui::Div {
-    div().my_1().h(zpx(1.)).bg(c(t.border))
+    div().flex_none().my_1().h(zpx(1.)).bg(c(t.border))
 }
 
 /// A floating menu anchored below its trigger. Clicking outside closes it;
@@ -4879,7 +5135,6 @@ fn floating_menu(
     floating_menu_at(id, t, width, false, leaving, reduced, on_dismiss, items)
 }
 
-/// A floating menu on the sidebar, matching the sidebar's background color.
 fn sidebar_menu(
     id: &'static str,
     t: Tokens,
@@ -4889,14 +5144,31 @@ fn sidebar_menu(
     on_dismiss: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
     items: Vec<AnyElement>,
 ) -> AnyElement {
-    let anchor = Anchor::TopLeft;
-    let panel = menu_panel_with_bg(id, t, width, false, c(t.sidebar), items)
+    sidebar_menu_at(id, t, width, 32., 0., leaving, reduced, on_dismiss, items)
+}
+
+fn sidebar_menu_at(
+    id: &'static str,
+    t: Tokens,
+    width: f32,
+    offset_left: f32,
+    offset_top: f32,
+    leaving: Option<u64>,
+    reduced: bool,
+    on_dismiss: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+    items: Vec<AnyElement>,
+) -> AnyElement {
+    let panel = menu_panel_with_max_h(id, t, width, 360., false, items)
         .when(leaving.is_none(), |d| d.on_mouse_down_out(on_dismiss));
-    anchored_menu_positioned(
-        anchor,
-        None,
-        menu_motion(panel, id, false, leaving, reduced),
+    gpui::deferred(
+        div()
+            .absolute()
+            .top(zpx(offset_top))
+            .left(zpx(offset_left))
+            .child(menu_motion(panel, id, false, leaving, reduced)),
     )
+    .with_priority(1)
+    .into_any_element()
 }
 
 /// Like [`floating_menu`]; `up` opens it above the trigger (composer pickers).
@@ -4969,21 +5241,23 @@ pub(super) fn menu_motion<E: IntoElement + Styled + 'static>(
     reduced: bool,
 ) -> AnyElement {
     use gpui::AnimationExt as _;
-    let rise = if up { 4. } else { -4. };
+    let rise = if up { 6. } else { -6. };
     match leaving {
         Some(_) if reduced => gpui::Empty.into_any_element(),
-        None => crate::motion::appear(
-            el,
-            gpui::ElementId::Name(format!("{id}-appear").into()),
-            crate::motion::FAST,
-            rise,
-            reduced,
-        )
-        .into_any_element(),
+        // In over BASE (160 ms), out over FAST (120 ms), as the model menu.
+        None => el
+            .with_animation(
+                gpui::ElementId::Name(format!("{id}-appear").into()),
+                gpui::Animation::new(crate::motion::BASE)
+                    .with_easing(crate::motion::ease_out_strong),
+                move |el, delta| el.opacity(delta).relative().top(zpx(rise * (1. - delta))),
+            )
+            .into_any_element(),
         Some(n) => el
             .with_animation(
                 gpui::ElementId::Name(format!("{id}-leave-{n}").into()),
-                gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_in),
+                gpui::Animation::new(crate::motion::FAST)
+                    .with_easing(crate::motion::ease_out),
                 move |el, delta| el.opacity(1. - delta).relative().top(zpx(rise * delta)),
             )
             .into_any_element(),
@@ -5024,35 +5298,12 @@ fn menu_panel_with_max_h(
         .p_1()
         .flex()
         .flex_col()
-        .gap_0p5()
         .floating_surface(t)
         .bg(c(t.floating))
-        .children(items)
-}
-
-/// A menu panel with a configurable background color.
-fn menu_panel_with_bg(
-    id: &'static str,
-    t: Tokens,
-    width: f32,
-    up: bool,
-    bg: gpui::Hsla,
-    items: Vec<AnyElement>,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .when(up, |d| d.mb_1())
-        .when(!up, |d| d.mt_1())
-        .w(zpx(width))
-        .occlude()
-        .max_h(zpx(360.))
-        .overflow_y_scroll()
-        .p_1()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .floating_surface(t)
-        .bg(bg)
+        .border_1()
+        .border_color(c(t.border))
+        .rounded(crate::style::RADIUS_LG)
+        .shadow_xl()
         .children(items)
 }
 
@@ -5085,8 +5336,9 @@ fn icon_button(id: &'static str, icon: Icon, t: Tokens) -> gpui::Stateful<gpui::
         .rounded(RADIUS_MD)
         .text_color(c(t.text))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-        .active(|s| s.bg(c(t.selected)).text_color(c(t.text)).opacity(0.85))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.text_color(c(t.text)).opacity(0.85))
         .child(icon.el(zpx(15.)))
 }
 
@@ -5178,7 +5430,7 @@ pub(super) const ZOOM_TOAST: Duration = Duration::from_millis(1300);
 /// How long an error toast stays before it leaves on its own.
 pub(super) const NOTICE_HOLD: Duration = Duration::from_secs(6);
 pub(super) const NOTICE_ENTER: Duration = Duration::from_millis(240);
-pub(super) const NOTICE_EXIT: Duration = Duration::from_millis(160);
+pub(super) const NOTICE_EXIT: Duration = Duration::from_millis(120);
 
 /// How long reasoning deltas gather before their rows are rebuilt.
 const PUBLISH_BATCH: Duration = Duration::from_millis(33);

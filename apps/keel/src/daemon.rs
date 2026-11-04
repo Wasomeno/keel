@@ -387,6 +387,21 @@ mod tests {
         assert_eq!(parse_pid("\tstate = not running\n"), None);
     }
 
+    /// The updater kickstarts the daemon only when this bundle's binary is
+    /// what the plist runs (UPDATER.md, daemon step).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn updater_recognizes_a_plist_running_this_bundle() {
+        let exe = PathBuf::from("/Applications/Keel.app/Contents/MacOS/keel");
+        let data = PathBuf::from("/Users/test/Library/Application Support/Keel");
+        let xml = render_plist(&exe, &data, "/usr/bin:/bin");
+        assert!(keel_update::daemon_runs(&xml, &exe));
+        let other = PathBuf::from("/usr/local/bin/keel");
+        assert!(!keel_update::daemon_runs(&xml, &other));
+        let odd = PathBuf::from("/Users/k&r/Keel.app/Contents/MacOS/keel");
+        assert!(keel_update::daemon_runs(&render_plist(&odd, &data, "/bin"), &odd));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_render_plist_contains_required_fields() {

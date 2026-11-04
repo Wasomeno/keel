@@ -216,7 +216,9 @@ impl KeelWindow {
             }
             "scroll_settings" => {
                 let y: f32 = arg.parse().unwrap_or(-320.);
-                self.dotify.settings_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(y)));
+                self.dotify
+                    .settings_scroll
+                    .set_offset(gpui::point(gpui::px(0.), gpui::px(y)));
                 "ok"
             }
             "sound_menu" => {

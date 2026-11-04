@@ -489,7 +489,7 @@ impl KeelWindow {
         items.extend([
             menu_separator(t).into_any_element(),
             menu_item("timer-menu-dock", t, true, false)
-                .child(if docked { "Pop Out" } else { "Dock in Header" })
+                .child(if docked { "Pop out" } else { "Dock in header" })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     let dock = if docked {
                         TimerDock::TopRight

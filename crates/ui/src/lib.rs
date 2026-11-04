@@ -24,6 +24,7 @@ pub mod mention;
 pub mod mermaid;
 pub mod mermaid_viewer;
 pub mod model_menu;
+pub mod hover_fade;
 pub mod motion;
 pub mod mr;
 pub mod mr_card;

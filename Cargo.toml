@@ -10,10 +10,11 @@ members = [
     "crates/store",
     "crates/theme",
     "crates/ui",
+    "crates/update",
 ]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 publish = false
 
@@ -26,6 +27,7 @@ keel-rpc = { path = "crates/rpc" }
 keel-store = { path = "crates/store" }
 keel-theme = { path = "crates/theme" }
 keel-ui = { path = "crates/ui" }
+keel-update = { path = "crates/update" }
 
 async-trait = "0.1"
 
@@ -44,6 +46,7 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 libc = "0.2"
 mimalloc = { version = "0.1", features = ["v2"] }
+minisign-verify = "0.3"
 notify = "7"
 sha2 = "0.10"
 base64 = "0.22"
@@ -57,6 +60,7 @@ pulldown-cmark = "0.12"
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

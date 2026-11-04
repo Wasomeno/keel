@@ -3,6 +3,7 @@
 //! (sidebar width, new-chat composer drop), and reduced motion turns every
 //! transition into an instant cut.
 
+pub use crate::hover_fade::{HOVER_IN, HOVER_OUT, HoverFadeExt, reveal_on_hover};
 use crate::style::zpx;
 use std::time::Duration;
 
@@ -500,8 +501,36 @@ pub fn dismiss<E: IntoElement + Styled + 'static>(
     }
     el.with_animation(
         id,
-        Animation::new(FAST).with_easing(ease_in),
+        Animation::new(FAST).with_easing(ease_out),
         |el, delta| el.opacity(1.0 - delta).relative().top(zpx(6. * delta)),
+    )
+    .into_any_element()
+}
+
+/// A modal's backdrop: a black wash of `alpha` that fades in over [`BASE`]
+/// and out over [`FAST`], ease-out both ways. Only the wash animates, so the
+/// card on it keeps its own motion. `id` must be new per open to replay.
+pub fn scrim(
+    el: gpui::Stateful<gpui::Div>,
+    id: impl Into<ElementId>,
+    alpha: f32,
+    leaving: bool,
+    reduced: bool,
+) -> gpui::AnyElement {
+    let wash = move |k: f32| gpui::Hsla {
+        h: 0.,
+        s: 0.,
+        l: 0.,
+        a: alpha * k,
+    };
+    if reduced {
+        return el.bg(wash(1.)).into_any_element();
+    }
+    let (duration, from, to) = if leaving { (FAST, 1., 0.) } else { (BASE, 0., 1.) };
+    el.with_animation(
+        id,
+        Animation::new(duration).with_easing(ease_out),
+        move |el, d| el.bg(wash(from + (to - from) * d)),
     )
     .into_any_element()
 }

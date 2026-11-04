@@ -2,6 +2,7 @@
 //! self-hosted domain). Sign-in happens in Pi's own `/login`, run against
 //! Keel's Pi folder; Keel only lists what is stored there.
 
+use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use gpui::{
     AnimationExt, AnyElement, ClickEvent, Context, ElementId, IntoElement, UniformListScrollHandle,
@@ -187,6 +188,10 @@ pub(super) struct SkillsPage {
     pub added: Option<(String, String)>,
     pub notice: Option<String>,
     pub confirm: Option<SkillConfirm>,
+    /// Replays the confirm banner's entrance; numbers its exit.
+    pub confirm_gen: u64,
+    /// The banner fading out after Cancel: (exit number, what it said).
+    pub confirm_leaving: Option<(u64, SkillConfirm)>,
     pub row_errors: std::collections::HashMap<String, String>,
     /// Own scroll, so opening the drill-in does not inherit the Settings offset.
     pub scroll: gpui::ScrollHandle,
@@ -221,6 +226,8 @@ impl Default for SkillsPage {
             added: None,
             notice: None,
             confirm: None,
+            confirm_gen: 0,
+            confirm_leaving: None,
             row_errors: std::collections::HashMap::new(),
             scroll: gpui::ScrollHandle::default(),
             list_scroll: UniformListScrollHandle::new(),
@@ -235,6 +242,118 @@ impl Default for SkillsPage {
             modal_scroll: gpui::ScrollHandle::default(),
         }
     }
+}
+
+/// One note as `memory_list` reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MemoryNote {
+    pub slug: String,
+    pub kind: String,
+    pub description: String,
+    /// A topic file with no index line. Listed last so it can be deleted.
+    pub unindexed: bool,
+}
+
+impl MemoryNote {
+    fn parse(v: &serde_json::Value) -> Self {
+        let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+        Self {
+            slug: s("slug"),
+            kind: s("type"),
+            description: s("description"),
+            unindexed: v["unindexed"].as_bool().unwrap_or(false),
+        }
+    }
+}
+
+/// One scope of `memory_list`. `None` for a `null` project.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct MemoryScopeView {
+    pub notes: Vec<MemoryNote>,
+    /// The index is over the inject cap.
+    pub truncated: bool,
+}
+
+impl MemoryScopeView {
+    fn parse(v: &serde_json::Value) -> Option<Self> {
+        if !v.is_object() {
+            return None;
+        }
+        let mut notes: Vec<MemoryNote> = v["notes"]
+            .as_array()
+            .map(|n| n.iter().map(MemoryNote::parse).collect())
+            .unwrap_or_default();
+        // Index order, then the unindexed files (stable sort).
+        notes.sort_by_key(|n| n.unindexed);
+        Some(Self {
+            notes,
+            truncated: v["truncated"].as_bool().unwrap_or(false),
+        })
+    }
+
+    fn indexed(&self) -> usize {
+        self.notes.iter().filter(|n| !n.unindexed).count()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum MemoryTab {
+    #[default]
+    You,
+    Project,
+}
+
+impl MemoryTab {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::You => "user",
+            Self::Project => "project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MemoryConfirm {
+    Archive,
+    Delete,
+}
+
+/// The note in the edit modal.
+#[derive(Clone, Debug)]
+pub(super) struct MemoryOpen {
+    pub tab: MemoryTab,
+    /// The folder the note's scope was resolved for.
+    pub cwd: Option<String>,
+    pub note: MemoryNote,
+    /// `None` while `memory_read` is in flight.
+    pub loaded: Option<Result<(), String>>,
+}
+
+/// Settings → Memory. Replaces the settings column while `open`, like Skills.
+#[derive(Default)]
+pub(super) struct MemoryPage {
+    pub open: bool,
+    pub epoch: u64,
+    /// `(epoch, leaving)` while the drill transition runs.
+    pub transition: Option<(u64, bool)>,
+    pub load_gen: u64,
+    pub user: Option<Result<MemoryScopeView, String>>,
+    pub project: Option<Result<Option<MemoryScopeView>, String>>,
+    /// The open chat's folder the lists were read for. Never the process cwd.
+    pub cwd: Option<String>,
+    pub tab: MemoryTab,
+    /// Replays the list entrance on a tab switch.
+    pub list_epoch: u64,
+    pub modal: Option<MemoryOpen>,
+    pub modal_gen: u64,
+    pub modal_leaving: Option<(u64, MemoryOpen)>,
+    pub confirm: Option<MemoryConfirm>,
+    pub confirm_gen: u64,
+    /// A write is in flight; the modal's buttons wait for it.
+    pub busy: bool,
+    pub error: Option<String>,
+    pub scroll: gpui::ScrollHandle,
+    pub modal_scroll: gpui::ScrollHandle,
 }
 
 /// Computes (draw_left, draw_w) with asymmetric leading/trailing edge morphology.
@@ -307,6 +426,7 @@ impl KeelWindow {
         self.load_agent_status(cx);
         self.load_connections(cx);
         self.load_skills(cx);
+        self.load_memory(cx);
         cx.notify();
     }
 
@@ -318,7 +438,15 @@ impl KeelWindow {
         self.skills.confirm = None;
         self.skills.expanded_skill = None;
         self.skills.author_filter = None;
+        self.memory.open = false;
+        self.memory.transition = None;
+        self.memory.modal = None;
+        self.memory.modal_leaving = None;
+        self.memory.confirm = None;
         self.show_sound_menu = false;
+        // Off screen with the page: no exit to play on the next visit.
+        self.menus_open.remove("sound-list");
+        self.menus_leaving.remove("sound-list");
         self.mark_current_read(cx);
         cx.notify();
     }
@@ -576,7 +704,7 @@ impl KeelWindow {
     }
 
     /// Remember that switch `id` just flipped, so it slides instead of snapping.
-    fn note_switch_flip(&mut self, id: &str) {
+    pub(super) fn note_switch_flip(&mut self, id: &str) {
         self.switch_gen += 1;
         self.switch_flips
             .retain(|_, (_, at)| at.elapsed() < std::time::Duration::from_secs(1));
@@ -585,10 +713,12 @@ impl KeelWindow {
     }
 
     /// The flip number when switch `id` changed just now (and motion is on).
-    fn recent_flip(&self, id: &str) -> Option<u64> {
+    pub(super) fn recent_flip(&self, id: &str) -> Option<u64> {
         self.switch_flips
             .get(id)
-            .filter(|(_, at)| !self.reduced() && at.elapsed() < std::time::Duration::from_millis(150))
+            .filter(|(_, at)| {
+                !self.reduced() && at.elapsed() < std::time::Duration::from_millis(150)
+            })
             .map(|(n, _)| *n)
     }
 
@@ -597,15 +727,24 @@ impl KeelWindow {
         self.segmented_gen += 1;
         self.segmented_flips
             .retain(|_, (_, _, _, at)| at.elapsed() < std::time::Duration::from_secs(1));
-        self.segmented_flips
-            .insert(id.to_string(), (from_ix, to_ix, self.segmented_gen, std::time::Instant::now()));
+        self.segmented_flips.insert(
+            id.to_string(),
+            (
+                from_ix,
+                to_ix,
+                self.segmented_gen,
+                std::time::Instant::now(),
+            ),
+        );
     }
 
     /// The recent flip info `(from_ix, to_ix, generation)` when segmented control `id` changed just now (and motion is on).
     fn recent_segmented_flip(&self, id: &str) -> Option<(usize, usize, u64)> {
         self.segmented_flips
             .get(id)
-            .filter(|(_, _, _, at)| !self.reduced() && at.elapsed() < std::time::Duration::from_millis(150))
+            .filter(|(_, _, _, at)| {
+                !self.reduced() && at.elapsed() < std::time::Duration::from_millis(150)
+            })
             .map(|(from, to, generation, _)| (*from, *to, *generation))
     }
 
@@ -631,7 +770,10 @@ impl KeelWindow {
     {
         use gpui::AnimationExt as _;
 
-        let current_ix = options.iter().position(|(_, val)| *val == current).unwrap_or(0);
+        let current_ix = options
+            .iter()
+            .position(|(_, val)| *val == current)
+            .unwrap_or(0);
         let flip = self.recent_segmented_flip(group_id);
         let count = options.len();
         const PAD: f32 = 2.0;
@@ -641,7 +783,8 @@ impl KeelWindow {
         const TRACK_RADIUS: f32 = 8.0;
 
         // Account for 1px border on each side (total 2px width and 2px height)
-        let inner_w = PAD * 2.0 + (item_w * count as f32) + (GAP * (count.saturating_sub(1)) as f32);
+        let inner_w =
+            PAD * 2.0 + (item_w * count as f32) + (GAP * (count.saturating_sub(1)) as f32);
         let total_w = inner_w + 2.0;
         let total_h = H + PAD * 2.0 + 2.0;
         let left_of = |ix: usize| PAD + ix as f32 * (item_w + GAP);
@@ -764,7 +907,7 @@ impl KeelWindow {
                     .rounded(zpx(PILL_RADIUS))
                     .cursor_pointer()
                     .when(!is_selected, |d| {
-                        d.hover(|s| s.bg(c(t.hover).opacity(0.35)))
+                        d.hover_fade(c(t.hover).opacity(0.35), None)
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if ix != current_ix {
@@ -800,6 +943,10 @@ impl KeelWindow {
             self.render_skills_drill(t, cx).into_any_element()
         } else if self.skills.open {
             self.render_skills_page(t, cx).into_any_element()
+        } else if self.memory.transition.is_some() {
+            self.render_memory_drill(t, cx).into_any_element()
+        } else if self.memory.open {
+            self.render_memory_page(t, cx).into_any_element()
         } else {
             self.render_settings_home(t, cx).into_any_element()
         }
@@ -872,6 +1019,8 @@ impl KeelWindow {
                     )
                     .child(self.render_appearance_section(t, cx))
                     .child(section_divider(t))
+                    .child(self.render_updates_section(t, cx))
+                    .child(section_divider(t))
                     .child(self.render_notifications_section(t, cx))
                     .child(section_divider(t))
                     .child(self.render_background_section(t, cx))
@@ -879,6 +1028,8 @@ impl KeelWindow {
                     .child(self.render_agents_section(t, cx))
                     .child(section_divider(t))
                     .child(self.render_skills_entry(t, cx))
+                    .child(section_divider(t))
+                    .child(self.render_memory_entry(t, cx))
                     .child(section_divider(t))
                     .child(self.render_browser_section(t, cx))
                     .child(section_divider(t))
@@ -991,8 +1142,9 @@ impl KeelWindow {
                 .when(!primary, |d| d.text_color(c(t.text_muted)))
                 .t_small()
                 .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-                .active(|s| s.bg(c(t.selected)).opacity(0.85))
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.hover), Some(c(t.selected)))
+                .active(|s| s.opacity(0.85))
                 .child(label)
         };
         // What the sign-in needs from the user now, in place of the hint.
@@ -1594,7 +1746,8 @@ impl KeelWindow {
             .map(|v| v.0)
             .unwrap_or(0.75);
 
-        let sound_menu: Option<AnyElement> = if self.show_sound_menu {
+        let sound_phase = self.menu_phase("sound-list", self.show_sound_menu, cx);
+        let sound_menu: Option<AnyElement> = if let Some(leaving) = sound_phase {
             let mut options: Vec<(SoundChoice, String)> = vec![
                 (SoundChoice::None, "None".into()),
                 (
@@ -1613,13 +1766,14 @@ impl KeelWindow {
             }
 
             let weak_dismiss = cx.entity().downgrade();
-            let dismiss = move |_: &gpui::MouseDownEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
-                let _ = weak_dismiss.update(cx, |this: &mut KeelWindow, cx| {
-                    this.note_menu_dismissed("sound-list");
-                    this.show_sound_menu = false;
-                    cx.notify();
-                });
-            };
+            let dismiss =
+                move |_: &gpui::MouseDownEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                    let _ = weak_dismiss.update(cx, |this: &mut KeelWindow, cx| {
+                        this.note_menu_dismissed("sound-list");
+                        this.show_sound_menu = false;
+                        cx.notify();
+                    });
+                };
 
             let mut items: Vec<AnyElement> = options
                 .into_iter()
@@ -1638,7 +1792,7 @@ impl KeelWindow {
                         .t_small()
                         .cursor_pointer()
                         .when(selected, |d| d.bg(c(t.selected)))
-                        .when(!selected, |d| d.hover(|s| s.bg(c(t.hover))))
+                        .when(!selected, |d| d.hover_fade(c(t.hover), None))
                         .child(
                             div()
                                 .w(zpx(12.))
@@ -1670,7 +1824,7 @@ impl KeelWindow {
                     .t_small()
                     .text_color(c(t.accent))
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)))
+                    .hover_fade(c(t.hover), None)
                     .child(div().w(zpx(12.)))
                     .child("Custom…")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1688,7 +1842,7 @@ impl KeelWindow {
                 gpui::Anchor::TopLeft,
                 None,
                 false,
-                None,
+                leaving,
                 self.reduced(),
                 dismiss,
                 items,
@@ -1702,7 +1856,9 @@ impl KeelWindow {
         let preview_flip = self
             .switch_flips
             .get("sound-preview")
-            .filter(|(_, at)| !self.reduced() && at.elapsed() < std::time::Duration::from_millis(220))
+            .filter(|(_, at)| {
+                !self.reduced() && at.elapsed() < std::time::Duration::from_millis(220)
+            })
             .map(|(n, _)| *n);
 
         let sound_anchor = div()
@@ -1731,13 +1887,13 @@ impl KeelWindow {
                     .t_small()
                     .text_color(c(t.text))
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)))
-                    .active(|s| s.bg(c(t.selected)).opacity(0.85))
-                    .child(
-                        Icon::Volume2
-                            .el(zpx(12.))
-                            .text_color(c(if is_none { t.text_faint } else { t.text_muted })),
-                    )
+                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                    .active(|s| s.opacity(0.85))
+                    .child(Icon::Volume2.el(zpx(12.)).text_color(c(if is_none {
+                        t.text_faint
+                    } else {
+                        t.text_muted
+                    })))
                     .child(sound_label)
                     .child(
                         Icon::ChevronDown
@@ -1769,8 +1925,9 @@ impl KeelWindow {
             .child(sound_anchor)
             .when(!is_none, |d| {
                 d.child(
-                    render_sound_preview_btn(is_playing, preview_flip, self.reduced(), t)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.preview_sound(cx))),
+                    render_sound_preview_btn(is_playing, preview_flip, self.reduced(), t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.preview_sound(cx)),
+                    ),
                 )
             });
 
@@ -2098,7 +2255,10 @@ impl KeelWindow {
         let ticket = self.skills.load_gen;
         cx.spawn(async move |this, cx| {
             let res = client
-                .call("list_skills", serde_json::json!({ "cwd": serde_json::Value::Null }))
+                .call(
+                    "list_skills",
+                    serde_json::json!({ "cwd": serde_json::Value::Null }),
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.skills.load_gen != ticket {
@@ -2140,13 +2300,18 @@ impl KeelWindow {
         // not another account row. The count and chevron are the way in.
         div()
             .id("skills-open-row")
+            .relative()
             .w_full()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
             .gap_4()
+            .rounded(RADIUS_MD)
             .cursor_pointer()
+            // The tint reaches past the text so the title stays aligned
+            // with the other section titles.
+            .hover_fade_outset(c(t.hover), Some(c(t.selected)), zpx(8.), zpx(6.))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_skills(cx)))
             .child(
                 div()
@@ -2209,7 +2374,9 @@ impl KeelWindow {
         self.skills
             .scroll
             .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
-        self.skills.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.skills
+            .list_scroll
+            .scroll_to_item(0, gpui::ScrollStrategy::Top);
 
         if self.reduced() {
             self.skills.transition = None;
@@ -2281,7 +2448,9 @@ impl KeelWindow {
         if !self.skills.expanded_content.contains_key(&skill.path) {
             let file = std::path::Path::new(&skill.path).join("SKILL.md");
             let text = std::fs::read_to_string(&file).unwrap_or_default();
-            self.skills.expanded_content.insert(skill.path.clone(), text);
+            self.skills
+                .expanded_content
+                .insert(skill.path.clone(), text);
         }
         cx.notify();
     }
@@ -2297,9 +2466,7 @@ impl KeelWindow {
             let generation = self.skills.modal_gen;
             self.skills.modal_leaving = Some((generation, skill));
             cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(crate::motion::FAST)
-                    .await;
+                cx.background_executor().timer(crate::motion::FAST).await;
                 let _ = this.update(cx, |this, cx| {
                     if this.skills.modal_leaving.as_ref().map(|(n, _)| *n) == Some(generation) {
                         this.skills.modal_leaving = None;
@@ -2453,8 +2620,23 @@ impl KeelWindow {
         if let Some(notice) = self.skills.notice.clone() {
             body = body.child(div().pb_2().t_small().text_color(c(t.danger)).child(notice));
         }
+        // The banner rises in, and drops out on Cancel, quicker than it came.
         if let Some(confirm) = self.skills.confirm.clone() {
-            body = body.child(self.render_skill_confirm(&confirm, t, cx));
+            let banner = self.render_skill_confirm(&confirm, t, cx);
+            body = body.child(crate::motion::appear(
+                banner,
+                ("skills-confirm-in", self.skills.confirm_gen as usize),
+                crate::motion::BASE,
+                6.,
+                reduced,
+            ));
+        } else if let Some((n, confirm)) = self.skills.confirm_leaving.clone() {
+            let banner = self.render_skill_confirm(&confirm, t, cx);
+            body = body.child(crate::motion::dismiss(
+                banner,
+                ("skills-confirm-out", n as usize),
+                reduced,
+            ));
         }
 
         // Collect author stats
@@ -2563,7 +2745,9 @@ impl KeelWindow {
                             cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.skills.author_filter = None;
                                 this.skills.status_filter = SkillStatusFilter::All;
-                                this.skills.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                                this.skills
+                                    .list_scroll
+                                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
                                 cx.notify();
                             }),
                         ),
@@ -2642,7 +2826,8 @@ impl KeelWindow {
                         .bg(c(t.input).opacity(0.35))
                         .border_1()
                         .border_color(c(t.border).opacity(0.5))
-                        .hover(|s| s.bg(c(t.hover)).border_color(c(t.border)))
+                        .hover(|s| s.border_color(c(t.border)))
+                        .hover_fade(c(t.hover), None)
                         .cursor_pointer()
                         .flex()
                         .flex_row()
@@ -2677,13 +2862,9 @@ impl KeelWindow {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .child(
-                                            Icon::Puzzle.el(zpx(15.)).text_color(c(if enabled {
-                                                t.accent
-                                            } else {
-                                                t.text_faint
-                                            })),
-                                        ),
+                                        .child(Icon::Puzzle.el(zpx(15.)).text_color(c(
+                                            if enabled { t.accent } else { t.text_faint },
+                                        ))),
                                 )
                                 .child(
                                     div()
@@ -2712,7 +2893,8 @@ impl KeelWindow {
                                                     d.child(
                                                         div()
                                                             .id(ElementId::Name(
-                                                                format!("skill-row-author-{path}").into(),
+                                                                format!("skill-row-author-{path}")
+                                                                    .into(),
                                                             ))
                                                             .flex()
                                                             .flex_row()
@@ -2726,7 +2908,9 @@ impl KeelWindow {
                                                             .child(
                                                                 div()
                                                                     .text_size(zpx(11.))
-                                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::MEDIUM,
+                                                                    )
                                                                     .text_color(c(t.text_muted))
                                                                     .child(format!("by {author}")),
                                                             ),
@@ -2797,7 +2981,8 @@ impl KeelWindow {
                                         .bg(c(t.hover).opacity(0.5))
                                         .border_1()
                                         .border_color(c(t.border).opacity(0.4))
-                                        .hover(|s| s.bg(c(t.hover)).border_color(c(t.border)))
+                                        .hover(|s| s.border_color(c(t.border)))
+                                        .hover_fade(c(t.hover), None)
                                         .t_small()
                                         .text_color(c(t.text_muted))
                                         .child(
@@ -2845,7 +3030,12 @@ impl KeelWindow {
 
         let filter_epoch = self.skills.filter_epoch as usize;
         let animated_list = if reduced {
-            div().flex_1().min_h_0().w_full().child(list_el).into_any_element()
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(list_el)
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -3033,11 +3223,14 @@ impl KeelWindow {
                                 author_filter.is_none(),
                                 t,
                             )
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.skills.author_filter = None;
-                                this.skills.filter_epoch = this.skills.filter_epoch.wrapping_add(1);
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
+                                    this.skills.author_filter = None;
+                                    this.skills.filter_epoch =
+                                        this.skills.filter_epoch.wrapping_add(1);
+                                    cx.notify();
+                                },
+                            )),
                         )
                         .children(authors.iter().map(|(author, count)| {
                             let is_sel = author_filter.as_deref() == Some(author);
@@ -3063,16 +3256,13 @@ impl KeelWindow {
             })
     }
 
-    fn render_skill_modal(
-        &mut self,
-        t: Tokens,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let (skill, leaving, modal_gen) = match (&self.skills.modal_skill, &self.skills.modal_leaving) {
-            (Some(s), _) => (s.clone(), false, self.skills.modal_gen),
-            (None, Some((n, s))) => (s.clone(), true, *n),
-            _ => return None,
-        };
+    fn render_skill_modal(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (skill, leaving, modal_gen) =
+            match (&self.skills.modal_skill, &self.skills.modal_leaving) {
+                (Some(s), _) => (s.clone(), false, self.skills.modal_gen),
+                (None, Some((n, s))) => (s.clone(), true, *n),
+                _ => return None,
+            };
 
         let reduced = self.reduced();
         let name = skill.name.clone();
@@ -3199,7 +3389,8 @@ impl KeelWindow {
                     .justify_center()
                     .cursor_pointer()
                     .text_color(c(t.text_muted))
-                    .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                    .hover(|s| s.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
                     .active(|s| s.opacity(0.7))
                     .child(Icon::Close.el(zpx(14.)))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -3274,6 +3465,8 @@ impl KeelWindow {
                             row_text("skill-modal-remove", "Remove skill", t.danger, t).on_click(
                                 cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     this.dismiss_skill_modal(cx);
+                                    this.skills.confirm_gen += 1;
+                                    this.skills.confirm_leaving = None;
                                     this.skills.confirm = Some(SkillConfirm::Remove {
                                         path: path_remove.clone(),
                                         name: name_remove.clone(),
@@ -3329,7 +3522,7 @@ impl KeelWindow {
             scrim
                 .with_animation(
                     ("skill-scrim-out", modal_gen as usize),
-                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_in),
+                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
                     |el, delta| el.opacity(1.0 - delta),
                 )
                 .into_any_element()
@@ -3391,18 +3584,45 @@ impl KeelWindow {
                     .items_center()
                     .gap_2()
                     .child(
-                        row_text("skills-confirm-go", action, if danger { t.danger } else { t.accent }, t)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_skill(cx))),
+                        row_text(
+                            "skills-confirm-go",
+                            action,
+                            if danger { t.danger } else { t.accent },
+                            t,
+                        )
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_skill(cx)),
+                        ),
                     )
-                    .child(
-                        text_button("skills-confirm-cancel", "Cancel", t).on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.skills.confirm = None;
-                                cx.notify();
-                            },
-                        )),
-                    ),
+                    .child(text_button("skills-confirm-cancel", "Cancel", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_skill_confirm(cx)),
+                    )),
             )
+    }
+
+    /// Cancel: the banner plays its exit, then goes.
+    fn dismiss_skill_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(confirm) = self.skills.confirm.take() else {
+            return;
+        };
+        if !self.reduced() {
+            self.skills.confirm_gen += 1;
+            let n = self.skills.confirm_gen;
+            self.skills.confirm_leaving = Some((n, confirm));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.skills.confirm_leaving.as_ref().is_some_and(|(m, _)| *m == n) {
+                        this.skills.confirm_leaving = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     fn toggle_skill_expanded(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -3418,16 +3638,29 @@ impl KeelWindow {
 
     /// Debug socket: filter to the pack/author, or expand a skill by name.
     pub(super) fn dev_toggle_skill_pack(&mut self, label: &str, cx: &mut Context<Self>) {
+        // Dev socket `skills memory` / `skills memory:project`: Settings → Memory.
+        if let Some(tab) = match label {
+            "memory" => Some(MemoryTab::You),
+            "memory:project" => Some(MemoryTab::Project),
+            _ => None,
+        } {
+            self.skills.open = false;
+            self.skills.transition = None;
+            self.open_memory(cx);
+            self.memory.transition = None;
+            self.memory.tab = tab;
+            cx.notify();
+            return;
+        }
         if let Some(Ok(rows)) = self.skills.rows.as_ref() {
             if rows.iter().any(|r| {
                 r.author.eq_ignore_ascii_case(label) || r.collection.eq_ignore_ascii_case(label)
             }) {
-                self.skills.author_filter =
-                    if self.skills.author_filter.as_deref() == Some(label) {
-                        None
-                    } else {
-                        Some(label.to_string())
-                    };
+                self.skills.author_filter = if self.skills.author_filter.as_deref() == Some(label) {
+                    None
+                } else {
+                    Some(label.to_string())
+                };
                 self.skills.filter_epoch = self.skills.filter_epoch.wrapping_add(1);
                 cx.notify();
                 return;
@@ -3542,6 +3775,8 @@ impl KeelWindow {
                     }
                     Err(err) => {
                         if let Some(name) = err.strip_prefix("exists:").map(str::to_string) {
+                            this.skills.confirm_gen += 1;
+                            this.skills.confirm_leaving = None;
                             this.skills.confirm = Some(SkillConfirm::Replace { source, dest, name });
                         } else {
                             this.skills.notice = Some(err);
@@ -3594,7 +3829,7 @@ impl KeelWindow {
 }
 
 /// Section title with subtitle.
-fn section_header(
+pub(super) fn section_header(
     title: &'static str,
     blurb: &'static str,
     action: Option<AnyElement>,
@@ -3624,13 +3859,888 @@ fn section_header(
         .children(action)
 }
 
+/// Settings → Memory: the home row, the drill-in, and the edit modal.
+impl KeelWindow {
+    pub(super) fn load_memory(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.memory.load_gen += 1;
+        let ticket = self.memory.load_gen;
+        let cwd = self.mention_root();
+        cx.spawn(async move |this, cx| {
+            let res = client
+                .call("memory_list", serde_json::json!({ "cwd": cwd }))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.memory.load_gen != ticket {
+                    return;
+                }
+                this.memory.cwd = cwd;
+                match res {
+                    Ok(v) => {
+                        this.memory.user =
+                            Some(Ok(MemoryScopeView::parse(&v["user"]).unwrap_or_default()));
+                        this.memory.project = Some(Ok(MemoryScopeView::parse(&v["project"])));
+                    }
+                    Err(err) => {
+                        this.memory.user = Some(Err(err.clone()));
+                        this.memory.project = Some(Err(err));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_memory_entry(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        let count = match &self.memory.user {
+            Some(Ok(scope)) if scope.indexed() == 0 => "None yet".to_string(),
+            Some(Ok(scope)) => scope.indexed().to_string(),
+            _ => String::new(),
+        };
+        div()
+            .id("memory-open-row")
+            .relative()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .rounded(RADIUS_MD)
+            .cursor_pointer()
+            .hover_fade_outset(c(t.hover), Some(c(t.selected)), zpx(8.), zpx(6.))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_memory(cx)))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(zpx(15.))
+                            .line_height(zpx(20.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(t.text))
+                            .child("Memory"),
+                    )
+                    .child(
+                        div()
+                            .t_small()
+                            .text_color(c(t.text_muted))
+                            .child("Notes the agent keeps across chats"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .t_small()
+                    .text_color(c(t.text_muted))
+                    .child(count)
+                    .child(
+                        Icon::ChevronDown
+                            .el(zpx(14.))
+                            .text_color(c(t.text_faint))
+                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                -std::f32::consts::FRAC_PI_2,
+                            ))),
+                    ),
+            )
+    }
+
+    pub(super) fn open_memory(&mut self, cx: &mut Context<Self>) {
+        if self.memory.open {
+            return;
+        }
+        self.memory.epoch = self.memory.epoch.wrapping_add(1);
+        let n = self.memory.epoch;
+        self.memory.open = true;
+        self.memory.modal = None;
+        self.memory.modal_leaving = None;
+        self.memory.confirm = None;
+        self.memory.error = None;
+        self.memory
+            .scroll
+            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+        if self.reduced() {
+            self.memory.transition = None;
+        } else {
+            self.memory.transition = Some((n, false));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(180))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.memory.transition == Some((n, false)) {
+                        this.memory.transition = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        self.load_memory(cx);
+        cx.notify();
+    }
+
+    fn close_memory(&mut self, cx: &mut Context<Self>) {
+        if !self.memory.open {
+            return;
+        }
+        self.memory.open = false;
+        self.memory.modal = None;
+        self.memory.modal_leaving = None;
+        self.memory.confirm = None;
+        if self.reduced() {
+            self.memory.transition = None;
+            cx.notify();
+            return;
+        }
+        self.memory.epoch = self.memory.epoch.wrapping_add(1);
+        let n = self.memory.epoch;
+        self.memory.transition = Some((n, true));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(160))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.memory.transition == Some((n, true)) {
+                    this.memory.transition = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Settings stays mounted underneath, same crossfade and slide as Skills.
+    fn render_memory_drill(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui::AnimationExt as _;
+        let reduced = self.reduced();
+        let (epoch, leaving) = self.memory.transition.unwrap_or((0, false));
+        let duration = if reduced {
+            std::time::Duration::from_millis(1)
+        } else if leaving {
+            std::time::Duration::from_millis(160)
+        } else {
+            std::time::Duration::from_millis(180)
+        };
+        let home = self.render_settings_home(t, cx).into_any_element();
+        let page = self.render_memory_page(t, cx).into_any_element();
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .overflow_hidden()
+            .child(
+                div().absolute().inset_0().child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(home)
+                        .with_animation(
+                            ("memory-drill-parent", epoch as usize),
+                            gpui::Animation::new(duration).with_easing(crate::motion::ease_out),
+                            move |el, delta| {
+                                if leaving {
+                                    el.opacity(delta).relative().left(zpx(-12. * (1. - delta)))
+                                } else {
+                                    el.opacity(1. - delta).relative().left(zpx(-12. * delta))
+                                }
+                            },
+                        ),
+                ),
+            )
+            .child(
+                div().absolute().inset_0().overflow_hidden().child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .bg(c(t.window))
+                        .child(page)
+                        .with_animation(
+                            ("memory-drill-child", epoch as usize),
+                            gpui::Animation::new(duration).with_easing(crate::motion::ease_out),
+                            move |el, delta| {
+                                if leaving {
+                                    el.opacity(1. - delta).relative().left(zpx(16. * delta))
+                                } else {
+                                    el.opacity(delta).relative().left(zpx(16. * (1. - delta)))
+                                }
+                            },
+                        ),
+                ),
+            )
+    }
+
+    fn render_memory_page(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = self.render_memory_body(t, cx);
+        let modal = self.render_memory_modal(t, cx);
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .id("memory-scroll")
+                    .track_scroll(&self.memory.scroll)
+                    .w_full()
+                    .max_w(TRANSCRIPT_MAX_WIDTH)
+                    .h_full()
+                    .overflow_y_scroll()
+                    .px_8()
+                    .pt_6()
+                    .pb_8()
+                    .flex()
+                    .flex_col()
+                    .child(body),
+            )
+            .children(modal)
+    }
+
+    fn render_memory_body(&mut self, t: Tokens, cx: &mut Context<Self>) -> gpui::Div {
+        let reduced = self.reduced();
+        let tab = self.memory.tab;
+        let header = div()
+            .flex()
+            .flex_col()
+            .child(
+                div().flex().flex_row().items_center().pb_4().child(
+                    div()
+                        .id("memory-back-btn")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .py_1()
+                        .pr_1()
+                        .rounded(RADIUS_MD)
+                        .t_small()
+                        .text_color(c(t.text_muted))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(c(t.text)))
+                        .active(|s| s.opacity(0.65))
+                        .child(Icon::Back.el(zpx(14.)))
+                        .child("Settings")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_memory(cx))),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .justify_between()
+                    .gap_4()
+                    .pb_3()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(zpx(20.))
+                                    .line_height(zpx(26.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(c(t.text))
+                                    .child("Memory"),
+                            )
+                            .child(div().t_small().text_color(c(t.text_muted)).child(
+                                "Notes the agent writes for later chats. Edit, archive, or delete them here.",
+                            )),
+                    )
+                    .child(self.render_segmented_control(
+                        "memory-scope",
+                        &[("You", MemoryTab::You), ("This project", MemoryTab::Project)],
+                        tab,
+                        96.0,
+                        t,
+                        cx,
+                        |this, tab, _| {
+                            if this.memory.tab != tab {
+                                this.memory.tab = tab;
+                                this.memory.list_epoch = this.memory.list_epoch.wrapping_add(1);
+                            }
+                        },
+                    )),
+            );
+
+        let muted_line = |text: &'static str| {
+            div()
+                .py_3()
+                .t_body()
+                .text_color(c(t.text_muted))
+                .child(text)
+        };
+        let scope: Result<Option<MemoryScopeView>, String> = match tab {
+            MemoryTab::You => match &self.memory.user {
+                None => return div().flex().flex_col().child(header),
+                Some(Ok(s)) => Ok(Some(s.clone())),
+                Some(Err(e)) => Err(e.clone()),
+            },
+            MemoryTab::Project => match &self.memory.project {
+                None => return div().flex().flex_col().child(header),
+                Some(Ok(s)) => Ok(s.clone()),
+                Some(Err(e)) => Err(e.clone()),
+            },
+        };
+        let content: gpui::AnyElement = match scope {
+            Err(err) => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .py_2()
+                .child(
+                    div()
+                        .t_body()
+                        .text_color(c(t.text))
+                        .child("Couldn't read memory."),
+                )
+                .child(div().t_small().text_color(c(t.danger)).child(err))
+                .child(text_button("memory-retry", "Retry", t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.load_memory(cx)),
+                ))
+                .into_any_element(),
+            Ok(None) => muted_line("Open a chat that has a folder to see its project notes.")
+                .into_any_element(),
+            Ok(Some(scope)) if scope.notes.is_empty() => {
+                muted_line("None yet.").into_any_element()
+            }
+            Ok(Some(scope)) => {
+                let mut list = div().flex().flex_col().gap_0p5();
+                if scope.truncated {
+                    list = list.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .pb_2()
+                            .t_small()
+                            .text_color(c(t.warning))
+                            .child(Icon::Alert.el(zpx(12.)))
+                            .child("The index is over the cap. Later chats will not see every line."),
+                    );
+                }
+                for note in scope.notes {
+                    list = list.child(self.render_memory_row(tab, note, t, cx));
+                }
+                crate::motion::appear(
+                    list,
+                    ("memory-list-in", self.memory.list_epoch as usize),
+                    crate::motion::BASE,
+                    4.,
+                    reduced,
+                )
+                .into_any_element()
+            }
+        };
+        div().flex().flex_col().child(header).child(content)
+    }
+
+    fn render_memory_row(
+        &mut self,
+        tab: MemoryTab,
+        note: MemoryNote,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tag = |text: String, mono: bool| {
+            div()
+                .flex_none()
+                .px_1p5()
+                .h(zpx(18.))
+                .flex()
+                .items_center()
+                .rounded(RADIUS_SM)
+                .bg(c(t.input))
+                .text_size(zpx(11.5))
+                .text_color(c(t.text_muted))
+                .when(mono, |d| d.font_family(MONO))
+                .child(text)
+        };
+        let description = if note.description.is_empty() {
+            note.slug.clone()
+        } else {
+            note.description.clone()
+        };
+        let open = note.clone();
+        div()
+            .id(ElementId::Name(format!("memory-row-{}-{}", tab.scope(), note.slug).into()))
+            .w_full()
+            .h(zpx(40.))
+            .px_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .rounded(RADIUS_MD)
+            .cursor_pointer()
+            .hover_fade(c(t.hover), None)
+            .active(|s| s.opacity(0.8))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.open_memory_note(tab, open.clone(), window, cx)
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .t_body()
+                    .text_color(c(if note.unindexed { t.text_muted } else { t.text }))
+                    .child(description),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .when(note.unindexed, |d| d.child(tag("Unindexed".into(), false)))
+                    .when(!note.kind.is_empty(), |d| d.child(tag(note.kind.clone(), false)))
+                    .child(tag(note.slug.clone(), true)),
+            )
+    }
+
+    fn open_memory_note(
+        &mut self,
+        tab: MemoryTab,
+        note: MemoryNote,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.memory.modal_gen = self.memory.modal_gen.wrapping_add(1);
+        let generation = self.memory.modal_gen;
+        let cwd = self.memory.cwd.clone();
+        self.memory.modal = Some(MemoryOpen {
+            tab,
+            cwd: cwd.clone(),
+            note: note.clone(),
+            loaded: None,
+        });
+        self.memory.modal_leaving = None;
+        self.memory.confirm = None;
+        self.memory.error = None;
+        self.memory.busy = false;
+        self.memory
+            .modal_scroll
+            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+        let description = note.description.clone();
+        self.memory_desc
+            .update(cx, |i, cx| i.set_value(description, window, cx));
+        self.memory_body.update(cx, |i, cx| i.set_value("", window, cx));
+        let params = serde_json::json!({ "scope": tab.scope(), "slug": note.slug, "cwd": cwd });
+        cx.spawn_in(window, async move |this, cx| {
+            let res = client.call("memory_read", params).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(open) = this.memory.modal.as_mut() else {
+                    return;
+                };
+                if this.memory.modal_gen != generation {
+                    return;
+                }
+                match res {
+                    Ok(v) => {
+                        open.loaded = Some(Ok(()));
+                        let body = v["body"].as_str().unwrap_or_default().to_string();
+                        this.memory_body
+                            .update(cx, |i, cx| i.set_value(body, window, cx));
+                    }
+                    Err(err) => open.loaded = Some(Err(err)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn dismiss_memory_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.memory.modal.take() else {
+            return;
+        };
+        self.memory.confirm = None;
+        self.memory.error = None;
+        if self.reduced() {
+            self.memory.modal_leaving = None;
+            cx.notify();
+            return;
+        }
+        let generation = self.memory.modal_gen;
+        self.memory.modal_leaving = Some((generation, open));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::motion::FAST).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.memory.modal_leaving.as_ref().map(|(n, _)| *n) == Some(generation) {
+                    this.memory.modal_leaving = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Save, archive or delete the open note; reloads the list on success.
+    fn memory_modal_action(&mut self, action: Option<MemoryConfirm>, cx: &mut Context<Self>) {
+        let (Some(client), Some(open)) = (self.client.clone(), self.memory.modal.clone()) else {
+            return;
+        };
+        if self.memory.busy {
+            return;
+        }
+        let note = &open.note;
+        let scope = open.tab.scope();
+        let (method, params) = match action {
+            None => (
+                "memory_write",
+                serde_json::json!({
+                    "scope": scope,
+                    "action": "upsert",
+                    "slug": note.slug,
+                    "type": note.kind,
+                    "description": self.memory_desc.read(cx).value().trim().to_string(),
+                    "body": self.memory_body.read(cx).value().to_string(),
+                    "cwd": open.cwd,
+                }),
+            ),
+            Some(MemoryConfirm::Archive) => (
+                "memory_write",
+                serde_json::json!({ "scope": scope, "action": "archive", "slug": note.slug, "cwd": open.cwd }),
+            ),
+            Some(MemoryConfirm::Delete) => (
+                "memory_delete",
+                serde_json::json!({ "scope": scope, "slug": note.slug, "cwd": open.cwd }),
+            ),
+        };
+        self.memory.busy = true;
+        self.memory.error = None;
+        let generation = self.memory.modal_gen;
+        cx.spawn(async move |this, cx| {
+            let res = client.call(method, params).await;
+            let _ = this.update(cx, |this, cx| {
+                this.memory.busy = false;
+                if this.memory.modal_gen != generation || this.memory.modal.is_none() {
+                    return;
+                }
+                match res {
+                    Ok(_) => {
+                        this.dismiss_memory_modal(cx);
+                        this.load_memory(cx);
+                    }
+                    Err(err) => {
+                        this.memory.confirm = None;
+                        this.memory.error = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_memory_modal(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (open, leaving, modal_gen) = match (&self.memory.modal, &self.memory.modal_leaving) {
+            (Some(o), _) => (o.clone(), false, self.memory.modal_gen),
+            (None, Some((n, o))) => (o.clone(), true, *n),
+            _ => return None,
+        };
+        let reduced = self.reduced();
+        let note = open.note.clone();
+        let busy = self.memory.busy;
+        let confirm = self.memory.confirm;
+        let field = |label: &'static str| {
+            div()
+                .t_small()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(c(t.text_muted))
+                .child(label)
+        };
+        let input_box = || {
+            div()
+                .w_full()
+                .px_2p5()
+                .py_1p5()
+                .rounded(RADIUS_MD)
+                .bg(c(t.input))
+                .border_1()
+                .border_color(c(t.border))
+                .t_body()
+                .text_color(c(t.text))
+        };
+        let tag = |text: String, mono: bool| {
+            div()
+                .flex_none()
+                .px_1p5()
+                .h(zpx(18.))
+                .flex()
+                .items_center()
+                .rounded(RADIUS_SM)
+                .bg(c(t.input))
+                .text_size(zpx(11.5))
+                .text_color(c(t.text_muted))
+                .when(mono, |d| d.font_family(MONO))
+                .child(text)
+        };
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_5()
+            .py_3()
+            .border_b_1()
+            .border_color(c(t.border))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(zpx(15.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(t.text))
+                            .child("Edit note"),
+                    )
+                    .when(note.unindexed, |d| d.child(tag("Unindexed".into(), false)))
+                    .when(!note.kind.is_empty(), |d| d.child(tag(note.kind.clone(), false)))
+                    .child(tag(note.slug.clone(), true)),
+            )
+            .child(
+                div()
+                    .id("memory-modal-close-x")
+                    .size(zpx(26.))
+                    .rounded(RADIUS_SM)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(c(t.text_muted))
+                    .hover(|s| s.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
+                    .active(|s| s.opacity(0.7))
+                    .child(Icon::Close.el(zpx(14.)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.dismiss_memory_modal(cx)
+                    })),
+            );
+
+        let loading = open.loaded.is_none();
+        let read_error = open.loaded.clone().and_then(|r| r.err());
+        let body = div()
+            .id("memory-modal-scroll")
+            .track_scroll(&self.memory.modal_scroll)
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_4()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(field("Description"))
+            .child(input_box().child(self.memory_desc.clone()))
+            .child(div().h(zpx(8.)))
+            .child(field("Body"))
+            .child(
+                input_box()
+                    .min_h(zpx(160.))
+                    .when(loading, |d| d.opacity(0.6))
+                    .child(self.memory_body.clone()),
+            )
+            .when_some(read_error, |d, err| {
+                d.child(
+                    div()
+                        .t_small()
+                        .text_color(c(t.danger))
+                        .child(format!("Couldn't read this note. {err}")),
+                )
+            })
+            .when_some(self.memory.error.clone(), |d, err| {
+                d.child(div().t_small().text_color(c(t.danger)).child(err))
+            });
+
+        let left = match confirm {
+            Some(kind) => {
+                let (question, action) = match kind {
+                    MemoryConfirm::Archive => ("Archive this note? Later chats will not see it.", "Archive"),
+                    MemoryConfirm::Delete => ("Delete this note? The file is removed.", "Delete"),
+                };
+                crate::motion::appear(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(div().t_small().text_color(c(t.text)).child(question))
+                        .child(row_text("memory-confirm-go", action, t.danger, t).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.memory_modal_action(Some(kind), cx)
+                            }),
+                        ))
+                        .child(text_button("memory-confirm-cancel", "Cancel", t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.memory.confirm = None;
+                                cx.notify();
+                            }),
+                        )),
+                    ("memory-confirm-in", self.memory.confirm_gen as usize),
+                    crate::motion::FAST,
+                    4.,
+                    reduced,
+                )
+                .into_any_element()
+            }
+            None => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .when(!note.unindexed, |d| {
+                    d.child(row_text("memory-archive", "Archive", t.text_muted, t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.memory.confirm = Some(MemoryConfirm::Archive);
+                            this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
+                            cx.notify();
+                        }),
+                    ))
+                })
+                .child(row_text("memory-delete", "Delete", t.danger, t).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| {
+                        this.memory.confirm = Some(MemoryConfirm::Delete);
+                        this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
+                        cx.notify();
+                    },
+                )))
+                .into_any_element(),
+        };
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_5()
+            .py_3()
+            .border_t_1()
+            .border_color(c(t.border))
+            .child(left)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(text_button("memory-cancel", "Cancel", t).on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx),
+                    )))
+                    .child(
+                        filled_button("memory-save", "Save", t.accent, t)
+                            .when(busy || loading, |d| d.opacity(0.6))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if !loading {
+                                    this.memory_modal_action(None, cx)
+                                }
+                            })),
+                    ),
+            );
+
+        let card = div()
+            .id(("memory-modal-card", modal_gen as usize))
+            .w(zpx(640.))
+            .max_w(gpui::relative(0.92))
+            .max_h(gpui::relative(0.85))
+            .rounded(crate::style::RADIUS_LG)
+            .bg(c(t.surface))
+            .border_1()
+            .border_color(c(t.border))
+            .floating_surface(t)
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+            .child(header)
+            .child(body)
+            .child(footer);
+        let card = if leaving {
+            crate::motion::dismiss(card, ("memory-modal-out", modal_gen as usize), reduced)
+        } else {
+            crate::motion::appear(
+                card,
+                ("memory-modal-in", modal_gen as usize),
+                crate::motion::BASE,
+                10.,
+                reduced,
+            )
+            .into_any_element()
+        };
+        let scrim = div()
+            .id(("memory-modal-scrim", modal_gen as usize))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui::rgba(0x00000080))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)))
+            .child(card);
+        let scrim = if reduced {
+            scrim.into_any_element()
+        } else if leaving {
+            scrim
+                .with_animation(
+                    ("memory-scrim-out", modal_gen as usize),
+                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(1.0 - delta),
+                )
+                .into_any_element()
+        } else {
+            scrim
+                .with_animation(
+                    ("memory-scrim-in", modal_gen as usize),
+                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(delta),
+                )
+                .into_any_element()
+        };
+        Some(gpui::deferred(scrim).with_priority(3).into_any_element())
+    }
+}
+
 /// 1px rule with 32px vertical margin separating major sections.
 fn section_divider(t: Tokens) -> gpui::Div {
     div().h(gpui::px(1.)).w_full().bg(c(t.border)).my_8()
 }
 
 /// Settings list container that places a 1px hairline divider between rows.
-fn settings_list(rows: Vec<gpui::Div>, t: Tokens) -> gpui::Div {
+pub(super) fn settings_list(rows: Vec<gpui::Div>, t: Tokens) -> gpui::Div {
     div().flex().flex_col().children(
         rows.into_iter()
             .enumerate()
@@ -3639,7 +4749,7 @@ fn settings_list(rows: Vec<gpui::Div>, t: Tokens) -> gpui::Div {
 }
 
 /// A setting: its label (and an explanation) on the left, the control on the right.
-fn setting_row(
+pub(super) fn setting_row(
     t: Tokens,
     label: &'static str,
     caption: Option<&'static str>,
@@ -3674,12 +4784,7 @@ fn setting_row(
 }
 
 /// Filter pill for creators.
-fn creator_pill(
-    id: String,
-    label: String,
-    selected: bool,
-    t: Tokens,
-) -> gpui::Stateful<gpui::Div> {
+fn creator_pill(id: String, label: String, selected: bool, t: Tokens) -> gpui::Stateful<gpui::Div> {
     div()
         .id(ElementId::Name(id.into()))
         .px_2p5()
@@ -3702,11 +4807,8 @@ fn creator_pill(
                 d.bg(c(t.hover).opacity(0.35))
                     .border_color(c(t.border).opacity(0.45))
                     .text_color(c(t.text_muted))
-                    .hover(|s| {
-                        s.bg(c(t.hover))
-                            .border_color(c(t.border))
-                            .text_color(c(t.text))
-                    })
+                    .hover(|s| s.border_color(c(t.border)).text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
                     .active(|s| s.opacity(0.75))
             }
         })
@@ -3875,7 +4977,7 @@ fn row_text(
         .t_small()
         .text_color(c(color))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)))
+        .hover_fade(c(t.hover), None)
         .child(label)
 }
 
@@ -3943,7 +5045,7 @@ fn field(t: Tokens, label: &'static str, input: AnyElement) -> gpui::Div {
 /// knob slides across, stretching mid-travel with asymmetric leading/trailing edge
 /// morphology, while the track and knob colors blend to their new state with
 /// Emil Kowalski motion physics.
-fn toggle(id: String, on: bool, flip: Option<u64>, t: Tokens) -> gpui::Stateful<gpui::Div> {
+pub(super) fn toggle(id: String, on: bool, flip: Option<u64>, t: Tokens) -> gpui::Stateful<gpui::Div> {
     use gpui::AnimationExt as _;
     const TRAVEL: f32 = 12.;
     const KNOB: f32 = 14.;
@@ -4026,8 +5128,11 @@ fn toggle(id: String, on: bool, flip: Option<u64>, t: Tokens) -> gpui::Stateful<
     div()
         .id(ElementId::Name(id.into()))
         .flex_none()
+        .rounded_full()
         .cursor_pointer()
         .child(body)
+        // After the track, so the tint washes over it.
+        .hover_fade(c(t.hover), Some(c(t.selected)))
 }
 
 /// Blend two `0xRRGGBBAA` colors, `at` 0 → `from`, 1 → `to`.
@@ -4061,11 +5166,7 @@ fn render_sound_preview_btn(
         } else {
             crate::motion::ease_out(progress)
         };
-        let play_ratio = if is_playing {
-            curve
-        } else {
-            1.0 - curve
-        };
+        let play_ratio = if is_playing { curve } else { 1.0 - curve };
 
         // Smooth color interpolation between idle and playing states
         let accent_fill = (t.accent & 0xFFFFFF00) | 0x22;
@@ -4091,12 +5192,7 @@ fn render_sound_preview_btn(
             .opacity(idle_opacity)
             .top(zpx(idle_top))
             .child(Icon::Play.el(zpx(10.)).text_color(c(text_color)))
-            .child(
-                div()
-                    .t_small()
-                    .text_color(c(text_color))
-                    .child("Preview"),
-            );
+            .child(div().t_small().text_color(c(text_color)).child("Preview"));
 
         let playing_layer = div()
             .absolute()
@@ -4109,12 +5205,7 @@ fn render_sound_preview_btn(
             .opacity(playing_opacity)
             .top(zpx(playing_top))
             .child(Icon::Volume2.el(zpx(12.)).text_color(c(text_color)))
-            .child(
-                div()
-                    .t_small()
-                    .text_color(c(text_color))
-                    .child("Playing…"),
-            );
+            .child(div().t_small().text_color(c(text_color)).child("Playing…"));
 
         div()
             .w(zpx(88.))
@@ -4170,7 +5261,7 @@ fn filled_button_owned(id: String, label: &'static str, t: Tokens) -> gpui::Stat
 }
 
 /// `text_button` with a runtime id.
-fn text_button_owned(id: String, label: &'static str, t: Tokens) -> gpui::Stateful<gpui::Div> {
+pub(super) fn text_button_owned(id: String, label: &'static str, t: Tokens) -> gpui::Stateful<gpui::Div> {
     div()
         .id(ElementId::Name(id.into()))
         .px_2p5()
@@ -4180,7 +5271,7 @@ fn text_button_owned(id: String, label: &'static str, t: Tokens) -> gpui::Statef
         .t_small()
         .text_color(c(t.accent))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)))
+        .hover_fade(c(t.hover), None)
         .child(label)
 }
 

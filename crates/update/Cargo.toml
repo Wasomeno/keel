@@ -1,0 +1,21 @@
+[package]
+name = "keel-update"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# The macOS in-app updater (UPDATER.md): manifest, archive checks, bundle
+# gate, download and verify, stage, install. No UI; the window drives it.
+[dependencies]
+libc.workspace = true
+minisign-verify.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+minisign = "0.10"

@@ -6,6 +6,7 @@
 //! the view's motion ticker repaints while any of those windows is open. No
 //! `with_animation`, so nothing nests and nothing repeats on its own.
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use gpui::{
     AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, prelude::FluentBuilder,
@@ -26,7 +27,8 @@ pub const LINE_H: f32 = 26.;
 pub const INSET: f32 = 8.;
 /// Expand / collapse / line entry, ms.
 pub const OPEN_MS: f32 = 220.;
-pub const CLOSE_MS: f32 = 220.;
+/// Closing is quicker than opening.
+pub const CLOSE_MS: f32 = 160.;
 /// A live line arriving: fade and a 5 px rise on (0.2, 0.8, 0.2, 1), while
 /// its height glides open so what's below slides rather than jumps.
 pub const ENTER_MS: f32 = 220.;
@@ -109,11 +111,11 @@ impl Fold {
                 chevron: h,
             }
         } else {
-            let h = 1. - ease_in_out(progress(ms, CLOSE_MS));
+            let h = 1. - ease_out(progress(ms, CLOSE_MS));
             Self {
                 open,
                 height: h,
-                opacity: (1. - ease_in_out(progress(ms, CLOSE_MS))).powf(1.2),
+                opacity: (1. - ease_out(progress(ms, CLOSE_MS * 0.8))).powf(1.2),
                 chevron: h,
             }
         }
@@ -628,14 +630,13 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         .items_center()
         .gap(zpx(8.))
         .rounded(RADIUS_MD)
+        .when(expandable, |d| d.hover_fade(c(t.hover), Some(c(t.selected))))
         .child(icon)
         .child(title)
         .children(desc)
         .children(chevron)
         .when(expandable, |d| {
             d.cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)))
-                .active(|s| s.bg(c(t.selected)))
                 .on_click(move |_, _, cx| {
                     let row_id = if row_toggle {
                         line_id.clone()
@@ -993,7 +994,8 @@ fn browser_body(
             .cursor_pointer()
             .t_caption()
             .text_color(c(t.text_faint))
-            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text_muted)))
+            .hover(|s| s.text_color(c(t.text_muted)))
+            .hover_fade(c(t.hover), None)
             .child(Icon::ChevronDown.el(zpx(10.)).with_transformation(
                 gpui::Transformation::rotate(gpui::radians(
                     -std::f32::consts::FRAC_PI_2 * (1. - fold.chevron),
@@ -1339,7 +1341,7 @@ pub fn render_turn_summary(
                 .gap(zpx(6.))
                 .rounded(crate::style::RADIUS_SM)
                 .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)))
+                .hover_fade(c(t.hover), None)
                 .active(|s| s.opacity(0.75))
                 .on_click(move |_, _, cx| {
                     on_action(
@@ -1425,12 +1427,13 @@ pub fn render_subagent(
     div().w_full().ml(zpx(-INSET)).child(
         div()
             .id(ElementId::Name(format!("subagent-{id}").into()))
+            .hover_probe(group.clone())
             .group(group.clone())
             .relative()
             .w_full()
             .rounded(RADIUS_MD)
             .cursor_pointer()
-            .hover(|s| s.bg(c(t.hover)))
+            .hover_fade(c(t.hover), None)
             .on_click(move |_, _, cx| {
                 on_action(
                     RowAction::OpenSubagent {
@@ -1440,7 +1443,7 @@ pub fn render_subagent(
                 )
             })
             .child(line)
-            .child(
+            .child(reveal_on_hover("external-reveal", group, 0., 1.,
                 div()
                     .absolute()
                     .top_0()
@@ -1449,10 +1452,7 @@ pub fn render_subagent(
                     .flex()
                     .items_center()
                     .text_color(c(t.text_faint))
-                    .opacity(0.)
-                    .group_hover(group, |s| s.opacity(1.))
-                    .child(Icon::External.el(zpx(12.))),
-            ),
+                    .child(Icon::External.el(zpx(12.))))),
     )
 }
 
@@ -1504,8 +1504,8 @@ mod tests {
         assert!(Fold::at(true, Some(OPEN_MS), false).settled());
         let closing = Fold::at(false, Some(CLOSE_MS / 2.), false);
         assert!(
-            closing.height > 0.3 && closing.height < 0.7,
-            "in-out is near half at half time: {}",
+            closing.height > 0.05 && closing.height < 0.3,
+            "ease-out is mostly closed at half time: {}",
             closing.height
         );
         assert!(Fold::at(false, Some(CLOSE_MS), false).settled());

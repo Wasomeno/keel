@@ -207,6 +207,7 @@ impl KeelWindow {
                 true
             }
             "escape" => {
+                self.menus_cut = true;
                 self.set_picker(None, cx);
                 self.composer.update(cx, |s, cx| s.focus(window, cx));
                 true
@@ -300,16 +301,8 @@ impl KeelWindow {
             self.model_menu.reveal = Some(false);
             self.model_menu.scroll.set_offset(point(px(0.), px(0.)));
         }
-        // A fixed header: the search, then a hairline the list scrolls under.
-        let mut search = vec![
-            self.picker_search_box(Icon::Search, t),
-            div()
-                .flex_none()
-                .mx(zpx(-4.))
-                .h(zpx(1.))
-                .bg(c(t.border))
-                .into_any_element(),
-        ];
+        // A fixed header: the search, whose own hairline the list scrolls under.
+        let mut search = vec![self.picker_search_box(Icon::Search, t)];
         search.append(&mut items);
         let mut items = search;
 

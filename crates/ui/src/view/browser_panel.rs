@@ -12,10 +12,11 @@
 #[path = "browser_agent.rs"]
 mod agent;
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle,
+    Animation, AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle,
     Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Window, div, prelude::*, px, relative,
 };
@@ -26,7 +27,7 @@ use super::{KeelWindow, icon_button};
 use crate::browser::agent::ConsoleLog;
 use crate::browser::{PageState, normalize_address};
 use crate::icons::Icon;
-use crate::motion::{BASE, SLOW, SPATIAL, ease_in, ease_out};
+use crate::motion::{BASE, FAST, SLOW, SPATIAL, SPIN, ease_in, ease_out, ease_out_strong};
 use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_LG, RADIUS_MD, c, zpx};
 use agent::AgentTab;
 
@@ -55,6 +56,9 @@ pub(super) struct BrowserPanel {
     /// Pointer offset from the pane's left edge at grab, so the edge
     /// doesn't jump onto the cursor.
     resize_grab: f32,
+    /// `width` when the edge was grabbed. A drag that ends there does not
+    /// flash the settle line.
+    resize_from: Option<f32>,
     /// Grown over the whole window.
     pub(super) expanded: bool,
     pub(super) expand_from: f32,
@@ -108,6 +112,9 @@ pub(super) struct BrowserTab {
     agent: Option<AgentTab>,
     /// Console messages and page errors (`browser_console`).
     console: ConsoleLog,
+    /// Settle line while the page bitmap catches the pane. Generation, and
+    /// when the fade-out started (`None` while the paint is still due).
+    layout_line: Option<(u64, Option<Instant>)>,
 }
 
 impl BrowserTab {
@@ -128,6 +135,7 @@ impl BrowserTab {
             park_seq: None,
             agent: None,
             console: ConsoleLog::default(),
+            layout_line: None,
         }
     }
 
@@ -217,6 +225,7 @@ impl BrowserPanel {
             width: None,
             resizing: false,
             resize_grab: 0.,
+            resize_from: None,
             expanded: false,
             expand_from: 0.,
             expand_anim: None,
@@ -997,6 +1006,7 @@ impl KeelWindow {
         let viewport = f32::from(window.viewport_size().width);
         let edge = viewport - self.browser_width(window);
         self.browser.resize_grab = x - edge;
+        self.browser.resize_from = self.browser.width;
         self.browser.resizing = true;
         if let Some(page) = self.browser.active_native_page() {
             page.set_resizing(true);
@@ -1007,9 +1017,15 @@ impl KeelWindow {
         if !self.browser.resizing {
             return;
         }
+        let changed = self.browser.width != self.browser.resize_from;
         self.browser.resizing = false;
         if let Some(page) = self.browser.active_native_page() {
             page.set_resizing(false);
+            // The bitmap was scaled for the drag. Ask for one reflow now,
+            // and keep the settle line up until that paint (not during the drag).
+            if changed {
+                page.arm_layout();
+            }
         }
     }
 
@@ -1037,6 +1053,7 @@ impl KeelWindow {
             for tab in &b.tabs {
                 if let Some(page) = &tab.native {
                     page.set_resizing(false);
+                    page.arm_layout();
                 }
             }
             cx.notify();
@@ -1061,6 +1078,7 @@ impl KeelWindow {
                     for tab in &this.browser.tabs {
                         if let Some(page) = &tab.native {
                             page.set_resizing(false);
+                            page.arm_layout();
                         }
                     }
                     cx.notify();
@@ -1240,7 +1258,11 @@ impl KeelWindow {
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     if event.click_count >= 2 {
+                        let changed = this.browser.width.is_some();
                         this.browser.width = None;
+                        if changed && let Some(page) = this.browser.active_native_page() {
+                            page.arm_layout();
+                        }
                     } else {
                         this.begin_browser_resize(f32::from(event.position.x), window);
                     }
@@ -1255,6 +1277,7 @@ impl KeelWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        self.note_layout_line(cx);
         let page = &self.browser.tab().page;
         let has_page = page.url.is_some();
         let nav = |id: &'static str, icon: Icon, enabled: bool| {
@@ -1376,7 +1399,8 @@ impl KeelWindow {
                         .when(!has_page, |b| b.opacity(0.35).cursor_default())
                         .when(has_page, |b| {
                             b.cursor_pointer()
-                                .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
+                                .hover(|s| s.text_color(c(t.danger)))
+                                .hover_fade(c(t.hover), None)
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.end_browser_session(window, cx)
                                 }))
@@ -1420,7 +1444,112 @@ impl KeelWindow {
                 cx,
             ))
             .children(self.render_browser_bar(t))
+            .children(self.render_layout_line(t))
             .children(self.render_browser_tip(t, window))
+    }
+
+    fn page_geometry_pending(&self) -> bool {
+        let tab = self.browser.tab();
+        let has_page = tab.page.url.is_some() && tab.error.is_none() && tab.native.is_some();
+        let loading = tab.page.loading || tab.bar_done;
+        let paint_due = tab
+            .native
+            .as_ref()
+            .is_some_and(|page| page.layout_pending());
+        geometry_line(has_page, loading, paint_due)
+    }
+
+    /// Arm or retire the settle line. The fade-out is one [`FAST`] pass;
+    /// a new wait during it starts a fresh line.
+    fn note_layout_line(&mut self, cx: &mut Context<Self>) {
+        let pending = self.page_geometry_pending();
+        let reduced = self.reduced();
+        let tab_id = self.browser.tab().id;
+        let line = &mut self.browser.tab_mut().layout_line;
+        if pending {
+            let restart = line.as_ref().is_none_or(|(_, leave)| leave.is_some());
+            if restart {
+                let n = line.map(|(n, _)| n.saturating_add(1)).unwrap_or(1);
+                *line = Some((n, None));
+            }
+            return;
+        }
+        let Some((n, None)) = *line else {
+            return;
+        };
+        // Reduced motion keeps the mark and drops the fade: the line goes
+        // when the paint does.
+        if reduced {
+            *line = None;
+            return;
+        }
+        *line = Some((n, Some(Instant::now())));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FAST).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(tab) = this.browser.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                    return;
+                };
+                if tab
+                    .layout_line
+                    .is_some_and(|(generation, leave)| generation == n && leave.is_some())
+                {
+                    tab.layout_line = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A 2px accent segment under the toolbar, the same mark as the load
+    /// bar, while the page reflows to the pane. It sweeps until the paint
+    /// at the new size arrives, then fades. Reduced motion keeps a static
+    /// segment and removes it with the paint.
+    fn render_layout_line(&self, t: Tokens) -> Option<AnyElement> {
+        let (n, leaving) = self.browser.tab().layout_line?;
+        let reduced = self.reduced();
+        let segment = div()
+            .absolute()
+            .top_0()
+            .h_full()
+            .w(relative(0.28))
+            .rounded_r(px(1.))
+            .bg(c(t.accent));
+        // Divs have no translate. `left` on this one clipped bar is the
+        // sweep the skeleton already uses. Linear: the motion is constant
+        // for as long as the paint takes.
+        let segment = if reduced {
+            segment.left_0().into_any_element()
+        } else {
+            segment
+                .with_animation(
+                    ElementId::Name(format!("browser-settle-sweep-{n}").into()),
+                    Animation::new(SPIN).repeat(),
+                    |el, d| el.left(relative(0.72 * d)),
+                )
+                .into_any_element()
+        };
+        let track = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(2.))
+            .overflow_hidden()
+            .child(segment);
+        if reduced || leaving.is_none() {
+            return Some(track.into_any_element());
+        }
+        Some(
+            track
+                .with_animation(
+                    ElementId::Name(format!("browser-settle-out-{n}").into()),
+                    Animation::new(FAST).with_easing(ease_out_strong),
+                    |el, d| el.opacity(1. - d),
+                )
+                .into_any_element(),
+        )
     }
 
     /// What each toolbar button does, as its tooltip says it (state-aware),
@@ -1565,7 +1694,7 @@ impl KeelWindow {
             .map(|(ix, tab)| {
                 let (id, active) = (tab.id, ix == b.active);
                 let group = format!("browser-tab-{id}");
-                let close = div()
+                let close = reveal_on_hover("close-reveal", group.clone(), if active { 1. } else { 0. }, 1., div()
                     .id(("browser-tab-close", id as usize))
                     .flex_none()
                     .size(zpx(16.))
@@ -1575,23 +1704,22 @@ impl KeelWindow {
                     .rounded(zpx(4.))
                     .text_color(c(t.text_faint))
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-                    .when(!active, |d| {
-                        d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
-                    })
+                    .hover(|s| s.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
                     .child(Icon::Close.el(zpx(10.)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if let Some(ix) = this.browser.tab_ix(id) {
                             this.browser_close_tab(ix, window, cx);
                         }
-                    }));
+                    })));
                 let dot = tab
                     .agent
                     .is_some()
                     .then(|| div().flex_none().size(zpx(6.)).rounded_full().bg(c(t.info)));
                 let el = div()
                     .id(("browser-tab", id as usize))
+                    .hover_probe(group.clone())
                     .group(group)
                     .flex_1()
                     .min_w_0()
@@ -1615,7 +1743,7 @@ impl KeelWindow {
                             d.border_color(gpui::transparent_black())
                                 .text_color(c(t.text_muted))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(c(t.hover)))
+                                .hover_fade(c(t.hover), None)
                         }
                     })
                     .children(dot)
@@ -1833,7 +1961,8 @@ impl KeelWindow {
                 .font_family(crate::style::MONO)
                 .text_color(c(t.text_muted))
                 .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.hover), None)
                 .child(*addr)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     if let Some(url) = normalize_address(addr) {
@@ -2117,6 +2246,12 @@ fn shot_image_files_sized(
     }
 }
 
+/// The settle line is up while a loaded page's bitmap is still the previous
+/// size. A real load already has the toolbar's progress bar.
+pub(super) fn geometry_line(has_page: bool, loading: bool, paint_due: bool) -> bool {
+    has_page && !loading && paint_due
+}
+
 /// Widest screenshot sent to an agent, in pixels.
 const MAX_SHOT_WIDTH: u32 = 1600;
 
@@ -2263,6 +2398,14 @@ mod host_tests {
         assert_eq!(tab.label(), "report.html");
         tab.page.title = "  Report  ".into();
         assert_eq!(tab.label(), "Report");
+    }
+
+    #[test]
+    fn settle_line_waits_on_a_loaded_page_only() {
+        assert!(!geometry_line(false, false, true));
+        assert!(!geometry_line(true, true, true));
+        assert!(!geometry_line(true, false, false));
+        assert!(geometry_line(true, false, true));
     }
 
     #[test]

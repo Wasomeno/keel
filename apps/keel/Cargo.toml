@@ -11,6 +11,7 @@ keel-proto.workspace = true
 keel-rpc.workspace = true
 keel-store.workspace = true
 keel-ui.workspace = true
+keel-update.workspace = true
 libc.workspace = true
 tokio.workspace = true
 tracing.workspace = true

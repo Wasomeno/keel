@@ -6,6 +6,7 @@
 //! huge files start folded; long diffs show their first lines and a way to
 //! the rest. Wide panes pair old and new side by side.
 
+use crate::hover_fade::HoverFadeExt;
 use super::*;
 use gpui::{AnimationExt, ListAlignment, ListState, Pixels, WeakEntity};
 use std::collections::BTreeMap;
@@ -873,7 +874,7 @@ impl KeelWindow {
                         if on {
                             d.bg(c(t.selected))
                         } else {
-                            d.hover(|s| s.bg(c(t.hover)))
+                            d.hover_fade(c(t.hover), None)
                         }
                     })
                     .active(|s| s.bg(c(t.selected)))
@@ -967,8 +968,7 @@ impl KeelWindow {
                         .rounded(RADIUS_MD)
                         .t_small()
                         .cursor_pointer()
-                        .hover(|s| s.bg(c(t.hover)))
-                        .active(|s| s.bg(c(t.selected)))
+                        .hover_fade(c(t.hover), Some(c(t.selected)))
                         .child(
                             div()
                                 .flex_none()
@@ -1827,7 +1827,7 @@ fn hunk_row(cx: &Ctx, f: usize, ix: usize, doc: &DiffDoc, first: bool) -> AnyEle
                 .overflow_hidden()
                 .when(gap > 0, |d| {
                     d.cursor_pointer()
-                        .hover(|s| s.bg(c(t.accent).opacity(0.08)))
+                        .hover_fade(c(t.accent).opacity(0.08), None)
                         .on_click(move |_, _, cx| {
                             let path = path.clone();
                             let _ = weak.update(cx, |this, cx| this.files_expand_gap(path, ix, cx));
@@ -1983,7 +1983,8 @@ fn more_row(cx: &Ctx, f: usize, hidden: usize) -> AnyElement {
                 .t_caption()
                 .text_color(c(t.text_muted))
                 .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.hover), None)
                 .child(format!("Show {} more lines", grouped(next as u32)))
                 .when(hidden > next, |d| {
                     d.child(

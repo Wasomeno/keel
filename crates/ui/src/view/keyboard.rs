@@ -100,6 +100,7 @@ impl KeelWindow {
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
                 // Closes menus first; with none open, Escape goes on to the
                 // question panel and text fields.
+                this.menus_cut = true;
                 if !this.close_menus(cx) {
                     if this.browser.expanded {
                         this.toggle_browser_expand(cx);
@@ -142,7 +143,10 @@ impl KeelWindow {
                     cx.notify();
                 } else if key == "escape" && this.close_lightbox(cx) {
                     cx.stop_propagation();
-                } else if key == "escape" && this.close_menus(cx) {
+                } else if key == "escape" && {
+                    this.menus_cut = true;
+                    this.close_menus(cx)
+                } {
                     cx.stop_propagation();
                 } else if key == "v" && m.secondary() && !m.shift && !m.alt && this.paste_images(cx)
                 {
@@ -187,8 +191,24 @@ impl KeelWindow {
 
     /// Close every menu and picker. True when one was open.
     pub(super) fn close_menus(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.update_confirm_open() {
+            self.dismiss_update_confirm(cx);
+            if self.menus_cut {
+                self.cut_update_confirm();
+            }
+            return true;
+        }
         if self.skills.modal_skill.is_some() {
             self.dismiss_skill_modal(cx);
+            if self.menus_cut {
+                // Escape: the modal goes at once.
+                self.skills.modal_leaving = None;
+            }
+            return true;
+        }
+        if self.projects.sheet_open() {
+            self.projects.close_sheet();
+            cx.notify();
             return true;
         }
         let timer_menu = self.timer_close_menu();
@@ -214,8 +234,23 @@ impl KeelWindow {
             || self.confirming_delete_chats.is_some()
             || self.delete_confirm_leaving.is_some()
             || self.select_mode
-            || !self.selected_chats.is_empty();
-        // Escape backs out of the delete modal (with its exit), then selection.
+            || !self.selected_chats.is_empty()
+            || self.project_modal_open
+            || self.confirming_delete_projects.is_some()
+            || self.delete_projects_confirm_leaving.is_some()
+            || self.project_select_mode
+            || !self.selected_projects.is_empty()
+            || self.show_projects_menu;
+        // Escape backs out of modals/selection in orderly fashion.
+        if self.project_modal_open {
+            self.dismiss_project_modal(cx);
+        }
+        if self.confirming_delete_projects.is_some() {
+            self.dismiss_delete_projects_confirm(cx);
+        } else if self.project_select_mode || !self.selected_projects.is_empty() {
+            self.exit_project_select_mode(cx);
+        }
+        self.show_projects_menu = false;
         if self.confirming_delete_chats.is_some() {
             self.dismiss_delete_confirm(cx);
         } else {
@@ -234,6 +269,14 @@ impl KeelWindow {
         self.show_sound_menu = false;
         self.state.show_branch_picker = false;
         self.card_end_picking();
+        if self.menus_cut {
+            // Escape: modals go at once, without their leave fade.
+            self.delete_confirm_leaving = None;
+            self.delete_projects_confirm_leaving = None;
+            if self.project_modal_leaving.take().is_some() {
+                self.projects.close_sheet();
+            }
+        }
         if open {
             cx.notify();
         }

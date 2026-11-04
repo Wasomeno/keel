@@ -1,5 +1,6 @@
 //! Window layout: sidebar | (tab strip, transcript, notice, composer).
 
+use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use gpui::{
     ClickEvent, Context, ElementId, IntoElement, Render, ScrollWheelEvent, Window,
@@ -18,6 +19,7 @@ use crate::transcript::{RowAction, RowContext, render_row};
 impl Render for KeelWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_now.set(Some(std::time::Instant::now()));
+        self.menus_cut_now = std::mem::take(&mut self.menus_cut);
         self.sync_active_chat(window, cx);
         self.sync_prompt_suggestion(window, cx);
         self.fullscreen = window.is_fullscreen();
@@ -37,7 +39,12 @@ impl Render for KeelWindow {
             self.input_style_for = Some(t);
             apply_base_theme(t, cx);
             let style = editor_style(t);
-            for input in [&self.composer, &self.question_input, &self.dotify_desc] {
+            for input in [
+                &self.composer,
+                &self.question_input,
+                &self.dotify_desc,
+                &self.memory_body,
+            ] {
                 input.update(cx, |s, cx| {
                     s.set_editor_style(style.clone());
                     cx.notify();
@@ -66,6 +73,7 @@ impl Render for KeelWindow {
                 &self.dotify_search,
                 &self.gitlab_filter,
                 &self.skills_filter,
+                &self.memory_desc,
                 &self.mr_input,
                 &self.browser.address,
             ] {
@@ -73,6 +81,19 @@ impl Render for KeelWindow {
                     s.set_editor_style(style.clone());
                     cx.notify();
                 });
+            }
+            if let Some(sheet) = &self.projects.sheet {
+                sheet.name.update(cx, |s, _cx| {
+                    s.set_editor_style(style.clone());
+                });
+                for row in &sheet.rows {
+                    row.alias.update(cx, |s, _cx| {
+                        s.set_editor_style(style.clone());
+                    });
+                    row.letter.update(cx, |s, _cx| {
+                        s.set_editor_style(style.clone());
+                    });
+                }
             }
         }
 
@@ -405,6 +426,7 @@ impl Render for KeelWindow {
             .children(self.render_sidebar_peek(t, cx))
             .children(self.render_zoom_toast(t))
             .children(self.render_notice(t, cx))
+            .children(self.render_update_line(t, cx))
             .children(self.render_timer_menu(t, cx))
             .children(if self.dotify_visible() {
                 self.render_dotify_overlay(t, window, cx)
@@ -423,6 +445,9 @@ impl Render for KeelWindow {
             )
             .children(self.render_delete_space_modal(t, cx))
             .children(self.render_delete_chats_modal(t, cx))
+            .children(self.render_update_confirm(t, cx))
+            .children(self.render_project_modal(t, window, cx))
+            .children(self.render_delete_projects_modal(t, cx))
             .children(probe_end)
     }
 }
@@ -675,8 +700,9 @@ impl KeelWindow {
                 })
                 .text_color(c(t.text))
                 .cursor_pointer()
-                .hover(|s| s.bg(c(t.surface)).text_color(c(t.text)))
-                .active(|s| s.bg(c(t.selected)).opacity(0.85))
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.surface), Some(c(t.selected)))
+                .active(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_sidebar(cx)))
                 .tooltip(move |_, cx| {
                     cx.new(|_| crate::view::dotify_ui::Tip::new(tooltip_text, t))
@@ -1106,7 +1132,10 @@ impl KeelWindow {
                         })
                         .on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.toggle_subagent_menu(cx)
+                                // The press that closed it from outside is not a reopen.
+                                if !this.menu_just_dismissed("subagent-menu") {
+                                    this.toggle_subagent_menu(cx)
+                                }
                             }),
                         ),
                 )
@@ -1864,25 +1893,51 @@ impl KeelWindow {
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        self.state.confirming_delete_space.as_ref()?;
-        Some(
-            gpui::deferred(
-                div()
-                    .id("delete-space-modal")
-                    .absolute()
-                    .inset_0()
-                    .occlude()
-                    .bg(gpui::rgba(0x000000B3))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.state.confirming_delete_space = None;
-                        cx.notify();
-                    }))
-                    .children(self.render_delete_prompt_card(t, cx)),
+        let (space_id, leaving, modal_gen) = match (
+            &self.state.confirming_delete_space,
+            &self.delete_space_leaving,
+        ) {
+            (Some(id), _) => (id.clone(), false, self.delete_space_gen),
+            (None, Some((n, id))) => (id.clone(), true, *n),
+            _ => return None,
+        };
+        let reduced = self.reduced();
+        let card = self.render_delete_prompt_card(t, space_id, cx)?;
+        // The card rises in and drops out; the wash fades under it.
+        let card = if leaving {
+            crate::motion::dismiss(card, ("delete-space-out", modal_gen as usize), reduced)
+        } else {
+            crate::motion::appear(
+                card,
+                ("delete-space-in", modal_gen as usize),
+                crate::motion::BASE,
+                14.,
+                reduced,
             )
+            .into_any_element()
+        };
+        let backdrop = div()
+            .id(("delete-space-modal", modal_gen as usize))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_delete_space(cx)))
+            .child(card);
+        Some(
+            gpui::deferred(crate::motion::scrim(
+                backdrop,
+                (
+                    if leaving { "delete-space-scrim-out" } else { "delete-space-scrim-in" },
+                    modal_gen as usize,
+                ),
+                0.7,
+                leaving,
+                reduced,
+            ))
             .with_priority(3),
         )
     }
@@ -1978,13 +2033,12 @@ impl KeelWindow {
             .into_any_element()
         };
         Some(
-            gpui::deferred(
+            gpui::deferred(crate::motion::scrim(
                 div()
                     .id(("delete-chats-modal", modal_gen as usize))
                     .absolute()
                     .inset_0()
                     .occlude()
-                    .bg(gpui::rgba(0x000000B3))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1993,7 +2047,14 @@ impl KeelWindow {
                         cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_delete_confirm(cx)),
                     )
                     .child(card),
-            )
+                (
+                    if leaving { "delete-chats-scrim-out" } else { "delete-chats-scrim-in" },
+                    modal_gen as usize,
+                ),
+                0.7,
+                leaving,
+                reduced,
+            ))
             .with_priority(3),
         )
     }
@@ -2457,7 +2518,8 @@ impl KeelWindow {
                     .justify_center()
                     .text_color(c(t.text_faint))
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                    .hover(|s| s.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
                     .child(Icon::Close.el(zpx(11.)))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_notice(cx))),
             );
@@ -2468,7 +2530,7 @@ impl KeelWindow {
         let card: gpui::AnyElement = if leaving {
             card.with_animation(
                 ElementId::Name(format!("notice-out-{generation}").into()),
-                gpui::Animation::new(super::NOTICE_EXIT).with_easing(crate::motion::ease_in),
+                gpui::Animation::new(super::NOTICE_EXIT).with_easing(crate::motion::ease_out),
                 move |el, d| el.opacity(1. - d).relative().top(zpx(-6. * d * travel)),
             )
             .into_any_element()
@@ -2756,9 +2818,9 @@ impl KeelWindow {
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.show_subagent_menu || self.current_chat.is_none() {
-            return None;
-        }
+        let open = self.show_subagent_menu && self.current_chat.is_some();
+        // Stays mounted through its exit, like the other floating menus.
+        let leaving = self.menu_phase("subagent-menu", open, cx)?;
         let rows: Vec<gpui::AnyElement> = self
             .subagent_list()
             .into_iter()
@@ -2790,7 +2852,7 @@ impl KeelWindow {
                     .gap_2()
                     .t_small()
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)))
+                    .hover_fade(c(t.hover), None)
                     .child(div().size(zpx(7.)).flex_none().rounded_full().bg(c(color)))
                     .child(
                         div()
@@ -2833,7 +2895,17 @@ impl KeelWindow {
                     .text_color(c(t.text_faint))
                     .child("SUBAGENTS"),
             )
-            .children(rows);
+            .children(rows)
+            .when(leaving.is_none(), |d| {
+                d.on_mouse_down_out(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                    if this.show_subagent_menu {
+                        this.show_subagent_menu = false;
+                        this.note_menu_dismissed("subagent-menu");
+                        cx.notify();
+                    }
+                }))
+            });
+        let panel = super::menu_motion(panel, "subagent-menu", false, leaving, self.reduced());
         Some(
             div()
                 .absolute()

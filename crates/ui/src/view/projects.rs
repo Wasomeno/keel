@@ -4,13 +4,14 @@
 //! a Projects section and a create sheet in the folder picker, sidebar rows
 //! that unfold, a home page, and a composer scope chip.
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, ElementId, Entity, IntoElement, Window, anchored, deferred,
-    div, point, prelude::*, px,
+    AnimationExt, AnyElement, ClickEvent, Context, ElementId, Entity, IntoElement, Window,
+    anchored, deferred, div, point, prelude::*, px,
 };
 use gpui_base::input::InputState;
 use keel_proto::projects::{self, Project, ProjectFolder};
@@ -20,15 +21,14 @@ use super::composer_view::Picker;
 use super::files_panel::fold;
 use super::session_summary::SUMMARY_HOVER_DELAY;
 use super::sidebar::{SECTION_HEADER_HEIGHT, filled_button, text_button};
-use super::{KeelWindow, floating_menu_at, menu_item, menu_label, menu_separator, status_dot};
+use super::{
+    KeelWindow, floating_menu_at, menu_action, menu_item, menu_label, menu_separator, status_dot,
+};
 use crate::icons::Icon;
 use crate::motion::{ease_out, ease_out_strong};
 use crate::state::AppState;
 use crate::style::{KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, c, zpx};
 
-const SHEET_GROW: f32 = 200.;
-const ROW_STAGGER: f32 = 40.;
-const ROW_IN: f32 = 180.;
 const HOME_ROW_H: f32 = 54.;
 /// Chats listed under an unfolded project. The rest stay on the project home.
 const SIDE_CHAT_CAP: usize = 3;
@@ -45,12 +45,13 @@ pub(super) struct Projects {
     home_folded: bool,
     home_fold_gen: u64,
     scope_open: bool,
-    sheet: Option<Sheet>,
-    sheet_error: Option<String>,
+    pub(super) sheet: Option<Sheet>,
+    pub(super) sheet_close_gen: u64,
+    pub(super) sheet_error: Option<String>,
     status: HashMap<String, FolderStatus>,
     status_wait: HashSet<String>,
     /// Project chosen from the folder picker, before a chat exists.
-    picked: Option<String>,
+    pub(super) picked: Option<String>,
     /// Scope for a project that has no chat yet. Missing means every folder.
     draft_scope: HashMap<String, Vec<String>>,
     /// Dev commands and other keyboard actions skip motion.
@@ -71,16 +72,17 @@ pub(super) struct FolderCard {
     left: Option<std::time::Instant>,
 }
 
-struct Sheet {
-    name: Entity<InputState>,
-    rows: Vec<SheetRow>,
+pub(super) struct Sheet {
+    pub(super) name: Entity<InputState>,
+    pub(super) rows: Vec<SheetRow>,
     generation: u64,
+    _subscription: Option<gpui::Subscription>,
 }
 
-struct SheetRow {
-    path: String,
-    alias: Entity<InputState>,
-    letter: Entity<InputState>,
+pub(super) struct SheetRow {
+    pub(super) path: String,
+    pub(super) alias: Entity<InputState>,
+    pub(super) letter: Entity<InputState>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +113,7 @@ impl Projects {
             home_fold_gen: 0,
             scope_open: false,
             sheet: None,
+            sheet_close_gen: 0,
             sheet_error: None,
             status: HashMap::new(),
             status_wait: HashSet::new(),
@@ -122,7 +125,7 @@ impl Projects {
         }
     }
 
-    fn save(&self) {
+    pub(super) fn save(&self) {
         let path = self.data_dir.join(projects::FILE);
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, self.store.to_json())
@@ -153,7 +156,11 @@ impl Projects {
     /// True when the create sheet was open.
     pub(super) fn close_sheet(&mut self) -> bool {
         self.sheet_error = None;
-        self.sheet.take().is_some()
+        let was_open = self.sheet.take().is_some();
+        if was_open {
+            self.sheet_close_gen += 1;
+        }
+        was_open
     }
 
     fn find(&self, name: &str) -> Option<&Project> {
@@ -170,10 +177,17 @@ impl Projects {
     }
 
     /// The project a new chat in `cwd` should join, and the scope to store.
+    /// Only joins a project when the project was explicitly picked for new chat
+    /// or created from the project's home. A single folder chat session remains
+    /// a folder session, even if that folder also belongs to a project.
     pub(super) fn link_plan(&self, cwd: &str) -> Option<(String, Vec<String>)> {
-        let id = self.project_id_for_path(cwd)?;
-        let scope = self.draft_scope.get(&id).cloned().unwrap_or_default();
-        Some((id, scope))
+        let active_id = self.picked.as_deref().or(self.home.as_deref())?;
+        let project = self.store.project(active_id)?;
+        if !project.folders.iter().any(|f| paths_eq(&f.path, cwd)) {
+            return None;
+        }
+        let scope = self.draft_scope.get(active_id).cloned().unwrap_or_default();
+        Some((active_id.to_string(), scope))
     }
 
     pub(super) fn record_chat(&mut self, chat: &str, project: &str, scope: Vec<String>) {
@@ -188,13 +202,15 @@ impl Projects {
         self.save();
     }
 
-    /// Folder chip text when `path` is one of a project's folders.
+    /// Folder chip text when `path` is one of a project's folders and a project
+    /// is explicitly active (picked or in project home).
     pub(super) fn folder_chip(&self, path: Option<&str>, fallback: String) -> String {
         let Some(path) = path else { return fallback };
-        let Some(id) = self.project_id_for_path(path) else {
+        let active_project = self.picked.as_deref().or(self.home.as_deref());
+        let Some(id) = active_project else {
             return fallback;
         };
-        let Some(project) = self.store.project(&id) else {
+        let Some(project) = self.store.project(id) else {
             return fallback;
         };
         let Some(folder) = project.folders.iter().find(|f| paths_eq(&f.path, path)) else {
@@ -699,6 +715,7 @@ fn input_text(input: &Entity<InputState>, cx: &Context<KeelWindow>) -> String {
     input.read(cx).value().trim().to_string()
 }
 
+#[allow(dead_code)]
 pub(super) fn render_projects_label(t: Tokens) -> gpui::Stateful<gpui::Div> {
     div()
         .id("projects-group-label")
@@ -772,11 +789,38 @@ impl KeelWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_picker(Some(Picker::Folder), cx);
-        let name_in = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        let name_in = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Resona RIF"));
         if !name.is_empty() {
             name_in.update(cx, |s, cx| s.set_value(name.to_string(), window, cx));
         }
+        name_in.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(
+            &name_in,
+            window,
+            |this, _, event: &gpui_base::input::InputEvent, window, cx| {
+                if let gpui_base::input::InputEvent::PressEnter { .. } = event {
+                    let has_name = this
+                        .projects
+                        .sheet
+                        .as_ref()
+                        .map_or(false, |s| !input_text(&s.name, cx).trim().is_empty());
+                    let has_folders = this
+                        .projects
+                        .sheet
+                        .as_ref()
+                        .map_or(false, |s| !s.rows.is_empty());
+                    if has_name && has_folders {
+                        if let Some(path) = this.commit_sheet(cx) {
+                            this.dismiss_project_modal(cx);
+                            this.use_folder_for_new_chat(path, cx);
+                        }
+                    } else if !has_folders {
+                        this.pick_sheet_folder(window, cx);
+                    }
+                    cx.notify();
+                }
+            },
+        );
         let mut rows = Vec::new();
         for (alias, path) in folders {
             rows.push(self.sheet_row(path, alias, String::new(), window, cx));
@@ -786,8 +830,29 @@ impl KeelWindow {
             name: name_in,
             rows,
             generation,
+            _subscription: Some(sub),
         });
         self.projects.sheet_error = None;
+    }
+
+    fn remove_sheet_folder(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(sheet) = &mut self.projects.sheet {
+            if ix < sheet.rows.len() {
+                sheet.rows.remove(ix);
+                self.projects.sheet_error = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn make_sheet_folder_primary(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(sheet) = &mut self.projects.sheet {
+            if ix > 0 && ix < sheet.rows.len() {
+                let row = sheet.rows.remove(ix);
+                sheet.rows.insert(0, row);
+                cx.notify();
+            }
+        }
     }
 
     fn push_sheet_folder(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -838,7 +903,7 @@ impl KeelWindow {
             (name, rows)
         };
         let (name, rows) = draft;
-        if name.is_empty() {
+        if name.trim().is_empty() {
             self.projects.sheet_error = Some("Name the project.".into());
             return None;
         }
@@ -921,7 +986,42 @@ impl KeelWindow {
             "project_open" => self.dev_project_open(arg, cx),
             "project_home" => self.dev_project_home(arg, cx),
             "project_new" => {
-                self.begin_sheet("", Vec::new(), window, cx);
+                self.open_project_modal(window, cx);
+                "ok".into()
+            }
+            "project_modal_off" => {
+                self.dismiss_project_modal(cx);
+                "ok".into()
+            }
+            "project_select" => {
+                if arg == "off" {
+                    self.exit_project_select_mode(cx);
+                } else {
+                    self.enter_project_select_mode(cx);
+                }
+                "ok".into()
+            }
+            "project_toggle" => {
+                self.toggle_project_selection(arg, cx);
+                "ok".into()
+            }
+            "project_ask_delete" => {
+                self.ask_delete_projects(self.selected_projects.clone(), cx);
+                "ok".into()
+            }
+            "project_menu" => {
+                if arg == "off" {
+                    self.show_projects_menu = false;
+                } else {
+                    self.show_projects_menu = true;
+                }
+                cx.notify();
+                "ok".into()
+            }
+            "project_back" => {
+                self.projects.close_sheet();
+                self.dismiss_project_modal(cx);
+                cx.notify();
                 "ok".into()
             }
             "project_commit" => match self.commit_sheet(cx) {
@@ -946,7 +1046,12 @@ impl KeelWindow {
                 } else {
                     match parse_spec(arg) {
                         Ok((name, folders)) => {
+                            self.set_picker(None, cx);
                             self.begin_sheet(&name, folders, window, cx);
+                            self.project_modal_gen = self.project_modal_gen.wrapping_add(1);
+                            self.project_modal_open = true;
+                            self.project_modal_leaving = None;
+                            cx.notify();
                             "ok".into()
                         }
                         Err(err) => format!("error: {err}"),
@@ -1273,7 +1378,13 @@ impl KeelWindow {
                     .text_color(c(t.text))
                     .child(project.name.clone()),
             )
-            .child(faint(format!("{n} folders · {aliases}"), t))
+            .child(faint(
+                format!(
+                    "{n} {} · {aliases}",
+                    if n == 1 { "folder" } else { "folders" }
+                ),
+                t,
+            ))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.projects.instant = false;
                 this.projects.picked = Some(id.clone());
@@ -1286,12 +1397,13 @@ impl KeelWindow {
             rows.push(row.into_any_element());
         }
         rows.push(
-            menu_item("project-new", t, true, false)
-                .child(div().text_color(c(t.text_muted)).child("New project…"))
+            menu_action("project-new", Icon::Plus.el(zpx(14.)), false, t)
+                .text_color(c(t.text_muted))
+                .child("New project")
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.projects.instant = false;
-                    this.begin_sheet("", Vec::new(), window, cx);
-                    cx.notify();
+                    this.set_picker(None, cx);
+                    this.open_project_modal(window, cx);
                 }))
                 .into_any_element(),
         );
@@ -1299,218 +1411,668 @@ impl KeelWindow {
         rows
     }
 
-    pub(super) fn render_project_sheet(&self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
-        let Some(sheet) = &self.projects.sheet else {
-            return div().into_any_element();
-        };
-        let clock = self.project_clock();
-        let generation = sheet.generation;
-        let rows_n = sheet.rows.len() + 1;
-        let total = SHEET_GROW.max(60. + ROW_STAGGER * rows_n as f32 + ROW_IN);
-        let stagger = move |el: gpui::Stateful<gpui::Div>, ix: usize| {
-            timed(
-                el,
-                format!("project-sheet-row-{generation}-{ix}"),
-                total,
-                clock,
-                move |el, ms| {
-                    let k = ease_out(step(ms, 60. + ROW_STAGGER * ix as f32, ROW_IN));
-                    el.opacity(k).relative().top(zpx(4. * (1. - k)))
-                },
-            )
-        };
-        let back = cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.projects.instant = true;
-            this.projects.close_sheet();
+    pub(super) fn open_project_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_picker(None, cx);
+        self.projects.instant = false;
+        self.begin_sheet("", Vec::new(), window, cx);
+        self.project_modal_gen = self.project_modal_gen.wrapping_add(1);
+        self.project_modal_open = true;
+        self.project_modal_leaving = None;
+        cx.notify();
+    }
+
+    pub(super) fn dismiss_project_modal(&mut self, cx: &mut Context<Self>) {
+        if self.project_modal_open {
+            self.project_modal_open = false;
+            let m_gen = self.project_modal_gen;
+            self.project_modal_leaving = Some(m_gen);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::motion::FAST + std::time::Duration::from_millis(30))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.project_modal_leaving == Some(m_gen) {
+                        this.project_modal_leaving = None;
+                        this.projects.close_sheet();
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
             cx.notify();
+        }
+    }
+
+    pub(super) fn render_project_modal(
+        &mut self,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let (leaving, modal_gen) = match (self.project_modal_open, self.project_modal_leaving) {
+            (true, _) => (false, self.project_modal_gen),
+            (false, Some(n)) => (true, n),
+            _ => return None,
+        };
+        let Some(sheet) = &self.projects.sheet else {
+            return None;
+        };
+
+        // Ensure text inputs have proper theme styling so placeholders and carets render clearly.
+        sheet.name.update(cx, |s, _cx| {
+            s.set_editor_style(super::editor_style(t));
         });
+        for row in &sheet.rows {
+            row.alias.update(cx, |s, _cx| {
+                s.set_editor_style(super::editor_style(t));
+            });
+            row.letter.update(cx, |s, _cx| {
+                s.set_editor_style(super::editor_style(t));
+            });
+        }
+
+        let reduced = self.reduced();
+        let name_str = input_text(&sheet.name, cx);
+        let can_create = !name_str.trim().is_empty() && !sheet.rows.is_empty();
+
+        // Title and one muted line; the close sits on the title's line.
         let header = div()
-            .px_2()
-            .pt_1()
-            .pb_1p5()
             .flex()
             .flex_row()
-            .items_center()
-            .gap_2()
+            .items_start()
+            .justify_between()
+            .gap_3()
             .child(
                 div()
-                    .id("project-sheet-back")
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(zpx(15.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(t.text))
+                            .child("New project"),
+                    )
+                    .child(
+                        div()
+                            .t_small()
+                            .text_color(c(t.text_muted))
+                            .child("Group repositories and folders together."),
+                    ),
+            )
+            .child(
+                div()
+                    .id("project-modal-close-x")
+                    .size(zpx(22.))
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(RADIUS_SM)
                     .text_color(c(t.text_faint))
                     .cursor_pointer()
                     .hover(|s| s.text_color(c(t.text)))
-                    .child(Icon::Back.el(zpx(13.)))
-                    .on_click(back),
-            )
-            .child(
-                div()
-                    .t_body()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(c(t.text))
-                    .child("New project"),
+                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                    .active(|s| s.opacity(0.7))
+                    .child(Icon::Close.el(zpx(12.)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.dismiss_project_modal(cx);
+                    })),
             );
-        let name = div()
-            .mx_1()
-            .h(zpx(30.))
-            .px_2()
+
+        let section_label = |text: &'static str| {
+            div()
+                .t_small()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(c(t.text_muted))
+                .child(text)
+        };
+        let name_label = section_label("Name");
+
+        let name_focused =
+            gpui::Focusable::focus_handle(sheet.name.read(cx), cx).is_focused(window);
+        let name_field = div()
+            .h(zpx(32.))
+            .px_2p5()
             .flex()
             .flex_row()
             .items_center()
             .rounded(RADIUS_MD)
             .border_1()
-            .border_color(c(t.border))
-            .bg(c(t.window))
+            .border_color(c(if name_focused { t.accent } else { t.border }))
+            .bg(c(t.surface))
+            .when(!name_focused, |d| {
+                d.hover(|s| s.border_color(c(t.text_faint)))
+            })
             .w_full()
             .t_body()
             .text_color(c(t.text))
             .child(div().flex_1().min_w_0().child(sheet.name.clone()));
-        let mut col: Vec<AnyElement> = vec![
-            header.into_any_element(),
-            name.into_any_element(),
-            menu_label("Folders", t).mt_1().into_any_element(),
-        ];
-        for (ix, row) in sheet.rows.iter().enumerate() {
-            let alias = input_text(&row.alias, cx);
-            let letter = input_text(&row.letter, cx);
-            let shown = letter
-                .chars()
-                .next()
-                .or_else(|| alias.chars().next())
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_else(|| "?".into());
-            let name = base_name(&row.path);
-            let line = div()
-                .id(ElementId::Name(format!("project-sheet-folder-{ix}").into()))
-                .h(zpx(34.))
-                .px_2()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .rounded(RADIUS_SM)
-                .hover(|s| s.bg(c(t.hover)))
-                .child(mark(shown, ix, t))
-                .child(
-                    div()
-                        .flex_none()
-                        .h(zpx(20.))
-                        .w(zpx(64.))
-                        .px_1p5()
-                        .flex()
-                        .items_center()
-                        .rounded(RADIUS_SM)
-                        .border_1()
-                        .border_color(c(t.border))
-                        .font_family(MONO)
-                        .t_small()
-                        .text_color(c(t.text))
-                        .overflow_hidden()
-                        .child(div().size_full().min_w_0().child(row.alias.clone())),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(zpx(28.))
-                        .min_w_0()
-                        .overflow_hidden()
-                        .font_family(MONO)
-                        .t_caption()
-                        .text_color(c(hue(ix, t)))
-                        .child(div().size_full().min_w_0().child(row.letter.clone())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(c(t.text_muted))
-                        .child(name),
-                )
-                .when(ix == 0, |d| {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .px_1p5()
-                            .rounded(RADIUS_SM)
-                            .bg(c(t.hover))
-                            .t_caption()
-                            .text_color(c(t.text_faint))
-                            .child("starts here"),
+
+        let folder_count = sheet.rows.len();
+        // "Folders 2": the count inline and faint, the help on hover.
+        let folders_header = div()
+            .id("project-modal-folders-tip")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .tooltip(move |_, cx| {
+                cx.new(|_| {
+                    super::dotify_ui::Tip::new(
+                        "Chats start in the primary folder. Mention others in your prompt using @alias/path."
+                            .to_string(),
+                        t,
                     )
-                });
-            col.push(stagger(line, ix));
-        }
-        let add = menu_item("project-sheet-add", t, true, false)
-            .child(div().text_color(c(t.text_muted)).child("Add folder…"))
+                })
+                .into()
+            })
+            .tooltip_show_delay(super::tooltip::delay())
+            .child(section_label("Folders"))
+            .when(folder_count > 0, |d| {
+                d.child(
+                    div()
+                        .t_small()
+                        .text_color(c(t.text_faint))
+                        .child(folder_count.to_string()),
+                )
+            });
+
+        // One add row for both states, so the first folder lands without a jump.
+        let add_row = div()
+            .id(if sheet.rows.is_empty() {
+                "project-modal-add-folder-empty"
+            } else {
+                "project-modal-add-another"
+            })
+            .flex_none()
+            .h(zpx(32.))
+            .pl_2p5()
+            .pr_1p5()
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_dashed()
+            .border_color(c(t.border))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .t_small()
+            .text_color(c(t.text_muted))
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), None)
+            .active(|s| s.opacity(0.75))
+            .child(
+                div()
+                    .w(zpx(14.))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(Icon::Plus.el(zpx(12.))),
+            )
+            .child(if sheet.rows.is_empty() {
+                "Add folder"
+            } else {
+                "Add another folder"
+            })
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.pick_sheet_folder(window, cx);
-            }));
-        col.push(stagger(add, sheet.rows.len()));
-        col.push(menu_separator(t).into_any_element());
-        if let Some(err) = &self.projects.sheet_error {
-            col.push(
-                div()
-                    .px_2()
-                    .t_small()
-                    .text_color(c(t.warning))
-                    .child(err.clone())
-                    .into_any_element(),
-            );
-        }
-        col.push(
+            }))
+            .into_any_element();
+
+        let folders_content = if sheet.rows.is_empty() {
+            add_row
+        } else {
+            let mut rows: Vec<AnyElement> = Vec::new();
+            for (ix, row) in sheet.rows.iter().enumerate() {
+                let alias = input_text(&row.alias, cx);
+                let letter = input_text(&row.letter, cx);
+                // No alias yet: a folder glyph, not a "?" placeholder.
+                let shown = letter
+                    .chars()
+                    .next()
+                    .or_else(|| alias.chars().next())
+                    .map(|c| c.to_uppercase().to_string());
+                let name = base_name(&row.path);
+                let is_primary = ix == 0;
+                let line = div()
+                    .id(ElementId::Name(format!("project-modal-folder-{ix}").into()))
+                    .flex_none()
+                    .h(zpx(32.))
+                    .pl_2p5()
+                    .pr_1p5()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_MD)
+                    .bg(c(t.surface))
+                    .border_1()
+                    .border_color(c(t.border))
+                    .hover(|s| s.border_color(c(t.text_faint)))
+                    .child(match shown {
+                        Some(letter) => mark(letter, ix, t),
+                        None => div()
+                            .w(zpx(14.))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .text_color(c(t.text_faint))
+                            .child(Icon::Folder.el(zpx(14.))),
+                    })
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("project-modal-alias-{ix}").into()))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| {
+                                    super::dotify_ui::Tip::new(
+                                        "Mention this folder in chats with @alias/path".to_string(),
+                                        t,
+                                    )
+                                })
+                                .into()
+                            })
+                            .tooltip_show_delay(super::tooltip::delay())
+                            .flex_none()
+                            .h(zpx(24.))
+                            .w(zpx(84.))
+                            .px_1p5()
+                            .flex()
+                            .items_center()
+                            .gap_0p5()
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(c(t.border))
+                            .bg(c(t.input))
+                            .font_family(MONO)
+                            .t_small()
+                            .child(div().flex_none().text_color(c(t.text_faint)).child("@"))
+                            .child(div().flex_1().min_w_0().child(row.alias.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .t_body()
+                            .text_color(c(t.text))
+                            .child(name),
+                    )
+                    .when(is_primary, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .h(zpx(20.))
+                                .px_1p5()
+                                .flex()
+                                .items_center()
+                                .rounded(RADIUS_SM)
+                                .bg(c(t.hover))
+                                .t_caption()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(c(t.accent))
+                                .child("Primary"),
+                        )
+                    })
+                    .when(!is_primary, |d| {
+                        d.child(
+                            div()
+                                .id(ElementId::Name(
+                                    format!("project-modal-primary-{ix}").into(),
+                                ))
+                                .flex_none()
+                                .h(zpx(20.))
+                                .px_1p5()
+                                .flex()
+                                .items_center()
+                                .rounded(RADIUS_SM)
+                                .cursor_pointer()
+                                .t_caption()
+                                .text_color(c(t.text_faint))
+                                .hover(|s| s.text_color(c(t.text)))
+                                .hover_fade(c(t.hover), None)
+                                .active(|s| s.opacity(0.75))
+                                .child("Make primary")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.make_sheet_folder_primary(ix, cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("project-modal-remove-{ix}").into()))
+                            .size(zpx(24.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(RADIUS_SM)
+                            .text_color(c(t.text_faint))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(c(t.danger)))
+                            .hover_fade(c(t.hover), None)
+                            .active(|s| s.opacity(0.75))
+                            .child(Icon::Close.el(zpx(12.)))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.remove_sheet_folder(ix, cx);
+                            })),
+                    );
+                rows.push(line.into_any_element());
+            }
+            rows.push(add_row);
             div()
-                .px_2()
-                .pt_0p5()
-                .pb_1()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(div().t_small().text_color(c(t.text_faint)).child(
-                    "Chats start in the first folder. Point at the others by name, like @api/src.",
-                ))
-                .child(
+                .gap_1p5()
+                .children(rows)
+                .into_any_element()
+        };
+
+        let cancel_btn = text_button("project-modal-cancel", "Cancel", t)
+            .h(zpx(28.))
+            .px_2p5()
+            .py_0()
+            .flex()
+            .items_center()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.dismiss_project_modal(cx);
+            }));
+
+        let create_base = div()
+            .id("project-modal-create")
+            .flex_none()
+            .h(zpx(28.))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded(RADIUS_MD)
+            .t_small()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child("Create project");
+        // Disabled reads as quiet text on a faint fill, not a grey block.
+        let create_btn = if can_create {
+            create_base
+                .bg(c(t.accent))
+                .text_color(c(t.text_on_accent))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.9))
+                .active(|s| s.opacity(0.75))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    if let Some(path) = this.commit_sheet(cx) {
+                        this.dismiss_project_modal(cx);
+                        this.use_folder_for_new_chat(path, cx);
+                    }
+                    cx.notify();
+                }))
+        } else {
+            create_base.bg(c(t.hover)).text_color(c(t.text_faint))
+        };
+
+        let card = div()
+            .id(("project-modal-card", modal_gen as usize))
+            .w(zpx(416.))
+            .max_w(gpui::relative(0.92))
+            .p_4()
+            .rounded(RADIUS_LG)
+            .bg(c(t.floating))
+            .border_1()
+            .border_color(c(t.border))
+            .floating_surface(t)
+            .shadow_2xl()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .cursor_default()
+            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+            .child(header)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(name_label)
+                    .child(name_field),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(folders_header)
+                    .child(folders_content),
+            )
+            .when_some(self.projects.sheet_error.clone(), |d, err| {
+                d.child(
                     div()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded(RADIUS_SM)
+                        .bg(c(t.hover))
                         .flex()
                         .flex_row()
-                        .justify_end()
-                        .gap_1()
-                        .child(text_button("project-sheet-cancel", "Cancel", t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.projects.instant = true;
-                                this.projects.close_sheet();
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            filled_button("project-sheet-create", "Create project", t.accent, t)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    if let Some(path) = this.commit_sheet(cx) {
-                                        this.projects.instant = true;
-                                        this.set_picker(None, cx);
-                                        this.use_folder_for_new_chat(path, cx);
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
+                        .items_center()
+                        .gap_1p5()
+                        .t_small()
+                        .text_color(c(t.warning))
+                        .child(Icon::Alert.el(zpx(12.)))
+                        .child(err),
                 )
-                .into_any_element(),
-        );
-        timed(
-            div().flex().flex_col().children(col),
-            format!("project-sheet-{generation}"),
-            total,
-            clock,
-            |el, ms| {
-                let k = ease_out(step(ms, 0., SHEET_GROW));
-                if k >= 1. {
-                    return el;
-                }
-                el.max_h(zpx(140. + 260. * k))
-                    .overflow_hidden()
-                    .opacity(0.5 + 0.5 * k)
-            },
+            })
+            .child(
+                div()
+                    .pt_1()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child("↵ to create · Esc to cancel"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(cancel_btn)
+                            .child(create_btn),
+                    ),
+            );
+
+        let card_motion = if leaving {
+            crate::motion::dismiss(
+                card,
+                ("project-modal-card-out", modal_gen as usize),
+                reduced,
+            )
+        } else {
+            crate::motion::appear(
+                card,
+                ("project-modal-card-in", modal_gen as usize),
+                crate::motion::BASE,
+                16.,
+                reduced,
+            )
+            .into_any_element()
+        };
+
+        let scrim = div()
+            .id(("project-modal-scrim", modal_gen as usize))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui::rgba(0x00000088))
+            .flex()
+            .items_center()
+            .justify_center();
+
+        let scrim = if leaving {
+            if reduced {
+                scrim.child(card_motion).into_any_element()
+            } else {
+                scrim
+                    .child(card_motion)
+                    .with_animation(
+                        ("project-modal-scrim-out", modal_gen as usize),
+                        gpui::Animation::new(crate::motion::FAST)
+                            .with_easing(crate::motion::ease_out),
+                        |el, delta| el.opacity(1.0 - delta),
+                    )
+                    .into_any_element()
+            }
+        } else if reduced {
+            scrim
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.dismiss_project_modal(cx);
+                }))
+                .child(card_motion)
+                .into_any_element()
+        } else {
+            scrim
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.dismiss_project_modal(cx);
+                }))
+                .child(card_motion)
+                .with_animation(
+                    ("project-modal-scrim-in", modal_gen as usize),
+                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(delta),
+                )
+                .into_any_element()
+        };
+
+        Some(gpui::deferred(scrim).with_priority(3))
+    }
+
+    pub(super) fn render_delete_projects_modal(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let (ids, leaving, modal_gen) = match (
+            &self.confirming_delete_projects,
+            &self.delete_projects_confirm_leaving,
+        ) {
+            (Some(ids), _) => (ids.clone(), false, self.delete_projects_confirm_gen),
+            (None, Some((n, ids))) => (ids.clone(), true, *n),
+            _ => return None,
+        };
+        let heading = match ids.as_slice() {
+            [one] => {
+                let name = self
+                    .projects
+                    .store
+                    .projects
+                    .iter()
+                    .find(|p| &p.id == one)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "project".into());
+                format!("Delete “{name}”?")
+            }
+            many => format!("Delete {} projects?", many.len()),
+        };
+        let reduced = self.reduced();
+        let delete_ids = ids;
+        let card = div()
+            .id(("delete-projects-modal-card", modal_gen as usize))
+            .w(zpx(380.))
+            .max_w(gpui::relative(0.9))
+            .p_4()
+            .rounded(RADIUS_LG)
+            .bg(c(t.floating))
+            .border_1()
+            .border_color(c(t.border))
+            .floating_surface(t)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .t_title()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(t.text))
+                    .child(heading),
+            )
+            .child(
+                div()
+                    .t_body()
+                    .text_color(c(t.text_muted))
+                    .child("Their chats and folders stay; the project groupings are removed."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        text_button("cancel-delete-projects-btn", "Cancel", t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.dismiss_delete_projects_confirm(cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        filled_button("confirm-delete-projects-btn", "Delete", t.danger, t)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.delete_projects(delete_ids.clone(), cx);
+                            })),
+                    ),
+            );
+        let card = if leaving {
+            crate::motion::dismiss(
+                card,
+                ("delete-projects-modal-out", modal_gen as usize),
+                reduced,
+            )
+        } else {
+            crate::motion::appear(
+                card,
+                ("delete-projects-modal-in", modal_gen as usize),
+                crate::motion::BASE,
+                14.,
+                reduced,
+            )
+            .into_any_element()
+        };
+        Some(
+            gpui::deferred(crate::motion::scrim(
+                div()
+                    .id(("delete-projects-modal-scrim", modal_gen as usize))
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.dismiss_delete_projects_confirm(cx);
+                    }))
+                    .child(card),
+                (
+                    if leaving {
+                        "delete-projects-scrim-out"
+                    } else {
+                        "delete-projects-scrim-in"
+                    },
+                    modal_gen as usize,
+                ),
+                0x88 as f32 / 255.,
+                leaving,
+                reduced,
+            ))
+            .with_priority(3),
         )
     }
 
@@ -1552,6 +2114,10 @@ impl KeelWindow {
         let home_open = self.projects.home.as_deref() == Some(id.as_str());
         let toggle_id = id.clone();
         let total = self.project_chats(&id).len();
+        let in_select = self.project_select_mode || !self.selected_projects.is_empty();
+        let selected = self.selected_projects.contains(&id);
+        let select_gen = self.project_select_mode_gen;
+        let select_leaving = self.project_select_leaving.is_some();
         let urgent = self
             .project_chats(&id)
             .into_iter()
@@ -1594,6 +2160,7 @@ impl KeelWindow {
             .child(
                 div()
                     .id(ElementId::Name(group.clone().into()))
+                    .hover_probe(group.clone())
                     .group(group.clone())
                     .h(zpx(28.))
                     .pl_1()
@@ -1604,11 +2171,26 @@ impl KeelWindow {
                     .gap_1()
                     .rounded(RADIUS_MD)
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)))
+                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                    .active(|s| s.opacity(0.85))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.toggle_project_fold(&toggle_id, cx);
+                        if in_select {
+                            this.toggle_project_selection(&toggle_id, cx);
+                        } else {
+                            this.toggle_project_fold(&toggle_id, cx);
+                        }
                     }))
-                    .child(
+                    .child(if in_select {
+                        super::sidebar::check_circle(
+                            selected,
+                            t,
+                            &id,
+                            select_gen,
+                            0,
+                            select_leaving,
+                            reduced,
+                        )
+                    } else {
                         div()
                             .id(ElementId::Name(format!("project-side-fold-{id}").into()))
                             .size(zpx(16.))
@@ -1617,8 +2199,9 @@ impl KeelWindow {
                             .items_center()
                             .justify_center()
                             .text_color(c(t.text_faint))
-                            .child(chevron),
-                    )
+                            .child(chevron)
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -1632,32 +2215,33 @@ impl KeelWindow {
                             .group_hover(group.clone(), |s| s.text_color(c(t.text)))
                             .child(project.name),
                     )
-                    .when(collapsed, |d| {
-                        d.children(match urgent {
-                            keel_proto::DisplayStatus::AwaitingInput
-                            | keel_proto::DisplayStatus::Running => {
-                                status_dot(urgent, &format!("project-{id}"), t, reduced)
-                            }
-                            _ => None,
+                    .when(!in_select, |d| {
+                        d.when(collapsed, |d| {
+                            d.children(match urgent {
+                                keel_proto::DisplayStatus::AwaitingInput
+                                | keel_proto::DisplayStatus::Running => {
+                                    status_dot(urgent, &format!("project-{id}"), t, reduced)
+                                }
+                                _ => None,
+                            })
+                            .when(total > 0, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1()
+                                        .t_caption()
+                                        .font_family(crate::style::MONO)
+                                        .text_color(c(t.text_faint))
+                                        .child(total.to_string()),
+                                )
+                            })
                         })
-                        .when(total > 0, |d| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .px_1()
-                                    .t_caption()
-                                    .font_family(crate::style::MONO)
-                                    .text_color(c(t.text_faint))
-                                    .child(total.to_string()),
-                            )
-                        })
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .opacity(if home_open { 1. } else { 0. })
-                            .group_hover(group, |s| s.opacity(1.))
-                            .child(
+                        .child(reveal_on_hover(
+                            "project-home-reveal",
+                            group,
+                            if home_open { 1. } else { 0. },
+                            1.,
+                            div().flex_none().child(
                                 super::sidebar::header_button(
                                     format!("project-home-{id}"),
                                     Icon::AppWindow,
@@ -1682,7 +2266,8 @@ impl KeelWindow {
                                     }
                                 })),
                             ),
-                    )
+                        ))
+                    })
                     .on_hover(cx.listener({
                         let id = id.clone();
                         move |this, on: &bool, window, cx| {
@@ -2124,7 +2709,11 @@ impl KeelWindow {
             .items_center()
             .gap_1()
             .ml(zpx(-20.))
+            .relative()
+            .rounded(RADIUS_SM)
             .cursor_pointer()
+            // The header has no padding of its own, so the tint reaches past it.
+            .hover_fade_outset(c(t.hover), Some(c(t.selected)), zpx(6.), zpx(3.))
             .child(
                 div()
                     .size(zpx(16.))
@@ -2181,7 +2770,7 @@ impl KeelWindow {
                 .justify_center()
                 .gap_0p5()
                 .rounded(RADIUS_MD)
-                .hover(|s| s.bg(c(t.hover)))
+                .hover_fade(c(t.hover), None)
                 .child(
                     div()
                         .flex()
@@ -2283,7 +2872,8 @@ impl KeelWindow {
             .t_small()
             .text_color(c(t.text_faint))
             .cursor_pointer()
-            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text_muted)))
+            .hover(|s| s.text_color(c(t.text_muted)))
+            .hover_fade(c(t.hover), None)
             .child(
                 div()
                     .w(zpx(14.))
@@ -2337,7 +2927,8 @@ impl KeelWindow {
                     .gap_2()
                     .rounded(RADIUS_MD)
                     .cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)))
+                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                    .active(|s| s.opacity(0.85))
                     .child(
                         div()
                             .flex_1()
@@ -2565,7 +3156,8 @@ impl KeelWindow {
             .text_color(c(if open { t.text } else { t.text_muted }))
             .cursor_pointer()
             .when(open, |s| s.bg(c(t.selected)))
-            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), None)
             .min_w_0()
             .overflow_hidden()
             .child(Icon::Folder.el(zpx(12.)).flex_none())

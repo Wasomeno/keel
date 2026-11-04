@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use cef::*;
@@ -19,6 +20,19 @@ pub type Sender = tokio::sync::mpsc::UnboundedSender<NativeEvent>;
 /// Size the page lays out at while it runs with the pane closed: a desktop
 /// window, so pages and screenshots look like a normal browser's.
 pub const BACKGROUND_SIZE: (f64, f64) = (1280., 800.);
+
+/// How long a resize waits for a paint at the new size before the settle
+/// line gives up. The line clears earlier, on that paint.
+const LAYOUT_PAINT_WAIT: Duration = Duration::from_millis(800);
+
+/// `due` is the device-pixel size a resize is waiting on. A paint of that
+/// size catches up; a paint of the previous size does not.
+pub(crate) fn settle_paint(due: Option<(u32, u32)>, painted: (u32, u32)) -> Option<(u32, u32)> {
+    match due {
+        Some(size) if size == painted => None,
+        other => other,
+    }
+}
 
 /// Keel's agent library ([`js/agent.js`]): snapshot with refs, actions,
 /// wait checks. Evaluated in the page's JS context.
@@ -813,6 +827,13 @@ pub struct NativePage {
     /// Drag in progress: keep the last frame and scale it, instead of
     /// reflowing Chromium on every pointer move.
     resizing: Cell<bool>,
+    /// A gesture just ended. True until `sync` either resizes or finds the
+    /// size unchanged, so the settle line does not drop for the frame
+    /// before the resize lands.
+    layout_armed: Cell<bool>,
+    /// Device-pixel size of a resize whose matching paint has not arrived,
+    /// and when the wait started.
+    layout_due: Cell<Option<((u32, u32), Instant)>>,
     /// `set_windowless_frame_rate` last sent. Calling it every frame
     /// restarts the compositor clock and the picture jitters.
     frame_rate: Cell<i32>,
@@ -923,6 +944,8 @@ impl NativePage {
                 (init_h as f32 * 2.).round() as u32,
             )),
             resizing: Cell::new(false),
+            layout_armed: Cell::new(false),
+            layout_due: Cell::new(None),
             frame_rate: Cell::new(60),
             background: Cell::new(false),
             shown: Cell::new(false),
@@ -1028,6 +1051,9 @@ impl NativePage {
                 (fs.dip_w, fs.dip_h)
             };
             self.size.set(device_px(dip_w, dip_h, scale));
+            if self.current_frame.borrow().is_some() {
+                self.layout_due.set(Some((self.size.get(), Instant::now())));
+            }
             if let Some(host) = self.browser.host() {
                 host.notify_screen_info_changed();
                 host.was_resized();
@@ -1039,6 +1065,35 @@ impl NativePage {
     /// the last frame scales with the pane until the drag ends.
     pub fn set_resizing(&self, on: bool) {
         self.resizing.set(on);
+        if on {
+            // The bitmap is scaled on purpose for the gesture. A paint from
+            // the size before the drag must not clear the next wait.
+            self.layout_armed.set(false);
+            self.layout_due.set(None);
+        }
+    }
+
+    /// The gesture ended (or the width jumped). The next `sync` resizes.
+    /// No-op until a frame exists: there is nothing stale to cover.
+    pub fn arm_layout(&self) {
+        if self.current_frame.borrow().is_some() {
+            self.layout_armed.set(true);
+        }
+    }
+
+    /// A loaded page is still showing a bitmap from the previous size.
+    pub fn layout_pending(&self) -> bool {
+        if self.layout_armed.get() {
+            return true;
+        }
+        match self.layout_due.get() {
+            Some((_, at)) if at.elapsed() < LAYOUT_PAINT_WAIT => true,
+            Some(_) => {
+                self.layout_due.set(None);
+                false
+            }
+            None => false,
+        }
     }
 
     pub fn sync(
@@ -1057,6 +1112,9 @@ impl NativePage {
         // what shakes. One resize lands when the drag ends.
         if !self.resizing.get() && self.size.get() != target {
             self.resize_dip(dip_w, dip_h, target);
+        } else if self.layout_armed.get() {
+            // The gesture ended on the size Chromium already has.
+            self.layout_armed.set(false);
         }
         if !self.shown.get() {
             self.shown.set(true);
@@ -1076,6 +1134,12 @@ impl NativePage {
             let mut fs = self.frame_state.lock().unwrap();
             fs.dip_w = dip_w;
             fs.dip_h = dip_h;
+        }
+        self.layout_armed.set(false);
+        // The first layout has no bitmap to be wrong about. Later ones do,
+        // until a paint arrives at this device size.
+        if self.current_frame.borrow().is_some() {
+            self.layout_due.set(Some((device, Instant::now())));
         }
         if let Some(host) = self.browser.host() {
             host.was_resized();
@@ -1111,8 +1175,12 @@ impl NativePage {
         let mut fs = self.frame_state.lock().unwrap();
         if fs.has_new && !fs.buffer.is_empty() {
             fs.has_new = false;
-            let w = fs.buf_w;
-            let h = fs.buf_h;
+            let painted = (fs.buf_w, fs.buf_h);
+            if let Some((size, at)) = self.layout_due.get() {
+                self.layout_due
+                    .set(settle_paint(Some(size), painted).map(|size| (size, at)));
+            }
+            let (w, h) = painted;
             if let Some(rgba) = image::RgbaImage::from_raw(w, h, fs.buffer.clone()) {
                 let render_img = Arc::new(gpui::RenderImage::new(vec![image::Frame::new(rgba)]));
                 if let Some(old) = self.current_frame.borrow_mut().replace(render_img) {
@@ -1787,4 +1855,17 @@ fn urlencoding_simple(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::settle_paint;
+
+    #[test]
+    fn only_a_paint_at_the_new_size_catches_up() {
+        let due = Some((800, 600));
+        assert_eq!(settle_paint(due, (400, 600)), due);
+        assert_eq!(settle_paint(due, (800, 600)), None);
+        assert_eq!(settle_paint(None, (800, 600)), None);
+    }
 }

@@ -108,6 +108,14 @@ fn headed(data_dir: PathBuf, port: u16) -> i32 {
         Err(err) => return err.code(),
     };
     let engine = held.engine;
+    keel_update::init(keel_update::Config {
+        public_key: include_str!("../update-key.pub"),
+        #[cfg(target_os = "macos")]
+        plist_path: daemon::launch_agent_plist_path().ok(),
+        #[cfg(not(target_os = "macos"))]
+        plist_path: None,
+        plist_label: daemon::PLIST_LABEL,
+    });
     keel_ui::run(data_dir, held.guard, port, move || {
         if let Some(engine) = &engine {
             engine.flush();

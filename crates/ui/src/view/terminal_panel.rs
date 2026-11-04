@@ -2,6 +2,7 @@
 //! panel slot (with the browser and files panels; one at a time), sliding
 //! in and out like them. Hiding the panel detaches; the shells keep running.
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use crate::style::zpx;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -479,6 +480,7 @@ impl KeelWindow {
                     let group = format!("term-tab-{ix}");
                     div()
                         .id(ElementId::Name(group.clone().into()))
+                        .hover_probe(group.clone())
                         .group(group.clone())
                         .h(zpx(24.))
                         .max_w(zpx(220.))
@@ -493,7 +495,7 @@ impl KeelWindow {
                         .t_small()
                         .text_color(c(if active { t.text } else { t.text_muted }))
                         .when(active, |s| s.bg(c(t.selected)))
-                        .when(!active, |s| s.hover(|s| s.bg(c(t.hover))))
+                        .when(!active, |s| s.hover_fade(c(t.hover), None))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.terminal.active = ix;
                             window.focus(&this.terminal.focus, cx);
@@ -516,7 +518,7 @@ impl KeelWindow {
                                     .child("exited"),
                             )
                         })
-                        .child(
+                        .child(reveal_on_hover("term-close-reveal", group.clone(), if active { 1. } else { 0. }, 1.,
                             div()
                                 .id(ElementId::Name(format!("term-close-{ix}").into()))
                                 .size(zpx(16.))
@@ -526,16 +528,13 @@ impl KeelWindow {
                                 .justify_center()
                                 .rounded(RADIUS_SM)
                                 .text_color(c(t.text_faint))
-                                .when(!active, |s| {
-                                    s.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
-                                })
-                                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                                .hover(|s| s.text_color(c(t.text)))
+                                .hover_fade(c(t.hover), None)
                                 .child(Icon::Close.el(zpx(10.)))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     cx.stop_propagation();
                                     this.close_terminal(ix, window, cx);
-                                })),
-                        )
+                                }))))
                 }))
                 .child(
                     icon_button("term-new-btn", Icon::Plus, t)

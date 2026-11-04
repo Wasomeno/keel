@@ -1,5 +1,6 @@
 //! Composer dock: text area, picker chips, primary Send / Steer / Stop.
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use crate::style::zpx;
 use gpui::{AnyElement, ClickEvent, Context, IntoElement, div, prelude::*, px};
 use keel_proto::{ChatStatus, PermissionMode};
@@ -372,7 +373,8 @@ impl KeelWindow {
                         .t_small()
                         .cursor_pointer()
                         .when(model_open, |s| s.bg(c(t.selected)))
-                        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                        .hover(|s| s.text_color(c(t.text)))
+                        .hover_fade(c(t.hover), None)
                         .child(
                             div()
                                 .text_color(c(t.text))
@@ -413,7 +415,8 @@ impl KeelWindow {
                             .t_small()
                             .cursor_pointer()
                             .when(effort_open, |s| s.bg(c(t.selected)))
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                            .hover(|s| s.text_color(c(t.text)))
+                            .hover_fade(c(t.hover), None)
                             .child(
                                 div()
                                     .w(zpx(EFFORT_CHIP_LABEL_W))
@@ -986,7 +989,7 @@ impl KeelWindow {
                         .t_body()
                         .text_color(c(t.text))
                         .cursor_pointer()
-                        .hover(|s| s.bg(c(t.hover)))
+                        .hover_fade(c(t.hover), None)
                         .child(div().truncate().child(text.clone()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.show_points_menu = false;
@@ -1143,7 +1146,7 @@ impl KeelWindow {
                 .cursor_pointer()
                 .t_body()
                 .when(active, |d| d.bg(c(t.selected)))
-                .when(!active, |d| d.hover(|s| s.bg(c(t.hover))))
+                .when(!active, |d| d.hover_fade(c(t.hover), None))
         };
         let faint = |text: String| {
             div()
@@ -1168,20 +1171,18 @@ impl KeelWindow {
             });
             let cascade_in = |r: gpui::Stateful<gpui::Div>| r.into_any_element();
             match item {
-                super::MentionItem::Command(command) => command_rows.push(cascade_in(
-                    row(format!("mention-cmd-{}", command.insert), active)
-                        .child(div().flex_none().text_color(c(t.text_faint)).child(
-                            if command.skill {
-                                Icon::Brain.el(zpx(13.))
-                            } else {
-                                Icon::Tool.el(zpx(13.))
-                            },
-                        ))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(c(t.text))
-                                .child(if command.skill {
+                super::MentionItem::Command(command) => {
+                    command_rows.push(cascade_in(
+                        row(format!("mention-cmd-{}", command.insert), active)
+                            .child(div().flex_none().text_color(c(t.text_faint)).child(
+                                if command.skill {
+                                    Icon::Brain.el(zpx(13.))
+                                } else {
+                                    Icon::Tool.el(zpx(13.))
+                                },
+                            ))
+                            .child(div().flex_none().text_color(c(t.text)).child(
+                                if command.skill {
                                     command
                                         .insert
                                         .strip_prefix("/skill:")
@@ -1189,23 +1190,24 @@ impl KeelWindow {
                                         .unwrap_or_else(|| command.insert.clone())
                                 } else {
                                     command.insert.clone()
-                                }),
-                        )
-                        .when(command.project, |d| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .px_1()
-                                    .rounded(zpx(3.))
-                                    .bg(c(t.surface))
-                                    .t_caption()
-                                    .text_color(c(t.text_faint))
-                                    .child("project"),
-                            )
-                        })
-                        .child(faint(command.description))
-                        .on_click(accept),
-                )),
+                                },
+                            ))
+                            .when(command.project, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1()
+                                        .rounded(zpx(3.))
+                                        .bg(c(t.surface))
+                                        .t_caption()
+                                        .text_color(c(t.text_faint))
+                                        .child("project"),
+                                )
+                            })
+                            .child(faint(command.description))
+                            .on_click(accept),
+                    ))
+                }
                 super::MentionItem::Issue(issue) => issue_rows.push(cascade_in(
                     row(format!("mention-issue-{}", issue.iid), active)
                         .child(
@@ -1556,7 +1558,8 @@ impl KeelWindow {
                     .rounded(zpx(4.))
                     .cursor_pointer()
                     .text_color(c(t.text_faint))
-                    .hover(|d| d.bg(c(t.hover)).text_color(c(t.text)))
+                    .hover(|d| d.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
                     .child(Icon::Close.el(zpx(11.)))
                     .when(exit.is_none(), |d| {
                         d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1654,6 +1657,7 @@ impl KeelWindow {
                 let group = format!("pending-{}", &id[..12]);
                 let tile = div()
                     .id(gpui::ElementId::Name(group.clone().into()))
+                    .hover_probe(group.clone())
                     .group(group.clone())
                     .relative()
                     .size(zpx(56.))
@@ -1672,7 +1676,7 @@ impl KeelWindow {
                             .size_full()
                             .object_fit(gpui::ObjectFit::Cover),
                     )
-                    .child(
+                    .child(reveal_on_hover("remove-reveal", group.clone(), 0., 1.,
                         div()
                             .id(gpui::ElementId::Name(format!("remove-{group}").into()))
                             .absolute()
@@ -1686,15 +1690,12 @@ impl KeelWindow {
                             .bg(gpui::rgba(0x000000A6))
                             .text_color(gpui::rgb(0xFFFFFF))
                             .cursor_pointer()
-                            .opacity(0.)
-                            .group_hover(group, |s| s.opacity(1.))
                             .child(Icon::Close.el(zpx(10.)))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 // Not also the tile's open.
                                 cx.stop_propagation();
                                 this.remove_image(&id, cx)
-                            })),
-                    );
+                            }))));
                 match exit {
                     None => tile.into_any_element(),
                     // Gone from sight in the first half; the space closes over
@@ -2313,26 +2314,29 @@ impl KeelWindow {
 
     /// The search box at the top of a hero picker's menu.
     pub(super) fn picker_search_box(&self, icon: Icon, t: Tokens) -> AnyElement {
+        // Borderless, on the rows' inset, with a hairline under it: the
+        // field reads as the menu's first row, not a box inside it. flex_none
+        // so the scrolling panel never squeezes it below its height.
         div()
-            .mx_1()
-            .mt_1()
+            .flex_none()
+            .h(zpx(32.))
             .mb_1()
-            .h(zpx(30.))
             .px_2()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
-            .rounded(RADIUS_MD)
-            .bg(c(t.input))
-            .border_1()
+            .border_b_1()
             .border_color(c(t.border))
-            .t_body()
+            .t_small()
             .child(
                 div()
+                    .w(zpx(14.))
                     .flex_none()
+                    .flex()
+                    .justify_center()
                     .text_color(c(t.text_faint))
-                    .child(icon.el(zpx(13.))),
+                    .child(icon.el(zpx(14.))),
             )
             .child(div().flex_1().min_w_0().child(self.picker_filter.clone()))
             .into_any_element()
@@ -2352,10 +2356,6 @@ impl KeelWindow {
         let mut items: Vec<AnyElement> = Vec::new();
         let id = picker.menu_id();
         let width = match picker {
-            Picker::Folder if self.projects.sheet_open() => {
-                items.push(self.render_project_sheet(t, cx));
-                380.
-            }
             Picker::Folder => {
                 let query = self.picker_query.clone();
                 items.push(self.picker_search_box(Icon::Folder, t));
@@ -2432,6 +2432,7 @@ impl KeelWindow {
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
                             this.state.new_chat_space = Some(id.clone());
+                            this.projects.picked = None;
                             this.state.reset_branch_for_folder();
                             this.create_error = None;
                             this.set_picker(None, cx);
@@ -2454,7 +2455,7 @@ impl KeelWindow {
                 );
                 items.push(
                     menu_item("folder-choose", t, true, false)
-                        .child("Choose folder…")
+                        .child("Choose folder")
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.set_picker(None, cx);
                             this.pick_folder_for_new_chat(cx);
@@ -2868,7 +2869,8 @@ fn points_chip(id: &'static str, icon: Icon, active: bool, t: Tokens) -> gpui::S
         .text_color(c(if active { t.text } else { t.text_muted }))
         .cursor_pointer()
         .when(active, |s| s.bg(c(t.selected)))
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), None)
         .child(icon.el(zpx(15.)))
 }
 
@@ -3353,7 +3355,8 @@ fn icon_chip(id: &'static str, icon: Icon, t: Tokens) -> gpui::Stateful<gpui::Di
         .rounded_full()
         .text_color(c(t.text_muted))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), None)
         .child(icon.el(zpx(16.)))
 }
 
@@ -3377,7 +3380,8 @@ fn chip(id: &'static str, t: Tokens, active: bool) -> gpui::Stateful<gpui::Div> 
         .text_color(c(if active { t.text } else { t.text_muted }))
         .cursor_pointer()
         .when(active, |s| s.bg(c(t.selected)))
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), None)
 }
 
 #[cfg(test)]

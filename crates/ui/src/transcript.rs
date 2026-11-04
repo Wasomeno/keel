@@ -13,6 +13,7 @@
 //! - Code block height is `lines * line_height`, independent of syntax highlight.
 //! - Paint-only syntax colors.
 
+use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1051,7 +1052,8 @@ fn chart_bar(
                     })
                     .when(show_table, |d| {
                         d.text_color(c(t.text_faint))
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                            .hover(|s| s.text_color(c(t.text)))
+                            .hover_fade(c(t.hover), None)
                     })
                     .active(|s| s.opacity(0.85))
                     .on_click(move |_, _, cx| {
@@ -1081,7 +1083,8 @@ fn chart_bar(
                     })
                     .when(!show_table, |d| {
                         d.text_color(c(t.text_faint))
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                            .hover(|s| s.text_color(c(t.text)))
+                            .hover_fade(c(t.hover), None)
                     })
                     .active(|s| s.opacity(0.85))
                     .on_click(move |_, _, cx| {
@@ -1205,7 +1208,8 @@ fn render_chart(
                 .bg(c(t.surface))
                 .border_1()
                 .border_color(c(t.border))
-                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.hover), None)
                 .active(|s| s.opacity(0.85))
                 .child(div().size(px(7.)).rounded(px(2.)).bg(series_color(t, ix)))
                 .child(
@@ -1353,6 +1357,7 @@ fn render_choices(
             .items_center()
             .gap_3()
             .when(ix > 0, |d| d.border_t_1().border_color(c(t.border)))
+            .when(live, |d| d.hover_fade(c(t.hover), Some(c(t.selected))))
             .child(badge)
             .child(
                 div()
@@ -1366,8 +1371,7 @@ fn render_choices(
             .when(recommended, |d| d.child(pill))
             .when(live, |d| {
                 d.cursor_pointer()
-                    .hover(|s| s.bg(c(t.hover)))
-                    .active(|s| s.bg(c(t.selected)).opacity(0.85))
+                    .active(|s| s.opacity(0.85))
                     .on_click(move |_, _, cx| {
                         on_action(RowAction::Choose { text: text.clone() }, cx)
                     })
@@ -1607,8 +1611,9 @@ fn render_mr_card(
             .text_size(zpx(12.))
             .text_color(c(t.text_muted))
             .cursor_pointer()
-            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-            .active(|s| s.bg(c(t.selected)).opacity(0.85))
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), Some(c(t.selected)))
+            .active(|s| s.opacity(0.85))
             .on_click(move |_, _, cx| on_action(RowAction::OpenUrl { url: url.clone() }, cx))
             .child("Open")
             .child(Icon::External.el(zpx(11.)))
@@ -1639,8 +1644,9 @@ fn render_mr_card(
             .text_size(zpx(12.))
             .text_color(c(t.text_muted))
             .cursor_pointer()
-            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-            .active(|s| s.bg(c(t.selected)).opacity(0.85))
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), Some(c(t.selected)))
+            .active(|s| s.opacity(0.85))
             .on_click(move |_, _, cx| on_action(RowAction::TrackMr { mr: mr.clone() }, cx))
             .child(Icon::Eye.el(zpx(11.)))
             .child("Track")
@@ -2013,6 +2019,7 @@ fn render_compare(
                 )
         });
         let card = div()
+            .id(("compare-card", ix))
             .flex_1()
             .min_w_0()
             .px_3()
@@ -2024,7 +2031,7 @@ fn render_compare(
             .border_1()
             .border_color(c(if col.recommended { t.accent } else { t.border }))
             .bg(c(t.surface))
-            .hover(|s| s.bg(c(t.hover)))
+            .hover_fade(c(t.hover), None)
             .child(
                 div()
                     .h(px(18.))
@@ -2224,8 +2231,8 @@ fn render_file_changes(
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .hover(|s| s.bg(c(t.hover)))
-            .active(|s| s.bg(c(t.selected)).opacity(0.85))
+            .hover_fade(c(t.hover), Some(c(t.selected)))
+            .active(|s| s.opacity(0.85))
             .on_click(move |_, _, cx| on_action(RowAction::OpenFileDiff { path: path.clone() }, cx))
             .child(
                 div()
@@ -2293,8 +2300,8 @@ fn render_file_changes(
         .items_center()
         .gap_2()
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)))
-        .active(|s| s.bg(c(t.selected)).opacity(0.85))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.opacity(0.85))
         .on_click(move |_, _, cx| {
             on_action(
                 RowAction::Toggle {
@@ -2357,8 +2364,8 @@ fn render_file_changes(
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .hover(|s| s.bg(c(t.hover)))
-            .active(|s| s.bg(c(t.selected)).opacity(0.85))
+            .hover_fade(c(t.hover), Some(c(t.selected)))
+            .active(|s| s.opacity(0.85))
             .on_click(move |_, _, cx| on_action(RowAction::OpenFileDiff { path: path.clone() }, cx))
             .child(
                 div()
@@ -2933,8 +2940,9 @@ pub fn bar_button(
         .rounded_full()
         .cursor_pointer()
         .text_color(c(color))
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-        .active(|s| s.bg(c(t.selected)).opacity(0.85))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.opacity(0.85))
         .child(icon.el(zpx(11.)))
         .when(!label.is_empty(), |d| d.child(label))
 }
@@ -4608,12 +4616,8 @@ fn link_chip(
         .text_size(zpx(12.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
-        .hover(|s| {
-            s.bg(c(t.hover))
-                .border_color(c(t.info).opacity(0.55))
-                .text_color(c(t.text))
-        })
-        .active(|s| s.bg(c(t.selected)))
+        .hover(|s| s.border_color(c(t.info).opacity(0.55)).text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
         .child(favicon_badge(&host, 13., t))
         .child(
             div()
@@ -4867,12 +4871,8 @@ fn file_inline_chip(
         .border_1()
         .border_color(c(t.border))
         .cursor_pointer()
-        .hover(|s| {
-            s.bg(c(t.hover))
-                .border_color(c(t.accent).opacity(0.6))
-                .text_color(c(t.text))
-        })
-        .active(|s| s.bg(c(t.selected)))
+        .hover(|s| s.border_color(c(t.accent).opacity(0.6)).text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
         .child(
             div()
                 .flex_none()
@@ -5563,8 +5563,9 @@ fn file_chip(
         .border_color(c(t.border))
         .bg(c(t.surface))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).border_color(c(t.focus)))
-        .active(|s| s.bg(c(t.selected)).border_color(c(t.focus)).opacity(0.85))
+        .hover(|s| s.border_color(c(t.focus)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.border_color(c(t.focus)).opacity(0.85))
         .on_click(move |_, _, cx| on_action(RowAction::OpenFile { path: path.clone() }, cx))
         .child(badge)
         .child(
@@ -5716,10 +5717,10 @@ fn render_receipt(
         .items_center()
         .gap_2()
         .rounded(RADIUS_MD)
+        .when(has_body, |d| d.hover_fade(c(t.hover), None))
         .child(crate::view::receipt_line_el(&line, t))
         .when(has_body, |d| {
             d.cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)))
                 .on_click(move |_, _, cx| {
                     on_action(
                         RowAction::Toggle {

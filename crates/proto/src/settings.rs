@@ -82,6 +82,9 @@ pub struct UiSettings {
     /// Chats whose agents have the browser turned off (the pane's toggle).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub browser_off_chats: Vec<String>,
+    /// Settings → Updates. Absent means check. `Some(false)` turns checks off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
 }
 
 /// Strongest background dim the slider offers.
@@ -229,6 +232,7 @@ mod tests {
             background: Some("bg-1.jpg".into()),
             background_dim: Some(0.4),
             dotify_nudge: true,
+            auto_update: Some(false),
             ..UiSettings::default()
         };
         let text = serde_json::to_string(&settings).unwrap();
@@ -237,5 +241,16 @@ mod tests {
             let text = serde_json::to_string(&sound).unwrap();
             assert_eq!(serde_json::from_str::<SoundChoice>(&text).unwrap(), sound);
         }
+    }
+
+    #[test]
+    fn auto_update_is_on_unless_turned_off() {
+        let old: UiSettings = serde_json::from_str(r#"{"openTabs":[],"theme":"dark"}"#).unwrap();
+        assert_eq!(old.auto_update, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("auto_update"));
+        let off: UiSettings = serde_json::from_str(r#"{"auto_update":false}"#).unwrap();
+        assert_eq!(off.auto_update, Some(false));
+        let text = serde_json::to_string(&off).unwrap();
+        assert_eq!(serde_json::from_str::<UiSettings>(&text).unwrap().auto_update, Some(false));
     }
 }

@@ -1,5 +1,6 @@
 //! Sidebar: chats grouped into foldable space sections, attention-ordered inside.
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use crate::style::zpx;
 use std::collections::HashMap;
 
@@ -7,7 +8,9 @@ use gpui::{AnyElement, ClickEvent, Context, ElementId, IntoElement, div, prelude
 use keel_theme::Tokens;
 
 use super::{
-    KeelWindow, drag_region, icon_button, menu_item, menu_separator, sidebar_menu, status_dot,
+    KeelWindow, drag_region, icon_button, menu_action, menu_hint, menu_separator, sidebar_menu,
+    sidebar_menu_at,
+    status_dot,
 };
 use crate::icons::Icon;
 use crate::state::{AppState, SPACE_ROW_CAP, SpaceSection};
@@ -83,7 +86,9 @@ pub(super) fn header_button(id: String, icon: Icon, t: Tokens) -> gpui::Stateful
         .rounded(RADIUS_SM)
         .text_color(c(t.text_faint))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.text_color(c(t.text)).opacity(0.85))
         .child(icon.el(zpx(13.)))
 }
 
@@ -167,6 +172,48 @@ impl KeelWindow {
             .children(self.render_rename_prompt(t, cx))
             .child(self.render_chat_list(t, cx))
             .children(self.render_selection_bar(t, cx))
+            .child(self.render_sidebar_footer(t, cx))
+    }
+
+    fn render_sidebar_footer(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_none()
+            .px_2()
+            .py_1p5()
+            .border_t_1()
+            .border_color(c(t.border))
+            .child(
+                div()
+                    .id("sidebar-settings-btn")
+                    .h(zpx(28.))
+                    .px_2()
+                    .rounded(RADIUS_MD)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .t_small()
+                    .text_color(c(t.text_muted))
+                    .hover(|s| s.text_color(c(t.text)))
+                    .hover_fade(c(t.hover), None)
+                    .active(|s| s.opacity(0.75))
+                    .child(Icon::Settings.el(zpx(13.)).text_color(c(t.text_faint)))
+                    .child(div().flex_1().child("Settings"))
+                    .child(
+                        div()
+                            .px_1()
+                            .py_0p5()
+                            .rounded(RADIUS_SM)
+                            .bg(c(t.hover))
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child("⌘,"),
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.toggle_settings(cx);
+                    })),
+            )
     }
 
     /// Top row: room for the traffic lights, stationary collapse button, and window drag.
@@ -218,6 +265,115 @@ impl KeelWindow {
             )
     }
 
+    fn render_projects_header(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let menu_open = self.show_projects_menu;
+        div()
+            .id("projects-header-group")
+            .hover_probe("projects-header")
+            .group("projects-header")
+            .h(zpx(SECTION_HEADER_HEIGHT))
+            .pl_1()
+            .pr_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .t_caption()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(t.text_faint))
+                    .child(
+                        div()
+                            .size(zpx(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::FolderTree.el(zpx(12.))),
+                    )
+                    .child("Projects"),
+            )
+            .child(reveal_on_hover("projects-overflow-reveal", "projects-header", if menu_open { 1. } else { 0. }, 1.,
+                div()
+                    .relative()
+                    .child(
+                        icon_button("projects-overflow-btn", Icon::Ellipsis, t)
+                            .text_color(c(t.text_faint))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.menu_just_dismissed("projects-overflow-menu") {
+                                    return;
+                                }
+                                this.show_projects_menu = !this.show_projects_menu;
+                                cx.notify();
+                            })),
+                    )
+                    .children(
+                        self.menu_phase("projects-overflow-menu", self.show_projects_menu, cx)
+                            .map(|leaving| self.render_projects_menu(leaving, t, cx)),
+                    )))
+    }
+
+    fn render_projects_menu(
+        &mut self,
+        leaving: Option<u64>,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let in_select = self.project_select_mode;
+        let mut items: Vec<AnyElement> = vec![
+            menu_action("projects-menu-new", Icon::Plus.el(zpx(14.)), false, t)
+                .child("New project")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.show_projects_menu = false;
+                    this.open_project_modal(window, cx);
+                }))
+                .into_any_element(),
+        ];
+        if !self.projects.store.projects.is_empty() {
+            items.push(menu_separator(t).into_any_element());
+            items.push(
+                menu_action("projects-menu-delete", Icon::Trash.el(zpx(14.)), true, t)
+                    .child(if in_select {
+                        "Exit selection"
+                    } else {
+                        "Delete projects"
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.show_projects_menu = false;
+                        if this.project_select_mode {
+                            this.exit_project_select_mode(cx);
+                        } else {
+                            this.enter_project_select_mode(cx);
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+            this.note_menu_dismissed("projects-overflow-menu");
+            this.show_projects_menu = false;
+            cx.notify();
+        });
+        sidebar_menu(
+            "projects-overflow-menu",
+            t,
+            176.,
+            leaving,
+            self.reduced(),
+            dismiss,
+            items,
+        )
+    }
+
     /// "Spaces" over the sections, or a way back out of a focused space;
     /// the app's overflow menu on the right.
     fn render_sidebar_header(
@@ -235,6 +391,8 @@ impl KeelWindow {
             .child(
                 div()
                     .id("spaces-header-group")
+                    .hover_probe("spaces-header")
+                    .group("spaces-header")
                     .h(zpx(SECTION_HEADER_HEIGHT))
                     .pl_1()
                     .pr_1()
@@ -278,7 +436,8 @@ impl KeelWindow {
                                 .cursor_pointer()
                                 .t_small()
                                 .text_color(c(t.text_muted))
-                                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                                .hover(|s| s.text_color(c(t.text)))
+                                .hover_fade(c(t.hover), None)
                                 .child(Icon::ChevronDown.el(zpx(12.)).with_transformation(
                                     gpui::Transformation::rotate(gpui::percentage(0.25)),
                                 ))
@@ -289,7 +448,7 @@ impl KeelWindow {
                                 })),
                         )
                     })
-                    .child(
+                    .child(reveal_on_hover("spaces-overflow-reveal", "spaces-header", if self.state.show_overflow_menu { 1. } else { 0. }, 1.,
                         div()
                             .relative()
                             .child(
@@ -308,8 +467,7 @@ impl KeelWindow {
                             .children(
                                 self.menu_phase("overflow-menu", self.state.show_overflow_menu, cx)
                                     .map(|leaving| self.render_overflow_menu(leaving, t, cx)),
-                            ),
-                    ),
+                            ))),
             )
     }
 
@@ -329,30 +487,20 @@ impl KeelWindow {
             space_id,
         );
         let items: Vec<AnyElement> = vec![
-            menu_item("space-new-chat", t, true, false)
+            menu_action("space-new-chat", Icon::Plus.el(zpx(14.)), false, t)
                 .child("New chat")
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.state.space_menu = None;
                     this.new_chat_in_space(new_id.clone(), cx);
                 }))
                 .into_any_element(),
-            menu_item("space-focus", t, true, false)
+            menu_action("space-focus", if focused { Icon::EyeOff.el(zpx(14.)) } else { Icon::Eye.el(zpx(14.)) }, false, t)
                 .child(if focused {
                     "Show all spaces"
                 } else {
                     "Show only this space"
                 })
-                .child(div().flex_1())
-                .when(!focused, |d| {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .t_caption()
-                            .text_color(c(t.text_faint))
-                            .child("⌥-click"),
-                    )
-                })
+                .when(!focused, |d| d.child(menu_hint("⌥-click", t)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.state.space_menu = None;
                     this.state.space_filter = if focused {
@@ -364,19 +512,17 @@ impl KeelWindow {
                 }))
                 .into_any_element(),
             menu_separator(t).into_any_element(),
-            menu_item("rename-space-action", t, true, false)
-                .child("Rename…")
+            menu_action("rename-space-action", Icon::FilePen.el(zpx(14.)), false, t)
+                .child("Rename")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.start_rename(ren.clone(), window, cx);
                 }))
                 .into_any_element(),
-            menu_item("delete-space-action", t, true, false)
-                .text_color(c(t.danger))
-                .child("Delete…")
+            menu_action("delete-space-action", Icon::Trash.el(zpx(14.)), true, t)
+                .child("Delete")
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.state.confirming_delete_space = Some(del.clone());
                     this.state.space_menu = None;
-                    cx.notify();
+                    this.ask_delete_space(del.clone(), cx);
                 }))
                 .into_any_element(),
         ];
@@ -385,10 +531,12 @@ impl KeelWindow {
             this.state.space_menu = None;
             cx.notify();
         });
-        sidebar_menu(
+        sidebar_menu_at(
             "space-menu",
             t,
-            240.,
+            220.,
+            46.,
+            0.,
             leaving,
             self.reduced(),
             dismiss,
@@ -398,6 +546,7 @@ impl KeelWindow {
 
     /// The new-chat screen, set to start in `space_id`.
     fn new_chat_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
+        self.projects.picked = None;
         self.state.new_chat_space = Some(space_id);
         self.create_new_session(None, cx);
     }
@@ -410,11 +559,11 @@ impl KeelWindow {
     ) -> AnyElement {
         let in_select = self.select_mode || !self.selected_chats.is_empty();
         let mut items: Vec<AnyElement> = vec![
-            menu_item("select-sessions", t, true, false)
+            menu_action("select-sessions", Icon::ListChecks.el(zpx(14.)), false, t)
                 .child(if in_select {
                     "Exit selection"
                 } else {
-                    "Select sessions…"
+                    "Select sessions"
                 })
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.state.show_overflow_menu = false;
@@ -429,7 +578,7 @@ impl KeelWindow {
         if let Some(chat_id) = self.state.active_tab.clone() {
             items.push(menu_separator(t).into_any_element());
             items.push(
-                menu_item("archive-active-chat", t, true, false)
+                menu_action("archive-active-chat", Icon::Archive.el(zpx(14.)), false, t)
                     .child("Archive this chat")
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.state.show_overflow_menu = false;
@@ -438,8 +587,8 @@ impl KeelWindow {
                     .into_any_element(),
             );
             items.push(
-                menu_item("track-mr", t, true, false)
-                    .child("Track merge request…")
+                menu_action("track-mr", Icon::GitLab.el(zpx(14.)), false, t)
+                    .child("Track merge request")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.state.show_overflow_menu = false;
                         this.mr_open_prompt(window, cx);
@@ -447,15 +596,7 @@ impl KeelWindow {
                     .into_any_element(),
             );
         }
-        items.push(menu_separator(t).into_any_element());
-        items.push(
-            menu_item("open-settings", t, true, false)
-                .child("Settings…")
-                .child(div().flex_1())
-                .child(div().t_caption().text_color(c(t.text_faint)).child("⌘,"))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_settings(cx)))
-                .into_any_element(),
-        );
+
         let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
             this.note_menu_dismissed("overflow-menu");
             this.state.show_overflow_menu = false;
@@ -464,7 +605,7 @@ impl KeelWindow {
         sidebar_menu(
             "overflow-menu",
             t,
-            200.,
+            192.,
             leaving,
             self.reduced(),
             dismiss,
@@ -523,9 +664,9 @@ impl KeelWindow {
     pub(super) fn render_delete_prompt_card(
         &mut self,
         t: Tokens,
+        space_id: String,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let space_id = self.state.confirming_delete_space.clone()?;
+    ) -> Option<gpui::Stateful<gpui::Div>> {
         let name = self
             .state
             .spaces
@@ -568,8 +709,7 @@ impl KeelWindow {
                         .child(
                             text_button("cancel-delete-space-btn", "Cancel", t).on_click(
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.state.confirming_delete_space = None;
-                                    cx.notify();
+                                    this.dismiss_delete_space(cx)
                                 }),
                             ),
                         )
@@ -607,7 +747,7 @@ impl KeelWindow {
                 .text_color(c(if active { t.text } else { t.text_muted }))
                 .when(active, |d| d.bg(c(t.selected)))
                 .when(!active, |d| {
-                    d.hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                    d.hover(|s| s.text_color(c(t.text))).hover_fade(c(t.hover), None)
                 })
                 .child(
                     div()
@@ -623,26 +763,41 @@ impl KeelWindow {
         )
     }
 
-    /// While chats are selected: how many, Clear, Done, Delete.
+    /// While chats or projects are selected: how many, Clear, Done, Delete.
     fn render_selection_bar(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.selected_chats.is_empty() && !self.select_mode {
+        let is_proj = self.project_select_mode || !self.selected_projects.is_empty();
+        let is_chat = self.select_mode || !self.selected_chats.is_empty();
+        if !is_proj && !is_chat {
             return None;
         }
-        let leaving = self.select_leaving.is_some();
-        let count = self.selected_chats.len();
-        let bar_n = self.select_mode_gen as usize;
+        let leaving = if is_proj {
+            self.project_select_leaving.is_some()
+        } else {
+            self.select_leaving.is_some()
+        };
+        let count = if is_proj {
+            self.selected_projects.len()
+        } else {
+            self.selected_chats.len()
+        };
+        let bar_n = if is_proj {
+            self.project_select_mode_gen as usize
+        } else {
+            self.select_mode_gen as usize
+        };
         let reduced = self.reduced();
         let bar = div()
             .flex_none()
             .mx_2()
             .mb_2()
-            .pl_3()
-            .pr_1()
+            .pl_2p5()
+            .pr_1p5()
             .h(zpx(36.))
             .rounded(crate::style::RADIUS_LG)
             .bg(c(t.surface))
             .border_1()
             .border_color(c(t.border))
+            .shadow_md()
             .flex()
             .flex_row()
             .items_center()
@@ -650,10 +805,17 @@ impl KeelWindow {
             .child(
                 div()
                     .flex_1()
-                    .t_small()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .t_caption()
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(c(t.text_muted))
                     .child(if count > 0 {
                         format!("{count} selected")
+                    } else if is_proj {
+                        "Select projects".into()
                     } else {
                         "Select sessions".into()
                     }),
@@ -661,9 +823,13 @@ impl KeelWindow {
             .when(count > 0, |d| {
                 d.child(
                     text_button("clear-selection-btn", "Clear", t).on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| {
-                            this.selected_chats.clear();
-                            this.select_anchor = None;
+                        move |this, _: &ClickEvent, _, cx| {
+                            if is_proj {
+                                this.selected_projects.clear();
+                            } else {
+                                this.selected_chats.clear();
+                                this.select_anchor = None;
+                            }
                             cx.notify();
                         },
                     )),
@@ -671,31 +837,43 @@ impl KeelWindow {
             })
             .child(
                 text_button("done-selection-btn", "Done", t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.exit_select_mode(cx);
+                    move |this, _: &ClickEvent, _, cx| {
+                        if is_proj {
+                            this.exit_project_select_mode(cx);
+                        } else {
+                            this.exit_select_mode(cx);
+                        }
                     },
                 )),
             )
             .when(count > 0, |d| {
                 d.child(
                     filled_button("delete-selected-btn", "Delete", t.danger, t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.ask_delete_chats(this.selected_chats.clone(), cx);
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if is_proj {
+                                this.ask_delete_projects(this.selected_projects.clone(), cx);
+                            } else {
+                                this.ask_delete_chats(this.selected_chats.clone(), cx);
+                            }
                         }),
                     ),
                 )
             });
         Some(if leaving {
-            crate::motion::dismiss(bar, ("selection-bar-out", bar_n), reduced)
+            let anim_id = if is_proj {
+                "proj-selection-bar-out"
+            } else {
+                "selection-bar-out"
+            };
+            crate::motion::dismiss(bar, (anim_id, bar_n), reduced)
         } else {
-            crate::motion::appear(
-                bar,
-                ("selection-bar", bar_n),
-                crate::motion::BASE,
-                10.,
-                reduced,
-            )
-            .into_any_element()
+            let anim_id = if is_proj {
+                "proj-selection-bar"
+            } else {
+                "selection-bar"
+            };
+            crate::motion::appear(bar, (anim_id, bar_n), crate::motion::BASE, 10., reduced)
+                .into_any_element()
         })
     }
 
@@ -733,12 +911,23 @@ impl KeelWindow {
                     pitch,
                     SidebarItem::ProjectHeader(project, open, first),
                 ));
-                for (chat, status) in self.visible_project_chats(&p_id) {
-                    items.push((
-                        chat.id.clone(),
-                        CHAT_ROW_PITCH,
-                        SidebarItem::Row(chat, status, true),
-                    ));
+                if open {
+                    let project_chats = self.visible_project_chats(&p_id);
+                    if project_chats.is_empty() {
+                        items.push((
+                            format!("e:project-{p_id}"),
+                            EMPTY_ROW_HEIGHT + 1.,
+                            SidebarItem::Empty(p_id.clone()),
+                        ));
+                    } else {
+                        for (chat, status) in project_chats {
+                            items.push((
+                                chat.id.clone(),
+                                CHAT_ROW_PITCH,
+                                SidebarItem::Row(chat, status, true),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -842,7 +1031,7 @@ impl KeelWindow {
                     )
                 });
                 let el = match item {
-                    SidebarItem::ProjectsLabel => super::projects::render_projects_label(t),
+                    SidebarItem::ProjectsLabel => self.render_projects_header(t, cx),
                     SidebarItem::ProjectHeader(project, open, first) => {
                         self.render_project_header(project, open, first, t, cx)
                     }
@@ -860,7 +1049,9 @@ impl KeelWindow {
                         Icon::Comment,
                         "No chats",
                         t,
-                    ),
+                    )
+                    .pl(zpx(28.))
+                    .pr_2(),
                     SidebarItem::NoSpaces => {
                         empty_row("spaces-empty-row".into(), Icon::Folder, "No spaces", t)
                     }
@@ -1046,6 +1237,7 @@ impl KeelWindow {
             .child(
                 div()
                     .id(ElementId::Name(group.clone().into()))
+                    .hover_probe(group.clone())
                     .group(group.clone())
                     .h(zpx(SECTION_HEADER_HEIGHT))
                     .pl_1()
@@ -1055,7 +1247,7 @@ impl KeelWindow {
                     .items_center()
                     .gap_1()
                     .rounded(RADIUS_MD)
-                    .when(!focused, |d| d.cursor_pointer().hover(|s| s.bg(c(t.hover))))
+                    .when(!focused, |d| d.cursor_pointer().hover_fade(c(t.hover), None))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if this.state.space_filter.is_some() {
                             return;
@@ -1113,14 +1305,12 @@ impl KeelWindow {
                             )
                         })
                     })
-                    .child(
+                    .child(reveal_on_hover("space-new-reveal", group, if menu_open { 1. } else { 0. }, 1.,
                         div()
                             .relative()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .opacity(if menu_open { 1. } else { 0. })
-                            .group_hover(group, |s| s.opacity(1.))
                             .child(
                                 header_button(format!("space-new-{space_id}"), Icon::Plus, t)
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1148,8 +1338,7 @@ impl KeelWindow {
                                     .map(|leaving| {
                                         self.render_space_menu(space_id.clone(), leaving, t, cx)
                                     }),
-                            ),
-                    ),
+                            ))),
             )
     }
 
@@ -1232,6 +1421,7 @@ impl KeelWindow {
         let chat_id = chat.id.clone();
         div()
             .id(ElementId::Name(group.clone().into()))
+            .hover_probe(group.clone())
             .group(group.clone())
             .when(!selecting, |d| {
                 let cid = chat_id.clone();
@@ -1249,7 +1439,7 @@ impl KeelWindow {
             .gap_0p5()
             .cursor_pointer()
             .when(active || selected, |s| s.bg(c(t.selected)))
-            .when(!active && !selected, |s| s.hover(|s| s.bg(c(t.hover))))
+            .when(!active && !selected, |s| s.hover_fade(c(t.hover), None))
             // ⌘-click toggles, ⇧-click selects a range; while in select mode or
             // anything is selected a plain click toggles too. Otherwise it opens.
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
@@ -1339,7 +1529,7 @@ impl KeelWindow {
                             .child(title),
                     )
                     .children(self.unread_mark(&chat.id, t))
-                    .child(
+                    .child(reveal_on_hover("archive-reveal", group.clone(), 0., 1.,
                         div()
                             .id(ElementId::Name(format!("archive-btn-{}", chat.id).into()))
                             .size(zpx(18.))
@@ -1348,18 +1538,16 @@ impl KeelWindow {
                             .justify_center()
                             .rounded(RADIUS_SM)
                             .text_color(c(t.text_faint))
-                            .opacity(0.)
-                            .group_hover(group.clone(), |s| s.opacity(1.))
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                            .hover(|s| s.text_color(c(t.text)))
+                            .hover_fade(c(t.hover), None)
                             .child(Icon::Archive.el(zpx(12.)))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 // Don't let the row's click reopen the tab.
                                 cx.stop_propagation();
                                 this.chat_summary_press(&archive_id, cx);
                                 this.archive_chat(archive_id.clone(), cx);
-                            })),
-                    )
-                    .child(
+                            }))))
+                    .child(reveal_on_hover("delete-reveal", group, 0., 1.,
                         div()
                             .id(ElementId::Name(format!("delete-btn-{}", chat.id).into()))
                             .size(zpx(18.))
@@ -1368,16 +1556,14 @@ impl KeelWindow {
                             .justify_center()
                             .rounded(RADIUS_SM)
                             .text_color(c(t.text_faint))
-                            .opacity(0.)
-                            .group_hover(group, |s| s.opacity(1.))
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
+                            .hover(|s| s.text_color(c(t.danger)))
+                            .hover_fade(c(t.hover), None)
                             .child(Icon::Trash.el(zpx(12.)))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
                                 this.chat_summary_press(&delete_id, cx);
                                 this.ask_delete_chats(vec![delete_id.clone()], cx);
-                            })),
-                    ),
+                            })))),
             )
             .child(
                 div()
@@ -1549,7 +1735,7 @@ fn next_selection(
 }
 
 /// Selection-mode checkbox at a row's left.
-fn check_circle(
+pub(super) fn check_circle(
     checked: bool,
     t: Tokens,
     id: &str,
@@ -1622,13 +1808,15 @@ pub(super) fn text_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .px_2p5()
-        .py_1()
+        .px_2()
+        .py_0p5()
         .rounded(RADIUS_MD)
-        .t_body()
+        .t_small()
         .text_color(c(t.text_muted))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.opacity(0.85))
         .child(label)
 }
 
@@ -1640,15 +1828,16 @@ pub(super) fn filled_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .px_2p5()
-        .py_1()
+        .px_2()
+        .py_0p5()
         .rounded(RADIUS_MD)
         .bg(c(fill))
-        .t_body()
+        .t_small()
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(c(t.text_on_accent))
         .cursor_pointer()
         .hover(|s| s.opacity(0.9))
+        .active(|s| s.opacity(0.75))
         .child(label)
 }
 

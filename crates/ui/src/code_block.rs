@@ -5,6 +5,7 @@
 //! over 360 ms. Nothing here starts a gpui animation, so a frame is requested
 //! only while that window is open: no nested animation id, no repeat.
 
+use crate::hover_fade::HoverFadeExt;
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -26,8 +27,10 @@ pub const COMPACT_CAP: f32 = 256.;
 pub const FULL_CAP: f32 = 480.;
 /// Bottom edge fade while the body is clipped.
 pub const FADE_H: f32 = 16.;
-/// Show-more glide. Same length as [`crate::motion::SHEET_OPEN`].
-pub const SHOW_MORE_MS: u64 = 360;
+/// Show-more glide. Same length as [`crate::motion::ROW_OPEN`].
+pub const SHOW_MORE_MS: u64 = 200;
+/// Show-less glide: closing is quicker than opening.
+pub const SHOW_LESS_MS: u64 = 160;
 /// Expanded full block: at most this fraction of the viewport, and it scrolls.
 pub const EXPANDED_VIEWPORT: f32 = 0.7;
 /// Compact output past this many lines is cut. The rest is "Show full output".
@@ -1264,8 +1267,9 @@ fn more_row(
         .t_caption()
         .text_color(c(t.text_muted))
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-        .active(|s| s.bg(c(t.selected)).opacity(0.85))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .active(|s| s.opacity(0.85))
         .on_click(on_click)
         .child(label.to_string())
         .when(chevron, |d| {
@@ -1481,7 +1485,7 @@ fn glide_cap(
         return (to, false, resting);
     }
     let elapsed = now.saturating_duration_since(at);
-    let window = Duration::from_millis(SHOW_MORE_MS);
+    let window = Duration::from_millis(if expanded { SHOW_MORE_MS } else { SHOW_LESS_MS });
     let t = (elapsed.as_secs_f32() / window.as_secs_f32()).clamp(0., 1.);
     let eased = glide_curve(t);
     let cap = from + (to - from) * eased;

@@ -104,14 +104,38 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Inside out, never --deep: --deep re-signs nested bundles wrong and is the
+# usual reason --verify --strict fails after a copy (UPDATER.md). Order: the
+# CEF framework's dylibs, the framework, each helper .app, the outer app.
+sign_bundle() {
+  local identity=$1 app=$2 fw="$2/Contents/Frameworks"
+  local cef="$fw/Chromium Embedded Framework.framework"
+  if [ -d "$cef" ]; then
+    if [ -d "$cef/Libraries" ]; then
+      find "$cef/Libraries" -type f -name '*.dylib' -print0 |
+        while IFS= read -r -d '' lib; do codesign --force --sign "$identity" "$lib"; done
+    fi
+    codesign --force --sign "$identity" "$cef"
+  fi
+  for helper in "$fw"/*.app; do
+    [ -d "$helper" ] && codesign --force --sign "$identity" "$helper"
+  done
+  codesign --force --sign "$identity" "$app"
+}
+
 # A stable identity keeps the Keychain's "Always Allow" across rebuilds; an
 # ad-hoc signature is new every build, so macOS asks for the password again.
+# KEEL_REQUIRE_IDENTITY=1 (publish-mac.sh) refuses ad hoc: an update archive
+# must carry a certificate signature.
 IDENTITY="${KEEL_SIGN_IDENTITY:-Keel Dev}"
-if security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
-  codesign --force --deep --sign "$IDENTITY" "$APP"
+if [ "$IDENTITY" != "-" ] && security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
+  sign_bundle "$IDENTITY" "$APP"
+elif [ -n "${KEEL_REQUIRE_IDENTITY:-}" ]; then
+  echo "no \"$IDENTITY\" signing certificate; refusing to sign an update build ad hoc" >&2
+  exit 1
 else
   echo "no \"$IDENTITY\" signing certificate; signing ad hoc (Keychain will ask after each rebuild)"
-  codesign --force --deep --sign - "$APP"
+  sign_bundle - "$APP"
 fi
 codesign --verify --strict "$APP"
 # A build copy (KEEL_APP set) is not registered as the Keel that opens keel:// links.

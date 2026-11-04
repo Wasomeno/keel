@@ -11,6 +11,7 @@ pub mod connections;
 pub mod dotify;
 pub mod files;
 mod genui;
+pub mod memory;
 pub mod skills;
 pub use genui::{ui_call, ui_tools};
 mod journal;
@@ -4372,6 +4373,68 @@ impl Engine {
         }
     }
 
+    /// `{data_dir}/harnesses/keel`, the root of both memory scopes.
+    fn memory_home(&self) -> PathBuf {
+        keel_harness::KeelProfile::home(&compute_data_dir(&self.inner.profile))
+    }
+
+    fn rpc_memory_prompt(&self, id: &str, params: &Value) -> String {
+        match memory_cwd(params) {
+            Ok(cwd) => success(id, serde_json::json!({ "text": memory::prompt(&self.memory_home(), cwd.as_deref()) })),
+            Err(msg) => failure(id, RpcErrorCode::BadParams, msg),
+        }
+    }
+
+    fn rpc_memory_list(&self, id: &str, params: &Value) -> String {
+        let cwd = match memory_cwd(params) {
+            Ok(cwd) => cwd,
+            Err(msg) => return failure(id, RpcErrorCode::BadParams, msg),
+        };
+        memory_reply(id, memory::list(&self.memory_home(), cwd.as_deref()))
+    }
+
+    fn rpc_memory_read(&self, id: &str, params: &Value) -> String {
+        let scope = match self.memory_scope(params) {
+            Ok(scope) => scope,
+            Err(err) => return memory_reply(id, Err(err)),
+        };
+        let slug = params.get("slug").and_then(Value::as_str).filter(|s| !s.is_empty());
+        memory_reply(id, memory::read(&scope, slug))
+    }
+
+    fn rpc_memory_write(&self, id: &str, params: &Value) -> String {
+        let scope = match self.memory_scope(params) {
+            Ok(scope) => scope,
+            Err(err) => return memory_reply(id, Err(err)),
+        };
+        let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let slug = text("slug");
+        let action = match text("action").as_str() {
+            "upsert" => memory::WriteAction::Upsert { kind: text("type"), description: text("description"), body: text("body") },
+            "archive" => memory::WriteAction::Archive,
+            _ => return failure(id, RpcErrorCode::BadParams, "action must be upsert or archive"),
+        };
+        memory_reply(
+            id,
+            memory::write(&scope, &slug, action).map(|out| serde_json::json!({ "over_cap": out.over_cap, "text": out.text })),
+        )
+    }
+
+    fn rpc_memory_delete(&self, id: &str, params: &Value) -> String {
+        let scope = match self.memory_scope(params) {
+            Ok(scope) => scope,
+            Err(err) => return memory_reply(id, Err(err)),
+        };
+        let slug = params.get("slug").and_then(Value::as_str).unwrap_or_default();
+        memory_reply(id, memory::delete(&scope, slug).map(|()| serde_json::json!({})))
+    }
+
+    fn memory_scope(&self, params: &Value) -> Result<memory::ScopeDir, memory::MemoryError> {
+        let kind = memory::ScopeKind::parse(params.get("scope").and_then(Value::as_str).unwrap_or_default())?;
+        let cwd = memory_cwd(params).map_err(|m| memory::MemoryError::BadParams(m.to_string()))?;
+        memory::resolve(&self.memory_home(), kind, cwd.as_deref())
+    }
+
     fn rpc_set_skill_enabled(&self, id: &str, params: &Value) -> String {
         let Some(path) = params.get("path").and_then(Value::as_str) else {
             return failure(id, RpcErrorCode::BadParams, "bad params");
@@ -4716,6 +4779,11 @@ impl EngineHost for Engine {
             "list_commands" => self.rpc_list_commands(&request.id, &request.params),
             "list_skills" => self.rpc_list_skills(&request.id, &request.params),
             "set_skill_enabled" => self.rpc_set_skill_enabled(&request.id, &request.params),
+            "memory_prompt" => self.rpc_memory_prompt(&request.id, &request.params),
+            "memory_list" => self.rpc_memory_list(&request.id, &request.params),
+            "memory_read" => self.rpc_memory_read(&request.id, &request.params),
+            "memory_write" => self.rpc_memory_write(&request.id, &request.params),
+            "memory_delete" => self.rpc_memory_delete(&request.id, &request.params),
             "add_skill" => self.rpc_add_skill(&request.id, &request.params),
             "remove_skill" => self.rpc_remove_skill(&request.id, &request.params),
             "queue_command" => self.rpc_queue(&request.id, &request.params),
@@ -5617,6 +5685,32 @@ fn fs_read_dirs(path: &std::path::Path) -> Vec<PathBuf> {
     entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect()
+}
+
+/// Memory's `cwd`: missing, empty or not a folder is no project; a relative
+/// path is a caller bug.
+fn memory_cwd(params: &Value) -> Result<Option<PathBuf>, &'static str> {
+    match params.get("cwd") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) if raw.is_empty() => Ok(None),
+        Some(Value::String(raw)) => {
+            let path = PathBuf::from(raw);
+            if !path.is_absolute() {
+                Err("cwd must be an absolute path")
+            } else {
+                Ok(Some(path).filter(|p| p.is_dir()))
+            }
+        }
+        Some(_) => Err("cwd must be a string"),
+    }
+}
+
+fn memory_reply(id: &str, result: Result<Value, memory::MemoryError>) -> String {
+    match result {
+        Ok(value) => success(id, value),
+        Err(memory::MemoryError::BadParams(msg)) => failure(id, RpcErrorCode::BadParams, &msg),
+        Err(memory::MemoryError::Failed(msg)) => failure(id, RpcErrorCode::Internal, &msg),
+    }
 }
 
 fn absolute_dir(value: Option<&Value>) -> Option<PathBuf> {

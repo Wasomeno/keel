@@ -10,6 +10,7 @@
 //! changed, when a turn ends, and on demand. Saving refuses to overwrite a
 //! file that changed since it was opened (the agent may have written it).
 
+use crate::hover_fade::HoverFadeExt;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -1604,7 +1605,7 @@ impl KeelWindow {
                         .rounded(RADIUS_MD)
                         .t_small()
                         .cursor_pointer()
-                        .hover(|s| s.bg(c(t.hover)))
+                        .hover_fade(c(t.hover), None)
                         .child(
                             div()
                                 .flex_none()
@@ -1706,7 +1707,7 @@ impl KeelWindow {
                         if on {
                             d.bg(c(t.selected))
                         } else {
-                            d.hover(|s| s.bg(c(t.hover)))
+                            d.hover_fade(c(t.hover), None)
                         }
                     })
                     .active(|s| s.bg(c(t.selected)))
@@ -2369,8 +2370,8 @@ fn text_button(id: &'static str, label: &'static str, t: Tokens) -> gpui::Statef
         .t_caption()
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
-        .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
-        .active(|s| s.bg(c(t.selected)))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
         .child(label)
 }
 

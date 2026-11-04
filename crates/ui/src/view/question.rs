@@ -7,6 +7,7 @@
 //! wrappers whose ids change under animated children); frames are requested
 //! only while something moves. Only the card itself re-lays out per frame.
 
+use crate::hover_fade::HoverFadeExt;
 use std::time::Instant;
 
 use gpui::{
@@ -497,7 +498,8 @@ impl KeelWindow {
             )
             .when(live, |d| {
                 d.cursor_pointer()
-                    .hover(|s| s.text_color(c(t.danger)).bg(c(t.danger).opacity(0.08)))
+                    .hover(|s| s.text_color(c(t.danger)))
+                    .hover_fade(c(t.danger).opacity(0.08), None)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.handle_interrupt(cx)))
             })
     }
@@ -514,7 +516,7 @@ impl KeelWindow {
         let settle = if reduced {
             approval::REDUCED_MS + 20.
         } else {
-            approval::ENTER_MS + 260.
+            approval::ENTER_MS + 120.
         };
         if ms < settle {
             window.request_animation_frame();
@@ -698,7 +700,7 @@ impl KeelWindow {
         for (ix, button) in buttons.iter().enumerate() {
             let look = match mode {
                 Mode::Live { ms } => {
-                    approval::part_enter(ms, 80. + 30. * ix.min(4) as f32, reduced)
+                    approval::part_enter(ms, 40. + 20. * ix.min(4) as f32, reduced)
                 }
                 Mode::Exit { frame, chosen } if chosen == Some(ix) => Look {
                     opacity: frame.chosen,
@@ -717,7 +719,7 @@ impl KeelWindow {
                 look,
             ));
         }
-        let stop_look = mode.part(80. + 30. * buttons.len().min(4) as f32, reduced);
+        let stop_look = mode.part(40. + 20. * buttons.len().min(4) as f32, reduced);
         actions = actions
             .child(div().flex_1())
             .child(place(self.stop_button(t, epoch, live, cx), stop_look));
@@ -869,7 +871,7 @@ impl KeelWindow {
         for (ix, option) in q.options.iter().enumerate() {
             let look = match mode {
                 Mode::Live { ms } => {
-                    approval::part_enter(ms, 40. + 30. * ix.min(6) as f32, reduced)
+                    approval::part_enter(ms, 20. + 20. * ix.min(6) as f32, reduced)
                 }
                 Mode::Exit { frame, chosen } if chosen == Some(ix) => Look {
                     opacity: frame.chosen,
@@ -905,6 +907,7 @@ impl KeelWindow {
                 .items_center()
                 .gap(zpx(10.))
                 .when(focused, |d| d.shadow(focus_ring(t)))
+                .when(live, |d| d.hover_fade(ink(t, 0.06), None))
                 .when(multi, |d| {
                     d.child(
                         div()
@@ -967,7 +970,6 @@ impl KeelWindow {
                 })
                 .when(live, |d| {
                     d.cursor_pointer()
-                        .hover(|s| s.bg(ink(t, 0.06)))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             if multi {
                                 this.with_panel(|p| {
@@ -996,7 +998,7 @@ impl KeelWindow {
                 .child(this.question_input.clone())
         };
         if q.other {
-            let look = mode.part(40. + 30. * other_ix.min(6) as f32, reduced);
+            let look = mode.part(20. + 20. * other_ix.min(6) as f32, reduced);
             let focused = live && panel.keyboard && panel.focus == other_ix;
             let el: AnyElement = if panel.other_open && live {
                 field(self).into_any_element()
@@ -1015,6 +1017,7 @@ impl KeelWindow {
                     .items_center()
                     .gap(zpx(10.))
                     .when(focused, |d| d.shadow(focus_ring(t)))
+                    .when(live, |d| d.hover_fade(ink(t, 0.06), None))
                     .child(key_chip("O", ink(t, 0.08), ink(t, 0.5)).ml_0())
                     .child(
                         div()
@@ -1024,7 +1027,7 @@ impl KeelWindow {
                             .child("Other…"),
                     )
                     .when(live, |d| {
-                        d.cursor_pointer().hover(|s| s.bg(ink(t, 0.06))).on_click(
+                        d.cursor_pointer().on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| this.open_other(cx)),
                         )
                     })
@@ -1055,7 +1058,7 @@ impl KeelWindow {
             "↑↓ move · ⏎ choose · Esc skip"
         };
         let rows_n = approval::question_rows(q).min(6) as f32;
-        let foot_look = mode.part(70. + 30. * rows_n, reduced);
+        let foot_look = mode.part(40. + 20. * rows_n, reduced);
         let can_submit = !panel.checked.is_empty();
         let submit = (q.multi || text_only || panel.other_open).then(|| {
             let enabled = if q.multi && !panel.other_open {
@@ -1080,6 +1083,9 @@ impl KeelWindow {
                     c(t.window).opacity(0.9)
                 } else {
                     ink(t, 0.35)
+                })
+                .when(live && enabled, |d| {
+                    d.hover_fade(c(t.window).opacity(0.1), Some(c(t.window).opacity(0.18)))
                 })
                 .child("Submit")
                 .child(key_chip(

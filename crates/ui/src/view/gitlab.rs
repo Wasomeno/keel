@@ -1,6 +1,7 @@
 //! The GitLab page: projects the user can reach on a connected host, and the
 //! selected project's issues. Read-only; an issue opens in the browser.
 
+use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use gpui::{AnyElement, ClickEvent, Context, ElementId, IntoElement, div, prelude::*};
 use keel_theme::Tokens;
@@ -447,7 +448,7 @@ impl KeelWindow {
                                 .cursor_pointer()
                                 .text_color(c(if active { t.text } else { t.text_muted }))
                                 .when(active, |d| d.bg(c(t.selected)))
-                                .hover(|d| d.bg(c(t.hover)))
+                                .hover_fade(c(t.hover), None)
                                 .child(h.trim_start_matches("https://").to_string())
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     this.gitlab_select_host(pick.clone(), cx);
@@ -523,7 +524,7 @@ impl KeelWindow {
                                 .flex()
                                 .flex_col()
                                 .when(active, |d| d.bg(c(t.selected)))
-                                .when(!active, |d| d.hover(|s| s.bg(c(t.hover))))
+                                .when(!active, |d| d.hover_fade(c(t.hover), None))
                                 .child(
                                     div()
                                         .t_body()

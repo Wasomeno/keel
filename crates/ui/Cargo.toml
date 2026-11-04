@@ -12,6 +12,8 @@ gpui-base.workspace = true
 keel-proto.workspace = true
 keel-rpc.workspace = true
 keel-theme.workspace = true
+# Settings → Updates: check, verify, stage, install (UPDATER.md).
+keel-update.workspace = true
 # Local UTC offset for Dotify times (tm_gmtoff).
 libc.workspace = true
 pulldown-cmark.workspace = true

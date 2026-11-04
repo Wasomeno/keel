@@ -3540,3 +3540,56 @@ fn boot_drops_chats_of_removed_harnesses() {
         .collect();
     assert_eq!(ids, ["c-keep"]);
 }
+
+#[test]
+fn memory_rpcs_write_list_prompt_and_refuse_bad_params() {
+    assert_eq!(keel_harness::MEMORY_PROTO, keel_rpc::PROTO_VERSION, "the memory extension's hello");
+    let tmp = Tmp::new("memory-rpc");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::silent());
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let (outbound, _rx) = Outbound::pair();
+    let call = |method: &str, params: Value| -> Value {
+        let request = RpcRequest { id: method.into(), method: method.into(), params };
+        serde_json::from_str(&engine.handle(&request, &outbound).expect("sync reply")).unwrap()
+    };
+    let home = tmp.path().join("profile/harnesses/keel");
+
+    let empty = call("memory_list", json!({}));
+    assert_eq!(empty["result"]["user"]["notes"], json!([]), "{empty}");
+    assert_eq!(empty["result"]["project"], Value::Null, "{empty}");
+    assert!(!home.join("agent/memory").exists(), "a read creates nothing");
+
+    let wrote = call(
+        "memory_write",
+        json!({ "scope": "user", "action": "upsert", "slug": "tabs", "type": "feedback",
+                "description": "Indent with tabs", "body": "Kevin wants tabs." }),
+    );
+    assert_eq!(wrote["result"]["over_cap"], json!(false), "{wrote}");
+    assert!(home.join("agent/memory/tabs.md").is_file());
+
+    let list = call("memory_list", json!({}));
+    assert_eq!(list["result"]["user"]["notes"][0]["slug"], json!("tabs"), "{list}");
+    let prompt = call("memory_prompt", json!({}));
+    let text = prompt["result"]["text"].as_str().unwrap();
+    assert!(text.starts_with(keel_harness::MEMORY_PREAMBLE), "{text}");
+    assert!(text.contains("- [tabs](tabs.md) — Indent with tabs"), "{text}");
+    assert!(text.contains("This chat has no folder."), "{text}");
+    let read = call("memory_read", json!({ "scope": "user", "slug": "tabs" }));
+    assert_eq!(read["result"]["body"], json!("Kevin wants tabs."), "{read}");
+
+    for (method, params) in [
+        ("memory_write", json!({ "scope": "user", "action": "upsert", "slug": "../x", "type": "user", "description": "d" })),
+        ("memory_write", json!({ "scope": "user", "action": "shred", "slug": "tabs" })),
+        ("memory_write", json!({ "scope": "project", "action": "archive", "slug": "tabs" })),
+        ("memory_read", json!({ "scope": "user", "cwd": "relative/dir" })),
+        ("memory_read", json!({ "scope": "galaxy" })),
+    ] {
+        let reply = call(method, params.clone());
+        assert_eq!(reply["error"]["code"], json!("bad_params"), "{params} -> {reply}");
+    }
+
+    let deleted = call("memory_delete", json!({ "scope": "user", "slug": "tabs" }));
+    assert!(deleted.get("result").is_some(), "{deleted}");
+    assert_eq!(call("memory_list", json!({}))["result"]["user"]["notes"], json!([]));
+}

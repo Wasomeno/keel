@@ -6,6 +6,7 @@
 //! frame while something is still moving. No scale; reduced motion lands
 //! at once with short fades.
 
+use crate::hover_fade::HoverFadeExt;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -557,7 +558,7 @@ fn secondary_button(
         .font_weight(FontWeight::MEDIUM)
         .text_color(ink(t, 0.88))
         .cursor_pointer()
-        .hover(|s| s.bg(ink(t, 0.11)))
+        .hover_fade(ink(t, 0.11), None)
         .child(
             div()
                 .opacity(if busy.is_some() { 0. } else { 1. })
@@ -590,7 +591,8 @@ fn ghost_button(id: &'static str, label: &'static str, t: Tokens) -> gpui::State
         .font_weight(FontWeight::MEDIUM)
         .text_color(ink(t, 0.65))
         .cursor_pointer()
-        .hover(|s| s.bg(ink(t, 0.07)).text_color(ink(t, 0.85)))
+        .hover(|s| s.text_color(ink(t, 0.85)))
+        .hover_fade(ink(t, 0.07), None)
         .child(label)
 }
 
@@ -1546,7 +1548,7 @@ impl KeelWindow {
                     .rounded(zpx(6.))
                     .text_color(ink(t, 0.5))
                     .cursor_pointer()
-                    .hover(|s| s.bg(ink(t, 0.08)))
+                    .hover_fade(ink(t, 0.08), None)
                     .child(icon)
                     .on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.dotify_manual_sync(cx)),
@@ -1754,7 +1756,7 @@ impl KeelWindow {
                         .justify_center()
                         .text_color(ink(t, 0.4))
                         .cursor_pointer()
-                        .hover(|s| s.bg(ink(t, 0.08)))
+                        .hover_fade(ink(t, 0.08), None)
                         .child(Icon::Close.el(zpx(11.)))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.dotify_clear_search(window, cx)
@@ -2066,7 +2068,7 @@ impl KeelWindow {
                 .gap(zpx(8.))
                 .when(is_picked, |d| d.bg(ink(t, 0.08)))
                 .when(is_hi && !is_picked, |d| d.bg(ink(t, 0.06)))
-                .hover(|s| s.bg(ink(t, 0.06)))
+                .hover_fade(ink(t, 0.06), None)
                 .cursor_pointer()
                 .text_size(zpx(13.))
                 .text_color(if is_picked {
@@ -2091,7 +2093,7 @@ impl KeelWindow {
                             d.invisible().group_hover(group.clone(), |s| s.visible())
                         })
                         .when(is_hi && !fav, |d| d.visible())
-                        .hover(|s| s.bg(ink(t, 0.08)))
+                        .hover_fade(ink(t, 0.08), None)
                         .child(if fav {
                             Icon::StarFilled.el(zpx(12.))
                         } else {
@@ -2801,6 +2803,7 @@ impl KeelWindow {
             .rounded(zpx(9.))
             .bg(track)
             .cursor_pointer()
+            .hover_fade(ink(t, 0.06), Some(ink(t, 0.1)))
             .child(
                 div()
                     .absolute()
@@ -2866,7 +2869,8 @@ impl KeelWindow {
                 .justify_center()
                 .text_color(ink(t, 0.5))
                 .cursor_pointer()
-                .hover(|s| s.bg(ink(t, 0.08)).text_color(ink(t, 0.8)))
+                .hover(|s| s.text_color(ink(t, 0.8)))
+                .hover_fade(ink(t, 0.08), None)
                 .child(icon.el(zpx(13.)))
         };
         let field = div()

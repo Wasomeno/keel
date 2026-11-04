@@ -534,9 +534,9 @@ pub struct Exit {
     pub reduced: bool,
 }
 
-pub const ENTER_MS: f32 = 300.;
-pub const EXIT_MS: f32 = 380.;
-pub const CANCEL_MS: f32 = 260.;
+pub const ENTER_MS: f32 = 200.;
+pub const EXIT_MS: f32 = 200.;
+pub const CANCEL_MS: f32 = 150.;
 pub const REDUCED_MS: f32 = 120.;
 pub const RECEIPT_H: f32 = 28.;
 
@@ -608,7 +608,7 @@ pub struct Look {
     pub dy: f32,
 }
 
-/// The whole card entering: 0→1, 8 px rise over 220 ms (a 120 ms fade under
+/// The whole card entering: 0→1, 8 px rise over 200 ms (a 120 ms fade under
 /// reduced motion).
 pub fn card_enter(ms: f32, reduced: bool) -> Look {
     if reduced {
@@ -617,7 +617,7 @@ pub fn card_enter(ms: f32, reduced: bool) -> Look {
             dy: 0.,
         };
     }
-    let e = out_quint(span(ms, 0., 220.));
+    let e = out_quint(span(ms, 0., ENTER_MS));
     Look {
         opacity: e,
         dy: 8. * (1. - e),
@@ -625,7 +625,7 @@ pub fn card_enter(ms: f32, reduced: bool) -> Look {
 }
 
 /// One piece of the card entering after `delay` ms: fade and 4 px rise over
-/// 160 ms. No stagger under reduced motion.
+/// 120 ms. No stagger under reduced motion.
 pub fn part_enter(ms: f32, delay: f32, reduced: bool) -> Look {
     if reduced {
         return Look {
@@ -633,7 +633,7 @@ pub fn part_enter(ms: f32, delay: f32, reduced: bool) -> Look {
             dy: 0.,
         };
     }
-    let e = out_quint(span(ms, delay, 160.));
+    let e = out_quint(span(ms, delay, 120.));
     Look {
         opacity: e,
         dy: 4. * (1. - e),
@@ -674,9 +674,10 @@ pub fn exit_frame(ms: f32, exit: Exit) -> ExitFrame {
         };
     }
     if exit.canceled {
-        let fade = out_quint(span(ms, 0., 120.));
-        let collapse = in_out(span(ms, 100., 160.));
-        let receipt = out_quint(span(ms, 160., 100.));
+        // 150 ms: fade, collapse, receipt, all ease-out.
+        let fade = out_quint(span(ms, 0., 80.));
+        let collapse = out_quint(span(ms, 40., 100.));
+        let receipt = out_quint(span(ms, 70., 80.));
         return ExitFrame {
             check: false,
             others: 1. - fade,
@@ -688,13 +689,14 @@ pub fn exit_frame(ms: f32, exit: Exit) -> ExitFrame {
             receipt_dy: 2. * (1. - receipt),
         };
     }
-    let others = 1. - out_quint(span(ms, 100., 120.));
-    let collapse = in_out(span(ms, 120., 200.));
-    let receipt = out_quint(span(ms, 220., 160.));
+    // 200 ms: a short beat on the check, then fade, collapse, receipt.
+    let others = 1. - out_quint(span(ms, 30., 90.));
+    let collapse = out_quint(span(ms, 60., 120.));
+    let receipt = out_quint(span(ms, 100., 100.));
     ExitFrame {
         check: true,
         others,
-        chosen: 1. - span(ms, 180., 100.),
+        chosen: 1. - out_quint(span(ms, 80., 70.)),
         dy: 0.,
         collapse,
         chrome: 1. - collapse,
@@ -993,11 +995,11 @@ mod tests {
             reduced: false,
         };
         assert_eq!(answered.phase(Duration::ZERO), Phase::Answered);
-        assert_eq!(answered.phase(Duration::from_millis(379)), Phase::Answered);
-        assert_eq!(answered.phase(Duration::from_millis(380)), Phase::Receipt);
-        let f = exit_frame(50., answered);
+        assert_eq!(answered.phase(Duration::from_millis(199)), Phase::Answered);
+        assert_eq!(answered.phase(Duration::from_millis(200)), Phase::Receipt);
+        let f = exit_frame(20., answered);
         assert!(f.check && f.others == 1. && f.collapse == 0. && f.receipt == 0.);
-        let f = exit_frame(380., answered);
+        let f = exit_frame(200., answered);
         assert!(f.others == 0. && (f.collapse - 1.).abs() < 1e-3 && (f.receipt - 1.).abs() < 1e-3);
 
         let canceled = Exit {
@@ -1005,7 +1007,7 @@ mod tests {
             reduced: false,
         };
         assert_eq!(canceled.phase(Duration::from_millis(100)), Phase::Canceled);
-        assert_eq!(canceled.phase(Duration::from_millis(260)), Phase::Receipt);
+        assert_eq!(canceled.phase(Duration::from_millis(150)), Phase::Receipt);
         assert!(!exit_frame(10., canceled).check);
 
         let reduced = Exit {

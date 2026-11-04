@@ -13,6 +13,7 @@
 //! at once on focus or switch if the last look is 15 s old), backing off
 //! after errors; other chats' MRs at most every five minutes, one per tick.
 
+use crate::hover_fade::HoverFadeExt;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -654,7 +655,8 @@ impl KeelWindow {
             .justify_center()
             .rounded(RADIUS_SM)
             .text_color(c(t.text_muted))
-            .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), None)
             .child(Icon::Close.el(zpx(12.)))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
@@ -1007,7 +1009,7 @@ impl KeelWindow {
             .unwrap_or_else(|| tracked.mr.web_url());
         let items = vec![
             menu_item("mr-menu-open", t, true, false)
-                .child("Open in Browser")
+                .child("Open in browser")
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.mr_ui.menu = false;
                     cx.open_url(&url);
@@ -1020,7 +1022,7 @@ impl KeelWindow {
                 .into_any_element(),
             menu_separator(t).into_any_element(),
             menu_item("mr-menu-stop", t, true, false)
-                .child("Stop Tracking")
+                .child("Stop tracking")
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.mr_stop(cx)))
                 .into_any_element(),
         ];
@@ -1232,7 +1234,7 @@ pub(super) fn render_inline(
             .cursor_pointer()
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(c(color))
-            .hover(|s| s.bg(c(t.hover)))
+            .hover_fade(c(t.hover), None)
             .child(label)
             .on_click(move |_, _, cx| on(action.clone(), cx))
     };

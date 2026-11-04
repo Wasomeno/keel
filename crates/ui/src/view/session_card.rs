@@ -30,6 +30,7 @@
 //! timestamp-driven: frames are asked for only while something moves.
 //! Reduced motion keeps fades and drops movement.
 
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1934,7 +1935,7 @@ impl KeelWindow {
             .rounded(RADIUS_MD)
             .when(repo.files_count > 0, |d| {
                 d.cursor_pointer()
-                    .hover(|s| s.bg(alpha(c(t.hover), 0.5)))
+                    .hover_fade(alpha(c(t.hover), 0.5), None)
                     .on_click(cx.listener({
                         let repo_id = repo.id.clone();
                         move |this, _: &ClickEvent, _, cx| {
@@ -1991,7 +1992,8 @@ impl KeelWindow {
                 .border_color(c(t.border).opacity(0.5))
                 .bg(alpha(c(t.hover), 0.3))
                 .cursor_pointer()
-                .hover(|s| s.bg(c(t.hover)).border_color(c(t.border)))
+                .hover(|s| s.border_color(c(t.border)))
+                .hover_fade(c(t.hover), None)
                 .child(
                     div()
                         .flex_none()
@@ -2156,6 +2158,7 @@ impl KeelWindow {
                     .id(ElementId::Name(
                         format!("tree-item-{}-{ix}", repo.id).into(),
                     ))
+                    .hover_probe(group_id.clone())
                     .group(group_id.clone())
                     .flex()
                     .flex_row()
@@ -2178,7 +2181,7 @@ impl KeelWindow {
                             .px(zpx(4.))
                             .rounded(RADIUS_SM)
                             .cursor_pointer()
-                            .hover(|s| s.bg(alpha(c(t.hover), 0.5)))
+                            .hover_fade(alpha(c(t.hover), 0.5), None)
                             .on_click(cx.listener({
                                 let target = file_target.clone();
                                 move |this, _: &ClickEvent, window, cx| {
@@ -2285,7 +2288,7 @@ impl KeelWindow {
                                     )
                                 },
                             ))
-                            .child(
+                            .child(reveal_on_hover("actions-reveal", group_id.clone(), 0., 1.,
                                 div()
                                     .absolute()
                                     .right(zpx(2.))
@@ -2293,8 +2296,6 @@ impl KeelWindow {
                                     .flex_row()
                                     .items_center()
                                     .gap(zpx(2.))
-                                    .opacity(0.)
-                                    .group_hover(group_id.clone(), |s| s.opacity(1.))
                                     .bg(c(t.floating))
                                     .pl(zpx(4.))
                                     .child(
@@ -2311,9 +2312,8 @@ impl KeelWindow {
                                             .border_color(c(t.border))
                                             .bg(c(t.floating))
                                             .cursor_pointer()
-                                            .hover(|s| {
-                                                s.bg(c(t.hover)).border_color(c(t.text_muted))
-                                            })
+                                            .hover(|s| s.border_color(c(t.text_muted)))
+                                            .hover_fade(c(t.hover), None)
                                             .child(Icon::FileDiff.el(zpx(10.)))
                                             .tooltip(move |_, cx| {
                                                 cx.new(|_| Tip::new("View Diff", t)).into()
@@ -2341,9 +2341,8 @@ impl KeelWindow {
                                             .border_color(c(t.border))
                                             .bg(c(t.floating))
                                             .cursor_pointer()
-                                            .hover(|s| {
-                                                s.bg(c(t.hover)).border_color(c(t.text_muted))
-                                            })
+                                            .hover(|s| s.border_color(c(t.text_muted)))
+                                            .hover_fade(c(t.hover), None)
                                             .child(Icon::Forward.el(zpx(10.)))
                                             .tooltip(move |_, cx| {
                                                 cx.new(|_| Tip::new("Open in diff panel", t)).into()
@@ -2356,8 +2355,7 @@ impl KeelWindow {
                                                     this.show_file_diff(target.clone(), window, cx);
                                                 }
                                             })),
-                                    ),
-                            ),
+                                    ))),
                     );
                 children_col = children_col.child(item);
             }
@@ -2378,7 +2376,8 @@ impl KeelWindow {
                                 .py(zpx(1.5))
                                 .rounded_full()
                                 .bg(c(t.code).opacity(0.4))
-                                .hover(|s| s.bg(c(t.hover)).text_color(text))
+                                .hover(|s| s.text_color(text))
+                                .hover_fade(c(t.hover), None)
                                 .t_caption()
                                 .font_weight(medium)
                                 .text_color(muted)
@@ -2730,7 +2729,8 @@ impl KeelWindow {
                     .tooltip_show_delay(crate::view::tooltip::delay())
                     .when(enabled, |b| {
                         b.cursor_pointer()
-                            .hover(|s| s.bg(c(t.hover)).text_color(c(t.danger)))
+                            .hover(|s| s.text_color(c(t.danger)))
+                            .hover_fade(c(t.hover), None)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.card_stop(&stop, cx)
                             }))
@@ -3041,6 +3041,7 @@ impl KeelWindow {
                     .px(zpx(4.))
                     .rounded(RADIUS_SM)
                     .text_color(c(t.text))
+                    .when(blocked.is_none(), |d| d.hover_fade(c(t.hover), None))
                     .child(div().text_color(muted).child(Icon::Branch.el(zpx(12.))))
                     .child(
                         div().min_w_0().truncate().child(
@@ -3054,7 +3055,6 @@ impl KeelWindow {
                     .tooltip_show_delay(crate::view::tooltip::delay())
                     .when(blocked.is_none(), |d| {
                         d.cursor_pointer()
-                            .hover(|s| s.bg(c(t.hover)))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.card_open_branches(window, cx)
                             }))
