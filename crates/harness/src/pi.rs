@@ -157,6 +157,16 @@ impl PiHarness {
         }
     }
 
+    /// A Pi process. Keel's own also gets the Antigravity bridge's env;
+    /// `permission` is the run's mode, `None` for probes and sign-in.
+    fn command(&self, exe: &Path, permission: Option<PermissionMode>) -> std::process::Command {
+        let mut cmd = crate::proc::command_with(exe, &self.engine_path, &self.login_dirs);
+        if self.profile.keel.is_some() {
+            cmd.envs(crate::keel::antigravity_env(crate::keel::antigravity_acp_bin().as_deref(), permission));
+        }
+        cmd
+    }
+
     fn missing(&self) -> HarnessError {
         HarnessError::NotInstalled {
             path: self.searched.clone(),
@@ -168,7 +178,7 @@ impl PiHarness {
     /// every command has its response (Pi exits on EOF without answering).
     async fn probe(&self, model: &str, commands: Vec<Value>) -> Result<Vec<Value>, HarnessError> {
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
-        let mut cmd = crate::proc::command_with(&exe, &self.engine_path, &self.login_dirs);
+        let mut cmd = self.command(&exe, None);
         rpc_args(&mut cmd, model, &std::env::temp_dir(), true);
         let mut proc = Proc::spawn(cmd, "pi")?;
         let mut waiting: HashSet<String> = commands
@@ -357,7 +367,7 @@ impl Harness for PiHarness {
         }
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
         let extension = crate::keel::login_extension().map_err(failed)?;
-        let mut std_cmd = crate::proc::command_with(&exe, &self.engine_path, &self.login_dirs);
+        let mut std_cmd = self.command(&exe, None);
         std_cmd.args(["--mode", "rpc", "--no-session", "--extension"]).arg(extension).current_dir(std::env::temp_dir());
         let mut cmd = tokio::process::Command::from(std_cmd);
         cmd.stdin(StdStdio::piped()).stdout(StdStdio::null()).stderr(StdStdio::piped()).kill_on_drop(true);
@@ -411,7 +421,7 @@ impl Harness for PiHarness {
     > {
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
         let model = spec.model.0.clone();
-        let mut std_cmd = crate::proc::command_with(&exe, &self.engine_path, &self.login_dirs);
+        let mut std_cmd = self.command(&exe, Some(spec.permission));
         rpc_args(&mut std_cmd, &model, &spec.cwd, false);
         let tag = self.profile.tag;
         let data_dir = spec.data_dir.as_deref();

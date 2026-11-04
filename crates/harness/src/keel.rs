@@ -13,18 +13,58 @@
 //!   `extensions`. Each loads with `--extension`;
 //! - Pi packages: folders bundled in `pi-packages/` beside the Pi folder are
 //!   registered in Keel's Pi settings (Command Code's provider ships there).
+//!   The Antigravity bridge is registered only when Google's ACP server is
+//!   installed ([`antigravity_acp_bin`]); see [`antigravity_env`].
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use keel_proto::HarnessId;
+use keel_proto::{HarnessId, PermissionMode};
 
 /// Folder under Keel's data dir that belongs to the Keel harness.
 pub const KEEL_HARNESS_DIR: &str = "harnesses/keel";
 
 /// The Pi release Keel bundles. `scripts/fetch-pi.sh` downloads this one.
-pub const PI_VERSION: &str = "1.3.0";
+pub const PI_VERSION: &str = "1.5.0";
+
+/// `pi-packages/` folder of `@estebanforge/pi-antigravity-bridge`, which adds
+/// the `antigravity/*` models by driving Google's Antigravity ACP server.
+pub(crate) const ANTIGRAVITY_BRIDGE: &str = "pi-antigravity-bridge";
+
+/// Google's Antigravity ACP server, under the home folder. Keel installs it;
+/// the bridge never does (it would fetch about 1.5 GB on its own).
+const ANTIGRAVITY_ACP_BIN: &str = ".local/share/keel/antigravity-acp/1.3.0/agy_acp_server.par";
+
+/// The installed Antigravity ACP server, or `None` when it is missing.
+pub(crate) fn antigravity_acp_bin() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+    let bin = Path::new(&home).join(ANTIGRAVITY_ACP_BIN);
+    bin.is_file().then_some(bin)
+}
+
+/// Env for the Antigravity bridge in a Pi Keel starts. Without a server the
+/// bridge is not registered at all, so it gets nothing.
+///
+/// The bridge drives the ACP engine, so Antigravity asks for its native tools
+/// through ACP `session/request_permission`, which the bridge shows as a Pi
+/// `select` and Keel as a question; headless, it denies. `AGY_APPROVALS`
+/// stays off: its hook gate works only on the stream-json engine. Under full
+/// access Antigravity runs unasked, as Pi does. `permission` is `None` for
+/// probes and sign-in, which ask (and so deny).
+pub(crate) fn antigravity_env(bin: Option<&Path>, permission: Option<PermissionMode>) -> Vec<(&'static str, OsString)> {
+    let Some(bin) = bin else {
+        return Vec::new();
+    };
+    let skip = if permission == Some(PermissionMode::FullAccess) { "1" } else { "0" };
+    vec![
+        ("AGY_ACP_BIN", bin.as_os_str().to_owned()),
+        ("AGY_ENGINE", "acp".into()),
+        ("AGY_APPROVALS", "off".into()),
+        ("AGY_APPROVALS_MODE", "ask".into()),
+        ("AGY_SKIP_PERMISSIONS", skip.into()),
+    ]
+}
 
 static PI_AGENT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -117,6 +157,13 @@ pub(crate) fn login_extension() -> std::io::Result<PathBuf> {
 /// for bundled folders that are gone (an older app location). Other
 /// entries and settings are left alone.
 pub(crate) fn register_bundled_packages(exe: &Path, agent: &Path) {
+    register_packages(exe, agent, antigravity_acp_bin().is_some());
+}
+
+/// [`register_bundled_packages`]; `antigravity` says whether the bridge's
+/// server is installed. Without it the bridge stays out (and an entry from
+/// before is dropped), so it never downloads its own.
+fn register_packages(exe: &Path, agent: &Path, antigravity: bool) {
     let legacy_skill = agent.join("skills/indonesian-natural");
     if legacy_skill.is_dir() {
         let _ = std::fs::remove_dir_all(&legacy_skill);
@@ -131,6 +178,7 @@ pub(crate) fn register_bundled_packages(exe: &Path, agent: &Path) {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())
+        .filter(|p| antigravity || p.file_name().is_none_or(|name| name != ANTIGRAVITY_BRIDGE))
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     want.sort();
@@ -380,6 +428,48 @@ mod tests {
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["packages"], serde_json::json!(["npm:a", pkg.to_string_lossy()]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn antigravity_bridge_needs_its_server() {
+        let root = tmp("agy");
+        let exe = root.join("pi/pi");
+        let bridge = root.join("pi-packages").join(ANTIGRAVITY_BRIDGE);
+        let other = root.join("pi-packages/pi-web-access");
+        std::fs::create_dir_all(&bridge).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let agent = root.join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        let packages = || {
+            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
+            v["packages"].clone()
+        };
+        register_packages(&exe, &agent, true);
+        assert_eq!(packages(), serde_json::json!([bridge.to_string_lossy(), other.to_string_lossy()]));
+        // Server gone: the bridge drops out, so it cannot fetch its own.
+        register_packages(&exe, &agent, false);
+        assert_eq!(packages(), serde_json::json!([other.to_string_lossy()]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn antigravity_env_asks_unless_full_access() {
+        assert!(antigravity_env(None, Some(PermissionMode::FullAccess)).is_empty());
+        let bin = Path::new("/h/agy_acp_server.par");
+        let env = |permission| -> Vec<(&str, String)> {
+            antigravity_env(Some(bin), permission).into_iter().map(|(k, v)| (k, v.to_string_lossy().into_owned())).collect()
+        };
+        let asking = [
+            ("AGY_ACP_BIN", "/h/agy_acp_server.par".to_string()),
+            ("AGY_ENGINE", "acp".into()),
+            ("AGY_APPROVALS", "off".into()),
+            ("AGY_APPROVALS_MODE", "ask".into()),
+            ("AGY_SKIP_PERMISSIONS", "0".into()),
+        ];
+        assert_eq!(env(None), asking);
+        assert_eq!(env(Some(PermissionMode::Ask)), asking);
+        assert_eq!(env(Some(PermissionMode::AutoEdit)), asking);
+        assert_eq!(env(Some(PermissionMode::FullAccess))[4], ("AGY_SKIP_PERMISSIONS", "1".to_string()));
     }
 
     #[test]
