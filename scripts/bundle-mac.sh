@@ -29,8 +29,9 @@ find "$APP/Contents/Resources/pi-packages" -type f \( -name "*.mp4" -o -name "*.
 rm -rf "$APP/Contents/Resources/pi/examples" "$APP/Contents/Resources/pi/docs" 2>/dev/null || true
 
 # CEF framework and helpers
-CEF_SRC="$(pwd)/.cef/cef_macos_aarch64/Chromium Embedded Framework.framework"
-if [ -d "$CEF_SRC" ]; then
+# cd -P resolves a symlinked framework: cp -R would copy the link itself.
+CEF_SRC="$(cd -P ".cef/cef_macos_aarch64/Chromium Embedded Framework.framework" 2>/dev/null && pwd || true)"
+if [ -n "$CEF_SRC" ] && [ -d "$CEF_SRC" ]; then
   mkdir -p "$APP/Contents/Frameworks"
   if [ ! -d "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" ]; then
     cp -R "$CEF_SRC" "$APP/Contents/Frameworks/"
