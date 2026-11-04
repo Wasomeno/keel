@@ -9,7 +9,7 @@ use keel_theme::Tokens;
 use super::{KeelWindow, floating_menu_at, menu_item, menu_label, menu_separator};
 use crate::composer::{PrimaryButtonAction, compute_button_action};
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_SM, RADIUS_XL, c};
+use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_XL, c};
 
 /// Send button disc and icon ink: the same dark disc whether or not it can
 /// send; disabled only dims the whole button. Swaps at once (it follows
@@ -961,17 +961,12 @@ impl KeelWindow {
                 .rev()
                 .map(|(index, text)| {
                     let index = *index;
-                    // No check column: these rows are jumps, not settings.
-                    div()
-                        .id(gpui::ElementId::Name(format!("point-{index}").into()))
-                        .px_2()
-                        .py_1p5()
-                        .rounded(RADIUS_SM)
-                        .t_body()
-                        .text_color(c(t.text))
-                        .cursor_pointer()
-                        .hover_fade(c(t.hover), None)
-                        .child(div().truncate().child(text.clone()))
+                    // The shared menu row (no check column: these rows are
+                    // jumps, not settings), in secondary text that rises to
+                    // primary on hover, one line.
+                    menu_item(format!("point-{index}"), t, true, false)
+                        .text_color(c(t.text_muted))
+                        .child(div().flex_1().min_w_0().truncate().child(text.clone()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.show_points_menu = false;
                             this.transcript.scroll_to_row(index);
@@ -993,7 +988,7 @@ impl KeelWindow {
                 cx.notify();
             });
             // A clear gap above the pill so the menu reads as its own layer.
-            let panel = super::menu_panel("points-menu", t, 300., true, rows)
+            let panel = super::menu_panel("points-menu", t, POINTS_MENU_W, true, rows)
                 .mb(zpx(POINTS_MENU_GAP))
                 .when(leaving.is_none(), |d| d.on_mouse_down_out(dismiss));
             gpui::deferred(
@@ -2817,6 +2812,8 @@ impl ChipWidth {
 /// The points pill: chips plus a pad on each side, minus the 1 px border.
 const POINTS_PILL_PAD: f32 = 3.;
 const POINTS_MENU_GAP: f32 = 8.;
+/// The jump list's width: room for most of a prompt's first line.
+const POINTS_MENU_W: f32 = 340.;
 const POINTS_CHIP: f32 = 28.;
 /// The suggestion pill's height, inside the reading line (22 px).
 const SUGGESTION_PILL_H: f32 = 18.;
