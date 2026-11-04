@@ -3655,7 +3655,7 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 content.clone(),
                 run.clone(),
             );
-            let (wrap, more) = (props.wrap, props.expanded);
+            let more = props.expanded;
             let on_code: crate::code_block::OnCodeAction = std::rc::Rc::new(move |action, cx| {
                 use crate::code_block::CodeAction;
                 let toggle = |key: &str, open: bool| RowAction::Toggle {
@@ -3669,7 +3669,6 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                         },
                         cx,
                     ),
-                    CodeAction::Wrap => on_action(toggle("wrap", wrap), cx),
                     CodeAction::Insert { text } => {
                         on_action(RowAction::InsertInTerminal { text }, cx)
                     }
@@ -6471,8 +6470,8 @@ mod tests {
     }
 }
 
-/// The markdown fence as a full [`crate::code_block`]: wrap and show-more
-/// live in the view's toggle set as `{row}~wrap` / `{row}~more`.
+/// The markdown fence as a full [`crate::code_block`]: show-more lives in
+/// the view's toggle set as `{row}~more`.
 fn fence_props(
     item: &TranscriptRowItem,
     language: &Option<String>,
@@ -6483,11 +6482,6 @@ fn fence_props(
     rc: &RowContext,
 ) -> crate::code_block::CodeBlockProps {
     let row = item.row_id();
-    let wrap = rc
-        .open_lines
-        .get(&format!("{row}~wrap"))
-        .copied()
-        .unwrap_or(false);
     let more = rc
         .open_lines
         .get(&format!("{row}~more"))
@@ -6498,7 +6492,6 @@ fn fence_props(
     props.language = language.clone();
     props.spans = Some(spans.clone());
     props.closed = closed;
-    props.wrap = wrap;
     props.expanded = more;
     props.copied = rc.copied.as_deref() == Some(row);
     props.copied_at = rc.copied_at.filter(|_| props.copied);

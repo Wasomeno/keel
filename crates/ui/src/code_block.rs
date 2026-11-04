@@ -77,7 +77,7 @@ pub enum LineVariant {
 }
 
 /// What a control in the block asked for. The parent owns the state
-/// (`wrap`, `expanded`, `copied`, `toggled_at`) and passes it back next frame.
+/// (`expanded`, `copied`, `toggled_at`) and passes it back next frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeAction {
     /// `text` is the visible source. Gutters are not included.
@@ -85,8 +85,6 @@ pub enum CodeAction {
     Copy {
         text: String,
     },
-    /// Toggle soft wrap.
-    Wrap,
     /// Toggle the show-more cap. Set `toggled_at` to `Instant::now()`.
     ShowMore,
     /// Compact output was cut at [`keel_proto::OUTPUT_TAIL`] or [`MAX_RENDERED_LINES`].
@@ -124,7 +122,6 @@ pub struct CodeBlockProps {
     pub line_variants: Option<Vec<LineVariant>>,
     pub size: CodeSize,
     pub variant: CodeVariant,
-    pub wrap: bool,
     /// `None` is automatic: full blocks number lines when there are more than 8,
     /// or when [`Self::start_line`] is set. Compact stays unnumbered until `Some(true)`.
     pub line_numbers: Option<bool>,
@@ -148,7 +145,13 @@ pub struct CodeBlockProps {
 }
 
 impl CodeBlockProps {
-    /// `wrap` starts on for compact and off for full. Copy starts enabled.
+    /// Fixed, no toggle: compact output wraps, full blocks keep each line
+    /// whole and scroll sideways.
+    pub fn wraps(&self) -> bool {
+        self.size == CodeSize::Compact
+    }
+
+    /// Copy starts enabled.
     pub fn new(id: impl Into<String>, content: impl Into<String>, size: CodeSize) -> Self {
         Self {
             id: id.into(),
@@ -159,7 +162,6 @@ impl CodeBlockProps {
             line_variants: None,
             size,
             variant: CodeVariant::Default,
-            wrap: size == CodeSize::Compact,
             line_numbers: None,
             start_line: None,
             closed: true,
@@ -757,7 +759,6 @@ fn header(
                         },
                     ))
                 })
-                .child(wrap_button(props, t, on_action.clone()))
                 .when(props.runnable, |d| {
                     let on_action = on_action.clone();
                     d.child(icon_button(
@@ -865,8 +866,8 @@ fn body(
                     .type_step(step)
                     .font_family(MONO)
                     .text_color(plain)
-                    .when(props.wrap, |d| d.whitespace_normal())
-                    .when(!props.wrap, |d| d.whitespace_nowrap())
+                    .when(props.wraps(), |d| d.whitespace_normal())
+                    .when(!props.wraps(), |d| d.whitespace_nowrap())
                     .child(styled),
             )
             .when(metrics.fade && props.size == CodeSize::Full, |d| {
@@ -940,14 +941,14 @@ fn body(
                 .py(zpx(line_box(props.size).1))
                 .when(props.size == CodeSize::Full, |d| d.overflow_y_scroll())
                 .when(props.size == CodeSize::Compact, |d| d.overflow_hidden())
-                .when(!props.wrap, |d| d.overflow_x_scroll())
+                .when(!props.wraps(), |d| d.overflow_x_scroll())
                 .type_step(step)
                 .font_family(MONO)
                 .text_color(plain)
                 .child(
                     div()
                         .min_w_full()
-                        .when(props.wrap, |d| d.w_full())
+                        .when(props.wraps(), |d| d.w_full())
                         .flex()
                         .flex_col()
                         .children(lines),
@@ -1016,7 +1017,7 @@ fn line_row(
     let color = if hunk { c(t.text_faint) } else { plain };
     div()
         .min_w_full()
-        .when(props.wrap, |d| d.w_full().min_w_0())
+        .when(props.wraps(), |d| d.w_full().min_w_0())
         .min_h(zpx(line_h))
         .flex()
         .flex_row()
@@ -1077,8 +1078,8 @@ fn line_text(
             .min_w_0()
             .min_h(zpx(line_box(props.size).0))
             .text_color(color)
-            .when(props.wrap, |d| d.flex_1().whitespace_normal())
-            .when(!props.wrap, |d| d.flex_none().whitespace_nowrap())
+            .when(props.wraps(), |d| d.flex_1().whitespace_normal())
+            .when(!props.wraps(), |d| d.flex_none().whitespace_nowrap())
             .child(styled)
             .into_any_element();
     }
@@ -1093,8 +1094,8 @@ fn line_text(
             .min_w_0()
             .min_h(zpx(line_box(props.size).0))
             .text_color(color)
-            .when(props.wrap, |d| d.flex_1().whitespace_normal())
-            .when(!props.wrap, |d| d.flex_none().whitespace_nowrap())
+            .when(props.wraps(), |d| d.flex_1().whitespace_normal())
+            .when(!props.wraps(), |d| d.flex_none().whitespace_nowrap())
             .child(styled)
             .into_any_element(),
     }
@@ -1232,25 +1233,6 @@ fn insert_text(props: &CodeBlockProps) -> Option<String> {
         return None;
     }
     terminal_text(&props.content)
-}
-
-fn wrap_button(props: &CodeBlockProps, t: Tokens, on_action: OnCodeAction) -> AnyElement {
-    let on = props.wrap;
-    icon_button(
-        format!("code-wrap-{}", props.id),
-        Icon::WrapText.el(zpx(12.)).into_any_element(),
-        c(if on { t.text } else { t.text_faint }),
-        c(t.hover),
-        c(t.text),
-        true,
-        Some((wrap_label(on).into(), t)),
-        move |_, _, cx| on_action(CodeAction::Wrap, cx),
-    )
-}
-
-/// The wrap toggle's tooltip: what a click does.
-pub fn wrap_label(wrapped: bool) -> &'static str {
-    if wrapped { "Unwrap lines" } else { "Wrap lines" }
 }
 
 /// Copy and check stacked in one 12 px box, crossfading: no layout shift.
@@ -2280,8 +2262,8 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn the_wrap_toggle_says_what_a_click_does() {
-        assert_eq!(wrap_label(false), "Wrap lines");
-        assert_eq!(wrap_label(true), "Unwrap lines");
+    fn full_blocks_scroll_sideways_and_compact_output_wraps() {
+        assert!(!CodeBlockProps::new("f", "x", CodeSize::Full).wraps());
+        assert!(CodeBlockProps::new("c", "x", CodeSize::Compact).wraps());
     }
 }
