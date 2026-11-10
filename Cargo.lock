@@ -3755,7 +3755,7 @@ dependencies = [
 
 [[package]]
 name = "keel"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "cef",
  "clap",
@@ -3777,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "keel-doc"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "keel-proto",
  "loro",
@@ -3788,7 +3788,7 @@ dependencies = [
 
 [[package]]
 name = "keel-engine"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "keel-harness"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "keel-proto"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -3841,7 +3841,7 @@ dependencies = [
 
 [[package]]
 name = "keel-rpc"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "futures",
  "keel-proto",
@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "keel-store"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "keel-doc",
  "keel-proto",
@@ -3871,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "keel-theme"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "keel-proto",
  "objc",
@@ -3879,7 +3879,7 @@ dependencies = [
 
 [[package]]
 name = "keel-ui"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "keel-update"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "libc",
  "minisign",
