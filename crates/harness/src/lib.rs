@@ -20,7 +20,7 @@ use futures::Stream;
 use keel_proto::{HarnessId, PermissionMode, UserInputAnswer};
 use tokio::sync::mpsc;
 
-pub use keel::{KeelProfile, PiProfile, PI_VERSION, pi_agent_dir, set_pi_agent_dir};
+pub use keel::{KeelProfile, PI_VERSION, PiProfile, pi_agent_dir, set_pi_agent_dir};
 pub use mock::{MockHarness, Step};
 pub use pi::{MEMORY_PREAMBLE, MEMORY_PROTO, MEMORY_UNAVAILABLE, PiHarness};
 
@@ -62,14 +62,21 @@ pub enum SignInEvent {
 
 /// Run the CLI once in the temp dir, stdin closed, stdout and stderr
 /// captured. `None` when it can't start or outlives `limit`.
-pub(crate) async fn capture(exe: &std::path::Path, args: &[String], limit: std::time::Duration) -> Option<std::process::Output> {
+pub(crate) async fn capture(
+    exe: &std::path::Path,
+    args: &[String],
+    limit: std::time::Duration,
+) -> Option<std::process::Output> {
     let mut cmd = proc::command(exe);
     cmd.args(args)
         .current_dir(std::env::temp_dir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    tokio::task::spawn_blocking(move || proc::output_timeout(cmd, limit)).await.ok().flatten()
+    tokio::task::spawn_blocking(move || proc::output_timeout(cmd, limit))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// A one-shot prompt that runs longer than this is killed.
@@ -77,7 +84,11 @@ pub(crate) const ONE_SHOT_LIMIT: std::time::Duration = std::time::Duration::from
 
 /// `[flag, model]` when a model is set, else nothing (the CLI's default).
 fn model_flag(flag: &str, model: &ModelId) -> Vec<String> {
-    if model.0.is_empty() { Vec::new() } else { vec![flag.to_string(), model.0.clone()] }
+    if model.0.is_empty() {
+        Vec::new()
+    } else {
+        vec![flag.to_string(), model.0.clone()]
+    }
 }
 
 /// Model id the session spec stores.
@@ -113,7 +124,9 @@ impl AttachmentFile {
 
 /// Read each image for inlining. Files that cannot be read are returned
 /// separately so the prompt can name their paths instead.
-pub fn inline_images(files: &[AttachmentFile]) -> (Vec<(&AttachmentFile, String)>, Vec<&AttachmentFile>) {
+pub fn inline_images(
+    files: &[AttachmentFile],
+) -> (Vec<(&AttachmentFile, String)>, Vec<&AttachmentFile>) {
     let mut inline = Vec::new();
     let mut unread = Vec::new();
     for file in files {
@@ -167,6 +180,8 @@ pub struct SessionSpec {
     pub attachments: Vec<AttachmentFile>,
     /// The engine stores the CLI session file. Drivers that have none ignore it.
     pub report_session: Option<SessionReport>,
+    /// Report token usage events (including idle cache warming).
+    pub report_usage: Option<Arc<dyn Fn(keel_proto::TokenUsage) + Send + Sync>>,
     /// Keel's data folder. Session files and per-run extensions (chat cards,
     /// permission gate) go here, whether or not the browser is wired up.
     pub data_dir: Option<PathBuf>,
@@ -176,12 +191,23 @@ pub struct SessionSpec {
     /// The chat this run belongs to. The browser shim sends it with each
     /// call so the pane gives every chat its own tab and queue.
     pub browser_chat: Option<String>,
+    /// The chat this run belongs to, if known.
+    pub chat_id: Option<String>,
     /// Picked by the user; drivers map it onto the CLI's own flags.
     pub permission: PermissionMode,
+    /// Plan mode for this run. Off unless the chat saved it. It narrows
+    /// tools; it does not change [`Self::permission`].
+    pub plan_mode: bool,
     /// The chat's project, when it has one: its folders in scope as named
     /// roots, the first being `cwd`. Drivers tell the agent about them out of
     /// sight of the chat and, where the CLI can, allow them as working dirs.
     pub project: Option<ProjectRoots>,
+    /// Opt-in: extended prompt cache retention (PI_CACHE_RETENTION=long).
+    pub longer_cache: bool,
+    /// Keep prompt cache warm between turns (cacheWarming: "idle" vs "streaming").
+    pub keep_cache_warm: bool,
+    /// Idle eviction timeout in seconds (default: 15 min).
+    pub idle_eviction_timeout_secs: Option<u32>,
 }
 
 /// A project's folders as the agent sees them (see [`SessionSpec::project`]).
@@ -198,12 +224,26 @@ pub struct ProjectRoots {
 pub fn is_spawn_tool(name: &str) -> bool {
     let lower = name.to_lowercase();
     let norm = lower.replace(['-', ' ', '_'], "");
-    if matches!(norm.as_str(), "task" | "agent" | "subagent" | "startsubagent" | "invokesubagent" | "spawnagent" | "spawnsubagent") {
+    if matches!(
+        norm.as_str(),
+        "task"
+            | "agent"
+            | "subagent"
+            | "startsubagent"
+            | "invokesubagent"
+            | "spawnagent"
+            | "spawnsubagent"
+    ) {
         return true;
     }
     lower
         .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .any(|word| matches!(word, "start_subagent" | "invoke_subagent" | "spawn_agent" | "spawn_subagent"))
+        .any(|word| {
+            matches!(
+                word,
+                "start_subagent" | "invoke_subagent" | "spawn_agent" | "spawn_subagent"
+            )
+        })
 }
 
 /// A spawn call's `(name, description)` from its arguments: an object or a
@@ -217,7 +257,14 @@ pub fn spawn_meta(args: &serde_json::Value) -> (Option<String>, Option<String>) 
         }
         None => args,
     };
-    let field = |keys: &[&str]| keys.iter().find_map(|key| args.get(*key)?.as_str().filter(|v| !v.is_empty()).map(str::to_string));
+    let field = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            args.get(*key)?
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        })
+    };
     (
         field(&["agent", "name", "agent_name", "subagent_type", "role"]),
         field(&["description", "task", "prompt", "goal"]),
@@ -238,16 +285,35 @@ pub fn is_browser_tool(name: &str) -> bool {
 pub fn browser_detail(input: &serde_json::Value) -> String {
     use serde_json::Value;
     let cut = |s: &str, n: usize| -> String {
-        if s.chars().count() <= n { s.to_string() } else { s.chars().take(n).collect::<String>() + "…" }
+        if s.chars().count() <= n {
+            s.to_string()
+        } else {
+            s.chars().take(n).collect::<String>() + "…"
+        }
     };
     let mut out = serde_json::Map::new();
-    let selector = input.get("selector").cloned().and_then(|v| v.as_str().map(str::to_string));
-    for (key, cap) in [("url", 160usize), ("selector", 80), ("text", 60), ("to", 20), ("key", 30), ("value", 60), ("ref", 16), ("level", 12), ("mode", 12)] {
+    let selector = input
+        .get("selector")
+        .cloned()
+        .and_then(|v| v.as_str().map(str::to_string));
+    for (key, cap) in [
+        ("url", 160usize),
+        ("selector", 80),
+        ("text", 60),
+        ("to", 20),
+        ("key", 30),
+        ("value", 60),
+        ("ref", 16),
+        ("level", 12),
+        ("mode", 12),
+    ] {
         if let Some(Value::String(s)) = input.get(key).cloned() {
             if s.is_empty() {
                 continue;
             }
-            let s = if matches!(key, "text" | "value") && selector.as_deref().is_some_and(secret_field) {
+            let s = if matches!(key, "text" | "value")
+                && selector.as_deref().is_some_and(secret_field)
+            {
                 "•".repeat(s.chars().count().clamp(4, 8))
             } else {
                 cut(&s, cap)
@@ -266,8 +332,15 @@ pub fn browser_detail(input: &serde_json::Value) -> String {
     // select_option's values read as one value; upload paths by file name.
     let list = |key: &str| -> Option<Vec<String>> {
         match input.get(key).cloned()? {
-            Value::Array(items) => Some(items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()),
-            Value::String(s) => serde_json::from_str::<Vec<String>>(&s).ok().or(Some(vec![s])),
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+            ),
+            Value::String(s) => serde_json::from_str::<Vec<String>>(&s)
+                .ok()
+                .or(Some(vec![s])),
             _ => None,
         }
         .filter(|v: &Vec<String>| !v.is_empty())
@@ -275,11 +348,20 @@ pub fn browser_detail(input: &serde_json::Value) -> String {
     if !out.contains_key("value")
         && let Some(values) = list("values")
     {
-        out.insert("value".to_string(), Value::String(cut(&values.join(", "), 60)));
+        out.insert(
+            "value".to_string(),
+            Value::String(cut(&values.join(", "), 60)),
+        );
     }
     if let Some(paths) = list("paths") {
-        let names: Vec<&str> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
-        out.insert("paths".to_string(), Value::String(cut(&names.join(", "), 80)));
+        let names: Vec<&str> = paths
+            .iter()
+            .map(|p| p.rsplit('/').next().unwrap_or(p))
+            .collect();
+        out.insert(
+            "paths".to_string(),
+            Value::String(cut(&names.join(", "), 80)),
+        );
     }
     for key in ["timeout_ms", "seconds"] {
         if let Some(Value::Number(n)) = input.get(key).cloned() {
@@ -291,13 +373,31 @@ pub fn browser_detail(input: &serde_json::Value) -> String {
             out.insert(key.to_string(), Value::Bool(b));
         }
     }
-    if out.is_empty() { String::new() } else { Value::Object(out).to_string() }
+    if out.is_empty() {
+        String::new()
+    } else {
+        Value::Object(out).to_string()
+    }
 }
 
 /// A selector that looks like a password, PIN or one-time-code field.
 pub fn secret_field(selector: &str) -> bool {
     let s = selector.to_ascii_lowercase();
-    ["pass", "pwd", "secret", "otp", "one-time-code", "cvv", "cvc", "pin\"", "pin]", "#pin", "[name=pin"].iter().any(|k| s.contains(k))
+    [
+        "pass",
+        "pwd",
+        "secret",
+        "otp",
+        "one-time-code",
+        "cvv",
+        "cvc",
+        "pin\"",
+        "pin]",
+        "#pin",
+        "[name=pin",
+    ]
+    .iter()
+    .any(|k| s.contains(k))
 }
 
 /// [`tool_detail`], or [`browser_detail`] for a browser tool.
@@ -311,19 +411,209 @@ pub fn tool_detail_for(name: &str, input: &serde_json::Value) -> String {
     tool_detail(input)
 }
 
+/// Agent-written progress label from tool args (`label`, else Antigravity
+/// `toolAction`). Empty when missing or looking like a raw command.
+pub fn tool_label(input: &serde_json::Value) -> String {
+    for key in ["label", "toolAction"] {
+        if let Some(raw) = input.get(key).and_then(|v| v.as_str()) {
+            let cleaned = sanitize_label(raw);
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Keep a short human label; drop command-like or empty text.
+pub fn sanitize_label(raw: &str) -> String {
+    let text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = keel_proto::trim_progress_label(&text);
+    if text.is_empty() {
+        return String::new();
+    }
+
+    // Check if the entire string is wrapped in backticks (e.g. `rg oncycle` or `bad`).
+    let is_entirely_backticked = text.starts_with('`') && text.ends_with('`') && text.len() >= 2;
+    let stripped = text.replace('`', "");
+    let stripped = stripped.trim();
+    if stripped.is_empty() {
+        return String::new();
+    }
+
+    // If the entire text was a single backticked token or command, drop it.
+    if is_entirely_backticked && (!stripped.contains(' ') || looks_like_command(stripped)) {
+        return String::new();
+    }
+
+    if looks_like_command(stripped) {
+        return String::new();
+    }
+
+    if stripped.starts_with('/') || stripped.starts_with("~/") || stripped.starts_with("./") {
+        return String::new();
+    }
+
+    // A bare file path (slash, no spaces, ASCII path characters) is a command/target, e.g. "src/lib.rs".
+    // Natural non-ASCII phrases with slashes (e.g. Japanese "認証/認可フローの確認") are preserved.
+    if stripped.contains('/') && !stripped.contains(' ') {
+        let is_ascii_path = stripped
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'));
+        if is_ascii_path {
+            return String::new();
+        }
+    }
+
+    // Cap at 60 characters cleanly.
+    if stripped.chars().count() > 60 {
+        if !stripped.contains(' ') {
+            let is_all_ascii = stripped.chars().all(|c| c.is_ascii());
+            if is_all_ascii {
+                return String::new();
+            }
+            let head: String = stripped.chars().take(60).collect();
+            return keel_proto::trim_progress_label(&head).to_string();
+        }
+        let head: String = stripped.chars().take(60).collect();
+        let trimmed = head.rfind(' ').map(|ix| &head[..ix]).unwrap_or(&head);
+        return keel_proto::trim_progress_label(trimmed).to_string();
+    }
+
+    stripped.to_string()
+}
+
+fn looks_like_command(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.starts_with("--") || trimmed.starts_with('-') {
+        return true;
+    }
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    const COMMAND_BINARIES: &[&str] = &[
+        "rg", "grep", "find", "cat", "ls", "cd", "cargo", "pnpm", "npm", "yarn", "bun",
+        "git", "python", "python3", "node", "curl", "wget", "bash", "sh", "zsh", "rm", "cp", "mv",
+        "mkdir", "touch", "chmod", "chown", "kill", "ps", "sed", "awk", "diff",
+    ];
+    if COMMAND_BINARIES.contains(&first_word) {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::{sanitize_label, tool_label};
+    use serde_json::json;
+
+    #[test]
+    fn sanitize_keeps_phrases_and_drops_commands() {
+        assert_eq!(
+            sanitize_label("Reading the on/off cycle logic"),
+            "Reading the on/off cycle logic"
+        );
+        assert_eq!(
+            sanitize_label("Reading the on/off cycle logic..."),
+            "Reading the on/off cycle logic"
+        );
+        assert_eq!(
+            sanitize_label("Reading the on/off cycle logic…"),
+            "Reading the on/off cycle logic"
+        );
+        assert_eq!(
+            sanitize_label("Reading the on/off cycle logic."),
+            "Reading the on/off cycle logic"
+        );
+        assert_eq!(
+            sanitize_label("Checking v1.2 config"),
+            "Checking v1.2 config"
+        );
+        assert_eq!(
+            sanitize_label("Checking v1.2 config..."),
+            "Checking v1.2 config"
+        );
+        assert_eq!(sanitize_label("  Searching payroll code  "), "Searching payroll code");
+        assert!(sanitize_label("").is_empty());
+        assert!(sanitize_label("`rg oncycle`").is_empty());
+        assert!(sanitize_label("rg --type rust oncycle").is_empty());
+        assert!(sanitize_label("/Users/kevin/Codes/keel").is_empty());
+        assert!(sanitize_label("~/Codes/keel").is_empty());
+        assert!(sanitize_label("./src/lib.rs").is_empty());
+        assert!(sanitize_label("src/lib.rs").is_empty());
+        assert!(sanitize_label(&"x".repeat(61)).is_empty());
+        // Resilient preservation: inline backticks stripped, CLI flags in phrases kept, CJK with slashes kept
+        assert_eq!(
+            sanitize_label("Checking `StepSwap` timing"),
+            "Checking StepSwap timing"
+        );
+        assert_eq!(
+            sanitize_label("Testing --dry-run option"),
+            "Testing --dry-run option"
+        );
+        assert_eq!(
+            sanitize_label("Updating parser -- handling errors"),
+            "Updating parser -- handling errors"
+        );
+        assert_eq!(
+            sanitize_label("認証/認可フローの確認"),
+            "認証/認可フローの確認"
+        );
+    }
+
+    #[test]
+    fn tool_label_prefers_label_then_tool_action() {
+        assert_eq!(
+            tool_label(&json!({"label": "Reading the on/off cycle logic", "path": "a.rs"})),
+            "Reading the on/off cycle logic"
+        );
+        assert_eq!(
+            tool_label(&json!({"toolAction": "Inspecting payroll state transitions"})),
+            "Inspecting payroll state transitions"
+        );
+        assert_eq!(
+            tool_label(&json!({"label": "`bad`", "toolAction": "Searching oncycle"})),
+            "Searching oncycle"
+        );
+        assert!(tool_label(&json!({"command": "ls"})).is_empty());
+    }
+}
+
+
 /// What a tool call works on, for its row: the file, command, pattern, query
 /// or URL in its input, on
 /// one line with the home dir as `~`. Empty when there is none.
 pub fn tool_detail(input: &serde_json::Value) -> String {
-    const KEYS: [&str; 8] = ["file_path", "path", "filePath", "notebook_path", "command", "cmd", "pattern", "query"];
+    const KEYS: [&str; 8] = [
+        "file_path",
+        "path",
+        "filePath",
+        "notebook_path",
+        "command",
+        "cmd",
+        "pattern",
+        "query",
+    ];
     let text = |v: &serde_json::Value| -> Option<String> {
-        Some(v.as_str()?.trim().lines().next().unwrap_or_default().to_string()).filter(|s| !s.is_empty())
+        Some(
+            v.as_str()?
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        )
+        .filter(|s| !s.is_empty())
     };
-    let Some(raw) = KEYS.iter().chain(&["url"]).find_map(|key| text(&input[*key])) else {
+    let Some(raw) = KEYS
+        .iter()
+        .chain(&["url"])
+        .find_map(|key| text(&input[*key]))
+    else {
         return String::new();
     };
     let raw = match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && raw.starts_with(&home) => format!("~{}", &raw[home.len()..]),
+        Ok(home) if !home.is_empty() && raw.starts_with(&home) => {
+            format!("~{}", &raw[home.len()..])
+        }
         _ => raw,
     };
     raw.chars().take(200).collect()
@@ -337,6 +627,9 @@ pub fn kind_from_name(name: &str) -> Option<&'static str> {
     let base = base.rsplit("__").next().unwrap_or(base);
     let base = base.rsplit(['/', ':']).next().unwrap_or(base);
     let n = base.to_ascii_lowercase().replace(['-', ' '], "_");
+    if n == "memory_read" || n == "memory_write" {
+        return Some("memory");
+    }
     if is_plan_name(&n) {
         return Some("plan");
     }
@@ -425,7 +718,10 @@ pub fn plan_entries(value: &serde_json::Value) -> Vec<keel_proto::PlanEntry> {
             Some(keel_proto::PlanEntry {
                 content: content.to_string(),
                 status: status.to_string(),
-                priority: item["priority"].as_str().filter(|p| !p.is_empty()).map(str::to_string),
+                priority: item["priority"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
             })
         })
         .collect()
@@ -463,15 +759,35 @@ impl ProgressGate {
 pub fn content_images(parts: &[serde_json::Value]) -> Vec<String> {
     let mut out = Vec::new();
     for part in parts {
-        let part = if part["type"] == "content" && part["content"].is_object() { &part["content"] } else { part };
+        let part = if part["type"] == "content" && part["content"].is_object() {
+            &part["content"]
+        } else {
+            part
+        };
         let data_uri = |mime: Option<&str>, data: Option<&str>| {
-            data.filter(|d| !d.is_empty()).map(|d| format!("data:{};base64,{d}", mime.unwrap_or("image/png")))
+            data.filter(|d| !d.is_empty())
+                .map(|d| format!("data:{};base64,{d}", mime.unwrap_or("image/png")))
         };
         let found = match part["type"].as_str() {
-            Some("image") => data_uri(part["mimeType"].as_str().or(part["mime_type"].as_str()), part["data"].as_str())
-                .or_else(|| data_uri(part["source"]["media_type"].as_str(), part["source"]["data"].as_str())),
-            Some("resource") if part["resource"]["mimeType"].as_str().is_some_and(|m| m.starts_with("image/")) => {
-                data_uri(part["resource"]["mimeType"].as_str(), part["resource"]["blob"].as_str())
+            Some("image") => data_uri(
+                part["mimeType"].as_str().or(part["mime_type"].as_str()),
+                part["data"].as_str(),
+            )
+            .or_else(|| {
+                data_uri(
+                    part["source"]["media_type"].as_str(),
+                    part["source"]["data"].as_str(),
+                )
+            }),
+            Some("resource")
+                if part["resource"]["mimeType"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("image/")) =>
+            {
+                data_uri(
+                    part["resource"]["mimeType"].as_str(),
+                    part["resource"]["blob"].as_str(),
+                )
             }
             Some("text") => {
                 out.extend(saved_paths(part["text"].as_str().unwrap_or_default()));
@@ -489,10 +805,17 @@ pub fn saved_paths(text: &str) -> Vec<String> {
     text.match_indices("Saved to ")
         .filter_map(|(at, needle)| {
             let rest = &text[at + needle.len()..];
-            let path: String = rest.chars().take_while(|c| !c.is_whitespace() && *c != '`' && *c != '"').collect();
+            let path: String = rest
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '`' && *c != '"')
+                .collect();
             let path = path.trim_end_matches(['.', ',', ';', ')']).to_string();
             let lower = path.to_ascii_lowercase();
-            (path.starts_with('/') && [".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().any(|e| lower.ends_with(e))).then_some(path)
+            (path.starts_with('/')
+                && [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                    .iter()
+                    .any(|e| lower.ends_with(e)))
+            .then_some(path)
         })
         .collect()
 }
@@ -503,6 +826,198 @@ pub const BROWSER_MCP_NAME: &str = "keel-browser";
 
 /// Server name for the chat-card tools (`show_chart`, `show_choices`, …).
 pub const UI_MCP_NAME: &str = "keel-ui";
+
+/// Read-only tool bases allowed while Plan mode is on. Anything else,
+/// including edit, write, shell, and a mutating MCP call, is denied by Keel.
+pub fn plan_readonly_tools() -> &'static [&'static str] {
+    &[
+        "read",
+        "read_file",
+        "grep",
+        "find",
+        "ls",
+        "list",
+        "list_dir",
+        "glob",
+        "search",
+        "memory_read",
+        "cat",
+        "web_search",
+        "web_fetch",
+        "fetch",
+        "open_page",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_read",
+        "browser_screenshot",
+        "browser_tabs",
+        "browser_console",
+        "browser_list",
+        "browser_get",
+    ]
+}
+
+/// The tool's own name: the last `__` segment, lowercase, dashes as underscores.
+pub fn tool_base(name: &str) -> String {
+    let base = name.rsplit("__").next().unwrap_or(name);
+    let base = base.rsplit(['/', ':']).next().unwrap_or(base);
+    base.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+/// Whether Plan mode lets this tool run. UI cards (including `show_plan`) are
+/// allowed. Edit, write, shell, exec, memory write, and browser click or type
+/// are not.
+pub fn plan_mode_allows(name: &str) -> bool {
+    let base = tool_base(name);
+    if keel_proto::is_ui_tool(&base) {
+        return true;
+    }
+    plan_readonly_tools().contains(&base.as_str())
+}
+
+/// While Plan mode is on, answer a Pi confirm or an Antigravity `select`
+/// here instead of asking. Reads are allowed. Mutating calls are denied.
+/// `None` leaves the question for the user (a real question, not a tool ask).
+pub fn plan_mode_ui_reply(value: &serde_json::Value) -> Option<serde_json::Value> {
+    if value.get("type").and_then(|t| t.as_str()) != Some("extension_ui_request") {
+        return None;
+    }
+    let method = value.get("method").and_then(|m| m.as_str())?;
+    let id = value.get("id").and_then(|id| id.as_str()).unwrap_or("pi-question");
+    let title = value.get("title").and_then(|t| t.as_str()).unwrap_or("");
+    let message = value.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    match method {
+        "confirm" => {
+            let name = confirm_tool_name(title).or_else(|| confirm_tool_name(message))?;
+            let allow = plan_mode_allows(&name);
+            Some(serde_json::json!({
+                "type": "extension_ui_response",
+                "id": id,
+                "confirmed": allow,
+            }))
+        }
+        "select" if title.starts_with("agy requests") || message.starts_with("agy requests") => {
+            let text = if title.starts_with("agy requests") {
+                title
+            } else {
+                message
+            };
+            let allow = agy_request_is_read(text);
+            let options = select_labels(value);
+            if allow {
+                let picked = options
+                    .iter()
+                    .find(|o| o.to_ascii_lowercase().contains("allow"))
+                    .cloned()
+                    .or_else(|| options.first().cloned())
+                    .unwrap_or_default();
+                if picked.is_empty() {
+                    Some(serde_json::json!({
+                        "type": "extension_ui_response",
+                        "id": id,
+                        "cancelled": true,
+                    }))
+                } else {
+                    Some(serde_json::json!({
+                        "type": "extension_ui_response",
+                        "id": id,
+                        "value": picked,
+                    }))
+                }
+            } else {
+                let reject = options.into_iter().find(|o| {
+                    let l = o.to_ascii_lowercase();
+                    l.contains("reject") || l.contains("deny") || l.contains("cancel") || l == "no"
+                });
+                match reject {
+                    Some(picked) => Some(serde_json::json!({
+                        "type": "extension_ui_response",
+                        "id": id,
+                        "value": picked,
+                    })),
+                    None => Some(serde_json::json!({
+                        "type": "extension_ui_response",
+                        "id": id,
+                        "cancelled": true,
+                    })),
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn confirm_tool_name(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("Allow ")?;
+    let name = rest.trim().trim_end_matches(['?', '.', ' ']);
+    let name = name.split_whitespace().next().unwrap_or("");
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn select_labels(value: &serde_json::Value) -> Vec<String> {
+    value
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .or_else(|| item.get("label").and_then(|l| l.as_str()).map(str::to_string))
+                        .filter(|s| !s.is_empty())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An Antigravity permission title is a read when it names a read and no
+/// mutating verb. Unknown requests are denied.
+fn agy_request_is_read(text: &str) -> bool {
+    let words: Vec<String> = text
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect();
+    // A bare "memory" word must not deny memory_read. Deny the pair.
+    let mutating = words.windows(2).any(|w| {
+        matches!(
+            (w[0].as_str(), w[1].as_str()),
+            ("memory", "write") | ("apply", "patch") | ("str", "replace")
+        )
+    }) || words.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "edit"
+                | "write"
+                | "bash"
+                | "shell"
+                | "exec"
+                | "execute"
+                | "click"
+                | "type"
+                | "delete"
+                | "remove"
+                | "mkdir"
+        )
+    });
+    if mutating {
+        return false;
+    }
+    words.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "read" | "grep" | "search" | "list" | "glob" | "find" | "fetch" | "snapshot"
+                | "navigate" | "web" | "ls" | "cat"
+        )
+    })
+}
+
+/// Told to the agent only while Plan mode is on.
+pub const PLAN_MODE_PROMPT: &str = "\
+Plan mode is on. Research with read-only tools first, then emit exactly one plan card with show_plan, and stop. Do not edit files, run commands, or call a tool that changes state.";
 
 /// The `keel_cards` prompt section, added on turns whose tools include the
 /// cards. The tools' own descriptions say how to call each one; this says
@@ -537,9 +1052,22 @@ impl std::fmt::Debug for BrowserMcp {
         let env: Vec<(&str, &str)> = self
             .env
             .iter()
-            .map(|(k, v)| (k.as_str(), if k == BROWSER_TOKEN_ENV { "<redacted>" } else { v.as_str() }))
+            .map(|(k, v)| {
+                (
+                    k.as_str(),
+                    if k == BROWSER_TOKEN_ENV {
+                        "<redacted>"
+                    } else {
+                        v.as_str()
+                    },
+                )
+            })
             .collect();
-        f.debug_struct("BrowserMcp").field("command", &self.command).field("args", &self.args).field("env", &env).finish()
+        f.debug_struct("BrowserMcp")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &env)
+            .finish()
     }
 }
 
@@ -567,7 +1095,9 @@ pub fn browser_mcp(sock: Option<&std::path::Path>, chat: Option<&str>) -> Option
     let sock = sock?;
     // `KEEL_BROWSER_MCP_EXE` names the Keel binary when this process isn't
     // one (live harness tests run from the test binary).
-    let exe = std::env::var_os("KEEL_BROWSER_MCP_EXE").map(PathBuf::from).or_else(|| std::env::current_exe().ok())?;
+    let exe = std::env::var_os("KEEL_BROWSER_MCP_EXE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())?;
     let mut env = Vec::new();
     if let Some(token) = browser_token() {
         env.push((BROWSER_TOKEN_ENV.to_string(), token));
@@ -589,7 +1119,9 @@ pub fn browser_mcp(sock: Option<&std::path::Path>, chat: Option<&str>) -> Option
 /// The stdio MCP server for chat cards: `<keel exe> mcp-ui`. No socket and
 /// no token. `None` when Keel cannot name its own executable.
 pub fn ui_mcp() -> Option<BrowserMcp> {
-    let exe = std::env::var_os("KEEL_BROWSER_MCP_EXE").map(PathBuf::from).or_else(|| std::env::current_exe().ok())?;
+    let exe = std::env::var_os("KEEL_BROWSER_MCP_EXE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())?;
     Some(BrowserMcp {
         command: exe.to_string_lossy().into_owned(),
         args: vec!["mcp-ui".to_string()],
@@ -629,10 +1161,20 @@ pub fn chat_file_stem(chat: Option<&str>) -> String {
     let stem: String = chat
         .unwrap_or("")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(80)
         .collect();
-    if stem.is_empty() { "shared".to_string() } else { stem }
+    if stem.is_empty() {
+        "shared".to_string()
+    } else {
+        stem
+    }
 }
 
 /// A coding-agent CLI. Discovery does not install.
@@ -669,6 +1211,12 @@ pub trait Harness: Send + Sync {
         ""
     }
 
+    /// Evict any warm process kept alive for `chat_id`.
+    fn evict_chat(&self, _chat_id: &str) {}
+
+    /// Evict all warm processes across all chats.
+    fn evict_all(&self) {}
+
     /// Whether this CLI is signed in, per account or provider. Read-only:
     /// asks the CLI, never reads or stores its credentials. Empty when the
     /// CLI has nothing to check.
@@ -679,8 +1227,15 @@ pub trait Harness: Send + Sync {
     /// Sign in to model provider `provider` with its subscription (OAuth),
     /// reporting each step to `on`. Resolves once the credential is stored.
     /// Dropping the future cancels the sign-in.
-    async fn sign_in(&self, _provider: &str, _on: &(dyn Fn(SignInEvent) + Send + Sync)) -> Result<(), HarnessError> {
-        Err(HarnessError::Failed(format!("{} has no sign-in", self.display_name())))
+    async fn sign_in(
+        &self,
+        _provider: &str,
+        _on: &(dyn Fn(SignInEvent) + Send + Sync),
+    ) -> Result<(), HarnessError> {
+        Err(HarnessError::Failed(format!(
+            "{} has no sign-in",
+            self.display_name()
+        )))
     }
 
     /// Arguments for a throwaway, tool-less, session-less prompt whose answer
@@ -700,8 +1255,12 @@ pub trait Harness: Send + Sync {
     async fn one_shot(&self, model: &ModelId, prompt: &str) -> Result<String, HarnessError> {
         let fail = |why: &str| HarnessError::Failed(format!("{}: {why}", self.display_name()));
         let exe = self.executable().ok_or_else(|| fail("not installed"))?;
-        let args = self.one_shot_args(model, prompt).ok_or_else(|| fail("no one-shot mode"))?;
-        let output = capture(&exe, &args, ONE_SHOT_LIMIT).await.ok_or_else(|| fail("timed out"))?;
+        let args = self
+            .one_shot_args(model, prompt)
+            .ok_or_else(|| fail("no one-shot mode"))?;
+        let output = capture(&exe, &args, ONE_SHOT_LIMIT)
+            .await
+            .ok_or_else(|| fail("timed out"))?;
         if !output.status.success() {
             return Err(fail(&format!("exited with {}", output.status)));
         }
@@ -755,20 +1314,50 @@ mod tool_detail_tests {
     #[test]
     fn picks_what_the_call_works_on() {
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(super::tool_detail(&json!({"file_path": format!("{home}/a.rs"), "limit": 5})), "~/a.rs");
+        assert_eq!(
+            super::tool_detail(&json!({"file_path": format!("{home}/a.rs"), "limit": 5})),
+            "~/a.rs"
+        );
         // Commands: one line.
-        assert_eq!(super::tool_detail(&json!({"command": "ls\nrm -rf x"})), "ls");
-        assert_eq!(super::tool_detail(&json!({"url": "https://a.b/c"})), "https://a.b/c");
+        assert_eq!(
+            super::tool_detail(&json!({"command": "ls\nrm -rf x"})),
+            "ls"
+        );
+        assert_eq!(
+            super::tool_detail(&json!({"url": "https://a.b/c"})),
+            "https://a.b/c"
+        );
         assert_eq!(super::tool_detail(&json!({"limit": 5})), "");
         assert_eq!(super::tool_detail(&json!(null)), "");
         // Browser tools keep the arguments that name their target; a
         // password field's text never reaches the row.
-        assert_eq!(super::tool_detail_for("mcp__keel-browser__browser_click", &json!({"selector": "#go"})), r##"{"selector":"#go"}"##);
-        assert_eq!(super::tool_detail_for("mcp__keel-browser__browser_navigate", &json!({"url": "https://a.b/c"})), r#"{"url":"https://a.b/c"}"#);
-        assert_eq!(super::tool_detail_for("keel-browser:browser_scroll", &json!({"dy": 600})), r#"{"dy":600}"#);
-        let pw = super::tool_detail_for("mcp__keel_browser__browser_type", &json!({"selector": "input[type=password]", "text": "hunter22"}));
+        assert_eq!(
+            super::tool_detail_for(
+                "mcp__keel-browser__browser_click",
+                &json!({"selector": "#go"})
+            ),
+            r##"{"selector":"#go"}"##
+        );
+        assert_eq!(
+            super::tool_detail_for(
+                "mcp__keel-browser__browser_navigate",
+                &json!({"url": "https://a.b/c"})
+            ),
+            r#"{"url":"https://a.b/c"}"#
+        );
+        assert_eq!(
+            super::tool_detail_for("keel-browser:browser_scroll", &json!({"dy": 600})),
+            r#"{"dy":600}"#
+        );
+        let pw = super::tool_detail_for(
+            "mcp__keel_browser__browser_type",
+            &json!({"selector": "input[type=password]", "text": "hunter22"}),
+        );
         assert!(!pw.contains("hunter"), "{pw}");
-        assert_eq!(super::tool_detail_for("Read", &json!({"file_path": "/x"})), "/x");
+        assert_eq!(
+            super::tool_detail_for("Read", &json!({"file_path": "/x"})),
+            "/x"
+        );
     }
 
     #[test]
@@ -797,6 +1386,9 @@ mod tool_detail_tests {
         assert_eq!(kind("fetch_content"), Some("fetch"));
         assert_eq!(kind("TodoWrite"), Some("plan"));
         assert_eq!(kind("EnterPlanMode"), Some("plan"));
+        assert_eq!(kind("memory_read"), Some("memory"));
+        assert_eq!(kind("memory_write"), Some("memory"));
+        assert_eq!(kind("mcp__keel__memory_read"), Some("memory"));
         assert_eq!(kind("mcp__keel-browser__read_file"), Some("read"));
         assert_eq!(kind("unknown_tool"), None);
     }
@@ -843,12 +1435,26 @@ mod browser_mcp_tests {
     #[test]
     fn new_tool_details_name_refs_values_and_files() {
         // Compared as values: key order depends on serde_json's features.
-        let d = |input: serde_json::Value| serde_json::from_str::<serde_json::Value>(&super::browser_detail(&input)).unwrap();
-        assert_eq!(d(json!({"ref": "e12", "double": true})), json!({"double":true,"ref":"e12"}));
-        assert_eq!(d(json!({"ref": "e4", "values": ["Business", "First"]})), json!({"ref":"e4","value":"Business, First"}));
-        assert_eq!(d(json!({"ref": "e9", "paths": ["shots/a.png", "/p/docs/b.pdf"]})), json!({"paths":"a.png, b.pdf","ref":"e9"}));
+        let d = |input: serde_json::Value| {
+            serde_json::from_str::<serde_json::Value>(&super::browser_detail(&input)).unwrap()
+        };
+        assert_eq!(
+            d(json!({"ref": "e12", "double": true})),
+            json!({"double":true,"ref":"e12"})
+        );
+        assert_eq!(
+            d(json!({"ref": "e4", "values": ["Business", "First"]})),
+            json!({"ref":"e4","value":"Business, First"})
+        );
+        assert_eq!(
+            d(json!({"ref": "e9", "paths": ["shots/a.png", "/p/docs/b.pdf"]})),
+            json!({"paths":"a.png, b.pdf","ref":"e9"})
+        );
         assert_eq!(d(json!({"accept": false})), json!({"accept":false}));
-        assert_eq!(d(json!({"text": "Saved", "timeout_ms": 5000})), json!({"text":"Saved","timeout_ms":5000}));
+        assert_eq!(
+            d(json!({"text": "Saved", "timeout_ms": 5000})),
+            json!({"text":"Saved","timeout_ms":5000})
+        );
         assert_eq!(d(json!({"level": "error"})), json!({"level":"error"}));
     }
 
@@ -856,13 +1462,28 @@ mod browser_mcp_tests {
     /// shows it, and argv never carries it.
     #[test]
     fn the_token_rides_in_env_and_is_redacted() {
-        super::set_browser_token("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-        let mcp = super::browser_mcp(Some(std::path::Path::new("/tmp/k/browser.sock")), Some("chat-1")).unwrap();
-        assert!(mcp.env.contains(&(super::BROWSER_TOKEN_ENV.to_string(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())));
-        assert!(mcp.env.contains(&(super::BROWSER_CHAT_ENV.to_string(), "chat-1".to_string())));
+        super::set_browser_token(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let mcp = super::browser_mcp(
+            Some(std::path::Path::new("/tmp/k/browser.sock")),
+            Some("chat-1"),
+        )
+        .unwrap();
+        assert!(mcp.env.contains(&(
+            super::BROWSER_TOKEN_ENV.to_string(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
+        )));
+        assert!(
+            mcp.env
+                .contains(&(super::BROWSER_CHAT_ENV.to_string(), "chat-1".to_string()))
+        );
         assert!(!mcp.args.iter().any(|a| a.contains("0123456789abcdef")));
         let shown = format!("{mcp:?}");
-        assert!(!shown.contains("0123456789abcdef") && shown.contains("<redacted>"), "{shown}");
+        assert!(
+            !shown.contains("0123456789abcdef") && shown.contains("<redacted>"),
+            "{shown}"
+        );
         assert_eq!(super::chat_file_stem(Some("a/b..c")), "a_b__c");
         assert_eq!(super::chat_file_stem(None), "shared");
     }
@@ -877,9 +1498,67 @@ mod browser_mcp_tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-            assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod plan_mode_tests {
+    use serde_json::json;
+
+    #[test]
+    fn plan_mode_permission_allows_reads_and_denies_mutations() {
+        let allow = super::plan_mode_ui_reply(&json!({
+            "type": "extension_ui_request",
+            "method": "confirm",
+            "id": "c1",
+            "title": "Allow read?",
+        }));
+        assert_eq!(allow.unwrap()["confirmed"], true);
+        let deny = super::plan_mode_ui_reply(&json!({
+            "type": "extension_ui_request",
+            "method": "confirm",
+            "id": "c2",
+            "title": "Allow edit?",
+        }));
+        assert_eq!(deny.unwrap()["confirmed"], false);
+        let agy = super::plan_mode_ui_reply(&json!({
+            "type": "extension_ui_request",
+            "method": "select",
+            "id": "s1",
+            "title": "agy requests: Edit src/lib.rs",
+            "options": ["Allow once", "Reject"],
+        }));
+        assert_eq!(agy.unwrap()["value"], "Reject");
+        let read = super::plan_mode_ui_reply(&json!({
+            "type": "extension_ui_request",
+            "method": "select",
+            "id": "s2",
+            "title": "agy requests: Read src/lib.rs",
+            "options": ["Allow once", "Reject"],
+        }));
+        assert_eq!(read.unwrap()["value"], "Allow once");
+        assert!(super::plan_mode_ui_reply(&json!({
+            "type": "extension_ui_request",
+            "method": "input",
+            "id": "q",
+            "title": "What next?",
+        })).is_none());
+        assert!(super::PLAN_MODE_PROMPT.contains("Research"));
+        assert!(super::PLAN_MODE_PROMPT.contains("exactly one plan card"));
+        assert!(super::PLAN_MODE_PROMPT.contains("stop"));
     }
 }

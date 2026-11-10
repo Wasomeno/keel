@@ -49,6 +49,8 @@ pub struct ChatRow {
     pub reasoning: String,
     /// [`keel_proto::PermissionMode`] name for the next turn. Empty is Ask.
     pub permission: String,
+    /// Plan mode for the next turn. Off when the chat has no saved value.
+    pub plan_mode: bool,
     pub status: String,
     /// Written only by [`RegistryDoc::add_chat_usage`]; `put_chat` leaves it.
     pub usage: ChatUsage,
@@ -71,6 +73,7 @@ pub struct ModelTokens {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    pub cache_warm: u64,
 }
 
 /// A device that has announced itself.
@@ -299,6 +302,7 @@ impl RegistryDoc {
             ("output", usage.output),
             ("cache_read", usage.cache_read),
             ("cache_write", usage.cache_write),
+            ("cache_warm", usage.cache_warm),
         ] {
             let sum = map_u64(&totals, key).saturating_add(add);
             totals.insert(key, i64::try_from(sum).unwrap_or(i64::MAX))?;
@@ -352,6 +356,16 @@ impl RegistryDoc {
         let doc = &self.inner.doc;
         let chat = require_chat(doc, id)?;
         chat.insert("permission", permission)?;
+        doc.commit();
+        Ok(())
+    }
+
+    /// Plan mode for this chat's next turn. Any device may write it. It does
+    /// not change [`Self::set_chat_permission`].
+    pub fn set_chat_plan_mode(&self, id: &str, plan_mode: bool) -> Result<(), DocError> {
+        let doc = &self.inner.doc;
+        let chat = require_chat(doc, id)?;
+        chat.insert("plan_mode", plan_mode)?;
         doc.commit();
         Ok(())
     }
@@ -583,6 +597,7 @@ fn write_chat(chat: &LoroMap, row: &ChatRow) -> Result<(), DocError> {
     chat.insert("model", row.model.as_str())?;
     chat.insert("reasoning", row.reasoning.as_str())?;
     chat.insert("permission", row.permission.as_str())?;
+    chat.insert("plan_mode", row.plan_mode)?;
     chat.insert("status", row.status.as_str())?;
     Ok(())
 }
@@ -680,6 +695,7 @@ fn read_chat(map: &LoroMap) -> ChatRow {
         model: map_str(map, "model"),
         reasoning: map_str(map, "reasoning"),
         permission: map_str(map, "permission"),
+        plan_mode: map_bool(map, "plan_mode"),
         status: map_str(map, "status"),
         usage: read_usage(map),
     }
@@ -696,6 +712,7 @@ fn read_usage(chat: &LoroMap) -> ChatUsage {
                     output: map_u64(&m, "output"),
                     cache_read: map_u64(&m, "cache_read"),
                     cache_write: map_u64(&m, "cache_write"),
+                    cache_warm: map_u64(&m, "cache_warm"),
                 });
             }
         });
@@ -743,6 +760,7 @@ mod tests {
             model: "pi".into(),
             reasoning: String::new(),
             permission: String::new(),
+            plan_mode: false,
             status: "idle".into(),
             usage: Default::default(),
         }
@@ -936,6 +954,7 @@ mod tests {
             output: 10,
             cache_read: 100,
             cache_write: 0,
+            cache_warm: 0,
             context_used,
             context_window,
         };
@@ -952,5 +971,30 @@ mod tests {
             ("pi", 12, 20, 200),
         ]);
         assert_eq!((usage.context_used, usage.context_window), (300, 1000));
+    }
+
+    #[test]
+    fn plan_mode_is_off_until_saved_and_does_not_change_permission() {
+        let registry = RegistryDoc::create().unwrap();
+        registry.put_space(&space("s1", "host")).unwrap();
+        registry.put_chat(&chat("c1", "s1", "host")).unwrap();
+        registry.put_chat(&chat("c2", "s1", "host")).unwrap();
+        let row = |id: &str| {
+            registry
+                .view()
+                .chats
+                .into_iter()
+                .find(|c| c.id == id)
+                .unwrap()
+        };
+        assert!(!row("c1").plan_mode && row("c1").permission.is_empty());
+        registry.set_chat_plan_mode("c1", true).unwrap();
+        registry.set_chat_permission("c1", "auto_edit").unwrap();
+        let saved = RegistryDoc::from_import(&registry.export_snapshot().unwrap()).unwrap();
+        let c1 = saved.view().chats.into_iter().find(|c| c.id == "c1").unwrap();
+        let c2 = saved.view().chats.into_iter().find(|c| c.id == "c2").unwrap();
+        assert!(c1.plan_mode);
+        assert_eq!(c1.permission, "auto_edit");
+        assert!(!c2.plan_mode);
     }
 }

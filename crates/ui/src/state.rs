@@ -62,6 +62,8 @@ pub struct ChatItem {
     pub reasoning_known: bool,
     /// `keel_proto::PermissionMode` name; empty is Ask.
     pub permission: String,
+    /// Plan mode for this chat. Off when the row has no saved value.
+    pub plan_mode: bool,
     /// Tokens spent and the context after the last turn (registry view).
     pub usage: crate::usage::ChatUsage,
 }
@@ -91,6 +93,7 @@ impl ChatItem {
             reasoning: String::new(),
             reasoning_known: false,
             permission: String::new(),
+            plan_mode: false,
             usage: Default::default(),
         }
     }
@@ -663,6 +666,7 @@ impl AppState {
         }
         merge_str(view, "reasoning", &mut chat.reasoning);
         merge_str(view, "permission", &mut chat.permission);
+        merge_bool(view, "plan_mode", &mut chat.plan_mode);
         if let Some(usage) = view.get("usage") {
             chat.usage = crate::usage::ChatUsage::from_view(usage);
         }

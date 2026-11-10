@@ -38,6 +38,7 @@ actions!(
         TimerReset,
         ToggleTimer,
         TrackMergeRequest,
+        ApprovePlan,
         Dismiss,
         JumpTab1,
         JumpTab2,
@@ -87,6 +88,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-s", FilesSave, Some(FILES)),
         KeyBinding::new("secondary-shift-f", BrowserExpand, ctx),
         KeyBinding::new("secondary-shift-t", TimerStartPause, ctx),
+        KeyBinding::new("secondary-enter", ApprovePlan, ctx),
         KeyBinding::new("secondary-l", BrowserAddress, Some(BROWSER)),
         KeyBinding::new("secondary-r", BrowserReload, Some(BROWSER)),
         KeyBinding::new("secondary-[", BrowserBack, Some(BROWSER)),
@@ -196,7 +198,7 @@ mod tests {
 
     #[test]
     fn every_binding_parses() {
-        assert_eq!(bindings().len(), 41);
+        assert_eq!(bindings().len(), 42);
     }
 
     #[test]

@@ -296,7 +296,9 @@ impl KeelWindow {
                             Then::Run(command) => {
                                 this.terminal_send(id.clone(), format!("{command}\r"), cx)
                             }
-                            Then::Insert(text) => this.insert_when_ready(id.clone(), text.clone(), cx),
+                            Then::Insert(text) => {
+                                this.insert_when_ready(id.clone(), text.clone(), cx)
+                            }
                         }
                     }
                     None => this.report("can't attach to the terminal", "subscribe failed"),
@@ -578,7 +580,11 @@ impl KeelWindow {
                                     .child("exited"),
                             )
                         })
-                        .child(reveal_on_hover("term-close-reveal", group.clone(), if active { 1. } else { 0. }, 1.,
+                        .child(reveal_on_hover(
+                            "term-close-reveal",
+                            group.clone(),
+                            if active { 1. } else { 0. },
+                            1.,
                             div()
                                 .id(ElementId::Name(format!("term-close-{ix}").into()))
                                 .size(zpx(16.))
@@ -594,7 +600,8 @@ impl KeelWindow {
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     cx.stop_propagation();
                                     this.close_terminal(ix, window, cx);
-                                }))))
+                                })),
+                        ))
                 }))
                 .child(
                     icon_button("term-new-btn", Icon::Plus, t)
@@ -781,7 +788,11 @@ mod tests {
     #[test]
     fn an_insert_goes_to_this_chats_running_shell() {
         let chat = Some("a".to_string());
-        let tabs = vec![tab("1", "a", false), tab("2", "b", false), tab("3", "a", true)];
+        let tabs = vec![
+            tab("1", "a", false),
+            tab("2", "b", false),
+            tab("3", "a", true),
+        ];
         // The active tab when it's this chat's.
         assert_eq!(pick_tab(&tabs, 0, &chat), Some(0));
         // Another chat's tab is active: this chat's latest running one.
@@ -792,4 +803,3 @@ mod tests {
         assert_eq!(pick_tab(&[], 0, &chat), None);
     }
 }
-

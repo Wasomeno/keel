@@ -12,6 +12,12 @@ impl KeelWindow {
     }
 
     pub(super) fn sync_prompt_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_plan_pending() {
+            if self.suggestion_key.is_some() || self.prompt_suggestion.is_some() {
+                self.invalidate_suggestion();
+            }
+            return;
+        }
         let ready = self.current_chat.is_some()
             && self.chat_stream.is_some()
             && !self.messages.is_empty()
@@ -53,7 +59,8 @@ impl KeelWindow {
                     }
                     match result {
                         Ok(body) => {
-                            this.prompt_suggestion = body["suggestion"].as_str().map(str::to_string);
+                            this.prompt_suggestion =
+                                body["suggestion"].as_str().map(str::to_string);
                             this.prompt_suggestion_at = Some(std::time::Instant::now());
                         }
                         Err(err) => tracing::info!("prompt suggestion unavailable: {err}"),

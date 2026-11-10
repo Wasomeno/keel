@@ -31,6 +31,7 @@ pub struct Viewport {
     bounds: Bounds<Pixels>,
     drag: Option<Point<Pixels>>,
     moved: Instant,
+    anim_zoom: Option<(Instant, f32, f32)>,
 }
 
 impl Default for Viewport {
@@ -41,6 +42,7 @@ impl Default for Viewport {
             bounds: Bounds::default(),
             drag: None,
             moved: Instant::now(),
+            anim_zoom: None,
         }
     }
 }
@@ -48,10 +50,13 @@ impl Default for Viewport {
 pub type SharedViewport = Rc<RefCell<Viewport>>;
 
 impl Viewport {
+    pub const PADDING: f32 = 48.;
+
     /// Diagram px → screen px.
     pub fn scale(&self, (w, h): (f32, f32)) -> f32 {
-        let fit =
-            (f32::from(self.bounds.size.width) / w).min(f32::from(self.bounds.size.height) / h);
+        let avail_w = (f32::from(self.bounds.size.width) - Self::PADDING * 2.).max(10.);
+        let avail_h = (f32::from(self.bounds.size.height) - Self::PADDING * 2.).max(10.);
+        let fit = (avail_w / w).min(avail_h / h);
         fit * self.zoom
     }
 
@@ -65,6 +70,7 @@ impl Viewport {
 
     /// Zoom by `factor`, keeping the diagram point under `at` where it is.
     pub fn zoom_at(&mut self, factor: f32, at: Point<Pixels>, natural: (f32, f32)) {
+        self.anim_zoom = None;
         let before = self.rect(natural);
         let s0 = self.scale(natural);
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -82,12 +88,41 @@ impl Viewport {
         self.zoom_at(factor, self.bounds.center(), natural);
     }
 
+    /// Animated zoom from UI buttons: 180ms ease-out. Reduced motion cuts immediately.
+    pub fn zoom_center_animated(&mut self, factor: f32, natural: (f32, f32), reduced: bool) {
+        if reduced {
+            self.zoom_center(factor, natural);
+            return;
+        }
+        let from_zoom = self.zoom;
+        let to_zoom = (from_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.anim_zoom = Some((Instant::now(), from_zoom, to_zoom));
+        self.moved = Instant::now();
+    }
+
+    pub fn step_animation(&mut self, now: Instant) -> bool {
+        let Some((start, from, to)) = self.anim_zoom else {
+            return false;
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f32() / 0.180).min(1.);
+        if t >= 1. {
+            self.zoom = to;
+            self.anim_zoom = None;
+            false
+        } else {
+            let e = crate::motion::ease_out(t);
+            self.zoom = from + (to - from) * e;
+            true
+        }
+    }
+
     pub fn pan_by(&mut self, delta: Point<Pixels>) {
         self.pan = self.pan + delta;
         self.moved = Instant::now();
     }
 
     pub fn reset(&mut self) {
+        self.anim_zoom = None;
         self.zoom = 1.;
         self.pan = Point::default();
         self.moved = Instant::now();
@@ -123,8 +158,13 @@ pub fn viewer(source: String, t: Tokens, vp: SharedViewport) -> impl IntoElement
                 .zoom_at(1. + e.delta, e.position, natural);
             window.refresh();
         })
-        .on_mouse_down(MouseButton::Left, move |e, _, _| {
-            down.borrow_mut().drag = Some(e.position)
+        .on_mouse_down(MouseButton::Left, move |e, window, _| {
+            if e.click_count >= 2 {
+                down.borrow_mut().reset();
+                window.refresh();
+            } else {
+                down.borrow_mut().drag = Some(e.position);
+            }
         })
         .on_mouse_move(move |e, window, _| {
             let mut vp = moving.borrow_mut();
@@ -145,7 +185,13 @@ pub fn viewer(source: String, t: Tokens, vp: SharedViewport) -> impl IntoElement
             gpui::canvas(
                 |_, _, _| {},
                 move |bounds, _, window, _| {
-                    paint_vp.borrow_mut().bounds = bounds;
+                    let mut vp_mut = paint_vp.borrow_mut();
+                    vp_mut.bounds = bounds;
+                    let animating = vp_mut.step_animation(Instant::now());
+                    if animating {
+                        window.request_animation_frame();
+                    }
+                    drop(vp_mut);
                     let vp = paint_vp.borrow();
                     window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                         paint(&source, &t, &vp, natural, window)
@@ -177,8 +223,9 @@ fn paint(source: &str, t: &Tokens, vp: &Viewport, natural: (f32, f32), window: &
     };
 
     // Whole diagram, 2x the fit size: sharp enough for the first zoom steps.
-    let fit_w = f32::from(vp.bounds.size.width)
-        .min(natural.0 * f32::from(vp.bounds.size.height) / natural.1);
+    let avail_w = (f32::from(vp.bounds.size.width) - Viewport::PADDING * 2.).max(10.);
+    let avail_h = (f32::from(vp.bounds.size.height) - Viewport::PADDING * 2.).max(10.);
+    let fit_w = avail_w.min(natural.0 * avail_h / natural.1);
     let base_w = (fit_w * sf * 2.).min(4096.);
     let base = draw(mermaid::raster(source, t, base_w, "viewer"), window);
 
@@ -242,7 +289,7 @@ mod tests {
     fn starts_fit_and_centered() {
         let v = vp();
         let r = v.rect((2000., 800.));
-        assert_eq!(r.size.width, px(1000.));
+        assert_eq!(r.size.width, px(904.));
         assert_eq!(r.center(), v.bounds.center());
     }
 

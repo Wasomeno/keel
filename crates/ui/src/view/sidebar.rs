@@ -1143,9 +1143,10 @@ impl KeelWindow {
             })
     }
 
-    /// A space's header: chevron, name, and, folded, its most urgent status
-    /// and chat count. Click folds; ⌥-click shows only this space. `+` and
-    /// `⋯` appear on hover.
+    /// A space's header: chevron, name, and, folded, its chat count. The
+    /// urgent mark sits left of the count only when that row is not already
+    /// listed. Click folds; ⌥-click shows only this space. `+` and `⋯`
+    /// appear on hover.
     fn render_space_header(
         &mut self,
         section: SpaceSection,
@@ -1162,8 +1163,10 @@ impl KeelWindow {
             urgent,
             collapsed,
             loose,
+            rows,
             ..
         } = section;
+        let show_mark = header_shows_status(urgent, rows.iter().map(|(_, status)| *status));
 
         if loose {
             return div()
@@ -1286,12 +1289,8 @@ impl KeelWindow {
                             .child(name),
                     )
                     .when(collapsed, |d| {
-                        d.children(match urgent {
-                            keel_proto::DisplayStatus::AwaitingInput
-                            | keel_proto::DisplayStatus::Running => {
-                                status_dot(urgent, &format!("space-{space_id}"), t, reduced)
-                            }
-                            _ => None,
+                        d.when(show_mark, |d| {
+                            d.children(status_dot(urgent, &format!("space-{space_id}"), t, reduced))
                         })
                         .when(total > 0, |d| {
                             d.child(
@@ -1435,8 +1434,9 @@ impl KeelWindow {
             .py_1p5()
             .rounded(RADIUS_MD)
             .flex()
-            .flex_col()
-            .gap_0p5()
+            .flex_row()
+            .items_center()
+            .gap_2()
             .cursor_pointer()
             .when(active || selected, |s| s.bg(c(t.selected)))
             .when(!active && !selected, |s| s.hover_fade(c(t.hover), None))
@@ -1496,22 +1496,28 @@ impl KeelWindow {
             )
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .when(selecting, |d| {
-                        d.child(check_circle(
-                            selected,
-                            t,
-                            &chat.id,
-                            select_gen,
-                            ix,
-                            select_leaving,
-                            self.reduced(),
-                        ))
-                    })
-                    .children(status_dot(status, &chat.id, t, self.reduced()))
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .when(selecting, |d| {
+                                d.child(check_circle(
+                                    selected,
+                                    t,
+                                    &chat.id,
+                                    select_gen,
+                                    ix,
+                                    select_leaving,
+                                    self.reduced(),
+                                ))
+                            })
                     .child(
                         div()
                             .flex_1()
@@ -1596,7 +1602,9 @@ impl KeelWindow {
                             .children(git),
                     )
                     .children(mr_badge),
+                ),
             )
+            .children(status_dot(status, &chat.id, t, self.reduced()))
     }
 
     /// Compare this frame's layout with the last one. An item that moved
@@ -1801,6 +1809,17 @@ fn inline_card(t: Tokens, edge: u32) -> gpui::Div {
         .gap_2()
 }
 
+/// A folded header shows its urgent mark only when no listed row already
+/// carries that status. The count stays either way.
+pub(super) fn header_shows_status(
+    urgent: keel_proto::DisplayStatus,
+    shown: impl IntoIterator<Item = keel_proto::DisplayStatus>,
+) -> bool {
+    use keel_proto::DisplayStatus;
+    matches!(urgent, DisplayStatus::Running | DisplayStatus::AwaitingInput)
+        && !shown.into_iter().any(|status| status == urgent)
+}
+
 pub(super) fn text_button(
     id: &'static str,
     label: &'static str,
@@ -1887,6 +1906,29 @@ impl KeelWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folded_header_hides_a_mark_the_row_already_shows() {
+        use keel_proto::DisplayStatus;
+        assert!(!header_shows_status(
+            DisplayStatus::Running,
+            [DisplayStatus::Running]
+        ));
+        assert!(header_shows_status(DisplayStatus::Running, []));
+        assert!(header_shows_status(
+            DisplayStatus::Running,
+            [DisplayStatus::Idle]
+        ));
+        assert!(!header_shows_status(
+            DisplayStatus::AwaitingInput,
+            [DisplayStatus::AwaitingInput]
+        ));
+        assert!(!header_shows_status(DisplayStatus::Idle, []));
+        assert!(!header_shows_status(
+            DisplayStatus::Aborted,
+            [DisplayStatus::Aborted]
+        ));
+    }
 
     #[test]
     fn row_clicks_open_toggle_and_select_ranges() {

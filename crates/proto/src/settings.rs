@@ -85,6 +85,15 @@ pub struct UiSettings {
     /// Settings → Updates. Absent means check. `Some(false)` turns checks off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
+    /// Keep prompt cache warm while idle between turns. On by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_cache_warm: Option<bool>,
+    /// Extended prompt cache retention (1 hour). Cache writes cost more. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub longer_cache: bool,
+    /// Minutes before an idle agent process is evicted. Default 15.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_eviction_minutes: Option<u32>,
 }
 
 /// Strongest background dim the slider offers.
@@ -173,6 +182,14 @@ pub enum ThemeChoice {
 }
 
 impl UiSettings {
+    pub fn keep_cache_warm(&self) -> bool {
+        self.keep_cache_warm.unwrap_or(true)
+    }
+
+    pub fn idle_eviction_minutes(&self) -> u32 {
+        self.idle_eviction_minutes.unwrap_or(15)
+    }
+
     pub fn read_from(path: &Path) -> Result<Self, std::io::Error> {
         let text = fs::read_to_string(path)?;
         serde_json::from_str(&text)

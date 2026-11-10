@@ -88,6 +88,9 @@ impl KeelWindow {
                     this.archive_chat(id, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ApprovePlan, window, cx| {
+                this.approve_pending_plan(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &StopRun, _, cx| {
                 let busy = matches!(
                     this.active_status(),
@@ -141,7 +144,51 @@ impl KeelWindow {
                     }
                     cx.stop_propagation();
                     cx.notify();
-                } else if key == "escape" && this.close_lightbox(cx) {
+                } else if this.diagram_menu.is_some() && (key == "down" || key == "up") {
+                    this.diagram_menu_ix = (this.diagram_menu_ix + 1) % 2;
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if let Some(row_id) = this.diagram_menu.clone().filter(|_| key == "enter") {
+                    this.diagram_menu = None;
+                    let ix = this.diagram_menu_ix;
+                    let dark = matches!(
+                        window.appearance(),
+                        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+                    );
+                    let tokens = this.state.effective_tokens(dark);
+                    if let Some(super::Lightbox::Diagram { row_id: d_row, source, .. }) = &this.lightbox {
+                        if *d_row == row_id {
+                            let (c_row, c_src) = (d_row.clone(), source.clone());
+                            if ix == 0 {
+                                this.copy_code(c_row, c_src, cx);
+                            } else {
+                                this.copy_image(c_row, c_src, tokens, cx);
+                            }
+                        }
+                    } else if let Some(item) = this.transcript.items.iter().find(|i| i.row_id() == row_id) {
+                        if let crate::markdown::TranscriptBlock::Code { content, .. } = &item.block {
+                            if ix == 0 {
+                                this.copy_code(row_id.clone(), content.clone(), cx);
+                            } else {
+                                this.copy_image(row_id.clone(), content.clone(), tokens, cx);
+                            }
+                        } else if let crate::markdown::TranscriptBlock::Chart { chart, .. } = &item.block {
+                            if ix == 0 {
+                                let csv = chart.to_csv();
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(csv));
+                                this.mark_copied(row_id.clone(), cx);
+                            } else {
+                                this.copy_chart_image(row_id.clone(), chart.clone(), tokens, cx);
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if key == "escape" && this.diagram_menu.is_some() {
+                    this.diagram_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if key == "escape" && this.close_lightbox_instant(cx) {
                     cx.stop_propagation();
                 } else if key == "escape" && {
                     this.menus_cut = true;
@@ -213,10 +260,12 @@ impl KeelWindow {
         }
         let timer_menu = self.timer_close_menu();
         let mr_menu = self.mr_close_menus();
+        let diagram_menu = self.diagram_menu.take().is_some();
         let scope_menu = self.projects.close_scope();
         let project_sheet = self.projects.close_sheet();
         let open = timer_menu
             || mr_menu
+            || diagram_menu
             || scope_menu
             || project_sheet
             || self.state.space_menu.is_some()

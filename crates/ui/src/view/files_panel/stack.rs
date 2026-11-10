@@ -6,8 +6,8 @@
 //! huge files start folded; long diffs show their first lines and a way to
 //! the rest. Wide panes pair old and new side by side.
 
-use crate::hover_fade::HoverFadeExt;
 use super::*;
+use crate::hover_fade::HoverFadeExt;
 use gpui::{AnimationExt, ListAlignment, ListState, Pixels, WeakEntity};
 use std::collections::BTreeMap;
 

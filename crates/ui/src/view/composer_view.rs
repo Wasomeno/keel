@@ -15,7 +15,11 @@ use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_XL, c};
 /// send; disabled only dims the whole button. Swaps at once (it follows
 /// typing, and keyboard changes don't animate).
 fn send_look(enabled: bool, t: Tokens) -> (gpui::Hsla, gpui::Hsla, f32) {
-    (c(t.text), c(t.text_on_accent), if enabled { 1. } else { SEND_DISABLED })
+    (
+        c(t.text),
+        c(t.text_on_accent),
+        if enabled { 1. } else { SEND_DISABLED },
+    )
 }
 
 /// The disabled send button's opacity.
@@ -446,17 +450,30 @@ impl KeelWindow {
         // Permission mode: unified chip in bottom row for both hero and docked modes.
         let permission_chip_bounds = self.permission_chip_bounds.clone();
         let mut permission_chip = (self.permission_modes().len() > 1).then(|| {
-            let label = self.permission_roll_label(
-                "composer-permission-chip-roll",
-                window,
-                !hero && fit.compact >= 1,
-            );
             let is_open = self.show_permission_menu;
             let menu = self
                 .menu_phase(PERMISSION_MENU_ID, is_open, cx)
                 .map(|leaving| self.render_permission_menu(leaving, t, cx));
             let mode = self.effective_permission();
-            let full = mode == PermissionMode::FullAccess;
+            let planning = self.plan_on();
+            let full = mode == PermissionMode::FullAccess && !planning;
+            let label = if planning {
+                div()
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .child(Icon::ListChecks.el(zpx(PERMISSION_ICON)))
+                    .when(hero || fit.compact < 1, |d| {
+                        d.child(div().ml(zpx(PERMISSION_GAP)).child("Plan"))
+                    })
+                    .into_any_element()
+            } else {
+                self.permission_roll_label(
+                    "composer-permission-chip-roll",
+                    window,
+                    !hero && fit.compact >= 1,
+                )
+            };
             div()
                 .relative()
                 .flex_none()
@@ -601,6 +618,11 @@ impl KeelWindow {
                     }
                 }),
             )
+            .capture_action(cx.listener(|this, _: &crate::keys::ApprovePlan, window, cx| {
+                if this.approve_pending_plan(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .capture_action(
                 cx.listener(|this, _: &gpui_base::input::IndentInline, window, cx| {
                     if this.accept_mention(None, true, window, cx) {
@@ -1652,7 +1674,11 @@ impl KeelWindow {
                             .size_full()
                             .object_fit(gpui::ObjectFit::Cover),
                     )
-                    .child(reveal_on_hover("remove-reveal", group.clone(), 0., 1.,
+                    .child(reveal_on_hover(
+                        "remove-reveal",
+                        group.clone(),
+                        0.,
+                        1.,
                         div()
                             .id(gpui::ElementId::Name(format!("remove-{group}").into()))
                             .absolute()
@@ -1671,7 +1697,8 @@ impl KeelWindow {
                                 // Not also the tile's open.
                                 cx.stop_propagation();
                                 this.remove_image(&id, cx)
-                            }))));
+                            })),
+                    ));
                 match exit {
                     None => tile.into_any_element(),
                     // Gone from sight in the first half; the space closes over
@@ -2011,13 +2038,30 @@ impl KeelWindow {
     ) -> AnyElement {
         let reduced = self.reduced();
         let current = self.effective_permission();
+        let planning = self.plan_on();
         let mut items = vec![menu_label("Permissions", t).into_any_element()];
+        items.push(
+            menu_item("permission-plan", t, true, planning)
+                .child(Icon::ListChecks.el(zpx(PERMISSION_ICON)))
+                .child(div().flex_1().child("Plan"))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(c(t.text_faint))
+                        .child("Research, then one plan"),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.select_plan(cx);
+                    this.close_permission_menu(cx);
+                }))
+                .into_any_element(),
+        );
         items.extend(self.permission_modes().to_vec().into_iter().map(|mode| {
             menu_item(
                 format!("permission-{}", mode.as_str()),
                 t,
                 true,
-                mode == current,
+                !planning && mode == current,
             )
             .child(permission_icon(mode).el(zpx(PERMISSION_ICON)))
             .child(div().flex_1().child(permission_label(mode)))
@@ -2855,14 +2899,15 @@ impl PillMotion {
         now: std::time::Instant,
     ) -> Option<(f32, f32)> {
         let progress = |since: std::time::Instant, len: std::time::Duration| {
-            crate::motion::ease_out((now.duration_since(since).as_secs_f32() / len.as_secs_f32()).min(1.))
+            crate::motion::ease_out(
+                (now.duration_since(since).as_secs_f32() / len.as_secs_f32()).min(1.),
+            )
         };
         if visible {
             if !self.shown {
                 self.shown = true;
                 self.leave = None;
-                self.enter = arrived
-                    .filter(|at| !reduced && now.duration_since(*at) < PILL_ENTER);
+                self.enter = arrived.filter(|at| !reduced && now.duration_since(*at) < PILL_ENTER);
             }
             let p = self.enter.map_or(1., |at| progress(at, PILL_ENTER));
             if p >= 1. {
@@ -3400,6 +3445,28 @@ fn icon_chip(id: &'static str, icon: Icon, t: Tokens) -> gpui::Stateful<gpui::Di
 /// solid mark (Pi) doesn't read bigger than line art.
 const MENU_LOGO: f32 = 12.;
 
+impl KeelWindow {
+    /// Plan mode, beside the access and model controls. Off until this chat
+    /// has a saved value. A new chat uses the hero's unsaved toggle.
+    fn plan_on(&self) -> bool {
+        if let Some(id) = &self.current_chat
+            && let Some(chat) = self.state.chats.get(id)
+        {
+            return chat.plan_mode;
+        }
+        self.plan_mode_draft
+    }
+
+    fn plan_toggle(&mut self, t: Tokens, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let on = self.plan_on();
+        chip("plan-mode-btn", t, on)
+            .child("Plan")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.toggle_plan_mode(cx);
+            }))
+    }
+}
+
 fn chip(id: &'static str, t: Tokens, active: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -3429,14 +3496,20 @@ mod slider_tests {
         let ms = |n| t0 + Duration::from_millis(n);
         let mut m = PillMotion::default();
         // A fresh suggestion rises in, under 300 ms, then holds.
-        assert_eq!(m.step(true, Some(t0), true, false, t0), Some((0., PILL_RISE)));
+        assert_eq!(
+            m.step(true, Some(t0), true, false, t0),
+            Some((0., PILL_RISE))
+        );
         let (o, dy) = m.step(true, Some(t0), true, false, ms(80)).unwrap();
         assert!(o > 0.5 && o < 1. && dy > 0. && dy < PILL_RISE, "{o} {dy}");
         assert!(m.animating());
         assert_eq!(m.step(true, Some(t0), true, false, ms(160)), Some((1., 0.)));
         assert!(!m.animating());
         // Cleared (or clicked): it sinks out, quicker than it came in.
-        assert_eq!(m.step(false, Some(t0), true, false, ms(1000)), Some((1., 0.)));
+        assert_eq!(
+            m.step(false, Some(t0), true, false, ms(1000)),
+            Some((1., 0.))
+        );
         assert!(m.step(false, Some(t0), true, false, ms(1060)).unwrap().0 < 0.5);
         assert_eq!(m.step(false, Some(t0), true, false, ms(1110)), None);
         assert!(!m.animating());

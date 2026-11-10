@@ -209,6 +209,10 @@ mod tests {
             harness_prefs: Default::default(),
             recent_models: Default::default(),
             open_model_providers: Default::default(),
+            auto_update: None,
+            keep_cache_warm: None,
+            longer_cache: false,
+            idle_eviction_minutes: None,
         };
         layout.write_ui_settings(&settings).unwrap();
         let again = Layout::open(&root.0).unwrap();

@@ -229,6 +229,8 @@ pub struct ToolEntry {
     pub summary: String,
     /// What the call works on (file, command, pattern, URL); may be empty.
     pub detail: String,
+    /// Short agent-written progress label. Empty when missing or rejected.
+    pub label: String,
     /// Images the tool returned (absolute paths that exist here), shown
     /// under the row as [`TranscriptBlock::Shots`].
     pub images: Vec<String>,
@@ -285,6 +287,7 @@ impl ToolEntry {
             state: s("state"),
             summary: s("summary"),
             detail: s("detail"),
+            label: s("label"),
             images,
             kind,
             started_ms: ms("started_ms"),
@@ -410,12 +413,15 @@ pub enum TranscriptBlock {
         live: bool,
         expanded: Option<bool>,
     },
-    /// A turn's steps folded into one expandable line ("Show works" / "Hide works").
+    /// A turn's steps folded into one expandable line. While `live`, `label`
+    /// is the step in progress. Once the turn settles it is the "N steps
+    /// completed" byline.
     TurnSummary {
         id: String,
         label: String,
         failed: bool,
         expanded: bool,
+        live: bool,
     },
     /// A spawned subagent: one clickable indicator row.
     Subagent {
@@ -476,6 +482,15 @@ pub enum TranscriptBlock {
         id: String,
         columns: Vec<crate::compare::Column>,
     },
+    /// An approvable plan. Not the harness plan event or the right-panel steps.
+    PlanCard {
+        id: String,
+        plan: crate::plan::Plan,
+    },
+    /// Narration the agent wrote between steps (a paragraph, list, heading
+    /// or quote), shown muted inside an open turn fold. It keeps the inner
+    /// row's id, so text moving into the fold stays the same row.
+    Interim(Box<TranscriptBlock>),
 }
 
 impl TranscriptBlock {
@@ -504,7 +519,9 @@ impl TranscriptBlock {
             | Self::FileChanges { id, .. }
             | Self::Steps { id, .. }
             | Self::Callout { id, .. }
-            | Self::Compare { id, .. } => id,
+            | Self::Compare { id, .. }
+            | Self::PlanCard { id, .. } => id,
+            Self::Interim(inner) => inner.id(),
         }
     }
 
@@ -533,12 +550,15 @@ impl TranscriptBlock {
             | Self::FileChanges { id, .. }
             | Self::Steps { id, .. }
             | Self::Callout { id, .. }
-            | Self::Compare { id, .. } => *id = new_id,
+            | Self::Compare { id, .. }
+            | Self::PlanCard { id, .. } => *id = new_id,
+            Self::Interim(inner) => inner.set_id(new_id),
         }
     }
 
     pub fn content_len(&self) -> usize {
         match self {
+            Self::Interim(inner) => inner.content_len() + 1,
             Self::Code { content, run, .. } => content.len() + usize::from(run.is_some()),
             Self::Paragraph { content, spans, .. }
             | Self::Heading { content, spans, .. }
@@ -613,6 +633,12 @@ impl TranscriptBlock {
                 .iter()
                 .map(|c| c.title.len() + c.points.iter().map(|p| p.len() + 1).sum::<usize>())
                 .sum(),
+            Self::PlanCard { plan, .. } => {
+                plan.title.len()
+                    + plan.summary.len()
+                    + plan.footer.len()
+                    + plan.steps.iter().map(|s| s.title.len() + 1).sum::<usize>()
+            }
         }
     }
 }

@@ -29,6 +29,7 @@ const MAX_STEPS: usize = 8;
 const MAX_POINTS: usize = 4;
 const MAX_CALLOUT: usize = 160;
 const MAX_FAILURES: usize = 6;
+const MAX_PLAN_STEPS: usize = 24;
 
 /// Words that make a command risky whatever the agent says.
 fn risky_words(command: &str) -> bool {
@@ -63,6 +64,18 @@ pub fn ui_tools() -> Value {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string", "enum": ["bar", "line"], "description": "bar compares categories; line is a trend over an ordered sequence"},
+                    "title": {"type": "string", "description": "Short title describing what the chart compares or trends, in sentence case"},
+                    "unit": {"type": "string", "description": "Optional unit or symbol for y-axis values, e.g. $, %, KB, ms"},
+                    "headline": {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string", "description": "Primary aggregate or latest number, e.g. $142.5k"},
+                            "label": {"type": "string", "description": "Short context label, e.g. Latest total"},
+                            "delta": {"type": "string", "description": "Optional change, e.g. +14% or -2.4k"},
+                            "better": {"type": "string", "enum": ["higher", "lower", "neither"], "description": "Direction considered positive for delta tinting"}
+                        },
+                        "required": ["value"]
+                    },
                     "x": {"type": "string", "description": "The table column that labels the categories or the x-axis, exactly as written in the header"},
                     "labels": {"type": "array", "items": {"type": "string"}, "description": "That column's cells, in order"},
                     "series": {
@@ -248,6 +261,32 @@ pub fn ui_tools() -> Value {
                 },
                 "required": ["url"]
             }
+        },
+        {
+            "name": "show_plan",
+            "description": "Show one plan card and stop. Call it only in plan mode, after you have researched with read-only tools. Exactly one call. The card is the user's copy of the plan: do not also write the steps in your reply.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short plan title, sentence case"},
+                    "summary": {"type": "string", "description": "One or two sentences on what the plan does"},
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "kind": {"type": "string", "enum": ["read", "edit", "run", "other"]},
+                                "targets": {"type": "array", "items": {"type": "string"}, "description": "Paths or commands this step touches"}
+                            },
+                            "required": ["title", "kind"]
+                        }
+                    },
+                    "footer": {"type": "string", "description": "Touched files or external effects, one line"}
+                },
+                "required": ["title", "summary", "steps", "footer"]
+            }
         }
     ])
 }
@@ -273,14 +312,65 @@ pub fn ui_call(name: &str, args: &Value) -> Option<Result<String, String>> {
         "show_compare" => compare_spec(args),
         "show_diagram" => diagram_spec(args),
         "show_tests" => tests_spec(args),
+        "show_plan" => plan_spec(args),
         _ => return None,
     };
     // The spec stays the last JSON line: the engine reads the card from it.
     Some(spec.map(|spec| match *tool {
-        "show_steps" | "task_steps" | "show_compare" | "show_diagram" => {
+        "show_steps" | "task_steps" | "show_compare" | "show_diagram" | "show_plan" => {
             format!("Shown to the user as a card. Do not repeat it in your reply.\n{spec}")
         }
         _ => spec.to_string(),
+    }))
+}
+
+fn plan_kind(raw: &str) -> &'static str {
+    match raw.trim() {
+        "read" => "read",
+        "edit" => "edit",
+        "run" => "run",
+        _ => "other",
+    }
+}
+
+fn plan_spec(args: &Value) -> Result<Value, String> {
+    let title = args["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("a plan needs a title")?;
+    let summary = args["summary"].as_str().unwrap_or("").trim();
+    let footer = args["footer"].as_str().unwrap_or("").trim();
+    let steps: Vec<Value> = args["steps"]
+        .as_array()
+        .ok_or("a plan needs at least one step")?
+        .iter()
+        .filter_map(|step| {
+            let title = step["title"].as_str().map(str::trim).filter(|s| !s.is_empty())?;
+            let kind = plan_kind(step["kind"].as_str().unwrap_or("other"));
+            let targets: Vec<String> = step["targets"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(json!({"title": title, "kind": kind, "targets": targets}))
+        })
+        .take(MAX_PLAN_STEPS)
+        .collect();
+    if steps.is_empty() {
+        return Err("a plan needs at least one step".into());
+    }
+    Ok(json!({
+        "component": "plan",
+        "title": title,
+        "summary": summary,
+        "steps": steps,
+        "footer": footer,
     }))
 }
 
@@ -320,13 +410,35 @@ fn chart_spec(args: &Value) -> Result<Value, String> {
     } else {
         "bar"
     };
-    Ok(json!({
+    let mut spec = json!({
         "component": "chart",
         "kind": kind,
         "x": args["x"].as_str().unwrap_or_default(),
         "labels": labels,
         "series": series,
-    }))
+    });
+    if let Some(title) = args["title"].as_str().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        spec["title"] = json!(title);
+    }
+    if let Some(unit) = args["unit"].as_str().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        spec["unit"] = json!(unit);
+    }
+    if let Some(obj) = args["headline"].as_object() {
+        if let Some(val) = obj.get("value").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let mut h = json!({ "value": val });
+            if let Some(label) = obj.get("label").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                h["label"] = json!(label);
+            }
+            if let Some(delta) = obj.get("delta").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                h["delta"] = json!(delta);
+            }
+            if let Some(better) = obj.get("better").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                h["better"] = json!(better);
+            }
+            spec["headline"] = h;
+        }
+    }
+    Ok(spec)
 }
 
 fn choices_spec(args: &Value) -> Result<Value, String> {
@@ -627,8 +739,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const REPLY: &str = "Results:\n\n| crate | before (s) | after (s) |\n|---|---|---|\n| ui | 41.2 | 28.7 |\n| `engine` | 33.5 | 30.1 |\n\n| name | note |\n|---|---|\n| a | b |\n| c | d |\n";
-
     #[test]
     fn a_chart_call_becomes_the_same_spec_a_table_would() {
         let spec = ui_call(
@@ -662,6 +772,33 @@ mod tests {
         );
         assert!(gapped.unwrap().is_err());
         assert!(ui_call("bash", &json!({})).is_none());
+
+        let with_meta = ui_call(
+            "show_chart",
+            &json!({
+                "kind": "bar",
+                "title": "Revenue and costs by month",
+                "unit": "$k",
+                "headline": {
+                    "value": "$142.5k",
+                    "label": "Total revenue",
+                    "delta": "+14%",
+                    "better": "higher"
+                },
+                "x": "Month",
+                "labels": ["Jan", "Feb"],
+                "series": [
+                    {"name": "Revenue", "values": [42.0, 55.0]}
+                ]
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let with_meta: Value = serde_json::from_str(&with_meta).unwrap();
+        assert_eq!(with_meta["title"], "Revenue and costs by month");
+        assert_eq!(with_meta["unit"], "$k");
+        assert_eq!(with_meta["headline"]["value"], "$142.5k");
+        assert_eq!(with_meta["headline"]["delta"], "+14%");
     }
 
     #[test]
@@ -854,5 +991,52 @@ mod tests {
                 .is_err()
         );
         assert!(keel_proto::is_ui_tool("mcp__keel-ui__show_callout"));
+    }
+
+    #[test]
+    fn a_plan_spec_round_trips_and_a_spec_without_title_or_steps_is_rejected() {
+        let spec = card(ui_call(
+            "show_plan",
+            &json!({
+                "title": "Ship plan mode",
+                "summary": "Add a plan card and keep tools read-only until it is approved.",
+                "footer": "Touches the composer and the harness gate.",
+                "steps": [
+                    {"title": "Read the composer", "kind": "read", "targets": ["crates/ui/src/view/composer_view.rs"]},
+                    {"title": "Add the card", "kind": "edit", "targets": ["crates/ui/src/transcript.rs"]},
+                    {"title": "Run the tests", "kind": "run", "targets": ["cargo test -p keel-ui"]},
+                    {"title": "Note the limit", "kind": "nope", "targets": []}
+                ]
+            }),
+        ));
+        assert_eq!(spec["component"], "plan");
+        assert_eq!(spec["title"], "Ship plan mode");
+        assert_eq!(spec["steps"][0]["kind"], "read");
+        assert_eq!(spec["steps"][3]["kind"], "other");
+        assert!(
+            ui_call("show_plan", &json!({"summary": "x", "steps": [{"title": "A", "kind": "read"}]}))
+                .unwrap()
+                .unwrap_err()
+                .contains("title")
+        );
+        assert!(
+            ui_call("show_plan", &json!({"title": "T", "steps": []}))
+                .unwrap()
+                .unwrap_err()
+                .contains("step")
+        );
+        assert!(
+            ui_call("show_plan", &json!({"title": "T", "steps": [{"title": "  ", "kind": "read"}]}))
+                .unwrap()
+                .is_err()
+        );
+        assert!(ui_call("show_chart", &json!({"kind": "bar"})).is_some());
+        let chart = ui_call(
+            "show_chart",
+            &json!({"kind": "bar", "x": "c", "labels": ["a", "b"], "series": [{"name": "n", "values": [1, 2]}]}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!chart.contains("\"component\":\"plan\""));
     }
 }

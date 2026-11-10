@@ -14,6 +14,10 @@ pub struct Attachment {
     pub mime: String,
 }
 
+fn shown_by_default() -> bool {
+    true
+}
+
 impl Attachment {
     /// The image types every harness and the UI can show.
     pub const MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -34,6 +38,10 @@ pub enum UserCommand {
         /// Images uploaded to the host first (`upload_attachment`). Absent: none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
+        /// When false, the text goes to the agent and is stored, but the
+        /// transcript does not draw it as a user message. Absent means shown.
+        #[serde(default = "shown_by_default")]
+        shown: bool,
     },
     Steer {
         command_id: Uuid,

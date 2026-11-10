@@ -303,6 +303,13 @@ fn icon_for(step: &TraceStep, name: &str) -> Icon {
         StepKind::Browser => crate::transcript::browser_step(name).map_or(Icon::Globe, |s| s.icon),
         StepKind::Subagent => Icon::Agent,
         StepKind::Plan => Icon::ListChecks,
+        StepKind::Memory => {
+            if crate::trace::memory_writes(name) {
+                Icon::PenLine
+            } else {
+                Icon::BookOpen
+            }
+        }
         StepKind::Other => Icon::Tool,
     }
 }
@@ -429,13 +436,7 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
     } else {
         ease_out(progress(since_end, STATUS_FADE_MS))
     };
-    let description = match (&step.description, step.status, step.started_ms) {
-        (Some(d), _, _) => Some(d.clone()),
-        (None, StepStatus::Running, Some(start)) if now_ms - start >= 3_000 => Some(
-            crate::trace::format_duration(((now_ms - start) / 1_000 * 1_000) as u64),
-        ),
-        _ => None,
-    };
+    let description = step.description.clone();
 
     // Running to done: the old title (still shimmering) and icon fade out
     // over the new ones in STATUS_FADE_MS, instead of a swap.
@@ -552,7 +553,13 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         };
     let subject_text = shown_subject(&subject);
     let fading = was_title.is_some();
-    let title = div()
+    let label_swap = rc.tool_from.get(&step.id);
+    let title = if label_swap.is_some() && lc.title.is_none() {
+        fading_content(&head, label_swap, rc, |text| {
+            title_row(text.to_string(), String::new(), lc.shimmer, head_color, subject_color)
+        })
+    } else {
+        div()
         .relative()
         .min_w_0()
         .flex_shrink_1()
@@ -578,7 +585,9 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
                     t.text_muted,
                     t.text_muted,
                 ))
-        }));
+        }))
+            .into_any_element()
+    };
 
     let desc = description.map(|text| {
         let diffstat = matches!(step.body, StepBody::Diff { .. }) && text.starts_with('+');
@@ -630,21 +639,22 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
         .items_center()
         .gap(zpx(8.))
         .rounded(RADIUS_MD)
-        .when(expandable, |d| d.hover_fade(c(t.hover), Some(c(t.selected))))
+        .when(expandable, |d| {
+            d.hover_fade(c(t.hover), Some(c(t.selected)))
+        })
         .child(icon)
         .child(title)
         .children(desc)
         .children(chevron)
         .when(expandable, |d| {
-            d.cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    let row_id = if row_toggle {
-                        line_id.clone()
-                    } else {
-                        format!("{line_id}={}", if open_now { 0 } else { 1 })
-                    };
-                    on_action(RowAction::Toggle { row_id }, cx);
-                })
+            d.cursor_pointer().on_click(move |_, _, cx| {
+                let row_id = if row_toggle {
+                    line_id.clone()
+                } else {
+                    format!("{line_id}={}", if open_now { 0 } else { 1 })
+                };
+                on_action(RowAction::Toggle { row_id }, cx);
+            })
         });
 
     let body = (expandable && fold.visible()).then(|| {
@@ -1306,12 +1316,48 @@ pub fn render_plan(
         .child(render_line(&step, lc, 0, rc))
 }
 
+/// Shared chrome for the waiting loader and the live trace header. Only the
+/// wording changes when the first agent-generated title arrives.
+pub fn live_status_chrome(
+    label: gpui::AnyElement,
+    chevron: Option<f32>,
+    t: keel_theme::Tokens,
+    reduced: bool,
+) -> gpui::Div {
+    div()
+        .h(zpx(LINE_H))
+        .max_w_full()
+        .px(zpx(4.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(6.))
+        .font_family(crate::style::SANS)
+        .t_small()
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(c(t.text_muted))
+        .child(
+            div().flex_none().size(zpx(14.)).flex().items_center().justify_center()
+                .child(crate::motion::dot_grid(c(t.text_muted), "live-status-dots", reduced)),
+        )
+        .child(div().min_w_0().overflow_hidden().child(label))
+        .children(chevron.map(|ch| {
+            div().flex_none().text_color(c(t.text_faint))
+                .child(Icon::ChevronDown.el(zpx(9.5)).with_transformation(
+                    gpui::Transformation::rotate(gpui::radians(
+                        -std::f32::consts::FRAC_PI_2 * (1. - ch),
+                    )),
+                ))
+        }))
+}
+
 /// A turn's steps, folded into an editorial byline.
 pub fn render_turn_summary(
     item: &TranscriptRowItem,
     label: &str,
-    failed: bool,
+    _failed: bool,
     expanded: bool,
+    live: bool,
     rc: &RowContext,
 ) -> gpui::Div {
     let t = rc.tokens;
@@ -1322,8 +1368,39 @@ pub fn render_turn_summary(
     let fold = Fold::at(expanded, toggled_ms, rc.reduced);
     let row_id = item.row_id().to_string();
     let on_action = rc.on_action.clone();
-    let icon = if failed { Icon::Alert } else { Icon::Check };
     let group: gpui::SharedString = format!("worked-{row_id}").into();
+    if live {
+        let words = fading_content(label, rc.step_from.as_ref(), rc, |text| {
+            div().whitespace_nowrap().child(text.to_string())
+        });
+        return div().w_full().h(zpx(LINE_H)).flex().items_center().child(
+            live_status_chrome(
+                words,
+                Some(fold.chevron),
+                t,
+                rc.reduced,
+            )
+            .id(ElementId::Name(group.clone()))
+            .group(group)
+            .rounded(crate::style::RADIUS_SM)
+            .cursor_pointer()
+            .hover_fade(c(t.hover), None)
+            .active(|s| s.opacity(0.75))
+            .on_click(move |_, _, cx| {
+                on_action(RowAction::Toggle { row_id: row_id.clone() }, cx)
+            }),
+        );
+    }
+    let label_color = if expanded {
+        t.text
+    } else {
+        t.text_muted
+    };
+    let mark = div()
+        .flex_none()
+        .text_color(c(t.success))
+        .child(Icon::Check.el(zpx(10.5)))
+        .into_any_element();
     div()
         .w_full()
         .h(zpx(LINE_H))
@@ -1334,7 +1411,8 @@ pub fn render_turn_summary(
             div()
                 .id(ElementId::Name(group.clone()))
                 .group(group.clone())
-                .h(zpx(22.))
+                .h(zpx(LINE_H))
+                .max_w_full()
                 .px(zpx(4.))
                 .flex()
                 .flex_row()
@@ -1355,20 +1433,17 @@ pub fn render_turn_summary(
                 .child(
                     div()
                         .flex_none()
-                        .size(zpx(12.))
+                        .size(zpx(14.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(c(if failed { t.danger } else { t.success }))
-                        .child(icon.el(zpx(10.5))),
+                        .child(mark),
                 )
                 .child(
                     div()
-                        .t_small()
-                        .font_weight(gpui::FontWeight::NORMAL)
-                        .text_color(c(if expanded { t.text } else { t.text_muted }))
-                        .group_hover(group.clone(), |s| s.text_color(c(t.text)))
-                        .child(label.to_string()),
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(fading_label(label, label_color, &group, live.then_some(rc.step_from.as_ref()).flatten(), rc)),
                 )
                 .child(
                     div()
@@ -1382,6 +1457,197 @@ pub fn render_turn_summary(
                         )),
                 ),
         )
+}
+
+/// The live line's wording changing. The old words leave upward and fade
+/// in [`STEP_EXIT`]; the new ones rise [`STEP_RISE`] px into place in
+/// [`STEP_ENTER`], starting [`STEP_DELAY`] in. The line's width glides
+/// between the two wordings (ahead of the arrival when growing, after the
+/// exit when shrinking), so no wording is clipped and nothing after it jumps.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepSwap {
+    /// The wording leaving.
+    pub from: String,
+    pub at: std::time::Instant,
+    /// Width retargets from its current value without restarting the fade.
+    pub width_at: std::time::Instant,
+    /// Where `from` was when the swap began: its opacity, and how far above
+    /// its resting place (negative: below). A fresh swap starts at 1 and 0;
+    /// one that interrupts an arrival starts where that arrival was.
+    pub alpha: f32,
+    pub lift: f32,
+    pub enter_alpha: f32,
+    pub enter_lift: f32,
+    /// Measured widths (px): the line's when the swap began, and the new
+    /// wording's. Unknown until the next frame measures them.
+    pub from_w: Option<f32>,
+    pub to_w: Option<f32>,
+    /// Room opens before the new wording fades in. For a waiting title,
+    /// keep the old words fully visible during this lead-in too.
+    pub delay: std::time::Duration,
+}
+
+/// The new wording's fade-in, synchronized with container width glide.
+pub const STEP_ENTER: std::time::Duration = std::time::Duration::from_millis(200);
+/// The old wording leaves faster than the new one arrives.
+pub const STEP_EXIT: std::time::Duration = std::time::Duration::from_millis(120);
+/// Synchronized bloom: no disjoint width delay (eradicates "Ghost Boxing").
+pub const STEP_DELAY: std::time::Duration = std::time::Duration::ZERO;
+/// Whole swap: 200 ms unified ease.
+pub const STEP_TOTAL: std::time::Duration = std::time::Duration::from_millis(200);
+/// A wording replaced this soon was never readable: the next one takes its
+/// place in the same swap instead of starting another.
+pub const STEP_RETARGET: std::time::Duration = std::time::Duration::from_millis(60);
+pub const STEP_RISE: f32 = 3.;
+
+impl StepSwap {
+    pub fn fresh(from: String, at: std::time::Instant, from_w: Option<f32>) -> Self {
+        let delay = STEP_DELAY;
+        Self {
+            from,
+            at,
+            width_at: at,
+            alpha: 1.,
+            lift: 0.,
+            enter_alpha: 0.,
+            enter_lift: -STEP_RISE,
+            from_w,
+            to_w: None,
+            delay,
+        }
+    }
+
+    fn age_ms(&self, now: std::time::Instant) -> f32 {
+        now.saturating_duration_since(self.at).as_secs_f32() * 1000.
+    }
+
+    /// Fade length for this swap: delay + enter.
+    pub fn total(&self) -> std::time::Duration {
+        self.delay + STEP_ENTER
+    }
+
+    /// Still moving at `now`.
+    pub fn running(&self, now: std::time::Instant) -> bool {
+        let total = self.total().max(STEP_EXIT);
+        now.saturating_duration_since(self.at) < total
+            || now.saturating_duration_since(self.width_at) < total
+    }
+
+    /// Eased progress of the arrival and of the exit.
+    pub(super) fn progress(&self, now: std::time::Instant) -> (f32, f32) {
+        let age = self.age_ms(now);
+        let enter = STEP_ENTER.as_secs_f32() * 1000.;
+        let exit = STEP_EXIT.as_secs_f32() * 1000.;
+        let delay = self.delay.as_secs_f32() * 1000.;
+        let tin_raw = ((age - delay) / enter).clamp(0., 1.);
+        let tin = crate::motion::glide_curve(tin_raw);
+        let tout = ease_out((age / exit).clamp(0., 1.));
+        (tin, tout)
+    }
+
+    /// The arriving wording's opacity, lift and the line's width at `now`:
+    /// where a swap that interrupts this one starts from.
+    pub fn arrival_at(&self, now: std::time::Instant) -> (f32, f32, Option<f32>) {
+        let (tin, _) = self.progress(now);
+        let width = match (self.from_w, self.to_w) {
+            (Some(a), Some(b)) => {
+                let age = now.saturating_duration_since(self.width_at).as_secs_f32();
+                let span = STEP_TOTAL.as_secs_f32();
+                Some(a + (b - a) * crate::motion::glide_curve((age / span.max(1e-3)).clamp(0., 1.)))
+            }
+            (Some(a), None) => Some(a),
+            (_, b) => b,
+        };
+        (self.enter_alpha + (1. - self.enter_alpha) * tin, self.enter_lift * (1. - tin), width)
+    }
+}
+
+/// Waiting titles retain their words while room opens for the first title.
+pub fn is_placeholder_label(text: &str) -> bool {
+    matches!(keel_proto::trim_progress_label(text), "Thinking" | "Working")
+}
+
+/// The step name, swapping per [`StepSwap`]. The row masks the move, which
+/// stays inside the line's 5 px of room, so no glyph is sliced. Reduced
+/// motion keeps only the crossfade.
+fn fading_label(
+    label: &str,
+    color: u32,
+    group: &gpui::SharedString,
+    swap: Option<&StepSwap>,
+    rc: &RowContext,
+) -> gpui::AnyElement {
+    let t = rc.tokens;
+    let word = |text: &str| {
+        div()
+            .t_small()
+            .font_weight(gpui::FontWeight::NORMAL)
+            .text_color(c(color))
+            .whitespace_nowrap()
+            .group_hover(group.clone(), |s| s.text_color(c(t.text)))
+            .child(text.to_string())
+    };
+    fading_content(label, swap, rc, word)
+}
+
+fn fading_content(
+    label: &str,
+    swap: Option<&StepSwap>,
+    rc: &RowContext,
+    word: impl Fn(&str) -> gpui::Div,
+) -> gpui::AnyElement {
+    let swap = swap.filter(|s| s.from != label && s.running(rc.now));
+    let Some(swap) = swap else {
+        return word(label)
+            .min_w_0()
+            .overflow_hidden()
+            .text_ellipsis()
+            .into_any_element();
+    };
+    let (_, tout) = swap.progress(rc.now);
+    let rise = if rc.reduced { 0. } else { STEP_RISE };
+    let (in_alpha, lift, _) = swap.arrival_at(rc.now);
+    let in_lift = if rc.reduced { 0. } else { lift };
+    let out_lift = if rc.reduced { 0. } else { swap.lift + rise * tout };
+    let out_alpha = swap.alpha * (1. - tout);
+    let width = if rc.reduced {
+        match (swap.from_w, swap.to_w) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (_, b) => b,
+        }
+    } else {
+        swap.arrival_at(rc.now).2
+    };
+    // Line box is 16 px inside the 26 px row: 5 px of room each side.
+    let rest = (LINE_H - crate::style::SMALL.line) / 2.;
+    div()
+        .relative()
+        .min_w_0()
+        .flex_shrink_1()
+        .h(zpx(LINE_H))
+        .overflow_hidden()
+        .map(|d| match width {
+            Some(w) => d.w(gpui::px(w)),
+            // Not measured yet: the new wording sets the width.
+            None => d.child(word(label).opacity(0.)),
+        })
+        .when(out_alpha > 0.01, |d| {
+            d.child(
+                word(&swap.from)
+                    .absolute()
+                    .left_0()
+                    .top(zpx(rest - out_lift))
+                    .opacity(out_alpha),
+            )
+        })
+        .child(
+            word(label)
+                .absolute()
+                .left_0()
+                .top(zpx(rest - in_lift))
+                .opacity(in_alpha),
+        )
+        .into_any_element()
 }
 
 /// A spawned subagent: "Running the research agent", ↗ opens its session.
@@ -1444,7 +1710,11 @@ pub fn render_subagent(
                 )
             })
             .child(line)
-            .child(reveal_on_hover("external-reveal", group, 0., 1.,
+            .child(reveal_on_hover(
+                "external-reveal",
+                group,
+                0.,
+                1.,
                 div()
                     .absolute()
                     .top_0()
@@ -1453,7 +1723,8 @@ pub fn render_subagent(
                     .flex()
                     .items_center()
                     .text_color(c(t.text_faint))
-                    .child(Icon::External.el(zpx(12.))))),
+                    .child(Icon::External.el(zpx(12.))),
+            )),
     )
 }
 
@@ -1466,6 +1737,7 @@ pub fn row_animating(item: &TranscriptRowItem) -> bool {
         TranscriptBlock::ToolGroup { tools, .. } => tools_animating(tools, now_ms()),
         TranscriptBlock::Plan { live, .. } => *live,
         TranscriptBlock::Subagent { state, .. } => state == "running",
+        TranscriptBlock::TurnSummary { live: true, .. } => true,
         _ => false,
     }
 }
@@ -1491,6 +1763,19 @@ pub fn tools_animating(tools: &[ToolEntry], now_ms: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_lines_use_a_book_or_a_pen() {
+        let step = TraceStep::from(&ToolEntry {
+            tool_id: "m".into(),
+            name: "memory_read".into(),
+            state: "done".into(),
+            ..ToolEntry::default()
+        });
+        assert_eq!(icon_for(&step, "memory_read"), Icon::BookOpen);
+        assert_eq!(icon_for(&step, "memory_write"), Icon::PenLine);
+        assert_eq!(icon_for(&step, "mcp__keel__memory_write"), Icon::PenLine);
+    }
 
     #[test]
     fn fold_glides_open_and_eases_closed() {
@@ -1650,11 +1935,17 @@ mod tests {
         s.kind = StepKind::Execute;
         s.verb = crate::trace::verb_for(StepKind::Execute, "bash");
         s.subject = "pnpm test".into();
-        assert_eq!(split_title(&s), ("Ran".into(), "pnpm test".into()));
+        // No label: title is the plain verb; subject stays for the body only.
+        assert_eq!(split_title(&s), ("Ran".into(), String::new()));
+        s.label = "Running the test suite".into();
+        assert_eq!(
+            split_title(&s),
+            ("Running the test suite".into(), String::new())
+        );
         s.status = StepStatus::Error;
         assert_eq!(
             split_title(&s),
-            ("Failed to run".into(), "pnpm test".into())
+            ("Running the test suite".into(), String::new())
         );
     }
 

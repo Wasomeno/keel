@@ -196,7 +196,12 @@ pub struct CopyLook {
 }
 
 /// [`CopyLook`] at `now`. Ease-out throughout; reduced motion swaps without fades.
-pub fn copy_look(copied: bool, copied_at: Option<Instant>, now: Instant, reduced: bool) -> CopyLook {
+pub fn copy_look(
+    copied: bool,
+    copied_at: Option<Instant>,
+    now: Instant,
+    reduced: bool,
+) -> CopyLook {
     let rest = CopyLook {
         check: 0.,
         tip: 0.,
@@ -267,7 +272,10 @@ pub fn terminal_text(content: &str) -> Option<String> {
         .filter_map(|l| l.trim_start().strip_prefix("$ "))
         .collect();
     let text = if prompted.is_empty() {
-        content.trim_end().trim_start_matches(['\n', '\r']).to_string()
+        content
+            .trim_end()
+            .trim_start_matches(['\n', '\r'])
+            .to_string()
     } else {
         prompted.join("\n").trim_end().to_string()
     };
@@ -596,7 +604,8 @@ pub fn render(
     };
     let group: SharedString = format!("code-{}", props.id).into();
     let copy_body = shown.to_string();
-    let copy_moving = copy_look(props.copied, props.copied_at, Instant::now(), props.reduced).animating;
+    let copy_moving =
+        copy_look(props.copied, props.copied_at, Instant::now(), props.reduced).animating;
 
     div()
         .group(group.clone())
@@ -1222,7 +1231,12 @@ fn copy_button(
         move |_, _, cx| on_action(CodeAction::Copy { text: text.clone() }, cx),
     );
     match copied_tip(look, t) {
-        Some(tip) => div().relative().flex_none().child(button).child(tip).into_any_element(),
+        Some(tip) => div()
+            .relative()
+            .flex_none()
+            .child(button)
+            .child(tip)
+            .into_any_element(),
         None => button,
     }
 }
@@ -2211,7 +2225,15 @@ diff --git a/b.rs b/b.rs
         let gone = look_at((COPIED_HOLD_MS + COPIED_OUT_MS) as u64, false);
         near(gone.tip, 0.);
         let back = look_at((COPIED_HOLD_MS + 2. * COPIED_OUT_MS) as u64, false);
-        assert_eq!(back, CopyLook { check: 0., tip: 0., tip_dy: 0., animating: false });
+        assert_eq!(
+            back,
+            CopyLook {
+                check: 0.,
+                tip: 0.,
+                tip_dy: 0.,
+                animating: false
+            }
+        );
         assert!(COPIED_OUT_MS < COPIED_IN_MS && COPIED_IN_MS < 300.);
     }
 
@@ -2219,12 +2241,20 @@ diff --git a/b.rs b/b.rs
     fn reduced_motion_swaps_copy_feedback_without_fades() {
         assert_eq!(
             look_at(0, true),
-            CopyLook { check: 1., tip: 1., tip_dy: 0., animating: false }
+            CopyLook {
+                check: 1.,
+                tip: 1.,
+                tip_dy: 0.,
+                animating: false
+            }
         );
         let late = look_at(COPIED_HOLD_MS as u64, true);
         assert_eq!((late.check, late.tip), (1., 0.));
         // Not copied: the copy icon at rest, whatever the time.
-        assert_eq!(copy_look(false, Some(Instant::now()), Instant::now(), false).check, 0.);
+        assert_eq!(
+            copy_look(false, Some(Instant::now()), Instant::now(), false).check,
+            0.
+        );
         // Copied with no time: a still check, no tip.
         let still = copy_look(true, None, Instant::now(), false);
         assert_eq!((still.check, still.tip, still.animating), (1., 0., false));
@@ -2257,7 +2287,10 @@ diff --git a/b.rs b/b.rs
         );
         // A console session: just the commands, prompts and output dropped.
         let session = "$ cargo --version\ncargo 1.90.0\n  $ echo hi\nhi\n";
-        assert_eq!(terminal_text(session).as_deref(), Some("cargo --version\necho hi"));
+        assert_eq!(
+            terminal_text(session).as_deref(),
+            Some("cargo --version\necho hi")
+        );
         assert_eq!(terminal_text("  \n\n"), None);
     }
 

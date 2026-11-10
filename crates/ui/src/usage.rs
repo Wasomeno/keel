@@ -10,18 +10,31 @@ pub struct ModelTokens {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    pub cache_warm: u64,
 }
 
 impl ModelTokens {
     pub fn total(&self) -> u64 {
-        self.input + self.output + self.cache_read + self.cache_write
+        self.input + self.output + self.cache_read + self.cache_write + self.cache_warm
     }
 
-    fn add(&mut self, other: &ModelTokens) {
+    /// Token-weighted hit rate: read / (input + read + write).
+    /// None when no input or cache tokens are recorded.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let denom = self.input + self.cache_read + self.cache_write;
+        if denom > 0 {
+            Some(self.cache_read as f64 / denom as f64)
+        } else {
+            None
+        }
+    }
+
+    pub fn add(&mut self, other: &ModelTokens) {
         self.input += other.input;
         self.output += other.output;
         self.cache_read += other.cache_read;
         self.cache_write += other.cache_write;
+        self.cache_warm += other.cache_warm;
     }
 }
 
@@ -47,6 +60,7 @@ impl ChatUsage {
                 output: n(t, "output"),
                 cache_read: n(t, "cache_read"),
                 cache_write: n(t, "cache_write"),
+                cache_warm: n(t, "cache_warm"),
             })
             .collect();
         models.sort_by(|a, b| b.total().cmp(&a.total()).then(a.model.cmp(&b.model)));
@@ -59,6 +73,14 @@ impl ChatUsage {
 
     pub fn total(&self) -> u64 {
         self.models.iter().map(ModelTokens::total).sum()
+    }
+
+    pub fn sum(&self) -> ModelTokens {
+        let mut sum = ModelTokens::default();
+        for m in &self.models {
+            sum.add(m);
+        }
+        sum
     }
 
     /// How full the context is, 0..1, when the window is known.

@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
-use keel_harness::{Harness, KeelProfile, ModelId, PiHarness, RunControls, SessionReport, SessionSpec};
+use keel_harness::{
+    Harness, KeelProfile, ModelId, PiHarness, RunControls, SessionReport, SessionSpec,
+};
 use keel_proto::{AgentEvent, HarnessId, PermissionMode, TurnStatus};
 
 #[tokio::test]
@@ -41,10 +43,19 @@ async fn keel_harness_answers_a_real_read_only_prompt() {
         browser_sock: Some(data.join("browser.sock")),
         browser_chat: Some("smoke".into()),
         permission: PermissionMode::Ask,
+        plan_mode: false,
         project: None,
+        report_usage: None,
+        chat_id: None,
+        longer_cache: false,
+        keep_cache_warm: true,
+        idle_eviction_timeout_secs: None,
     };
     let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut stream = keel.run(spec, RunControls { inbound: rx }).await.expect("run");
+    let mut stream = keel
+        .run(spec, RunControls { inbound: rx })
+        .await
+        .expect("run");
     let (mut text, mut status, mut tools) = (String::new(), None, 0);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     while let Ok(Some(item)) = tokio::time::timeout_at(deadline, stream.next()).await {
@@ -59,7 +70,10 @@ async fn keel_harness_answers_a_real_read_only_prompt() {
         }
     }
     eprintln!("keel smoke reply: {text:?}; status: {status:?}; tools: {tools}");
-    assert!(matches!(status, Some(TurnStatus::Completed { .. })), "{status:?}");
+    assert!(
+        matches!(status, Some(TurnStatus::Completed { .. })),
+        "{status:?}"
+    );
     assert!(text.to_lowercase().contains("ok"), "{text:?}");
     assert_eq!(tools, 0);
     // Keel's session file and generated extensions live in its own folders.
@@ -67,7 +81,9 @@ async fn keel_harness_answers_a_real_read_only_prompt() {
     let seen = seen.lock().unwrap().clone();
     eprintln!("reported sessions: {seen:?}");
     assert!(
-        seen.iter().any(|(_, file)| file.as_deref().is_some_and(|f| f.starts_with(&*sessions.to_string_lossy()))),
+        seen.iter().any(|(_, file)| file
+            .as_deref()
+            .is_some_and(|f| f.starts_with(&*sessions.to_string_lossy()))),
         "{seen:?}"
     );
     assert!(data.join("browser-mcp/keel-smoke.ts").is_file());

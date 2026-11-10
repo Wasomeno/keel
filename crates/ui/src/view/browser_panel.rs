@@ -1686,25 +1686,31 @@ impl KeelWindow {
             .map(|(ix, tab)| {
                 let (id, active) = (tab.id, ix == b.active);
                 let group = format!("browser-tab-{id}");
-                let close = reveal_on_hover("close-reveal", group.clone(), if active { 1. } else { 0. }, 1., div()
-                    .id(("browser-tab-close", id as usize))
-                    .flex_none()
-                    .size(zpx(16.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(zpx(4.))
-                    .text_color(c(t.text_faint))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(c(t.text)))
-                    .hover_fade(c(t.hover), None)
-                    .child(Icon::Close.el(zpx(10.)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        if let Some(ix) = this.browser.tab_ix(id) {
-                            this.browser_close_tab(ix, window, cx);
-                        }
-                    })));
+                let close = reveal_on_hover(
+                    "close-reveal",
+                    group.clone(),
+                    if active { 1. } else { 0. },
+                    1.,
+                    div()
+                        .id(("browser-tab-close", id as usize))
+                        .flex_none()
+                        .size(zpx(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(zpx(4.))
+                        .text_color(c(t.text_faint))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(c(t.text)))
+                        .hover_fade(c(t.hover), None)
+                        .child(Icon::Close.el(zpx(10.)))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(ix) = this.browser.tab_ix(id) {
+                                this.browser_close_tab(ix, window, cx);
+                            }
+                        })),
+                );
                 let dot = tab
                     .agent
                     .is_some()

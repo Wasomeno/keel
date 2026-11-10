@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio as StdStdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -23,16 +23,16 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc;
 
+use crate::keel::PiProfile;
 use crate::proc::{
     Io, KILL_WAIT, PROBE_LIMIT, Proc, TERM_WAIT, completed, errored, failed, interrupted, is_exec,
     login_dirs, pipe_lines, push_tail, signal_group, summary_line, tail_message,
 };
 #[cfg(test)]
 use crate::proc::{compose_path, redact};
-use crate::keel::PiProfile;
 use crate::{
-    ControlMsg, Harness, HarnessError, Model, ModelId, ProgressGate, ReasoningLevel, RunControls, SessionReport,
-    SessionSpec,
+    ControlMsg, Harness, HarnessError, Model, ModelId, ProgressGate, ReasoningLevel, RunControls,
+    SessionReport, SessionSpec,
 };
 
 const INSTALL_HINT: &str = "Keel's bundled Pi is missing; run scripts/fetch-pi.sh";
@@ -90,6 +90,7 @@ pub struct PiHarness {
     login_dirs: Vec<PathBuf>,
     /// Thinking levels per model id, filled by `models()`.
     levels: Mutex<HashMap<String, Vec<String>>>,
+    pool: Arc<PiProcessPool>,
 }
 
 impl PiHarness {
@@ -154,15 +155,27 @@ impl PiHarness {
             engine_path: input.engine_path,
             login_dirs: input.login_dirs,
             levels: Mutex::new(HashMap::new()),
+            pool: Arc::new(PiProcessPool::new()),
         }
     }
 
-    /// A Pi process. Keel's own also gets the Antigravity bridge's env;
+    /// A Pi process. Keel's own also gets the Antigravity bridge's env.
     /// `permission` is the run's mode, `None` for probes and sign-in.
-    fn command(&self, exe: &Path, permission: Option<PermissionMode>) -> std::process::Command {
+    /// `plan_mode` forces that env to ask (`default`, permissions not skipped)
+    /// so a mutating Antigravity call still hits the permission deny.
+    fn command(
+        &self,
+        exe: &Path,
+        permission: Option<PermissionMode>,
+        plan_mode: bool,
+    ) -> std::process::Command {
         let mut cmd = crate::proc::command_with(exe, &self.engine_path, &self.login_dirs);
         if self.profile.keel.is_some() {
-            cmd.envs(crate::keel::antigravity_env(crate::keel::antigravity_acp_bin().as_deref(), permission));
+            cmd.envs(crate::keel::antigravity_env(
+                crate::keel::antigravity_acp_bin().as_deref(),
+                permission,
+                plan_mode,
+            ));
         }
         cmd
     }
@@ -178,7 +191,7 @@ impl PiHarness {
     /// every command has its response (Pi exits on EOF without answering).
     async fn probe(&self, model: &str, commands: Vec<Value>) -> Result<Vec<Value>, HarnessError> {
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
-        let mut cmd = self.command(&exe, None);
+        let mut cmd = self.command(&exe, None, false);
         rpc_args(&mut cmd, model, &std::env::temp_dir(), true);
         let mut proc = Proc::spawn(cmd, "pi")?;
         let mut waiting: HashSet<String> = commands
@@ -240,7 +253,6 @@ impl Harness for PiHarness {
         &PermissionMode::ALL
     }
 
-
     fn installed(&self) -> bool {
         self.executable.is_some()
     }
@@ -255,6 +267,14 @@ impl Harness for PiHarness {
 
     fn deterministic_turn_end(&self) -> bool {
         true
+    }
+
+    fn evict_chat(&self, chat_id: &str) {
+        self.pool.evict_chat(chat_id);
+    }
+
+    fn evict_all(&self) {
+        self.pool.evict_all();
     }
 
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
@@ -368,31 +388,63 @@ impl Harness for PiHarness {
     /// extensions write to stdout over there, to keep its protocol clean.
     /// Stdin stays open until the extension reports done or an error (Pi
     /// exits on EOF); dropping this future kills the process.
-    async fn sign_in(&self, provider: &str, on: &(dyn Fn(crate::SignInEvent) + Send + Sync)) -> Result<(), HarnessError> {
-        if provider.is_empty() || !provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err(HarnessError::Failed(format!("unknown provider {provider:?}")));
+    async fn sign_in(
+        &self,
+        provider: &str,
+        on: &(dyn Fn(crate::SignInEvent) + Send + Sync),
+    ) -> Result<(), HarnessError> {
+        if provider.is_empty()
+            || !provider
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(HarnessError::Failed(format!(
+                "unknown provider {provider:?}"
+            )));
         }
         if provider == crate::antigravity::PROVIDER && self.profile.keel.is_some() {
-            let bin = crate::keel::antigravity_acp_bin()
-                .ok_or_else(|| HarnessError::Failed("Antigravity's server is not installed".into()))?;
-            let paths = crate::antigravity::Paths::of_home().ok_or_else(|| HarnessError::Failed("no home folder".into()))?;
-            let scratch = crate::pi_agent_dir().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+            let bin = crate::keel::antigravity_acp_bin().ok_or_else(|| {
+                HarnessError::Failed("Antigravity's server is not installed".into())
+            })?;
+            let paths = crate::antigravity::Paths::of_home()
+                .ok_or_else(|| HarnessError::Failed("no home folder".into()))?;
+            let scratch = crate::pi_agent_dir()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(std::env::temp_dir);
             return crate::antigravity::sign_in(&bin, &paths, &scratch, on).await;
         }
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
         let extension = crate::keel::login_extension().map_err(failed)?;
-        let mut std_cmd = self.command(&exe, None);
-        std_cmd.args(["--mode", "rpc", "--no-session", "--extension"]).arg(extension).current_dir(std::env::temp_dir());
+        let mut std_cmd = self.command(&exe, None, false);
+        std_cmd
+            .args(["--mode", "rpc", "--no-session", "--extension"])
+            .arg(extension)
+            .current_dir(std::env::temp_dir());
         let mut cmd = tokio::process::Command::from(std_cmd);
-        cmd.stdin(StdStdio::piped()).stdout(StdStdio::null()).stderr(StdStdio::piped()).kill_on_drop(true);
+        cmd.stdin(StdStdio::piped())
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::piped())
+            .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(failed)?;
-        let mut stdin = child.stdin.take().ok_or_else(|| HarnessError::Failed("pi has no stdin".into()))?;
-        let stderr = child.stderr.take().ok_or_else(|| HarnessError::Failed("pi has no stderr".into()))?;
-        let device = crate::pi_agent_dir().map(crate::keel::device_id).unwrap_or_default();
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| HarnessError::Failed("pi has no stdin".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| HarnessError::Failed("pi has no stderr".into()))?;
+        let device = crate::pi_agent_dir()
+            .map(crate::keel::device_id)
+            .unwrap_or_default();
         let message = format!("/keel-login {provider} {device}");
-        write_json(&mut stdin, &serde_json::json!({"id": "login", "type": "prompt", "message": message.trim_end()}))
-            .await
-            .map_err(failed)?;
+        write_json(
+            &mut stdin,
+            &serde_json::json!({"id": "login", "type": "prompt", "message": message.trim_end()}),
+        )
+        .await
+        .map_err(failed)?;
         let read = async {
             let mut lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stderr));
             while let Some(line) = lines.next_line().await.map_err(failed)? {
@@ -403,7 +455,9 @@ impl Harness for PiHarness {
                     None => {}
                 }
             }
-            Err(HarnessError::Failed("pi exited before the sign-in finished".into()))
+            Err(HarnessError::Failed(
+                "pi exited before the sign-in finished".into(),
+            ))
         };
         let out = tokio::time::timeout(SIGN_IN_LIMIT, read)
             .await
@@ -415,8 +469,16 @@ impl Harness for PiHarness {
 
     fn one_shot_args(&self, model: &ModelId, prompt: &str) -> Option<Vec<String>> {
         let mut args: Vec<String> = [
-            "-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-mcp",
-            "--no-context-files", "--no-prompt-templates", "--thinking", "off",
+            "-p",
+            "--no-session",
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-mcp",
+            "--no-context-files",
+            "--no-prompt-templates",
+            "--thinking",
+            "off",
         ]
         .map(String::from)
         .to_vec();
@@ -434,42 +496,209 @@ impl Harness for PiHarness {
         HarnessError,
     > {
         let exe = self.executable.clone().ok_or_else(|| self.missing())?;
-        let model = spec.model.0.clone();
-        let mut std_cmd = self.command(&exe, Some(spec.permission));
-        rpc_args(&mut std_cmd, &model, &spec.cwd, false);
-        let tag = self.profile.tag;
-        let data_dir = spec.data_dir.as_deref();
-        if let Some(keel) = &self.profile.keel {
-            // Before `run_args`, which loads the extensions folder it lands in.
-            memory_extension(data_dir);
-            std_cmd.args(keel.run_args(data_dir));
+        let chat_id = spec
+            .chat_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let project_fingerprint = spec
+            .project
+            .as_ref()
+            .map(|p| {
+                let mut s = p.name.clone();
+                for (a, r) in &p.roots {
+                    s.push(':');
+                    s.push_str(a);
+                    s.push('=');
+                    s.push_str(r);
+                }
+                s
+            })
+            .unwrap_or_default();
+        let target_config = ProcessConfig {
+            cwd: spec.cwd.clone(),
+            project_fingerprint,
+            plan_mode: spec.plan_mode,
+            permission: spec.permission,
+            longer_cache: spec.longer_cache,
+            keep_cache_warm: spec.keep_cache_warm,
+            exe_path: exe.clone(),
+            tag: self.profile.tag,
+        };
+
+        let mut reuse_tx = None;
+        {
+            let mut entries = self.pool.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = entries.get_mut(&chat_id) {
+                if !entry.is_busy && !entry.actor_tx.is_closed() && entry.config == target_config {
+                    entry.is_busy = true;
+                    reuse_tx = Some(entry.actor_tx.clone());
+                } else {
+                    let old = entries.remove(&chat_id).unwrap();
+                    let _ = old.actor_tx.send(ActorCommand::Evict);
+                }
+            }
         }
-        if let Some(ext) = ui_extension(data_dir, tag) {
-            std_cmd.arg("--extension").arg(ext);
+
+        if reuse_tx.is_none() {
+            // Cap concurrent idle processes to 3 (LRU eviction)
+            {
+                let mut entries = self.pool.entries.lock().unwrap_or_else(|e| e.into_inner());
+                let idle_keys: Vec<String> = entries
+                    .iter()
+                    .filter(|(_, e)| !e.is_busy && !e.actor_tx.is_closed())
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                if idle_keys.len() >= 3 {
+                    let oldest_key = idle_keys.into_iter().min_by_key(|k| {
+                        entries
+                            .get(k)
+                            .map(|e| e.last_active)
+                            .unwrap_or_else(Instant::now)
+                    });
+                    if let Some(k) = oldest_key {
+                        if let Some(old) = entries.remove(&k) {
+                            tracing::info!(target: "keel_harness::pi", chat = %k, "LRU evicting oldest idle warm process");
+                            let _ = old.actor_tx.send(ActorCommand::Evict);
+                        }
+                    }
+                }
+            }
+
+            let mut std_cmd = self.command(&exe, Some(spec.permission), spec.plan_mode);
+            rpc_args(&mut std_cmd, &spec.model.0, &spec.cwd, false);
+            if spec.longer_cache {
+                std_cmd.env("PI_CACHE_RETENTION", "long");
+            }
+            let tag = self.profile.tag;
+            let data_dir = spec.data_dir.as_deref();
+            if let Some(keel) = &self.profile.keel {
+                // Before `run_args`, which loads the extensions folder it lands in.
+                labels_extension(data_dir);
+                memory_extension(data_dir);
+                let idle_timeout_secs =
+                    spec.idle_eviction_timeout_secs.unwrap_or(15 * 60) as u64;
+                cache_warming_extension(data_dir, idle_timeout_secs);
+                std_cmd.args(keel.run_args(data_dir));
+            }
+            if let Some(ext) = ui_extension(data_dir, tag) {
+                std_cmd.arg("--extension").arg(ext);
+            }
+            if let Some(ext) = browser_extension(
+                spec.browser_sock.as_deref(),
+                spec.browser_chat.as_deref(),
+                tag,
+            ) {
+                std_cmd.arg("--extension").arg(ext);
+            }
+            if let Some(ext) = project_extension(
+                spec.project.as_ref(),
+                data_dir,
+                spec.browser_chat.as_deref(),
+                tag,
+            ) {
+                std_cmd.arg("--extension").arg(ext);
+            }
+            // Fail closed: without its gate Pi would run every tool unasked.
+            let gate = if spec.plan_mode {
+                permission_extension_for(spec.permission, data_dir, tag, true)
+            } else {
+                permission_extension(spec.permission, data_dir, tag)
+            };
+            if let Some(gate) = gate.transpose()? {
+                std_cmd.arg("--extension").arg(gate);
+            }
+            if let Some(ext) = plan_prompt_extension(spec.plan_mode, data_dir, tag) {
+                std_cmd.arg("--extension").arg(ext);
+            }
+            if let Some(agent_dir) = crate::keel::pi_agent_dir() {
+                crate::keel::update_cache_warming_setting(agent_dir, spec.keep_cache_warm);
+            }
+            let mut cmd = tokio::process::Command::from(std_cmd);
+            cmd.stdin(StdStdio::piped())
+                .stdout(StdStdio::piped())
+                .stderr(StdStdio::piped())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            cmd.process_group(0);
+            let mut child = cmd.spawn().map_err(failed)?;
+            let pid = child.id().unwrap_or(0);
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| HarnessError::Failed("pi stdin missing".to_string()))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| HarnessError::Failed("pi stdout missing".to_string()))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| HarnessError::Failed("pi stderr missing".to_string()))?;
+            let (actor_tx, actor_rx) = mpsc::unbounded_channel();
+            let idle_timeout = Duration::from_secs(
+                spec.idle_eviction_timeout_secs.unwrap_or(15 * 60) as u64,
+            );
+            let actor = ProcessActor {
+                chat_id: chat_id.clone(),
+                child,
+                pid,
+                _kill: GroupKill { pid },
+                stdin,
+                stdout: pipe_lines(stdout),
+                stderr: pipe_lines(stderr),
+                current_model: spec.model.0.clone(),
+                current_reasoning: String::new(),
+                current_session_path: None,
+                config: target_config.clone(),
+                last_active: Instant::now(),
+                last_report_usage: spec.report_usage.clone(),
+                idle_timeout,
+                rx: actor_rx,
+                seq: 0,
+            };
+            let pool_clone = Arc::clone(&self.pool);
+            tokio::spawn(async move {
+                actor.run_loop(pool_clone).await;
+            });
+            {
+                let mut entries = self.pool.entries.lock().unwrap_or_else(|e| e.into_inner());
+                entries.insert(
+                    chat_id.clone(),
+                    PoolEntry {
+                        actor_tx: actor_tx.clone(),
+                        config: target_config,
+                        last_active: Instant::now(),
+                        is_busy: true,
+                    },
+                );
+            }
+            reuse_tx = Some(actor_tx);
         }
-        if let Some(ext) = browser_extension(spec.browser_sock.as_deref(), spec.browser_chat.as_deref(), tag) {
-            std_cmd.arg("--extension").arg(ext);
-        }
-        if let Some(ext) = project_extension(spec.project.as_ref(), data_dir, spec.browser_chat.as_deref(), tag) {
-            std_cmd.arg("--extension").arg(ext);
-        }
-        // Fail closed: without its gate Pi would run every tool unasked.
-        if let Some(gate) = permission_extension(spec.permission, data_dir, tag).transpose()? {
-            std_cmd.arg("--extension").arg(gate);
-        }
-        let mut cmd = tokio::process::Command::from(std_cmd);
-        cmd.stdin(StdStdio::piped())
-            .stdout(StdStdio::piped())
-            .stderr(StdStdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let child = cmd.spawn().map_err(failed)?;
-        let (tx, rx) = mpsc::unbounded_channel();
+
+        let actor_tx = reuse_tx.unwrap();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let pool_for_done = Arc::clone(&self.pool);
+        let chat_id_for_done = chat_id.clone();
         tokio::spawn(async move {
-            drive(child, spec, controls, tx).await;
+            let _ = done_rx.await;
+            let mut entries = pool_for_done.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = entries.get_mut(&chat_id_for_done) {
+                entry.is_busy = false;
+                entry.last_active = Instant::now();
+            }
         });
-        Ok(Box::pin(stream::unfold(rx, |mut rx| async move {
+
+        if let Err(_) = actor_tx.send(ActorCommand::StartTurn {
+            spec,
+            controls,
+            event_tx,
+            done_tx,
+        }) {
+            return Err(HarnessError::Failed("warm process actor died".to_string()));
+        }
+
+        Ok(Box::pin(stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         })))
     }
@@ -486,8 +715,11 @@ impl Harness for PiHarness {
 fn mcp_register(name: &str, mcp: &crate::BrowserMcp) -> String {
     let lit = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
     let args = serde_json::to_string(&mcp.args).unwrap_or_else(|_| "[]".to_string());
-    let env: serde_json::Map<String, serde_json::Value> =
-        mcp.env.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
+    let env: serde_json::Map<String, serde_json::Value> = mcp
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
     let env = serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string());
     format!(
         "  pi.registerMcpServer({name}, {{\n    command: {command},\n    args: {args},\n    env: {env},\n    exposure: \"direct\",\n  }});\n",
@@ -512,7 +744,9 @@ export default function (pi: any) {{\n\
 /// the run then goes ahead without browser tools.
 fn browser_extension(sock: Option<&Path>, chat: Option<&str>, tag: &str) -> Option<PathBuf> {
     let browser = crate::browser_mcp(sock, chat)?;
-    let path = sock?.with_file_name("browser-mcp").join(format!("{tag}-{}.ts", crate::chat_file_stem(chat)));
+    let path = sock?
+        .with_file_name("browser-mcp")
+        .join(format!("{tag}-{}.ts", crate::chat_file_stem(chat)));
     match crate::write_private(&path, &browser_extension_source(&browser)) {
         Ok(()) => Some(path),
         Err(err) => {
@@ -540,7 +774,8 @@ export default function (pi: any) {{\n\
     if (sections) sections.keel_cards = CARDS;\n\
   }});\n\
 }}\n",
-        cards = serde_json::to_string(crate::UI_CARDS_PROMPT).unwrap_or_else(|_| "\"\"".to_string()),
+        cards =
+            serde_json::to_string(crate::UI_CARDS_PROMPT).unwrap_or_else(|_| "\"\"".to_string()),
         register = mcp_register(crate::UI_MCP_NAME, ui),
     )
 }
@@ -563,28 +798,40 @@ fn ui_extension(data_dir: Option<&Path>, tag: &str) -> Option<PathBuf> {
 /// every turn like the cards. Pi has no allowed-dirs list (its tools take any
 /// absolute path), so naming the roots is all it needs.
 fn project_extension_source(project: &crate::ProjectRoots) -> String {
-    let text = keel_proto::projects::roots_prompt(&project.name, &project.roots);
+    let mut roots = project.roots.clone();
+    if roots.len() > 1 {
+        roots[1..].sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    let text = keel_proto::projects::roots_prompt(&project.name, &roots);
+    let trimmed = text.trim_end();
     format!(
         "// Generated by Keel for each Pi run. Edits are overwritten.\n\
 const PROJECT = {text};\n\
 export default function (pi: any) {{\n\
   pi.on(\"before_agent_start\", (event: any) => {{\n\
     const sections = event.systemPromptOptions?.sections;\n\
-    if (sections) sections.keel_project = PROJECT;\n\
+    if (sections && sections.keel_project !== PROJECT) sections.keel_project = PROJECT;\n\
   }});\n\
 }}\n",
-        text = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string()),
+        text = serde_json::to_string(trimmed).unwrap_or_else(|_| "\"\"".to_string()),
     )
 }
 
 /// One file per chat under `{data_dir}/projects/`; `None` outside a
 /// project or when it cannot be written (the run goes ahead without it).
-fn project_extension(project: Option<&crate::ProjectRoots>, data_dir: Option<&Path>, chat: Option<&str>, tag: &str) -> Option<PathBuf> {
+fn project_extension(
+    project: Option<&crate::ProjectRoots>,
+    data_dir: Option<&Path>,
+    chat: Option<&str>,
+    tag: &str,
+) -> Option<PathBuf> {
     let project = project.filter(|p| !p.roots.is_empty())?;
     let dir = data_dir?.join("projects");
     let path = dir.join(format!("{tag}-{}.ts", crate::chat_file_stem(chat)));
     let aliases: Vec<&str> = project.roots.iter().map(|(a, _)| a.as_str()).collect();
-    match fs::create_dir_all(&dir).and_then(|()| write_extension(&path, &project_extension_source(project))) {
+    match fs::create_dir_all(&dir)
+        .and_then(|()| write_extension(&path, &project_extension_source(project)))
+    {
         Ok(()) => {
             tracing::info!(target: "keel_harness::pi", project = %project.name, roots = ?aliases, path = %path.display(), "project roots extension");
             Some(path)
@@ -599,7 +846,8 @@ fn project_extension(project: Option<&crate::ProjectRoots>, data_dir: Option<&Pa
 /// The fixed top of the `keel_memory` prompt section. The engine's
 /// `memory_prompt` builds the rest; the extension falls back to this plus
 /// [`MEMORY_UNAVAILABLE`] when the engine cannot be reached.
-pub const MEMORY_PREAMBLE: &str = "Keel memory is notes you write for a later session. It is not a transcript.
+pub const MEMORY_PREAMBLE: &str =
+    "Keel memory is notes you write for a later session. It is not a transcript.
 
 Save a correction, a preference, or a decision that is not in the repo and not in AGENTS.md.
 Do not save file layout, architecture, or commands you could read from the code.
@@ -687,15 +935,22 @@ const SCOPE = Type.Union([Type.Literal("user"), Type.Literal("project")], {{ des
 
 export default function (pi: any) {{
   let cwd: string | undefined;
+  let lastMemory: string | undefined;
   pi.on("before_agent_start", async (event: any, ctx: any) => {{
     const sections = event.systemPromptOptions?.sections;
     cwd = event.systemPromptOptions?.cwd ?? ctx?.cwd ?? cwd;
     if (!sections) return;
     try {{
       const result = await call("memory_prompt", {{ cwd }});
-      sections.keel_memory = String(result?.text ?? `${{PREAMBLE}}\n\n${{UNAVAILABLE}}`);
+      if (result && typeof result.text === "string") {{
+        lastMemory = String(result.text).trimEnd();
+      }}
     }} catch {{
-      sections.keel_memory = `${{PREAMBLE}}\n\n${{UNAVAILABLE}}`;
+      // Transient failure: keep last successful memory text if available
+    }}
+    const current = (lastMemory ?? `${{PREAMBLE}}\n\n${{UNAVAILABLE}}`).trimEnd();
+    if (sections.keel_memory !== current) {{
+      sections.keel_memory = current;
     }}
   }});
 
@@ -711,12 +966,19 @@ export default function (pi: any) {{
     ],
     annotations: {{ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }},
     parameters: Type.Object({{
+      label: Type.String({{ description: "Required. Short progress label: 3-6 words, present participle, sentence case, name the concept. Match the user's language." }}),
       scope: SCOPE,
       slug: Type.Optional(Type.String({{ description: "Topic slug. Omit for the index." }})),
     }}),
+    prepareArguments(args: any) {{
+      const next = {{ ...(args ?? {{}}) }};
+      if (typeof next.label !== "string" || !String(next.label).trim()) next.label = "Working";
+      return next;
+    }},
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {{
       try {{
-        const result = await call("memory_read", {{ scope: params.scope, slug: params.slug, cwd: ctx?.cwd ?? cwd }});
+        const {{ label: _label, ...rest }} = params ?? {{}};
+        const result = await call("memory_read", {{ scope: rest.scope, slug: rest.slug, cwd: ctx?.cwd ?? cwd }});
         return text(String(result?.text ?? ""));
       }} catch (err) {{
         return failed(err);
@@ -730,6 +992,7 @@ export default function (pi: any) {{
     description: "Save or retire one of Keel's notes. upsert writes the topic and its index line; archive retires the topic. type and description are required for upsert.",
     annotations: {{ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }},
     parameters: Type.Object({{
+      label: Type.String({{ description: "Required. Short progress label: 3-6 words, present participle, sentence case, name the concept. Match the user's language." }}),
       scope: SCOPE,
       action: Type.Union([Type.Literal("upsert"), Type.Literal("archive")]),
       slug: Type.String({{ description: "Lowercase letters, digits and dashes, up to 64 characters." }}),
@@ -737,9 +1000,15 @@ export default function (pi: any) {{
       description: Type.Optional(Type.String({{ description: "One line, at most 200 characters. Shown in the index." }})),
       body: Type.Optional(Type.String({{ description: "Markdown, at most 32 KiB." }})),
     }}),
+    prepareArguments(args: any) {{
+      const next = {{ ...(args ?? {{}}) }};
+      if (typeof next.label !== "string" || !String(next.label).trim()) next.label = "Working";
+      return next;
+    }},
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {{
       try {{
-        const result = await call("memory_write", {{ ...params, cwd: ctx?.cwd ?? cwd }});
+        const {{ label: _label, ...rest }} = params ?? {{}};
+        const result = await call("memory_write", {{ ...rest, cwd: ctx?.cwd ?? cwd }});
         return text(String(result?.text ?? "Saved."));
       }} catch (err) {{
         return failed(err);
@@ -781,6 +1050,253 @@ fn memory_extension(data_dir: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
+/// Writes `{data_dir}/harnesses/keel/extensions/keel-labels.ts`. Wraps the
+/// seven built-in tools so each requires a `label`, stripped in `execute`
+/// after schema validation. `folder_extensions` loads it with the rest.
+fn labels_extension(data_dir: Option<&Path>) -> Option<PathBuf> {
+    let data_dir = data_dir?;
+    let path = crate::KeelProfile::extensions_dir(data_dir).join("keel-labels.ts");
+    let source = LABELS_EXTENSION;
+    if fs::read_to_string(&path).ok().as_deref() == Some(source) {
+        return Some(path);
+    }
+    match crate::write_private(&path, source) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            tracing::warn!(target: "keel_harness::pi", error = %err, path = %path.display(), "labels extension write failed");
+            None
+        }
+    }
+}
+
+/// Writes `{data_dir}/harnesses/keel/extensions/keel-cache.ts`. Implements
+/// `cache_warming_decision` to halt cache warming once the session has been
+/// idle longer than the eviction limit.
+fn cache_warming_extension(data_dir: Option<&Path>, idle_timeout_secs: u64) -> Option<PathBuf> {
+    let data_dir = data_dir?;
+    let path = crate::KeelProfile::extensions_dir(data_dir).join("keel-cache.ts");
+    let source = format!(
+        "// Generated by Keel for prompt cache warming management. Edits are overwritten.\n\
+export default function (pi: any) {{\n\
+  let lastActive = Date.now();\n\
+  const maxIdleMs = {max_idle_ms};\n\
+\n\
+  pi.on(\"turn_end\", () => {{\n\
+    lastActive = Date.now();\n\
+  }});\n\
+\n\
+  pi.on(\"cache_warming_decision\", (_event: any, _ctx: any) => {{\n\
+    const idleMs = Date.now() - lastActive;\n\
+    if (idleMs > maxIdleMs) {{\n\
+      return {{ action: \"stop\" }};\n\
+    }}\n\
+  }});\n\
+}}\n",
+        max_idle_ms = idle_timeout_secs * 1000
+    );
+    if fs::read_to_string(&path).ok().as_deref() == Some(source.as_str()) {
+        return Some(path);
+    }
+    match crate::write_private(&path, &source) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            tracing::warn!(target: "keel_harness::pi", error = %err, path = %path.display(), "cache warming extension write failed");
+            None
+        }
+    }
+}
+
+/// Pi extension: require `label` on every built-in and extension tool schema.
+/// Keep it through validation (so resumes without a label can synthesize one in
+/// `prepareArguments`), then strip in `execute`. Re-register on
+/// `before_agent_start` and `before_provider_request` so later package shadows
+/// and dynamic tools cannot drop the field.
+const LABELS_EXTENSION: &str = r#"// Generated by Keel. Edits are overwritten.
+import { Type } from "typebox";
+import {
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+
+const LABEL_DESC =
+  'Required. Short progress label for the UI: 3-6 words, present participle, sentence case, naming the concept not the file or command. Match the user\'s language. Good: "Reading the on/off cycle logic", "Updating session state transition", "Compiling workspace binaries", "Locating theme token definitions" (Indonesian: "Nge-cek konfigurasi database", "Benerin bug memory leak", "Nge-build binary workspace"). Bad: "Reading file", "Editing session.rs", "Running cargo build", "rg oncycle", raw shell commands.';
+
+const LABEL = Type.String({
+  description: LABEL_DESC,
+});
+
+const LABEL_PROP = {
+  type: "string",
+  description: LABEL_DESC,
+};
+
+function injectLabelIntoSchema(params: any) {
+  if (!params || typeof params !== "object") return;
+  const existing = params.properties || {};
+  const { label: _existing, ...rest } = existing;
+  params.properties = { label: { ...LABEL_PROP }, ...rest };
+  if (Array.isArray(params.required)) {
+    if (!params.required.includes("label")) {
+      params.required.unshift("label");
+    }
+  } else {
+    params.required = ["label"];
+  }
+}
+
+function processToolSchema(tool: any) {
+  if (!tool || typeof tool !== "object") return;
+  if (tool.parameters) injectLabelIntoSchema(tool.parameters);
+  if (tool.function?.parameters) injectLabelIntoSchema(tool.function.parameters);
+  if (tool.input_schema) injectLabelIntoSchema(tool.input_schema);
+  if (Array.isArray(tool.functionDeclarations)) {
+    for (const decl of tool.functionDeclarations) {
+      processToolSchema(decl);
+    }
+  }
+  if (Array.isArray(tool.function_declarations)) {
+    for (const decl of tool.function_declarations) {
+      processToolSchema(decl);
+    }
+  }
+}
+
+function ensureToolLabels(tools: any) {
+  if (!tools) return;
+  if (Array.isArray(tools)) {
+    for (const tool of tools) {
+      processToolSchema(tool);
+    }
+  } else if (typeof tools === "object") {
+    processToolSchema(tools);
+  }
+}
+
+function wrapToolWithLabel(tool: any) {
+  if (!tool || typeof tool !== "object" || tool.__keel_labeled) return tool;
+  tool.__keel_labeled = true;
+  if (tool.parameters && typeof tool.parameters === "object") {
+    injectLabelIntoSchema(tool.parameters);
+  }
+  const prevPrep = tool.prepareArguments;
+  tool.prepareArguments = (args: any) => {
+    const next = { ...(args ?? {}) };
+    if (typeof next.label !== "string" || !String(next.label).trim()) {
+      next.label = "Working";
+    }
+    return prevPrep ? prevPrep(next) : next;
+  };
+  const prevExec = tool.execute;
+  if (typeof prevExec === "function") {
+    tool.execute = async function (toolCallId: any, args: any, signal: any, onUpdate: any, ctx: any) {
+      const { label: _label, ...rest } = args ?? {};
+      return prevExec.call(this, toolCallId, rest, signal, onUpdate, ctx);
+    };
+  }
+  return tool;
+}
+
+function withLabel(def: any) {
+  if (!def || typeof def !== "object") return def;
+  const props = def.parameters?.properties ?? {};
+  const { label: _existing, ...restProps } = props;
+  const parameters = Type.Object(
+    { label: LABEL, ...restProps },
+    { additionalProperties: false },
+  );
+  const prevPrep = def.prepareArguments;
+  const prevExec = def.execute;
+  const wrapped = {
+    ...def,
+    __keel_labeled: true,
+    parameters,
+    prepareArguments(args: any) {
+      const next = { ...(args ?? {}) };
+      // Resumed sessions may lack label; keep schema required for new calls.
+      if (typeof next.label !== "string" || !String(next.label).trim()) {
+        next.label = "Working";
+      }
+      return prevPrep ? prevPrep(next) : next;
+    },
+    async execute(toolCallId: any, args: any, signal: any, onUpdate: any, ctx: any) {
+      const { label: _label, ...rest } = args ?? {};
+      return prevExec.call(this, toolCallId, rest, signal, onUpdate, ctx);
+    },
+  };
+  return wrapped;
+}
+
+function registerLabeled(pi: any) {
+  const cwd = process.cwd();
+  for (const def of [
+    createReadToolDefinition(cwd),
+    createBashToolDefinition(cwd),
+    createEditToolDefinition(cwd),
+    createWriteToolDefinition(cwd),
+    createFindToolDefinition(cwd),
+    createGrepToolDefinition(cwd),
+    createLsToolDefinition(cwd),
+  ]) {
+    pi.registerTool(withLabel(def));
+  }
+}
+
+export default function (pi: any) {
+  registerLabeled(pi);
+
+  const applyToAllTools = () => {
+    registerLabeled(pi);
+    try {
+      const all = pi.getAllTools?.() ?? [];
+      for (const tool of all) {
+        wrapToolWithLabel(tool);
+      }
+    } catch {}
+  };
+
+  if (typeof pi.registerTool === "function") {
+    const origRegisterTool = pi.registerTool.bind(pi);
+    pi.registerTool = (tool: any) => {
+      wrapToolWithLabel(tool);
+      return origRegisterTool(tool);
+    };
+  }
+
+  pi.on("session_start", async () => {
+    applyToAllTools();
+  });
+
+  pi.on("before_agent_start", async () => {
+    applyToAllTools();
+  });
+
+  pi.on("before_provider_request", async (event: any) => {
+    if (event?.payload?.tools) {
+      ensureToolLabels(event.payload.tools);
+    }
+    if (event?.payload?.functionDeclarations) {
+      ensureToolLabels(event.payload.functionDeclarations);
+    }
+    if (event?.payload?.function_declarations) {
+      ensureToolLabels(event.payload.function_declarations);
+    }
+  });
+
+  pi.on("tool_call", async (event: any) => {
+    if (event?.input && typeof event.input === "object") {
+      if (typeof event.input.label !== "string" || !String(event.input.label).trim()) {
+        event.input.label = "Working";
+      }
+    }
+  });
+}
+"#;
+
 /// Writes `source` to `path` unless it is already there.
 fn write_extension(path: &Path, source: &str) -> std::io::Result<()> {
     if fs::read_to_string(path).ok().as_deref() == Some(source) {
@@ -796,6 +1312,20 @@ fn write_extension(path: &Path, source: &str) -> std::io::Result<()> {
 /// Auto-edit also passes `edit` and `write`. A call nobody can confirm is
 /// blocked.
 fn permission_extension_source(permission: PermissionMode) -> String {
+    permission_gate_source(permission, false)
+}
+
+fn permission_gate_source(permission: PermissionMode, plan_mode: bool) -> String {
+    let allow = crate::plan_readonly_tools()
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ui = keel_proto::UI_TOOLS
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "// Generated by Keel for each Pi run. Edits are overwritten.\n\
 const READ_ONLY = new Set([\"read\", \"grep\", \"find\", \"ls\", \"memory_read\"]);\n\
@@ -804,9 +1334,19 @@ const EDITS = new Set([\"edit\", \"write\"]);\n\
 // two memory folders, so it is allowed in every mode. The gate guards the repo.\n\
 const ALWAYS = new Set([\"memory_write\"]);\n\
 const AUTO_EDIT = {auto_edit};\n\
+const PLAN = {plan};\n\
+const PLAN_ALLOW = new Set([{allow}]);\n\
+const PLAN_UI = new Set([{ui}]);\n\
 export default function (pi: any) {{\n\
   pi.on(\"tool_call\", async (event: any, ctx: any) => {{\n\
     const name = event.toolName;\n\
+    if (PLAN) {{\n\
+      const base = String(name ?? \"\").split(\"__\").pop().toLowerCase().replace(/-/g, \"_\");\n\
+      if (!PLAN_ALLOW.has(base) && !PLAN_UI.has(base)) {{\n\
+        return {{ block: true, reason: `${{name}} is off in plan mode` }};\n\
+      }}\n\
+      return undefined;\n\
+    }}\n\
     const hints = pi.getAllTools?.().find((tool: any) => tool.name === name)?.annotations;\n\
     if (READ_ONLY.has(name) || ALWAYS.has(name) || hints?.readOnlyHint === true) return undefined;\n\
     if (AUTO_EDIT && EDITS.has(name)) return undefined;\n\
@@ -817,19 +1357,81 @@ export default function (pi: any) {{\n\
   }});\n\
 }}\n",
         auto_edit = permission == PermissionMode::AutoEdit,
+        plan = if plan_mode { "true" } else { "false" },
+        allow = allow,
+        ui = ui,
     )
+}
+
+/// System-prompt section only while Plan mode is on.
+fn plan_prompt_source() -> String {
+    let trimmed = crate::PLAN_MODE_PROMPT.trim_end();
+    let text = serde_json::to_string(trimmed).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "// Generated by Keel for a plan-mode run. Edits are overwritten.\n\
+const PLAN = {text};\n\
+export default function (pi: any) {{\n\
+  pi.on(\"before_agent_start\", (event: any) => {{\n\
+    const sections = event.systemPromptOptions?.sections;\n\
+    if (sections && sections.keel_plan !== PLAN) sections.keel_plan = PLAN;\n\
+  }});\n\
+}}\n"
+    )
+}
+
+fn plan_prompt_extension(plan_mode: bool, data_dir: Option<&Path>, tag: &str) -> Option<PathBuf> {
+    if !plan_mode {
+        return None;
+    }
+    let dir = data_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(format!("keel-plan.{tag}.ts"));
+    write_extension(&path, &plan_prompt_source()).ok()?;
+    Some(path)
 }
 
 /// The gate's path, written in Keel's data dir (else in the temp dir).
 /// `None` under full access: Pi's own behaviour.
-fn permission_extension(permission: PermissionMode, data_dir: Option<&Path>, tag: &str) -> Option<Result<PathBuf, HarnessError>> {
-    if permission == PermissionMode::FullAccess {
+fn permission_extension(
+    permission: PermissionMode,
+    data_dir: Option<&Path>,
+    tag: &str,
+) -> Option<Result<PathBuf, HarnessError>> {
+    permission_extension_for(permission, data_dir, tag, false)
+}
+
+fn permission_extension_for(
+    permission: PermissionMode,
+    data_dir: Option<&Path>,
+    tag: &str,
+    plan_mode: bool,
+) -> Option<Result<PathBuf, HarnessError>> {
+    // Full access skips the ask gate. Plan mode still installs one: it
+    // blocks mutating tools instead of offering them.
+    if permission == PermissionMode::FullAccess && !plan_mode {
         return None;
     }
-    let dir = data_dir.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
-    let path = dir.join(format!("keel-permission-{}.{tag}.ts", permission.as_str()));
+    let dir = data_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = if plan_mode {
+        dir.join(format!(
+            "keel-permission-{}.plan.{tag}.ts",
+            permission.as_str()
+        ))
+    } else {
+        dir.join(format!("keel-permission-{}.{tag}.ts", permission.as_str()))
+    };
     Some(
-        write_extension(&path, &permission_extension_source(permission))
+        write_extension(
+            &path,
+            &if plan_mode {
+                permission_gate_source(permission, true)
+            } else {
+                permission_extension_source(permission)
+            },
+        )
             .map(|()| path)
             .map_err(|err| HarnessError::Failed(format!("Pi permission gate: {err}"))),
     )
@@ -849,261 +1451,447 @@ fn rpc_args(cmd: &mut std::process::Command, model: &str, cwd: &Path, probe: boo
     }
 }
 
-async fn drive(
-    mut child: Child,
-    spec: SessionSpec,
-    mut controls: RunControls,
-    tx: mpsc::UnboundedSender<Result<AgentEvent, HarnessError>>,
-) {
-    let pid = child.id().unwrap_or(0);
-    let _kill = GroupKill { pid };
-    let Some(mut stdin) = child.stdin.take() else {
-        let _ = tx.send(Ok(errored("pi stdin".to_string())));
-        return;
-    };
-    let Some(stdout) = child.stdout.take() else {
-        let _ = tx.send(Ok(errored("pi stdout".to_string())));
-        return;
-    };
-    let Some(stderr) = child.stderr.take() else {
-        let _ = tx.send(Ok(errored("pi stderr".to_string())));
-        return;
-    };
-    let mut stdout = pipe_lines(stdout);
-    let mut stderr = pipe_lines(stderr);
-    let mut seq = 0u64;
-    let mut next_id = || {
-        seq += 1;
-        format!("k{seq}")
-    };
-    if let Some(resume) = &spec.resume {
-        let id = next_id();
-        let _ = write_json(
-            &mut stdin,
-            &serde_json::json!({
-                "id": id,
-                "type": "switch_session",
-                "sessionPath": resume.0,
-            }),
-        )
-        .await;
-        // switch_session answers asynchronously and cancels a prompt already
-        // in flight, so the prompt waits for it.
-        let switched = tokio::time::timeout(SWITCH_WAIT, async {
-            while let Some(line) = stdout.recv().await {
-                if let Ok(value) = serde_json::from_str::<Value>(&line)
-                    && value["type"] == "response"
-                    && value["id"] == id.as_str()
-                {
-                    return value["success"] != false;
-                }
-            }
-            false
-        })
-        .await;
-        if !matches!(switched, Ok(true)) {
-            tracing::warn!(target: "keel_harness::pi", session = %resume.0, "switch_session failed; starting a new session");
-        }
-    }
-    if let Some(level) = &spec.reasoning
-        && !level.0.is_empty()
-    {
-        let id = next_id();
-        let _ = write_json(
-            &mut stdin,
-            &serde_json::json!({"id": id, "type": "set_thinking_level", "level": level.0}),
-        )
-        .await;
-    }
-    let state_id = next_id();
-    let _ = write_json(
-        &mut stdin,
-        &serde_json::json!({"id": state_id, "type": "get_state"}),
-    )
-    .await;
-    let prompt_id = next_id();
-    // A child that exits during spawn still has a stderr tail to attach.
-    let _ = write_json(
-        &mut stdin,
-        &{
-            let (inline, unread) = crate::inline_images(&spec.attachments);
-            let mut prompt = serde_json::json!({
-                "id": prompt_id,
-                "type": "prompt",
-                "message": format!("{}{}", spec.initial_text, crate::attachment_note(&unread)),
-            });
-            if !inline.is_empty() {
-                prompt["images"] = inline
-                    .iter()
-                    .map(|(file, data)| serde_json::json!({"type": "image", "data": data, "mimeType": file.mime}))
-                    .collect();
-            }
-            prompt
-        },
-    )
-    .await;
+#[derive(Clone, PartialEq, Eq)]
+struct ProcessConfig {
+    cwd: PathBuf,
+    project_fingerprint: String,
+    plan_mode: bool,
+    permission: PermissionMode,
+    longer_cache: bool,
+    keep_cache_warm: bool,
+    exe_path: PathBuf,
+    tag: &'static str,
+}
 
-    let mut stop = Stop::None;
-    let mut tools = HashSet::new();
-    // Subagent spawn ids across this run (pi's spawn tool ends by id).
-    let mut spawns = HashSet::new();
-    let mut progress = ProgressGate::default();
-    let run_tag = uuid::Uuid::new_v4().simple().to_string();
-    let mut assistant_n = 0u32;
-    // The last assistant message's provider error, until a new one starts.
-    let mut failed: Option<String> = None;
-    let mut tail = VecDeque::new();
-    let mut stdout_open = true;
-    let mut stderr_open = true;
-    let mut controls_open = true;
-    let mut reaped = false;
-    let mut exit_code = None;
-    let mut wait = std::pin::pin!(child.wait());
-    loop {
-        match stop {
-            Stop::Term { deadline } if Instant::now() >= deadline => {
-                signal_group(pid, libc::SIGTERM);
-                stop = Stop::Kill {
-                    deadline: Instant::now() + KILL_WAIT,
-                };
-                continue;
-            }
-            Stop::Kill { deadline } if Instant::now() >= deadline => {
-                signal_group(pid, libc::SIGKILL);
-                let _ = tx.send(Ok(interrupted()));
-                break;
-            }
-            _ => {}
+enum ActorCommand {
+    StartTurn {
+        spec: SessionSpec,
+        controls: RunControls,
+        event_tx: mpsc::UnboundedSender<Result<AgentEvent, HarnessError>>,
+        done_tx: tokio::sync::oneshot::Sender<()>,
+    },
+    Evict,
+}
+
+struct PoolEntry {
+    actor_tx: mpsc::UnboundedSender<ActorCommand>,
+    config: ProcessConfig,
+    last_active: Instant,
+    is_busy: bool,
+}
+
+pub struct PiProcessPool {
+    entries: Mutex<HashMap<String, PoolEntry>>,
+}
+
+impl Default for PiProcessPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PiProcessPool {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
         }
-        if reaped && !stdout_open && !stderr_open && matches!(stop, Stop::None) {
-            let _ = tx.send(Ok(errored(tail_message("pi", &tail, exit_code))));
-            break;
+    }
+
+    pub fn evict_chat(&self, chat_id: &str) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = entries.remove(chat_id) {
+            let _ = entry.actor_tx.send(ActorCommand::Evict);
         }
-        let sleep_for = match stop {
-            Stop::Term { deadline } | Stop::Kill { deadline } => {
-                Some(deadline.saturating_duration_since(Instant::now()))
-            }
-            Stop::None => None,
-        };
-        if !stdout_open && !stderr_open && !controls_open && sleep_for.is_none() {
-            let _ = tx.send(Ok(errored(tail_message("pi", &tail, exit_code))));
-            break;
+    }
+
+    pub fn evict_all(&self) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, entry) in entries.drain() {
+            let _ = entry.actor_tx.send(ActorCommand::Evict);
         }
-        tokio::select! {
-            biased;
-            line = stdout.recv(), if stdout_open => {
-                match line {
-                    Some(line) => {
-                        if is_assistant_start(&line) {
-                            assistant_n += 1;
-                            failed = None;
-                        }
-                        if let Some(why) = assistant_error(&line) {
-                            failed = Some(why);
-                        }
-                        let events = on_stdout(&line, &mut tools, &mut spawns, &mut progress, &spec.report_session, &stop);
-                        let mut ended = false;
-                        for mut event in events {
-                            // Pi settles normally after a provider error; the turn failed.
-                            if event == completed()
-                                && let Some(why) = failed.take()
-                            {
-                                event = errored(why);
-                            }
-                            // Pi has no message id; each assistant message gets its own.
-                            if let AgentEvent::Text { message_id, .. } | AgentEvent::Reasoning { message_id, .. } = &mut event {
-                                *message_id = format!("pi-{run_tag}-{assistant_n}");
-                            }
-                            if event == completed() {
-                                // A steer that raced the settle is the next prompt, not lost.
-                                let late = crate::proc::late_steers(&mut controls.inbound);
-                                if !late.is_empty() {
-                                    let id = next_id();
-                                    let _ = write_json(
-                                        &mut stdin,
-                                        &serde_json::json!({"id": id, "type": "prompt", "message": late.join("\n\n")}),
-                                    ).await;
-                                    continue;
-                                }
-                            }
-                            ended = matches!(event, AgentEvent::Done { .. });
-                            if tx.send(Ok(event)).is_err() {
-                                ended = true;
+    }
+}
+
+struct ProcessActor {
+    chat_id: String,
+    child: Child,
+    pid: u32,
+    _kill: GroupKill,
+    stdin: ChildStdin,
+    stdout: mpsc::UnboundedReceiver<String>,
+    stderr: mpsc::UnboundedReceiver<String>,
+    current_model: String,
+    current_reasoning: String,
+    current_session_path: Option<String>,
+    config: ProcessConfig,
+    last_active: Instant,
+    last_report_usage: Option<Arc<dyn Fn(TokenUsage) + Send + Sync>>,
+    idle_timeout: Duration,
+    rx: mpsc::UnboundedReceiver<ActorCommand>,
+    seq: u64,
+}
+
+impl ProcessActor {
+    async fn run_loop(mut self, pool: Arc<PiProcessPool>) {
+        loop {
+            let deadline = self.last_active + self.idle_timeout;
+            let idle_sleep = tokio::time::sleep_until(deadline.into());
+            tokio::select! {
+                cmd = self.rx.recv() => {
+                    match cmd {
+                        Some(ActorCommand::StartTurn { spec, controls, event_tx, done_tx }) => {
+                            self.last_report_usage = spec.report_usage.clone();
+                            let res = self.drive_turn(spec, controls, event_tx).await;
+                            self.last_active = Instant::now();
+                            let _ = done_tx.send(());
+                            if res.is_err() {
                                 break;
                             }
                         }
-                        if ended {
+                        Some(ActorCommand::Evict) | None => {
                             break;
                         }
                     }
-                    None => stdout_open = false,
                 }
-            }
-            line = stderr.recv(), if stderr_open => {
-                match line {
-                    Some(line) => push_tail(&mut tail, line),
-                    None => stderr_open = false,
-                }
-            }
-            msg = controls.inbound.recv(), if controls_open && matches!(stop, Stop::None) => {
-                match msg {
-                    Some(ControlMsg::Interrupt) => {
-                        let id = next_id();
-                        let _ = write_json(&mut stdin, &serde_json::json!({"id": id, "type": "clear_queue"})).await;
-                        let id = next_id();
-                        let _ = write_json(&mut stdin, &serde_json::json!({"id": id, "type": "abort"})).await;
-                        stop = Stop::Term { deadline: Instant::now() + TERM_WAIT };
-                    }
-                    Some(ControlMsg::Steer { text }) => {
-                        let id = next_id();
-                        let _ = write_json(
-                            &mut stdin,
-                            &serde_json::json!({"id": id, "type": "steer", "message": text}),
-                        ).await;
-                    }
-                    Some(ControlMsg::Answer { answers }) => {
-                        for answer in &answers {
-                            let _ = write_raw(&mut stdin, &extension_line(answer)).await;
+                line = self.stdout.recv() => {
+                    match line {
+                        Some(line) => {
+                            if let Some(AgentEvent::Usage { usage }) = usage_of(&line) {
+                                if let Some(report) = &self.last_report_usage {
+                                    report(usage);
+                                }
+                            }
+                        }
+                        None => {
+                            break;
                         }
                     }
-                    None => controls_open = false,
+                }
+                _ = idle_sleep => {
+                    tracing::info!(target: "keel_harness::pi", chat = %self.chat_id, "idle eviction timeout reached");
+                    break;
                 }
             }
-            status = &mut wait, if !reaped => {
-                reaped = true;
-                if let Ok(status) = status {
-                    exit_code = status.code();
-                }
-            }
-            _ = sleep_deadline(sleep_for), if sleep_for.is_some() => {}
         }
+        {
+            let mut entries = pool.entries.lock().unwrap_or_else(|e| e.into_inner());
+            entries.remove(&self.chat_id);
+        }
+        signal_group(self.pid, libc::SIGTERM);
+        let _ = self.child.kill().await;
     }
-    drop(stdin);
-    if !reaped {
-        let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait).await;
+
+    async fn drive_turn(
+        &mut self,
+        spec: SessionSpec,
+        mut controls: RunControls,
+        tx: mpsc::UnboundedSender<Result<AgentEvent, HarnessError>>,
+    ) -> Result<(), HarnessError> {
+        let mut next_id = {
+            let seq = &mut self.seq;
+            move || {
+                *seq += 1;
+                format!("k{seq}")
+            }
+        };
+
+        if let Some(resume) = &spec.resume {
+            if self.current_session_path.as_deref() != Some(resume.0.as_str()) {
+                let mut success = false;
+                let id = next_id();
+                let _ = write_json(
+                    &mut self.stdin,
+                    &serde_json::json!({
+                        "id": id,
+                        "type": "switch_session",
+                        "sessionPath": resume.0,
+                    }),
+                )
+                .await;
+
+                let switched = tokio::time::timeout(SWITCH_WAIT, async {
+                    while let Some(line) = self.stdout.recv().await {
+                        if let Ok(value) = serde_json::from_str::<Value>(&line)
+                            && value["type"] == "response"
+                            && value["id"] == id.as_str()
+                        {
+                            return value["success"] != false;
+                        }
+                    }
+                    false
+                })
+                .await;
+
+                if matches!(switched, Ok(true)) {
+                    success = true;
+                } else {
+                    tracing::warn!(target: "keel_harness::pi", session = %resume.0, "switch_session failed or timed out; retrying once with longer timeout");
+                    let retry_id = next_id();
+                    let _ = write_json(
+                        &mut self.stdin,
+                        &serde_json::json!({
+                            "id": retry_id,
+                            "type": "switch_session",
+                            "sessionPath": resume.0,
+                        }),
+                    )
+                    .await;
+                    let retry_switched = tokio::time::timeout(Duration::from_secs(30), async {
+                        while let Some(line) = self.stdout.recv().await {
+                            if let Ok(value) = serde_json::from_str::<Value>(&line)
+                                && value["type"] == "response"
+                                && value["id"] == retry_id.as_str()
+                            {
+                                return value["success"] != false;
+                            }
+                        }
+                        false
+                    })
+                    .await;
+                    if matches!(retry_switched, Ok(true)) {
+                        success = true;
+                    }
+                }
+
+                if !success {
+                    if let Ok(Some(status)) = self.child.try_wait() {
+                        let mut tail = VecDeque::new();
+                        while let Ok(line) = self.stderr.try_recv() {
+                            push_tail(&mut tail, line);
+                        }
+                        let _ = tx.send(Ok(errored(tail_message("pi", &tail, status.code()))));
+                        return Err(HarnessError::Failed("process crashed during startup".to_string()));
+                    }
+                    tracing::error!(target: "keel_harness::pi", session = %resume.0, "switch_session failed on retry; aborting prompt");
+                    let _ = tx.send(Ok(AgentEvent::Done {
+                        status: keel_proto::TurnStatus::Errored {
+                            message: "Couldn't resume this session".to_string(),
+                        },
+                    }));
+                    return Ok(());
+                }
+                self.current_session_path = Some(resume.0.clone());
+            }
+        }
+
+        if spec.model.0 != self.current_model {
+            let id = next_id();
+            let _ = write_json(
+                &mut self.stdin,
+                &serde_json::json!({"id": id, "type": "set_model", "model": spec.model.0}),
+            )
+            .await;
+            self.current_model = spec.model.0.clone();
+        }
+
+        let reasoning_str = spec.reasoning.as_ref().map(|r| r.0.as_str()).unwrap_or("");
+        if reasoning_str != self.current_reasoning.as_str() && !reasoning_str.is_empty() {
+            let id = next_id();
+            let _ = write_json(
+                &mut self.stdin,
+                &serde_json::json!({"id": id, "type": "set_thinking_level", "level": reasoning_str}),
+            )
+            .await;
+            self.current_reasoning = reasoning_str.to_string();
+        }
+
+        let state_id = next_id();
+        let _ = write_json(
+            &mut self.stdin,
+            &serde_json::json!({"id": state_id, "type": "get_state"}),
+        )
+        .await;
+
+        {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            use std::hash::{Hash, Hasher};
+            self.current_model.hash(&mut hasher);
+            self.config.cwd.hash(&mut hasher);
+            self.config.project_fingerprint.hash(&mut hasher);
+            self.config.plan_mode.hash(&mut hasher);
+            let fingerprint = format!("{:016x}", hasher.finish());
+            tracing::debug!(target: "keel_harness::pi::cache", fingerprint = %fingerprint, "prefix fingerprint");
+        }
+
+        let prompt_id = next_id();
+        let _ = write_json(
+            &mut self.stdin,
+            &{
+                let (inline, unread) = crate::inline_images(&spec.attachments);
+                let mut prompt = serde_json::json!({
+                    "id": prompt_id,
+                    "type": "prompt",
+                    "message": format!("{}{}", spec.initial_text, crate::attachment_note(&unread)),
+                });
+                if !inline.is_empty() {
+                    prompt["images"] = inline
+                        .iter()
+                        .map(|(file, data)| serde_json::json!({"type": "image", "data": data, "mimeType": file.mime}))
+                        .collect();
+                }
+                prompt
+            },
+        )
+        .await;
+
+        let mut stop = Stop::None;
+        let mut tools = HashSet::new();
+        let mut labels = LabelStream::default();
+        let mut spawns = HashSet::new();
+        let mut progress = ProgressGate::default();
+        let run_tag = uuid::Uuid::new_v4().simple().to_string();
+        let mut assistant_n = 0u32;
+        let mut failed: Option<String> = None;
+        let mut tail = VecDeque::new();
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut controls_open = true;
+
+        loop {
+            match stop {
+                Stop::Term { deadline } if Instant::now() >= deadline => {
+                    signal_group(self.pid, libc::SIGTERM);
+                    stop = Stop::Kill {
+                        deadline: Instant::now() + KILL_WAIT,
+                    };
+                    continue;
+                }
+                Stop::Kill { deadline } if Instant::now() >= deadline => {
+                    signal_group(self.pid, libc::SIGKILL);
+                    let _ = tx.send(Ok(interrupted()));
+                    return Err(HarnessError::Failed("process wedged and killed".to_string()));
+                }
+                _ => {}
+            }
+
+            let sleep_for = match stop {
+                Stop::Term { deadline } | Stop::Kill { deadline } => {
+                    Some(deadline.saturating_duration_since(Instant::now()))
+                }
+                Stop::None => None,
+            };
+
+            if !stdout_open && !stderr_open {
+                let exit_code = self.child.try_wait().ok().flatten().and_then(|s| s.code());
+                let _ = tx.send(Ok(errored(tail_message("pi", &tail, exit_code))));
+                return Err(HarnessError::Failed("process exited".to_string()));
+            }
+
+            tokio::select! {
+                biased;
+                line = self.stdout.recv(), if stdout_open => {
+                    match line {
+                        Some(line) => {
+                            if is_assistant_start(&line) {
+                                assistant_n += 1;
+                                failed = None;
+                            }
+                            if let Some(why) = assistant_error(&line) {
+                                failed = Some(why);
+                            }
+                            if spec.plan_mode
+                                && let Ok(value) = serde_json::from_str::<Value>(&line)
+                                && let Some(reply) = crate::plan_mode_ui_reply(&value)
+                            {
+                                let _ = write_json(&mut self.stdin, &reply).await;
+                                continue;
+                            }
+                            let events = on_stdout(&line, &mut tools, &mut labels, &mut spawns, &mut progress, &spec.report_session, &stop);
+                            let mut ended = false;
+                            for mut event in events {
+                                if event == completed()
+                                    && let Some(why) = failed.take()
+                                {
+                                    event = errored(why);
+                                }
+                                if let AgentEvent::Text { message_id, .. } | AgentEvent::Reasoning { message_id, .. } = &mut event {
+                                    *message_id = format!("pi-{run_tag}-{assistant_n}");
+                                }
+                                if let AgentEvent::Usage { usage } = &event {
+                                    if let Some(report) = &spec.report_usage {
+                                        report(usage.clone());
+                                    }
+                                }
+                                if event == completed() {
+                                    let late = crate::proc::late_steers(&mut controls.inbound);
+                                    if !late.is_empty() {
+                                        let id = next_id();
+                                        let _ = write_json(
+                                            &mut self.stdin,
+                                            &serde_json::json!({"id": id, "type": "prompt", "message": late.join("\n\n")}),
+                                        ).await;
+                                        continue;
+                                    }
+                                }
+                                ended = matches!(event, AgentEvent::Done { .. });
+                                if tx.send(Ok(event)).is_err() {
+                                    ended = true;
+                                    break;
+                                }
+                            }
+                            if ended {
+                                break;
+                            }
+                        }
+                        None => stdout_open = false,
+                    }
+                }
+                line = self.stderr.recv(), if stderr_open => {
+                    match line {
+                        Some(line) => push_tail(&mut tail, line),
+                        None => stderr_open = false,
+                    }
+                }
+                msg = controls.inbound.recv(), if controls_open && matches!(stop, Stop::None) => {
+                    match msg {
+                        Some(ControlMsg::Interrupt) => {
+                            let id = next_id();
+                            let _ = write_json(&mut self.stdin, &serde_json::json!({"id": id, "type": "clear_queue"})).await;
+                            let id = next_id();
+                            let _ = write_json(&mut self.stdin, &serde_json::json!({"id": id, "type": "abort"})).await;
+                            stop = Stop::Term { deadline: Instant::now() + TERM_WAIT };
+                        }
+                        Some(ControlMsg::Steer { text }) => {
+                            let id = next_id();
+                            let _ = write_json(
+                                &mut self.stdin,
+                                &serde_json::json!({"id": id, "type": "steer", "message": text}),
+                            ).await;
+                        }
+                        Some(ControlMsg::Answer { answers }) => {
+                            for answer in &answers {
+                                let _ = write_raw(&mut self.stdin, &extension_line(answer)).await;
+                            }
+                        }
+                        None => controls_open = false,
+                    }
+                }
+                _ = sleep_deadline(sleep_for), if sleep_for.is_some() => {}
+            }
+        }
+        Ok(())
     }
 }
 
 fn on_stdout(
     line: &str,
     tools: &mut HashSet<String>,
+    labels: &mut LabelStream,
     spawns: &mut HashSet<String>,
     progress: &mut ProgressGate,
     report: &Option<SessionReport>,
     stop: &Stop,
 ) -> Vec<AgentEvent> {
     note_session(line, report);
-    let Some(incoming) = parse_line(line, tools, spawns, progress) else {
-        return Vec::new();
-    };
+    let incoming = parse_line(line, tools, labels, spawns, progress);
     if !matches!(stop, Stop::None) {
         return Vec::new();
     }
     let mut events = match incoming {
-        Incoming::Settle => vec![completed()],
-        Incoming::Events(events) => events,
-        Incoming::Response(response) => on_prompt(response).into_iter().collect(),
-        Incoming::Ignore => Vec::new(),
+        Some(Incoming::Settle) => vec![completed()],
+        Some(Incoming::Events(events)) => events,
+        Some(Incoming::Response(response)) => on_prompt(response).into_iter().collect(),
+        Some(Incoming::Ignore) | None => Vec::new(),
     };
     // Before a settle's Done, so the turn's tokens land with it.
     if let Some(usage) = usage_of(line) {
@@ -1113,9 +1901,13 @@ fn on_stdout(
 }
 
 /// An assistant message's tokens (Pi reports them per message, cached input
-/// apart), or the model's context window from `get_state`.
+/// apart), or the model's context window from `get_state`, or idle cache warming.
 fn usage_of(line: &str) -> Option<AgentEvent> {
-    if !line.contains("\"message_end\"") && !line.contains("\"contextWindow\"") {
+    if !line.contains("\"message_end\"")
+        && !line.contains("\"contextWindow\"")
+        && !line.contains("\"cache_warm\"")
+        && !line.contains("\"usage\"")
+    {
         return None;
     }
     let value: Value = serde_json::from_str(line).ok()?;
@@ -1129,11 +1921,48 @@ fn usage_of(line: &str) -> Option<AgentEvent> {
             output: n(&u["output"]),
             cache_read: n(&u["cacheRead"]),
             cache_write: n(&u["cacheWrite"]),
+            cache_warm: 0,
             context_used: None,
             context_window: None,
         };
         let total = usage.total();
-        TokenUsage { context_used: (total > 0).then_some(total), ..usage }
+        TokenUsage {
+            context_used: (total > 0).then_some(total),
+            ..usage
+        }
+    } else if (value["type"] == "entry_appended" && value["entry"]["type"] == "usage")
+        || value["type"] == "usage"
+    {
+        let entry = if value["type"] == "entry_appended" {
+            &value["entry"]
+        } else {
+            &value
+        };
+        let is_warm = entry["kind"].as_str() == Some("cache_warm");
+        let u = &entry["usage"];
+        let cache_read = if is_warm { 0 } else { n(&u["cacheRead"]) };
+        let cache_write = if is_warm { 0 } else { n(&u["cacheWrite"]) };
+        let cache_warm = if is_warm {
+            let r = n(&u["cacheRead"]);
+            if r > 0 { r } else { n(&u["totalTokens"]) }
+        } else {
+            0
+        };
+        let usage = TokenUsage {
+            model: entry["model"].as_str().unwrap_or("").to_string(),
+            input: if is_warm { 0 } else { n(&u["input"]) },
+            output: if is_warm { 0 } else { n(&u["output"]) },
+            cache_read,
+            cache_write,
+            cache_warm,
+            context_used: None,
+            context_window: None,
+        };
+        let total = usage.total();
+        TokenUsage {
+            context_used: (total > 0).then_some(total),
+            ..usage
+        }
     } else if value["type"] == "response" && value["command"] == "get_state" {
         let model = &value["data"]["model"];
         TokenUsage {
@@ -1207,25 +2036,39 @@ fn assistant_error(line: &str) -> Option<String> {
     }
     let value: Value = serde_json::from_str(line).ok()?;
     let message = &value["message"];
-    if value["type"] != "message_end" || message["role"] != "assistant" || message["stopReason"] != "error" {
+    if value["type"] != "message_end"
+        || message["role"] != "assistant"
+        || message["stopReason"] != "error"
+    {
         return None;
     }
-    let raw = message["errorMessage"].as_str().unwrap_or("the model request failed");
-    let body = raw.find('{').and_then(|at| serde_json::from_str::<Value>(&raw[at..]).ok());
-    Some(match body.as_ref().and_then(|b| b["error"]["message"].as_str()) {
-        Some(text) => text.to_string(),
-        None => raw.to_string(),
-    })
+    let raw = message["errorMessage"]
+        .as_str()
+        .unwrap_or("the model request failed");
+    let body = raw
+        .find('{')
+        .and_then(|at| serde_json::from_str::<Value>(&raw[at..]).ok());
+    Some(
+        match body.as_ref().and_then(|b| b["error"]["message"].as_str()) {
+            Some(text) => text.to_string(),
+            None => raw.to_string(),
+        },
+    )
 }
 
 fn is_assistant_start(line: &str) -> bool {
     line.contains("\"message_start\"")
-        && serde_json::from_str::<Value>(line).is_ok_and(|v| {
-            v["type"] == "message_start" && v["message"]["role"] == "assistant"
-        })
+        && serde_json::from_str::<Value>(line)
+            .is_ok_and(|v| v["type"] == "message_start" && v["message"]["role"] == "assistant")
 }
 
-fn parse_line(line: &str, tools: &mut HashSet<String>, spawns: &mut HashSet<String>, progress: &mut ProgressGate) -> Option<Incoming> {
+fn parse_line(
+    line: &str,
+    tools: &mut HashSet<String>,
+    labels: &mut LabelStream,
+    spawns: &mut HashSet<String>,
+    progress: &mut ProgressGate,
+) -> Option<Incoming> {
     let value: Value = serde_json::from_str(line).ok()?;
     let kind = value
         .get("type")
@@ -1257,8 +2100,8 @@ fn parse_line(line: &str, tools: &mut HashSet<String>, spawns: &mut HashSet<Stri
         return Some(Incoming::Ignore);
     }
     let events = match kind {
-        "message_update" => message_update(&value, tools),
-        "tool_execution_start" => tool_start(&value, tools, spawns).into_iter().collect(),
+        "message_update" => message_update(&value, tools, labels),
+        "tool_execution_start" => tool_start(&value, tools, labels, spawns),
         "tool_execution_update" => tool_update(&value, progress).into_iter().collect(),
         "tool_execution_end" => vec![tool_finished(&value, spawns)],
         _ => {
@@ -1337,10 +2180,13 @@ fn extension_question(value: &Value) -> Option<AgentEvent> {
             kind,
             prompt,
             options: question_options(value, kind),
-            required: value.get("timeout").is_none(), tool: None, multi: false, other: false,
+            required: value.get("timeout").is_none(),
+            tool: None,
+            multi: false,
+            other: false,
         }],
         subagent: None,
-        })
+    })
 }
 
 fn question_options(value: &Value, kind: QuestionKind) -> Vec<QuestionOption> {
@@ -1348,11 +2194,15 @@ fn question_options(value: &Value, kind: QuestionKind) -> Vec<QuestionOption> {
         QuestionKind::Confirm => vec![
             QuestionOption {
                 id: "yes".to_string(),
-                label: "Yes".to_string(), role: Default::default(), detail: None,
+                label: "Yes".to_string(),
+                role: Default::default(),
+                detail: None,
             },
             QuestionOption {
                 id: "no".to_string(),
-                label: "No".to_string(), role: Default::default(), detail: None,
+                label: "No".to_string(),
+                role: Default::default(),
+                detail: None,
             },
         ],
         QuestionKind::Input | QuestionKind::Editor => Vec::new(),
@@ -1366,7 +2216,9 @@ fn question_options(value: &Value, kind: QuestionKind) -> Vec<QuestionOption> {
                         if let Some(text) = item.as_str() {
                             return Some(QuestionOption {
                                 id: text.to_string(),
-                                label: text.to_string(), role: Default::default(), detail: None,
+                                label: text.to_string(),
+                                role: Default::default(),
+                                detail: None,
                             });
                         }
                         let label = item
@@ -1383,7 +2235,9 @@ fn question_options(value: &Value, kind: QuestionKind) -> Vec<QuestionOption> {
                                     id.to_string()
                                 } else {
                                     label.to_string()
-                                }, role: Default::default(), detail: None,
+                                },
+                                role: Default::default(),
+                                detail: None,
                             })
                         }
                     })
@@ -1447,7 +2301,11 @@ struct Cancelled<'a> {
     cancelled: bool,
 }
 
-fn message_update(value: &Value, tools: &mut HashSet<String>) -> Vec<AgentEvent> {
+fn message_update(
+    value: &Value,
+    tools: &mut HashSet<String>,
+    labels: &mut LabelStream,
+) -> Vec<AgentEvent> {
     let Some(event) = value.get("assistantMessageEvent") else {
         return Vec::new();
     };
@@ -1462,32 +2320,87 @@ fn message_update(value: &Value, tools: &mut HashSet<String>) -> Vec<AgentEvent>
     match kind {
         "text_delta" => delta_event(event, index, false).into_iter().collect(),
         "thinking_delta" => delta_event(event, index, true).into_iter().collect(),
-        "toolcall_start" | "toolcall_end" => {
-            let id = event
-                .get("id")
-                .and_then(|id| id.as_str())
-                .or_else(|| {
-                    event
-                        .get("toolCall")
-                        .and_then(|call| call.get("id"))
-                        .and_then(|id| id.as_str())
-                })
+        "toolcall_start" => {
+            let id = toolcall_id(event);
+            let name = toolcall_name(event);
+            labels.begin(index, &id, &name);
+            let detail = event
+                .get("toolCall")
+                .map(|call| crate::tool_detail_for(&name, &call["arguments"]))
+                .unwrap_or_default();
+            let label = event
+                .get("toolCall")
+                .map(|call| crate::tool_label(&call["arguments"]))
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            if let Some(ev) = tool_started(tools, &id, &name, 0, detail, label.clone()) {
+                out.push(ev);
+            }
+            if let Some(ev) = labels.emit_if_new(&id, label) {
+                out.push(ev);
+            }
+            out
+        }
+        "toolcall_delta" => {
+            let delta = event
+                .get("delta")
+                .and_then(|delta| delta.as_str())
                 .unwrap_or("");
-            let name = event
-                .get("toolName")
-                .and_then(|name| name.as_str())
-                .or_else(|| {
-                    event
-                        .get("toolCall")
-                        .and_then(|call| call.get("name"))
-                        .and_then(|name| name.as_str())
-                })
-                .unwrap_or("tool");
-            let detail = event.get("toolCall").map(|call| crate::tool_detail_for(name, &call["arguments"])).unwrap_or_default();
-            tool_started(tools, id, name, 0, detail).into_iter().collect()
+            labels
+                .on_delta(index, delta)
+                .into_iter()
+                .collect()
+        }
+        "toolcall_end" => {
+            let id = toolcall_id(event);
+            let name = toolcall_name(event);
+            let args = event
+                .get("toolCall")
+                .map(|call| &call["arguments"])
+                .cloned()
+                .unwrap_or(Value::Null);
+            let detail = crate::tool_detail_for(&name, &args);
+            let label = crate::tool_label(&args);
+            labels.finish(index, &id, &label);
+            let mut out = Vec::new();
+            if let Some(ev) = tool_started(tools, &id, &name, 0, detail, label.clone()) {
+                out.push(ev);
+            }
+            if let Some(ev) = labels.emit_if_new(&id, label) {
+                out.push(ev);
+            }
+            out
         }
         _ => Vec::new(),
     }
+}
+
+fn toolcall_id(event: &Value) -> String {
+    event
+        .get("id")
+        .and_then(|id| id.as_str())
+        .or_else(|| {
+            event
+                .get("toolCall")
+                .and_then(|call| call.get("id"))
+                .and_then(|id| id.as_str())
+        })
+        .unwrap_or("")
+        .to_string()
+}
+
+fn toolcall_name(event: &Value) -> String {
+    event
+        .get("toolName")
+        .and_then(|name| name.as_str())
+        .or_else(|| {
+            event
+                .get("toolCall")
+                .and_then(|call| call.get("name"))
+                .and_then(|name| name.as_str())
+        })
+        .unwrap_or("tool")
+        .to_string()
 }
 
 fn delta_event(event: &Value, index: u64, reasoning: bool) -> Option<AgentEvent> {
@@ -1504,18 +2417,23 @@ fn delta_event(event: &Value, index: u64, reasoning: bool) -> Option<AgentEvent>
             part_id: format!("think-{index}"),
             delta: delta.to_string(),
             subagent: None,
-                })
+        })
     } else {
         Some(AgentEvent::Text {
             message_id: "pi-assistant".to_string(),
             part_id: format!("text-{index}"),
             delta: delta.to_string(),
             subagent: None,
-                })
+        })
     }
 }
 
-fn tool_start(value: &Value, tools: &mut HashSet<String>, spawns: &mut HashSet<String>) -> Option<AgentEvent> {
+fn tool_start(
+    value: &Value,
+    tools: &mut HashSet<String>,
+    labels: &mut LabelStream,
+    spawns: &mut HashSet<String>,
+) -> Vec<AgentEvent> {
     let id = value
         .get("toolCallId")
         .and_then(|id| id.as_str())
@@ -1538,58 +2456,204 @@ fn tool_start(value: &Value, tools: &mut HashSet<String>, spawns: &mut HashSet<S
     if crate::is_spawn_tool(name) && args.get("action").is_none() {
         spawns.insert(id.to_string());
         let (sub_name, description) = crate::spawn_meta(args);
-        return Some(AgentEvent::SubagentStarted {
+        return vec![AgentEvent::SubagentStarted {
             tool_id: id.to_string(),
             subagent_id: id.to_string(),
             name: sub_name.unwrap_or_else(|| "subagent".to_string()),
             description: description.unwrap_or_default(),
-        });
+        }];
     }
-    tool_started(tools, id, name, input_bytes, crate::tool_detail_for(name, args))
+    let label = crate::tool_label(args);
+    let mut out = Vec::new();
+    if let Some(ev) = labels.emit_if_new(id, label.clone()) {
+        out.push(ev);
+    }
+    if let Some(ev) = tool_started(
+        tools,
+        id,
+        name,
+        input_bytes,
+        crate::tool_detail_for(name, args),
+        label,
+    ) {
+        out.push(ev);
+    }
+    out
 }
 
 /// A tool row's start. `toolcall_start` comes before the arguments, so the
-/// first later start with them goes out again to fill in the detail (marked
-/// in `tools` as `<id>\0detail`); any other repeat is dropped.
+/// first later start with them goes out again to fill in the detail or label
+/// (marked in `tools` as `<id>\0detail`); any other repeat is dropped.
 fn tool_started(
     tools: &mut HashSet<String>,
     id: &str,
     name: &str,
     input_bytes: u64,
     detail: String,
+    label: String,
 ) -> Option<AgentEvent> {
     let marker = format!("{id}\0detail");
-    if id.is_empty() || (!tools.insert(id.to_string()) && (detail.is_empty() || tools.contains(&marker))) {
+    let label_marker = format!("{id}\0label");
+    if id.is_empty() {
         return None;
     }
-    if !detail.is_empty() {
-        tools.insert(marker);
+    let first = tools.insert(id.to_string());
+    let detail_new = !detail.is_empty() && tools.insert(marker);
+    let label_new = !label.is_empty() && tools.insert(label_marker);
+    if !first && !detail_new && !label_new {
+        return None;
     }
     Some(AgentEvent::ToolStarted {
         tool_id: id.to_string(),
         name: name.to_string(),
         input_bytes,
         detail,
+        label,
         subagent: None,
         kind: crate::kind_from_name(name).map(str::to_string),
     })
 }
 
+/// Accumulates streaming tool-call argument JSON so a `label` can fire as
+/// soon as its string is complete.
+#[derive(Default)]
+struct LabelStream {
+    by_index: HashMap<u64, LabelPartial>,
+    emitted: HashMap<String, String>,
+}
+
+struct LabelPartial {
+    id: String,
+    buf: String,
+}
+
+impl LabelStream {
+    fn begin(&mut self, index: u64, id: &str, _name: &str) {
+        if id.is_empty() {
+            return;
+        }
+        self.by_index.insert(
+            index,
+            LabelPartial {
+                id: id.to_string(),
+                buf: String::new(),
+            },
+        );
+    }
+
+    fn on_delta(&mut self, index: u64, delta: &str) -> Option<AgentEvent> {
+        let partial = self.by_index.get_mut(&index)?;
+        partial.buf.push_str(delta);
+        let label = extract_streaming_label(&partial.buf);
+        let id = partial.id.clone();
+        self.emit_if_new(&id, label)
+    }
+
+    fn finish(&mut self, index: u64, id: &str, label: &str) {
+        self.by_index.remove(&index);
+        if !id.is_empty() && !label.is_empty() {
+            self.emitted.insert(id.to_string(), label.to_string());
+        }
+    }
+
+    fn emit_if_new(&mut self, id: &str, label: String) -> Option<AgentEvent> {
+        if id.is_empty() || label.is_empty() {
+            return None;
+        }
+        if self.emitted.get(id) == Some(&label) {
+            return None;
+        }
+        self.emitted.insert(id.to_string(), label.clone());
+        Some(AgentEvent::ToolLabel {
+            tool_id: id.to_string(),
+            label,
+            subagent: None,
+        })
+    }
+}
+
+/// Pull a complete JSON string value for `label` or `toolAction` from a
+/// partial args buffer. Returns sanitized text, or empty when incomplete.
+fn extract_streaming_label(buf: &str) -> String {
+    for key in ["\"label\"", "\"toolAction\""] {
+        if let Some(raw) = json_string_after_key(buf, key) {
+            let cleaned = crate::sanitize_label(&raw);
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
+        }
+    }
+    String::new()
+}
+
+/// After `"key":`, read a complete JSON string (handles `\"` / `\\`).
+fn json_string_after_key(buf: &str, key: &str) -> Option<String> {
+    let start = buf.find(key)?;
+    let after = &buf[start + key.len()..];
+    let colon = after.find(':')?;
+    let mut rest = after[colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                return None; // incomplete escape
+            };
+            match next {
+                '"' | '\\' | '/' => out.push(next),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if hex.len() < 4 {
+                        return None;
+                    }
+                    let code = u32::from_str_radix(&hex, 16).ok()?;
+                    out.push(char::from_u32(code)?);
+                }
+                _ => out.push(next),
+            }
+            continue;
+        }
+        if ch == '"' {
+            return Some(out);
+        }
+        out.push(ch);
+    }
+    None // string not closed yet
+}
+
 /// `partialResult` text while a tool runs. An empty update (Pi sends one
 /// before any bytes) is skipped. The partial result is the output so far.
 fn tool_update(value: &Value, gate: &mut ProgressGate) -> Option<AgentEvent> {
-    let id = value.get("toolCallId").and_then(|id| id.as_str()).unwrap_or("");
+    let id = value
+        .get("toolCallId")
+        .and_then(|id| id.as_str())
+        .unwrap_or("");
     if id.is_empty() {
         return None;
     }
     let text: String = value["partialResult"]["content"]
         .as_array()
-        .map(|parts| parts.iter().filter_map(|part| part["text"].as_str()).collect())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .collect()
+        })
         .unwrap_or_default();
     if text.is_empty() || !gate.allow(id) {
         return None;
     }
-    let name = value.get("toolName").and_then(|name| name.as_str()).unwrap_or("");
+    let name = value
+        .get("toolName")
+        .and_then(|name| name.as_str())
+        .unwrap_or("");
     Some(AgentEvent::ToolProgress {
         tool_id: id.to_string(),
         output_tail: keel_proto::output_tail(&text),
@@ -1639,11 +2703,19 @@ fn tool_finished(value: &Value, spawns: &mut HashSet<String>) -> AgentEvent {
         summary: summary_line(&raw),
         output_bytes: raw.len() as u64,
         is_error,
-        images: crate::content_images(result["content"].as_array().map(Vec::as_slice).unwrap_or_default()),
+        images: crate::content_images(
+            result["content"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        ),
         output_tail: keel_proto::output_tail(&raw),
         subagent: None,
         diff: None,
-        duration_ms: value.get("durationMs").and_then(|n| n.as_u64().or_else(|| n.as_i64().filter(|n| *n >= 0).map(|n| n as u64))),
+        duration_ms: value.get("durationMs").and_then(|n| {
+            n.as_u64()
+                .or_else(|| n.as_i64().filter(|n| *n >= 0).map(|n| n as u64))
+        }),
     }
 }
 
@@ -1705,7 +2777,10 @@ fn sign_in_line(line: &str) -> Option<SignInLine> {
     let text = |k: &str| event[k].as_str().unwrap_or_default().to_string();
     Some(SignInLine::Event(match event["type"].as_str()? {
         "auth_url" => crate::SignInEvent::Browser { url: text("url") },
-        "device_code" => crate::SignInEvent::DeviceCode { code: text("userCode"), url: text("verificationUri") },
+        "device_code" => crate::SignInEvent::DeviceCode {
+            code: text("userCode"),
+            url: text("verificationUri"),
+        },
         "progress" => crate::SignInEvent::Progress(text("message")),
         _ => return None,
     }))
@@ -1717,7 +2792,11 @@ pub(crate) const SIGN_INS: [(&str, &str, &str); 6] = [
     ("anthropic", "Claude", "Pro or Max plan, or an API key"),
     ("openai-codex", "ChatGPT", "Plus or Pro plan, through Codex"),
     ("github-copilot", "GitHub Copilot", "Copilot plan"),
-    ("commandcode", "Command Code", "Command Code plan or API key"),
+    (
+        "commandcode",
+        "Command Code",
+        "Command Code plan or API key",
+    ),
     ("xai", "xAI", "SuperGrok, X Premium, or an API key"),
     ("openai", "OpenAI", "API key, billed per use"),
 ];
@@ -1726,7 +2805,9 @@ pub(crate) const SIGN_INS: [(&str, &str, &str); 6] = [
 /// `auth.json`. `detail` is the stored credential's type.
 fn auth_rows(stored: &serde_json::Map<String, Value>) -> Vec<crate::AuthAccount> {
     let row = |id: &str, name: &str, hint: &str| {
-        let kind = stored.get(id).map(|v| v["type"].as_str().unwrap_or("stored").to_string());
+        let kind = stored
+            .get(id)
+            .map(|v| v["type"].as_str().unwrap_or("stored").to_string());
         crate::AuthAccount {
             id: id.to_string(),
             name: name.to_string(),
@@ -1735,8 +2816,14 @@ fn auth_rows(stored: &serde_json::Map<String, Value>) -> Vec<crate::AuthAccount>
             detail: kind.unwrap_or_else(|| "not signed in".to_string()),
         }
     };
-    let mut rows: Vec<_> = SIGN_INS.iter().map(|(id, name, hint)| row(id, name, hint)).collect();
-    let mut others: Vec<&String> = stored.keys().filter(|k| !SIGN_INS.iter().any(|(id, ..)| id == k)).collect();
+    let mut rows: Vec<_> = SIGN_INS
+        .iter()
+        .map(|(id, name, hint)| row(id, name, hint))
+        .collect();
+    let mut others: Vec<&String> = stored
+        .keys()
+        .filter(|k| !SIGN_INS.iter().any(|(id, ..)| id == k))
+        .collect();
     others.sort();
     rows.extend(others.into_iter().map(|k| row(k, k, "")));
     rows
@@ -1744,14 +2831,20 @@ fn auth_rows(stored: &serde_json::Map<String, Value>) -> Vec<crate::AuthAccount>
 
 /// Put the Antigravity row before OpenAI's API key row, the last offered one.
 fn with_antigravity(rows: &mut Vec<crate::AuthAccount>, row: crate::AuthAccount) {
-    let at = rows.iter().position(|r| r.id == "openai").unwrap_or(rows.len());
+    let at = rows
+        .iter()
+        .position(|r| r.id == "openai")
+        .unwrap_or(rows.len());
     rows.insert(at, row);
 }
 
 /// Where the app bundle or a dev build keeps Pi: `Contents/Resources/pi`
 /// in `Keel.app`, else `pi/` beside the binary (`scripts/fetch-pi.sh`).
 fn bundle_dirs() -> Vec<PathBuf> {
-    let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) else {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
         return Vec::new();
     };
     let mut dirs = Vec::new();
@@ -1912,8 +3005,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        HOMEBREW_PI, INSTALL_HINT, PiHarness, ResolveInput, SIGN_INS, Value, auth_rows, with_antigravity, classify_version, compose_path,
-        SignInLine, extension_line, redact, sign_in_line, split_records,
+        HOMEBREW_PI, INSTALL_HINT, PiHarness, ResolveInput, SIGN_INS, SignInLine, Value, auth_rows,
+        classify_version, compose_path, extension_line, redact, sign_in_line, split_records,
+        with_antigravity,
     };
     use crate::{
         ControlMsg, Harness, HarnessError, ModelId, NativeSessionId, ReasoningLevel, RunControls,
@@ -1926,12 +3020,65 @@ mod tests {
         assert!(super::permission_extension(FullAccess, None, "pi").is_none());
         let dir = std::env::temp_dir().join(format!("keel-pi-permission-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let ask = super::permission_extension(Ask, Some(&dir), "pi").unwrap().expect("written");
+        let ask = super::permission_extension(Ask, Some(&dir), "pi")
+            .unwrap()
+            .expect("written");
         assert_eq!(ask, dir.join("keel-permission-ask.pi.ts"));
         let source = fs::read_to_string(&ask).unwrap();
-        assert!(source.contains("const AUTO_EDIT = false;") && source.contains("ctx.ui.confirm("), "{source}");
-        let edit = super::permission_extension(AutoEdit, Some(&dir), "pi").unwrap().expect("written");
-        assert!(fs::read_to_string(edit).unwrap().contains("const AUTO_EDIT = true;"));
+        assert!(
+            source.contains("const AUTO_EDIT = false;") && source.contains("ctx.ui.confirm("),
+            "{source}"
+        );
+        let edit = super::permission_extension(AutoEdit, Some(&dir), "pi")
+            .unwrap()
+            .expect("written");
+        assert!(
+            fs::read_to_string(edit)
+                .unwrap()
+                .contains("const AUTO_EDIT = true;")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_mode_gate_blocks_mutating_tools_without_a_prompt_only() {
+        use keel_proto::PermissionMode::*;
+        let off = super::permission_gate_source(Ask, false);
+        assert!(off.contains("const PLAN = false;"), "{off}");
+        assert!(super::plan_prompt_extension(false, None, "pi").is_none());
+        let dir = std::env::temp_dir().join(format!("keel-pi-plan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gate = super::permission_extension_for(FullAccess, Some(&dir), "pi", true)
+            .unwrap()
+            .expect("written");
+        let source = fs::read_to_string(&gate).unwrap();
+        assert!(source.contains("const PLAN = true;"), "{source}");
+        let blocked = source.find("is off in plan mode").expect("deny");
+        let confirm = source.find("ctx.ui.confirm(").expect("ask path stays");
+        assert!(blocked < confirm, "plan mode denies before any confirm");
+        assert!(!source.contains("\"edit\"") || source.contains("PLAN_ALLOW"));
+        assert!(!crate::plan_mode_allows("edit"));
+        assert!(!crate::plan_mode_allows("write"));
+        assert!(!crate::plan_mode_allows("bash"));
+        assert!(!crate::plan_mode_allows("shell"));
+        assert!(!crate::plan_mode_allows("exec"));
+        assert!(!crate::plan_mode_allows("memory_write"));
+        assert!(!crate::plan_mode_allows("browser_click"));
+        assert!(!crate::plan_mode_allows("browser_type"));
+        assert!(!crate::plan_mode_allows("mcp__srv__delete_file"));
+        assert!(crate::plan_mode_allows("read"));
+        assert!(crate::plan_mode_allows("search"));
+        assert!(crate::plan_mode_allows("list"));
+        assert!(crate::plan_mode_allows("web_fetch"));
+        assert!(crate::plan_mode_allows("browser_read"));
+        assert!(crate::plan_mode_allows("show_plan"));
+        let prompt = super::plan_prompt_extension(true, Some(&dir), "pi").expect("prompt");
+        let prompt = fs::read_to_string(prompt).unwrap();
+        assert!(prompt.contains("keel_plan"), "{prompt}");
+        assert!(prompt.contains(crate::PLAN_MODE_PROMPT));
+        assert!(prompt.contains("Research") && prompt.contains("exactly one plan card") && prompt.contains("stop"));
+        assert!(!off.contains(crate::PLAN_MODE_PROMPT));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1939,30 +3086,88 @@ mod tests {
     fn memory_extension_injects_and_registers_both_tools() {
         let sock = Path::new("/data/keel.sock");
         let source = super::memory_extension_source(sock, "tok-fixture");
-        for needle in ["\"before_agent_start\"", "sections.keel_memory", "\"memory_read\"", "\"memory_write\"", "\"/data/keel.sock\"", "readOnlyHint: true", "method: \"hello\"", "memory_prompt"] {
+        for needle in [
+            "\"before_agent_start\"",
+            "sections.keel_memory",
+            "\"memory_read\"",
+            "\"memory_write\"",
+            "\"/data/keel.sock\"",
+            "readOnlyHint: true",
+            "method: \"hello\"",
+            "memory_prompt",
+        ] {
             assert!(source.contains(needle), "{needle} missing");
         }
         assert!(source.contains("Read and update Keel's notes for later sessions."));
-        assert!(!source.contains("memory_delete"), "the model never gets delete");
+        assert!(
+            !source.contains("memory_delete"),
+            "the model never gets delete"
+        );
 
         let dir = std::env::temp_dir().join(format!("keel-pi-memory-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        assert_eq!(super::memory_extension(Some(&dir)), None, "no token, no extension");
+        assert_eq!(
+            super::memory_extension(Some(&dir)),
+            None,
+            "no token, no extension"
+        );
         fs::write(dir.join("ipc.token"), "tok-fixture\n").unwrap();
         let path = super::memory_extension(Some(&dir)).expect("written");
         assert_eq!(path, dir.join("harnesses/keel/extensions/keel-memory.ts"));
-        assert_eq!(fs::read_to_string(&path).unwrap(), super::memory_extension_source(&dir.join("keel.sock"), "tok-fixture"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            super::memory_extension_source(&dir.join("keel.sock"), "tok-fixture")
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let before = fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         super::memory_extension(Some(&dir)).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before, "same text is not rewritten");
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "same text is not rewritten"
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stabilized_injected_sections_and_memory_fallback() {
+        let sock = Path::new("/data/keel.sock");
+        let mem = super::memory_extension_source(sock, "tok-test");
+        // Verify fallback to last successful memory
+        assert!(mem.contains("let lastMemory: string | undefined;"));
+        assert!(mem.contains("lastMemory = String(result.text).trimEnd();"));
+        assert!(mem.contains("const current = (lastMemory ?? `${PREAMBLE}\\n\\n${UNAVAILABLE}`).trimEnd();"));
+        assert!(mem.contains("if (sections.keel_memory !== current)"));
+
+        // Verify project extension sorts roots deterministically and trims whitespace
+        let roots = crate::ProjectRoots {
+            name: "test-proj".to_string(),
+            roots: vec![
+                ("main".to_string(), "/root/main".to_string()),
+                ("b".to_string(), "/root/b".to_string()),
+                ("a".to_string(), "/root/a".to_string()),
+            ],
+        };
+        let proj = super::project_extension_source(&roots);
+        assert!(proj.contains("keel_project !== PROJECT"));
+        assert!(proj.contains("a: /root/a") && proj.contains("b: /root/b"));
+        let a_pos = proj.find("a: /root/a").unwrap();
+        let b_pos = proj.find("b: /root/b").unwrap();
+        assert!(a_pos < b_pos, "secondary roots must be sorted deterministically");
+
+        // Verify plan prompt stabilizes section
+        let plan = super::plan_prompt_source();
+        assert!(plan.contains("sections.keel_plan !== PLAN"));
+        assert!(plan.contains(crate::PLAN_MODE_PROMPT.trim_end()));
     }
 
     #[test]
@@ -1971,9 +3176,17 @@ mod tests {
         for mode in [Ask, AutoEdit] {
             let source = super::permission_extension_source(mode);
             assert!(source.contains("\"ls\", \"memory_read\"]"), "{source}");
-            assert!(source.contains("const ALWAYS = new Set([\"memory_write\"]);"), "{source}");
-            let pass = source.find("ALWAYS.has(name)").expect("memory_write passes");
-            assert!(pass < source.find("ctx.ui.confirm(").unwrap(), "passes before the confirm");
+            assert!(
+                source.contains("const ALWAYS = new Set([\"memory_write\"]);"),
+                "{source}"
+            );
+            let pass = source
+                .find("ALWAYS.has(name)")
+                .expect("memory_write passes");
+            assert!(
+                pass < source.find("ctx.ui.confirm(").unwrap(),
+                "passes before the confirm"
+            );
         }
     }
 
@@ -1983,22 +3196,38 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keel-pi-browser-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("browser.sock");
-        let path = super::browser_extension(Some(&sock), Some("c1"), "pi").expect("extension written");
+        let path =
+            super::browser_extension(Some(&sock), Some("c1"), "pi").expect("extension written");
         assert_eq!(path, dir.join("browser-mcp").join("pi-c1.ts"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let source = fs::read_to_string(&path).unwrap();
-        assert!(source.contains("pi.registerMcpServer(\"keel-browser\""), "{source}");
-        assert!(!source.contains("keel-ui"), "cards have their own extension: {source}");
+        assert!(
+            source.contains("pi.registerMcpServer(\"keel-browser\""),
+            "{source}"
+        );
+        assert!(
+            !source.contains("keel-ui"),
+            "cards have their own extension: {source}"
+        );
         assert!(source.contains("exposure: \"direct\""), "{source}");
         assert!(source.contains("\"KEEL_BROWSER_CHAT\":\"c1\""), "{source}");
         let sock_lit = serde_json::to_string(&sock.to_string_lossy()).unwrap();
-        assert!(source.contains(&format!("[\"mcp-browser\",\"--socket\",{sock_lit}]")), "{source}");
+        assert!(
+            source.contains(&format!("[\"mcp-browser\",\"--socket\",{sock_lit}]")),
+            "{source}"
+        );
         // Rewriting the same content is a no-op and keeps the path stable.
-        assert_eq!(super::browser_extension(Some(&sock), Some("c1"), "pi"), Some(path));
+        assert_eq!(
+            super::browser_extension(Some(&sock), Some("c1"), "pi"),
+            Some(path)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2010,10 +3239,20 @@ mod tests {
         let path = super::ui_extension(Some(&dir), "pi").expect("extension written");
         assert_eq!(path, dir.join("keel-ui.pi.ts"));
         let source = fs::read_to_string(&path).unwrap();
-        assert!(source.contains("pi.registerMcpServer(\"keel-ui\""), "{source}");
+        assert!(
+            source.contains("pi.registerMcpServer(\"keel-ui\""),
+            "{source}"
+        );
         assert!(source.contains("[\"mcp-ui\"]"), "{source}");
-        assert!(source.contains("\"before_agent_start\"") && source.contains("sections.keel_cards = CARDS"), "{source}");
-        assert!(source.contains("show_diagram"), "the section names the cards: {source}");
+        assert!(
+            source.contains("\"before_agent_start\"")
+                && source.contains("sections.keel_cards = CARDS"),
+            "{source}"
+        );
+        assert!(
+            source.contains("show_diagram"),
+            "the section names the cards: {source}"
+        );
         assert!(!source.contains("keel-browser"), "{source}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2172,7 +3411,13 @@ mod tests {
             browser_sock: None,
             browser_chat: None,
             permission: Default::default(),
+            plan_mode: false,
             project: None,
+            report_usage: None,
+            chat_id: None,
+            longer_cache: false,
+            keep_cache_warm: true,
+            idle_eviction_timeout_secs: None,
         }
     }
 
@@ -2270,6 +3515,7 @@ mod tests {
     fn fixture_turn_parses_into_events() {
         let text = include_str!("../fixtures/pi-1.0.4-turn.jsonl");
         let mut tools = std::collections::HashSet::new();
+        let mut labels = super::LabelStream::default();
         let mut spawns = std::collections::HashSet::new();
         let mut progress = super::ProgressGate::default();
         let mut events = Vec::new();
@@ -2277,6 +3523,7 @@ mod tests {
             events.extend(super::on_stdout(
                 line,
                 &mut tools,
+                &mut labels,
                 &mut spawns,
                 &mut progress,
                 &None,
@@ -2297,7 +3544,9 @@ mod tests {
         let starts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                AgentEvent::ToolStarted { name, detail, .. } => Some((name.as_str(), detail.as_str())),
+                AgentEvent::ToolStarted { name, detail, .. } => {
+                    Some((name.as_str(), detail.as_str()))
+                }
                 _ => None,
             })
             .collect();
@@ -2310,7 +3559,9 @@ mod tests {
         let tails: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                AgentEvent::ToolProgress { output_tail, kind, .. } => Some((output_tail.as_str(), kind.as_deref())),
+                AgentEvent::ToolProgress {
+                    output_tail, kind, ..
+                } => Some((output_tail.as_str(), kind.as_deref())),
                 _ => None,
             })
             .collect();
@@ -2334,11 +3585,61 @@ mod tests {
     fn tool_end_keeps_duration_ms() {
         let line = r#"{"type":"tool_execution_end","toolCallId":"t","toolName":"bash","durationMs":42,"result":{"content":[{"type":"text","text":"ok"}]},"isError":false}"#;
         let mut tools = std::collections::HashSet::new();
+        let mut labels = super::LabelStream::default();
         let mut spawns = std::collections::HashSet::new();
         let mut progress = super::ProgressGate::default();
-        let events = super::on_stdout(line, &mut tools, &mut spawns, &mut progress, &None, &super::Stop::None);
+        let events = super::on_stdout(
+            line,
+            &mut tools,
+            &mut labels,
+            &mut spawns,
+            &mut progress,
+            &None,
+            &super::Stop::None,
+        );
         assert!(
             matches!(&events[..], [AgentEvent::ToolFinished { duration_ms: Some(42), summary, .. }] if summary == "ok"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn toolcall_delta_emits_label_as_soon_as_it_closes() {
+        let mut tools = std::collections::HashSet::new();
+        let mut labels = super::LabelStream::default();
+        let mut spawns = std::collections::HashSet::new();
+        let mut progress = super::ProgressGate::default();
+        let start = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"id":"c1","toolName":"read","toolCall":{"id":"c1","name":"read","arguments":{}}}}"#;
+        let partial = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"{\"label\":\"Reading the on/off cycle"}}"#;
+        let closed = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":" logic\",\"path\":\"a.rs\"}"}}"#;
+        let mut events = Vec::new();
+        for line in [start, partial, closed] {
+            events.extend(super::on_stdout(
+                line,
+                &mut tools,
+                &mut labels,
+                &mut spawns,
+                &mut progress,
+                &None,
+                &super::Stop::None,
+            ));
+        }
+        let labels: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolLabel { tool_id, label, .. } if tool_id == "c1" => {
+                    Some(label.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, ["Reading the on/off cycle logic"], "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolStarted { tool_id, name, .. }
+                    if tool_id == "c1" && name == "read"
+            )),
             "{events:?}"
         );
     }
@@ -2459,9 +3760,15 @@ mod tests {
             })
         };
         let picked = pick(Some(env_pi.clone()));
-        assert_eq!((picked.executable(), picked.version()), (Some(env_pi), "1.9.0"));
+        assert_eq!(
+            (picked.executable(), picked.version()),
+            (Some(env_pi), "1.9.0")
+        );
         let picked = pick(None);
-        assert_eq!((picked.executable(), picked.version()), (Some(app.join("pi")), "1.3.0"));
+        assert_eq!(
+            (picked.executable(), picked.version()),
+            (Some(app.join("pi")), "1.3.0")
+        );
         write_version(&app.join("pi"), "0.84.1");
         fs::set_permissions(&dev.join("pi"), fs::Permissions::from_mode(0o644)).expect("0644");
         let skipped = pick(None);
@@ -2528,8 +3835,14 @@ mod tests {
                     browser_sock: None,
                     browser_chat: None,
                     permission: Default::default(),
+                    plan_mode: false,
                     project: None,
-        },
+                    report_usage: None,
+                    chat_id: None,
+                    longer_cache: false,
+                    keep_cache_warm: true,
+                    idle_eviction_timeout_secs: None,
+                },
                 RunControls { inbound: rx },
             )
             .await
@@ -2634,7 +3947,10 @@ mod tests {
         let stdin = fs::read_to_string(fix.stub_dir.join("stdin")).expect("stdin");
         assert!(stdin.contains("\"type\":\"switch_session\""));
         assert!(stdin.contains("resume.jsonl"));
-        assert!(!fix.stub_dir.join("prompt_before_switch").exists(), "prompt sent before switch_session answered");
+        assert!(
+            !fix.stub_dir.join("prompt_before_switch").exists(),
+            "prompt sent before switch_session answered"
+        );
         assert!(stdin.contains("\"type\":\"set_thinking_level\""));
         assert!(stdin.contains("\"level\":\"low\""));
         assert!(stdin.contains("\"type\":\"get_state\""));
@@ -2683,6 +3999,32 @@ mod tests {
         );
         let extra = fix.tmp.path.join("extra");
         assert_eq!(parts.iter().filter(|part| **part == extra).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_failure_aborts_prompt_and_emits_error() {
+        let _gate = gate().lock().await;
+        let fix = layout("switch_fail");
+        let harness = harness_for(&fix);
+        let _env = bind_stub(&fix, "switch_fail");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let stream = harness
+            .run(spec(&fix, None), RunControls { inbound: rx })
+            .await
+            .expect("run");
+        drop(tx);
+        let events = until_done(stream, Duration::from_secs(8), |_| {}).await;
+        let status = done_status(&events);
+        assert!(
+            matches!(&status, TurnStatus::Errored { message } if message == "Couldn't resume this session"),
+            "expected Errored with Couldn't resume this session, got {status:?}"
+        );
+        let stdin = fs::read_to_string(fix.stub_dir.join("stdin")).expect("stdin");
+        assert!(stdin.contains("\"type\":\"switch_session\""));
+        assert!(
+            !stdin.contains("\"type\":\"prompt\""),
+            "prompt must not be sent when resume fails"
+        );
     }
 
     #[tokio::test]
@@ -2749,7 +4091,11 @@ mod tests {
             .collect();
         assert_eq!(questions.len(), 1, "{events:?}");
         match &questions[0] {
-            AgentEvent::Question { id, questions , subagent: None} => {
+            AgentEvent::Question {
+                id,
+                questions,
+                subagent: None,
+            } => {
                 assert_eq!(id, "q-1");
                 assert_eq!(questions.len(), 1);
                 assert_eq!(questions[0].id, "q-1");
@@ -2924,8 +4270,14 @@ mod tests {
                     browser_sock: None,
                     browser_chat: None,
                     permission: Default::default(),
+                    plan_mode: false,
                     project: None,
-        },
+                    report_usage: None,
+                    chat_id: None,
+                    longer_cache: false,
+                    keep_cache_warm: true,
+                    idle_eviction_timeout_secs: None,
+                },
                 RunControls { inbound: rx },
             )
             .await
@@ -2937,14 +4289,22 @@ mod tests {
         assert!(seen.lock().unwrap().iter().any(|(_, file)| file.is_some()));
     }
 
-    async fn run_args_for(harness: &PiHarness, fix: &Fix, data: &Path, sock: Option<&Path>) -> Vec<String> {
+    async fn run_args_for(
+        harness: &PiHarness,
+        fix: &Fix,
+        data: &Path,
+        sock: Option<&Path>,
+    ) -> Vec<String> {
         let mut spec = spec(fix, None);
         spec.data_dir = Some(data.to_path_buf());
         spec.browser_sock = sock.map(Path::to_path_buf);
         spec.browser_chat = Some("c1".into());
         spec.permission = keel_proto::PermissionMode::Ask;
         let (tx, rx) = mpsc::unbounded_channel();
-        let stream = harness.run(spec, RunControls { inbound: rx }).await.expect("run");
+        let stream = harness
+            .run(spec, RunControls { inbound: rx })
+            .await
+            .expect("run");
         drop(tx);
         let events = until_done(stream, Duration::from_secs(8), |_| {}).await;
         assert!(matches!(done_status(&events), TurnStatus::Completed {}));
@@ -2960,23 +4320,112 @@ mod tests {
         fs::create_dir_all(&data).unwrap();
         let sock = data.join("browser.sock");
         let has = |args: &[String], flag: &str, value: &Path| {
-            args.windows(2).any(|p| p[0] == flag && p[1] == value.to_string_lossy())
+            args.windows(2)
+                .any(|p| p[0] == flag && p[1] == value.to_string_lossy())
         };
         let keel = run_args_for(&harness_for(&fix), &fix, &data, Some(&sock)).await;
-        assert!(has(&keel, "--session-dir", &data.join("harnesses/keel/sessions")), "{keel:?}");
-        assert!(has(&keel, "--extension", &data.join("keel-ui.keel.ts")), "{keel:?}");
-        assert!(has(&keel, "--extension", &data.join("browser-mcp/keel-c1.ts")), "{keel:?}");
-        assert!(has(&keel, "--extension", &data.join("keel-permission-ask.keel.ts")), "{keel:?}");
-        assert!(keel.windows(2).any(|p| p[0] == "--append-system-prompt" && p[1] == crate::keel::KEEL_SYSTEM_PROMPT), "{keel:?}");
-        assert_eq!(keel.iter().filter(|a| *a == "--extension").count(), 3, "{keel:?}");
+        assert!(
+            has(
+                &keel,
+                "--session-dir",
+                &data.join("harnesses/keel/sessions")
+            ),
+            "{keel:?}"
+        );
+        assert!(
+            has(&keel, "--extension", &data.join("keel-ui.keel.ts")),
+            "{keel:?}"
+        );
+        assert!(
+            has(&keel, "--extension", &data.join("browser-mcp/keel-c1.ts")),
+            "{keel:?}"
+        );
+        assert!(
+            has(
+                &keel,
+                "--extension",
+                &data.join("keel-permission-ask.keel.ts")
+            ),
+            "{keel:?}"
+        );
+        assert!(
+            has(
+                &keel,
+                "--extension",
+                &data.join("harnesses/keel/extensions/keel-labels.ts")
+            ),
+            "{keel:?}"
+        );
+        assert!(
+            has(
+                &keel,
+                "--extension",
+                &data.join("harnesses/keel/extensions/keel-cache.ts")
+            ),
+            "{keel:?}"
+        );
+        assert!(
+            keel.windows(2).any(
+                |p| p[0] == "--append-system-prompt" && p[1] == crate::keel::KEEL_SYSTEM_PROMPT
+            ),
+            "{keel:?}"
+        );
+        assert_eq!(
+            keel.iter().filter(|a| *a == "--extension").count(),
+            5,
+            "{keel:?}"
+        );
 
         // Without the browser, sessions, cards and the gate stay in the data dir.
         let bare = run_args_for(&harness_for(&fix), &fix, &data, None).await;
-        assert!(has(&bare, "--session-dir", &data.join("harnesses/keel/sessions")), "{bare:?}");
-        assert!(has(&bare, "--extension", &data.join("keel-ui.keel.ts")), "{bare:?}");
-        assert!(has(&bare, "--extension", &data.join("keel-permission-ask.keel.ts")), "{bare:?}");
-        assert!(bare.windows(2).any(|p| p[0] == "--append-system-prompt" && p[1] == crate::keel::KEEL_SYSTEM_PROMPT), "{bare:?}");
+        assert!(
+            has(
+                &bare,
+                "--session-dir",
+                &data.join("harnesses/keel/sessions")
+            ),
+            "{bare:?}"
+        );
+        assert!(
+            has(&bare, "--extension", &data.join("keel-ui.keel.ts")),
+            "{bare:?}"
+        );
+        assert!(
+            has(
+                &bare,
+                "--extension",
+                &data.join("keel-permission-ask.keel.ts")
+            ),
+            "{bare:?}"
+        );
+        assert!(
+            has(
+                &bare,
+                "--extension",
+                &data.join("harnesses/keel/extensions/keel-labels.ts")
+            ),
+            "{bare:?}"
+        );
+        assert!(
+            has(
+                &bare,
+                "--extension",
+                &data.join("harnesses/keel/extensions/keel-cache.ts")
+            ),
+            "{bare:?}"
+        );
+        assert!(
+            bare.windows(2).any(
+                |p| p[0] == "--append-system-prompt" && p[1] == crate::keel::KEEL_SYSTEM_PROMPT
+            ),
+            "{bare:?}"
+        );
         assert!(!bare.iter().any(|a| a.contains("browser-mcp")), "{bare:?}");
+        assert_eq!(
+            bare.iter().filter(|a| *a == "--extension").count(),
+            4,
+            "{bare:?}"
+        );
     }
 
     #[test]
@@ -2987,15 +4436,29 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            event(r#"{"type":"keel_login","event":{"type":"auth_url","url":"https://claude.ai/oauth/authorize?x=1"}}"#),
-            Some(Browser { url: "https://claude.ai/oauth/authorize?x=1".into() })
+            event(
+                r#"{"type":"keel_login","event":{"type":"auth_url","url":"https://claude.ai/oauth/authorize?x=1"}}"#
+            ),
+            Some(Browser {
+                url: "https://claude.ai/oauth/authorize?x=1".into()
+            })
         );
         assert_eq!(
-            event(r#"{"type":"keel_login","event":{"type":"device_code","userCode":"0A50-65F9","verificationUri":"https://github.com/login/device"}}"#),
-            Some(DeviceCode { code: "0A50-65F9".into(), url: "https://github.com/login/device".into() })
+            event(
+                r#"{"type":"keel_login","event":{"type":"device_code","userCode":"0A50-65F9","verificationUri":"https://github.com/login/device"}}"#
+            ),
+            Some(DeviceCode {
+                code: "0A50-65F9".into(),
+                url: "https://github.com/login/device".into()
+            })
         );
-        assert!(matches!(sign_in_line(r#"{"type":"keel_login","done":true}"#), Some(SignInLine::Done)));
-        assert!(matches!(sign_in_line(r#"{"type":"keel_login","error":"denied"}"#), Some(SignInLine::Failed(w)) if w == "denied"));
+        assert!(matches!(
+            sign_in_line(r#"{"type":"keel_login","done":true}"#),
+            Some(SignInLine::Done)
+        ));
+        assert!(
+            matches!(sign_in_line(r#"{"type":"keel_login","error":"denied"}"#), Some(SignInLine::Failed(w)) if w == "denied")
+        );
         assert!(sign_in_line(r#"{"type":"response","command":"prompt"}"#).is_none());
         assert!(sign_in_line("not json").is_none());
     }
@@ -3008,11 +4471,25 @@ mod tests {
         .unwrap();
         let rows = auth_rows(&stored);
         assert_eq!(rows.len(), SIGN_INS.len() + 1);
-        assert_eq!((rows[0].signed_in, rows[0].detail.as_str()), (true, "oauth"));
+        assert_eq!(
+            (rows[0].signed_in, rows[0].detail.as_str()),
+            (true, "oauth")
+        );
         assert!(!rows[1].signed_in);
         let last = rows.last().unwrap();
-        assert_eq!((last.id.as_str(), last.name.as_str(), last.signed_in, last.detail.as_str()), ("zai", "zai", true, "api_key"));
-        assert_eq!((rows[0].id.as_str(), rows[0].name.as_str()), ("anthropic", "Claude"));
+        assert_eq!(
+            (
+                last.id.as_str(),
+                last.name.as_str(),
+                last.signed_in,
+                last.detail.as_str()
+            ),
+            ("zai", "zai", true, "api_key")
+        );
+        assert_eq!(
+            (rows[0].id.as_str(), rows[0].name.as_str()),
+            ("anthropic", "Claude")
+        );
         assert!(rows.iter().all(|r| !r.detail.contains("secret")));
     }
 
@@ -3036,13 +4513,25 @@ mod tests {
         use crate::ProjectRoots;
         let project = ProjectRoots {
             name: "Resona RIF".into(),
-            roots: vec![("web".into(), "/tmp/web".into()), ("api".into(), "/tmp/api".into())],
+            roots: vec![
+                ("web".into(), "/tmp/web".into()),
+                ("api".into(), "/tmp/api".into()),
+            ],
         };
         let source = super::project_extension_source(&project);
-        assert!(source.contains("sections.keel_project = PROJECT"), "{source}");
-        assert!(source.contains("Resona RIF") && source.contains("web: /tmp/web") && source.contains("api: /tmp/api"), "{source}");
+        assert!(
+            source.contains("sections.keel_project = PROJECT"),
+            "{source}"
+        );
+        assert!(
+            source.contains("Resona RIF")
+                && source.contains("web: /tmp/web")
+                && source.contains("api: /tmp/api"),
+            "{source}"
+        );
         let dir = std::env::temp_dir().join(format!("keel-pi-project-{}", std::process::id()));
-        let path = super::project_extension(Some(&project), Some(&dir), Some("chat-1"), "keel").unwrap();
+        let path =
+            super::project_extension(Some(&project), Some(&dir), Some("chat-1"), "keel").unwrap();
         let written = fs::read_to_string(&path).unwrap();
         assert_eq!(written, source);
         let _ = fs::remove_dir_all(&dir);
@@ -3065,13 +4554,58 @@ mod usage_tests {
         let turn = include_str!("../fixtures/pi-1.0.4-turn.jsonl");
         // Two assistant messages in the fixture (the tool call, then "ok").
         assert_eq!(turn.lines().filter_map(usage_of).count(), 2);
-        let last = usage(turn.lines().filter(|l| usage_of(l).is_some()).next_back().unwrap());
-        assert_eq!((last.model.as_str(), last.input, last.output, last.cache_read), ("grok-4.5", 103, 6, 8064));
+        let last = usage(
+            turn.lines()
+                .filter(|l| usage_of(l).is_some())
+                .next_back()
+                .unwrap(),
+        );
+        assert_eq!(
+            (
+                last.model.as_str(),
+                last.input,
+                last.output,
+                last.cache_read
+            ),
+            ("grok-4.5", 103, 6, 8064)
+        );
         assert_eq!(last.context_used, Some(last.total()));
-        let state = include_str!("../fixtures/pi-1.0.4.jsonl").lines().next().unwrap();
+        let state = include_str!("../fixtures/pi-1.0.4.jsonl")
+            .lines()
+            .next()
+            .unwrap();
         let state = usage(state);
-        assert_eq!((state.model.as_str(), state.context_window, state.total()), ("claude-opus-4-8", Some(1_000_000), 0));
+        assert_eq!(
+            (state.model.as_str(), state.context_window, state.total()),
+            ("claude-opus-4-8", Some(1_000_000), 0)
+        );
         assert!(usage_of(r#"{"type":"message_end","message":{"role":"user"}}"#).is_none());
+    }
+
+    #[test]
+    fn cache_warm_entries_and_token_split_parsing() {
+        let warm_line = r#"{"type":"entry_appended","entry":{"type":"usage","kind":"cache_warm","model":"claude-3-5-sonnet","usage":{"input":0,"output":0,"cacheRead":50000,"cacheWrite":0,"totalTokens":50000}}}"#;
+        let warm = usage(warm_line);
+        assert_eq!(warm.model.as_str(), "claude-3-5-sonnet");
+        assert_eq!(warm.cache_read, 0);
+        assert_eq!(warm.cache_write, 0);
+        assert_eq!(warm.cache_warm, 50000);
+        assert_eq!(warm.total(), 50000);
+
+        let assistant_line = r#"{"type":"message_end","message":{"role":"assistant","model":"claude-3-5-sonnet","usage":{"input":100,"output":50,"cacheRead":800,"cacheWrite":100}}}"#;
+        let u = usage(assistant_line);
+        assert_eq!(u.input, 100);
+        assert_eq!(u.output, 50);
+        assert_eq!(u.cache_read, 800);
+        assert_eq!(u.cache_write, 100);
+        assert_eq!(u.cache_warm, 0);
+        assert_eq!(u.total(), 1050);
+
+        // Hit-rate formula: read / (input + read + write)
+        let total_input_side = u.input + u.cache_read + u.cache_write;
+        let hit_rate = (u.cache_read as f64) / (total_input_side as f64);
+        assert!((hit_rate - (800.0 / 1000.0)).abs() < 1e-6);
+        assert_eq!(format!("{:.1}%", hit_rate * 100.0), "80.0%");
     }
 }
 
@@ -3082,7 +4616,10 @@ mod error_tests {
     #[test]
     fn provider_errors_read_as_their_message() {
         let line = r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Add more at claude.ai\"}}"}}"#;
-        assert_eq!(assistant_error(line).as_deref(), Some("Add more at claude.ai"));
+        assert_eq!(
+            assistant_error(line).as_deref(),
+            Some("Add more at claude.ai")
+        );
         let plain = r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"socket hang up"}}"#;
         assert_eq!(assistant_error(plain).as_deref(), Some("socket hang up"));
         let ok = r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop","errorMessage":null}}"#;

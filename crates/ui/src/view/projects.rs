@@ -1186,6 +1186,7 @@ impl KeelWindow {
         let model = self.selected_model.clone();
         let effort = self.selected_effort.clone();
         let permission = self.effective_permission().as_str().to_string();
+        let plan_mode = self.plan_on_value();
         let title = project.name.clone();
         cx.spawn(async move |this, cx| {
             let space = client
@@ -1209,6 +1210,7 @@ impl KeelWindow {
                         "model": model,
                         "reasoning": effort,
                         "permission": permission,
+                        "plan_mode": plan_mode,
                     }),
                 )
                 .await;
@@ -2130,6 +2132,10 @@ impl KeelWindow {
                     || *s == keel_proto::DisplayStatus::Running
             })
             .unwrap_or(keel_proto::DisplayStatus::Idle);
+        let show_mark = super::sidebar::header_shows_status(
+            urgent,
+            self.visible_project_chats(&id).into_iter().map(|(_, status)| status),
+        );
         let collapsed = !open;
         let turn = chevron_turn_radians;
         let chevron = Icon::ChevronDown.el(zpx(12.));
@@ -2216,15 +2222,10 @@ impl KeelWindow {
                             .child(project.name),
                     )
                     .when(!in_select, |d| {
-                        d.when(collapsed, |d| {
-                            d.children(match urgent {
-                                keel_proto::DisplayStatus::AwaitingInput
-                                | keel_proto::DisplayStatus::Running => {
-                                    status_dot(urgent, &format!("project-{id}"), t, reduced)
-                                }
-                                _ => None,
-                            })
-                            .when(total > 0, |d| {
+                        d.when(collapsed && show_mark, |d| {
+                            d.children(status_dot(urgent, &format!("project-{id}"), t, reduced))
+                        })
+                        .when(collapsed && total > 0, |d| {
                                 d.child(
                                     div()
                                         .flex_none()
@@ -2235,7 +2236,6 @@ impl KeelWindow {
                                         .child(total.to_string()),
                                 )
                             })
-                        })
                         .child(reveal_on_hover(
                             "project-home-reveal",
                             group,

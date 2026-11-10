@@ -311,6 +311,14 @@ impl DocsStore {
         }))
     }
 
+    pub fn delete_native_session(&self, chat_id: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM native_sessions WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
+        Ok(())
+    }
+
     pub fn journal_mode(&self) -> Result<String, StoreError> {
         let mode: String = self
             .conn
@@ -654,6 +662,7 @@ mod tests {
                 message_id: "m".into(),
                 text: "go".into(),
                 attachments: Vec::new(),
+                shown: true,
             };
             store
                 .session(chat_id)

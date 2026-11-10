@@ -1110,6 +1110,7 @@ mod tests {
             reasoning: "".into(),
             reasoning_known: false,
             permission: "".into(),
+            plan_mode: false,
             usage: ChatUsage {
                 models: vec![ModelTokens {
                     model: "grok-4.5".into(),
@@ -1117,6 +1118,7 @@ mod tests {
                     output: 500,
                     cache_read: 0,
                     cache_write: 0,
+                    cache_warm: 0,
                 }],
                 context_used: 2500,
                 context_window: 10000,
@@ -1169,6 +1171,7 @@ mod tests {
             reasoning: "".into(),
             reasoning_known: false,
             permission: "".into(),
+            plan_mode: false,
             usage: Default::default(),
         };
 

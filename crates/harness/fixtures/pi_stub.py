@@ -123,6 +123,9 @@ def main():
             early, _, _ = select.select([stdin], [], [], 0.3)
             if early and stub_dir:
                 open(os.path.join(stub_dir, "prompt_before_switch"), "w").close()
+            if mode == "switch_fail":
+                respond(msg, {"cancelled": True}, success=False)
+                continue
             respond(msg, {"cancelled": False})
             continue
         if kind in ("set_thinking_level", "steer"):

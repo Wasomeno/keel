@@ -68,6 +68,8 @@ icons! {
     FileJson => "file-json",
     FileText => "file-text",
     Brain => "brain",
+    BookOpen => "book-open",
+    PenLine => "pen-line",
     Puzzle => "puzzle",
     // The effort chip: one sparkle per level lit.
     Sparkle => "sparkle",
@@ -113,6 +115,8 @@ icons! {
     AgentOff => "bot-off",
     Play => "play",
     Volume2 => "volume-2",
+    ChartColumn => "chart-column",
+    ChartLine => "chart-line",
     // Provider logos: Lobe Icons (MIT); Command Code from commandcode.ai.
     LogoAntigravity => "logo-antigravity",
     LogoClaude => "logo-claude",

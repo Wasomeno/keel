@@ -229,6 +229,136 @@ impl KeelWindow {
                 self.preview_sound(cx);
                 "ok"
             }
+            "theme" => {
+                match arg {
+                    "dark" => self.state.set_theme(Some(keel_proto::ThemeChoice::Dark)),
+                    "light" => self.state.set_theme(Some(keel_proto::ThemeChoice::Light)),
+                    _ => self.state.set_theme(None),
+                }
+                cx.notify();
+                "ok"
+            }
+            "open_diagram" => {
+                let row_id = arg.to_string();
+                if let Some(item) = self.transcript.items.iter().find(|i| i.row_id() == row_id) {
+                    if let crate::markdown::TranscriptBlock::Code { content, .. } = &item.block {
+                        let col = crate::transcript::PROSE_MAX_W;
+                        let swapped = crate::mermaid::maybe_swap_direction(content, col).into_owned();
+                        let view = std::rc::Rc::new(std::cell::RefCell::new(crate::mermaid_viewer::Viewport::default()));
+                        self.open_lightbox(super::Lightbox::Diagram { row_id: row_id.clone(), source: swapped, view }, cx);
+                        "ok"
+                    } else {
+                        "error: not a code block"
+                    }
+                } else {
+                    "error: diagram row not found"
+                }
+            }
+            "close_lightbox" => {
+                self.close_lightbox(cx);
+                "ok"
+            }
+            "diagram_menu" => {
+                let row_id = if arg.is_empty() {
+                    self.transcript.items.iter().find_map(|i| {
+                        if matches!(&i.block, crate::markdown::TranscriptBlock::Chart { .. } | crate::markdown::TranscriptBlock::Code { .. }) {
+                            Some(i.row_id().to_string())
+                        } else {
+                            None
+                        }
+                    }).unwrap_or_default()
+                } else {
+                    arg.to_string()
+                };
+                if self.diagram_menu.as_deref() == Some(&row_id) {
+                    self.diagram_menu = None;
+                } else {
+                    self.diagram_menu = Some(row_id);
+                }
+                cx.notify();
+                "ok"
+            }
+            "chart_kind" => {
+                let mut parts = arg.split_whitespace();
+                let first = parts.next().unwrap_or("");
+                let (row_id, kind_str) = if first == "line" || first == "bar" {
+                    ("", first)
+                } else {
+                    (first, parts.next().unwrap_or("bar"))
+                };
+                let kind = match kind_str {
+                    "line" => crate::chart::Kind::Line,
+                    _ => crate::chart::Kind::Bar,
+                };
+                let items = std::rc::Rc::make_mut(&mut self.transcript.items);
+                if let Some((idx, item)) = items.iter_mut().enumerate().find(|(_, i)| matches!(&i.block, crate::markdown::TranscriptBlock::Chart { .. }) && (row_id.is_empty() || i.row_id() == row_id)) {
+                    if let crate::markdown::TranscriptBlock::Chart { chart, .. } = &mut item.block {
+                        chart.kind = kind;
+                    }
+                    self.transcript.list_state.remeasure_items(idx..idx + 1);
+                }
+                cx.notify();
+                "ok"
+            }
+            "chart_hover" => {
+                let mut parts = arg.split_whitespace();
+                let first = parts.next().unwrap_or("");
+                let (row_id, group_str) = if first == "none" || first == "rest" || first == "reset" || first.chars().all(|c| c.is_ascii_digit()) {
+                    ("", Some(first))
+                } else {
+                    (first, parts.next())
+                };
+                let group = match group_str {
+                    Some("reset") | None => None,
+                    Some("none") | Some("rest") => Some(None),
+                    Some(s) => s.parse::<usize>().ok().map(Some),
+                };
+                let target_row = if row_id.is_empty() {
+                    self.transcript.items.iter().find_map(|i| {
+                        if matches!(&i.block, crate::markdown::TranscriptBlock::Chart { .. }) {
+                            Some(i.row_id().to_string())
+                        } else {
+                            None
+                        }
+                    }).unwrap_or_default()
+                } else {
+                    row_id.to_string()
+                };
+                crate::transcript::dev_set_chart_hover(&target_row, group);
+                if let Some(idx) = self.transcript.items.iter().position(|i| i.row_id() == target_row) {
+                    self.transcript.list_state.remeasure_items(idx..idx + 1);
+                }
+                cx.notify();
+                "ok"
+            }
+            "chart_toggle_series" => {
+                let mut parts = arg.split_whitespace();
+                let first = parts.next().unwrap_or("0");
+                let (row_id, ix) = if first.chars().all(|c| c.is_ascii_digit()) {
+                    ("", first)
+                } else {
+                    (first, parts.next().unwrap_or("0"))
+                };
+                let target_row = if row_id.is_empty() {
+                    self.transcript.items.iter().find_map(|i| {
+                        if matches!(&i.block, crate::markdown::TranscriptBlock::Chart { .. }) {
+                            Some(i.row_id().to_string())
+                        } else {
+                            None
+                        }
+                    }).unwrap_or_default()
+                } else {
+                    row_id.to_string()
+                };
+                let base = format!("{target_row}~hide-series-{ix}");
+                let is_hidden = self.expanded_tools.contains(&format!("{base}=1"));
+                let next = if is_hidden { format!("{base}=0") } else { format!("{base}=1") };
+                self.toggle_row(&next, cx);
+                if let Some(idx) = self.transcript.items.iter().position(|i| i.row_id() == target_row) {
+                    self.transcript.list_state.remeasure_items(idx..idx + 1);
+                }
+                "ok"
+            }
             "skills" => {
                 if !self.settings_open {
                     self.open_settings(cx);
@@ -546,6 +676,13 @@ impl KeelWindow {
                 })
                 .to_string();
             }
+            "scroll_row" => {
+                let Some(index) = self.transcript.items.iter().position(|item| item.row_id() == arg) else {
+                    return "error: no such row".into();
+                };
+                self.transcript.scroll_to_row(index);
+                "ok"
+            }
             "scroll" => {
                 // Like the wheel: positive moves back up the history.
                 let Ok(dy) = arg.parse::<f32>() else {
@@ -576,7 +713,87 @@ impl KeelWindow {
                 }
                 "ok"
             }
+            "rows" => {
+                // Row ids and kinds in the open chat, for `toggle`.
+                let rows: Vec<_> = self
+                    .transcript
+                    .items
+                    .iter()
+                    .filter(|item| item.leaving.is_none())
+                    .map(|item| {
+                        let kind = format!("{:?}", item.block);
+                        let kind = kind.split([' ', '{', '(']).next().unwrap_or("").to_string();
+                        json!({"id": item.row_id(), "kind": kind})
+                    })
+                    .collect();
+                return json!(rows).to_string();
+            }
+            "toggle" => {
+                // Same as clicking a fold: `{head}#worked`, or `{line}=1` / `=0`.
+                self.toggle_row(arg, cx);
+                "ok"
+            }
+            "live" => {
+                // `live on|off`: the open chat's last turn renders as running
+                // (live line, loader, timer) without sending anything.
+                // `live_step <words>` simulates the latest tool label in memory only; empty clears.
+                self.dev_live = arg.trim() == "on";
+                if !self.dev_live {
+                    self.dev_step = None;
+                }
+                if let Some(last) = self.msg_order.last().cloned() {
+                    self.publish_rows(&last);
+                }
+                self.kick_motion(cx);
+                "ok"
+            }
+            "live_start" => {
+                // Actual pre-tool loader path; no persisted history or sends.
+                self.dev_live = true;
+                self.dev_step = Some(String::new());
+                self.loader_verbs = &["Thinking"];
+                self.loader_seed.0 = std::time::Instant::now();
+                self.step_line = Some(super::next_step_line(None, "Thinking", self.loader_seed.0));
+                if let Some(last) = self.msg_order.last().cloned() {
+                    self.publish_rows(&last);
+                }
+                self.kick_motion(cx);
+                "ok"
+            }
+            "live_step" => {
+                let step = arg.trim();
+                self.dev_step = (!step.is_empty()).then(|| step.to_string());
+                if let Some(last) = self.msg_order.last().cloned() {
+                    self.publish_rows(&last);
+                }
+                self.kick_motion(cx);
+                "ok"
+            }
+            "label_motion" => {
+                let now = std::time::Instant::now();
+                let state = |line: &super::StepLine| {
+                    let swap = line.from.as_ref();
+                    let arrival = swap.map(|swap| swap.arrival_at(now));
+                    json!({"label": line.shown, "width": arrival.and_then(|a| a.2).or(line.shown_w),
+                        "alpha": arrival.map_or(1., |a| a.0), "lift": arrival.map_or(0., |a| a.1),
+                        "animating": swap.is_some_and(|swap| swap.running(now))})
+                };
+                return json!({"summary": self.step_line.as_ref().map(state),
+                    "tools": self.tool_lines.iter().map(|(id, line)| (id, state(line))).collect::<std::collections::HashMap<_, _>>()}).to_string();
+            }
             "redraw" => "ok",
+            "resume_error" => {
+                let id = format!("error-{}", uuid::Uuid::new_v4());
+                let entry = self.message_entry(&id, "error");
+                entry.blocks.set_text("⚠ Couldn't resume this session");
+                self.publish_rows(&id);
+                self.mark_dirty(id, cx);
+                self.composer.update(cx, |s, cx| {
+                    s.set_value("Can you check the latest database migration for employees?", window, cx);
+                });
+                "ok"
+            }
+            "plan" => return self.dev_plan(arg, window, cx),
             "win_shot" => {
                 let path = if arg.is_empty() {
                     "/tmp/keel-win-shot.png"
@@ -613,7 +830,8 @@ impl KeelWindow {
                     if let Some(mtm) = MainThreadMarker::new() {
                         for window in NSApplication::sharedApplication(mtm).windows().iter() {
                             let wid: isize = unsafe { msg_send![&**window, windowNumber] };
-                            if wid > 0 && window.title().to_string().contains("Keel") {
+                            let title = window.title().to_string();
+                            if wid > 0 && (title.contains("Keel") || !title.is_empty()) {
                                 let rect = NSRect {
                                     origin: NSPoint {
                                         x: f64::INFINITY,
@@ -684,6 +902,108 @@ impl KeelWindow {
         })
         .detach();
         files_out.unwrap_or_else(|| answer.to_string())
+    }
+
+    /// Show one plan-card state, or read and set the Plan toggle. No model turn.
+    pub(super) fn dev_plan(&mut self, arg: &str, window: &mut Window, cx: &mut Context<Self>) -> String {
+        let arg = arg.trim();
+        cx.spawn(async move |_, cx| {
+            for _ in 0..30 {
+                crate::dev_control::redraw();
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        })
+        .detach();
+        if arg.is_empty() || arg == "toggle" {
+            return format!("Plan {}", if self.plan_on_value() { "on" } else { "off" });
+        }
+        if arg == "on" || arg == "off" {
+            let want = arg == "on";
+            if self.plan_on_value() != want {
+                self.toggle_plan_mode(cx);
+            }
+            return format!("Plan {}", if self.plan_on_value() { "on" } else { "off" });
+        }
+        if arg == "expand" {
+            let row_id = "plan-fixture".to_string();
+            if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                if card.expanded_targets.contains(&2) {
+                    card.expanded_targets.remove(&2);
+                } else {
+                    card.expanded_targets.insert(2);
+                }
+                cx.notify();
+                return "expanded targets toggled".into();
+            }
+        }
+        if arg == "mode_menu" {
+            let row_id = "plan-fixture".to_string();
+            if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                card.show_mode_menu = !card.show_mode_menu;
+                cx.notify();
+                return "mode menu toggled".into();
+            }
+        }
+        let phase = match arg {
+            "streaming" => crate::plan::Phase::Streaming,
+            "ready" => crate::plan::Phase::Ready,
+            "editing" => crate::plan::Phase::Editing,
+            "approved" => crate::plan::Phase::Approved,
+            "rejected" | "not-approved" => crate::plan::Phase::Rejected,
+            other => return format!("error: no plan state {other:?}"),
+        };
+        let plan = crate::plan::sample_plan();
+        let mut state = crate::plan::CardState::from_plan(&plan, phase);
+        if phase == crate::plan::Phase::Editing {
+            state.steps[0].title = "Read the composer".into();
+            state.steps[1].note = "Match the chart card.".into();
+        }
+        if phase == crate::plan::Phase::Approved {
+            state.expanded = false;
+        }
+        let row_id = "plan-fixture".to_string();
+        if phase == crate::plan::Phase::Editing {
+            self.plan_cards.insert(row_id.clone(), state.clone());
+            self.fill_plan_inputs(&row_id, window, cx);
+            state = self.plan_cards.get(&row_id).cloned().unwrap_or(state);
+        } else {
+            self.plan_cards.insert(row_id.clone(), state.clone());
+        }
+        let steps = self
+            .plan_cards
+            .get(&row_id)
+            .map(|c| c.steps.clone())
+            .unwrap_or(state.steps);
+        let item = crate::transcript::TranscriptRowItem {
+            message_id: "plan-fixture".into(),
+            role: "assistant".into(),
+            block: crate::markdown::TranscriptBlock::PlanCard {
+                id: row_id,
+                plan: plan.clone(),
+            },
+            born: std::time::Instant::now(),
+            enter: None,
+            leaving: None,
+        };
+        self.dev_plan_lock = true;
+        self.session_card.held_steps = None;
+        self.session_card.held_steps_chat = None;
+        self.transcript.set_rows(vec![item]);
+        self.transcript.scroll_to_row(0);
+        self.transcript.set_stick(false);
+        cx.notify();
+        cx.spawn(async move |_, cx| {
+            for _ in 0..45 {
+                crate::dev_control::redraw();
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        })
+        .detach();
+        crate::plan::fixture_reply(phase, &plan, &steps)
     }
 
     fn dev_state(&self, cx: &Context<Self>) -> String {

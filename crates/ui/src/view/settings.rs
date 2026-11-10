@@ -3614,7 +3614,12 @@ impl KeelWindow {
                     .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.skills.confirm_leaving.as_ref().is_some_and(|(m, _)| *m == n) {
+                    if this
+                        .skills
+                        .confirm_leaving
+                        .as_ref()
+                        .is_some_and(|(m, _)| *m == n)
+                    {
                         this.skills.confirm_leaving = None;
                         cx.notify();
                     }
@@ -4211,15 +4216,14 @@ impl KeelWindow {
                         .child("Couldn't read memory."),
                 )
                 .child(div().t_small().text_color(c(t.danger)).child(err))
-                .child(text_button("memory-retry", "Retry", t).on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| this.load_memory(cx)),
-                ))
+                .child(
+                    text_button("memory-retry", "Retry", t)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_memory(cx))),
+                )
                 .into_any_element(),
             Ok(None) => muted_line("Open a chat that has a folder to see its project notes.")
                 .into_any_element(),
-            Ok(Some(scope)) if scope.notes.is_empty() => {
-                muted_line("None yet.").into_any_element()
-            }
+            Ok(Some(scope)) if scope.notes.is_empty() => muted_line("None yet.").into_any_element(),
             Ok(Some(scope)) => {
                 let mut list = div().flex().flex_col().gap_0p5();
                 if scope.truncated {
@@ -4233,7 +4237,9 @@ impl KeelWindow {
                             .t_small()
                             .text_color(c(t.warning))
                             .child(Icon::Alert.el(zpx(12.)))
-                            .child("The index is over the cap. Later chats will not see every line."),
+                            .child(
+                                "The index is over the cap. Later chats will not see every line.",
+                            ),
                     );
                 }
                 for note in scope.notes {
@@ -4280,7 +4286,9 @@ impl KeelWindow {
         };
         let open = note.clone();
         div()
-            .id(ElementId::Name(format!("memory-row-{}-{}", tab.scope(), note.slug).into()))
+            .id(ElementId::Name(
+                format!("memory-row-{}-{}", tab.scope(), note.slug).into(),
+            ))
             .w_full()
             .h(zpx(40.))
             .px_3()
@@ -4313,7 +4321,9 @@ impl KeelWindow {
                     .items_center()
                     .gap_1p5()
                     .when(note.unindexed, |d| d.child(tag("Unindexed".into(), false)))
-                    .when(!note.kind.is_empty(), |d| d.child(tag(note.kind.clone(), false)))
+                    .when(!note.kind.is_empty(), |d| {
+                        d.child(tag(note.kind.clone(), false))
+                    })
                     .child(tag(note.slug.clone(), true)),
             )
     }
@@ -4347,7 +4357,8 @@ impl KeelWindow {
         let description = note.description.clone();
         self.memory_desc
             .update(cx, |i, cx| i.set_value(description, window, cx));
-        self.memory_body.update(cx, |i, cx| i.set_value("", window, cx));
+        self.memory_body
+            .update(cx, |i, cx| i.set_value("", window, cx));
         let params = serde_json::json!({ "scope": tab.scope(), "slug": note.slug, "cwd": cwd });
         cx.spawn_in(window, async move |this, cx| {
             let res = client.call("memory_read", params).await;
@@ -4529,7 +4540,9 @@ impl KeelWindow {
                             .child("Edit note"),
                     )
                     .when(note.unindexed, |d| d.child(tag("Unindexed".into(), false)))
-                    .when(!note.kind.is_empty(), |d| d.child(tag(note.kind.clone(), false)))
+                    .when(!note.kind.is_empty(), |d| {
+                        d.child(tag(note.kind.clone(), false))
+                    })
                     .child(tag(note.slug.clone(), true)),
             )
             .child(
@@ -4546,9 +4559,9 @@ impl KeelWindow {
                     .hover_fade(c(t.hover), None)
                     .active(|s| s.opacity(0.7))
                     .child(Icon::Close.el(zpx(14.)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.dismiss_memory_modal(cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)),
+                    ),
             );
 
         let loading = open.loaded.is_none();
@@ -4589,7 +4602,9 @@ impl KeelWindow {
         let left = match confirm {
             Some(kind) => {
                 let (question, action) = match kind {
-                    MemoryConfirm::Archive => ("Archive this note? Later chats will not see it.", "Archive"),
+                    MemoryConfirm::Archive => {
+                        ("Archive this note? Later chats will not see it.", "Archive")
+                    }
                     MemoryConfirm::Delete => ("Delete this note? The file is removed.", "Delete"),
                 };
                 crate::motion::appear(
@@ -4623,21 +4638,25 @@ impl KeelWindow {
                 .items_center()
                 .gap_1()
                 .when(!note.unindexed, |d| {
-                    d.child(row_text("memory-archive", "Archive", t.text_muted, t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.memory.confirm = Some(MemoryConfirm::Archive);
+                    d.child(
+                        row_text("memory-archive", "Archive", t.text_muted, t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.memory.confirm = Some(MemoryConfirm::Archive);
+                                this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                })
+                .child(
+                    row_text("memory-delete", "Delete", t.danger, t).on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| {
+                            this.memory.confirm = Some(MemoryConfirm::Delete);
                             this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
                             cx.notify();
-                        }),
-                    ))
-                })
-                .child(row_text("memory-delete", "Delete", t.danger, t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.memory.confirm = Some(MemoryConfirm::Delete);
-                        this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
-                        cx.notify();
-                    },
-                )))
+                        },
+                    )),
+                )
                 .into_any_element(),
         };
         let footer = div()
@@ -4657,9 +4676,9 @@ impl KeelWindow {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(text_button("memory-cancel", "Cancel", t).on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx),
-                    )))
+                    .child(text_button("memory-cancel", "Cancel", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)),
+                    ))
                     .child(
                         filled_button("memory-save", "Save", t.accent, t)
                             .when(busy || loading, |d| d.opacity(0.6))
@@ -5045,7 +5064,12 @@ fn field(t: Tokens, label: &'static str, input: AnyElement) -> gpui::Div {
 /// knob slides across, stretching mid-travel with asymmetric leading/trailing edge
 /// morphology, while the track and knob colors blend to their new state with
 /// Emil Kowalski motion physics.
-pub(super) fn toggle(id: String, on: bool, flip: Option<u64>, t: Tokens) -> gpui::Stateful<gpui::Div> {
+pub(super) fn toggle(
+    id: String,
+    on: bool,
+    flip: Option<u64>,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
     use gpui::AnimationExt as _;
     const TRAVEL: f32 = 12.;
     const KNOB: f32 = 14.;
@@ -5261,7 +5285,11 @@ fn filled_button_owned(id: String, label: &'static str, t: Tokens) -> gpui::Stat
 }
 
 /// `text_button` with a runtime id.
-pub(super) fn text_button_owned(id: String, label: &'static str, t: Tokens) -> gpui::Stateful<gpui::Div> {
+pub(super) fn text_button_owned(
+    id: String,
+    label: &'static str,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(ElementId::Name(id.into()))
         .px_2p5()

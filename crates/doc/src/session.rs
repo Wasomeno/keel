@@ -66,6 +66,9 @@ pub struct ToolRow {
     /// What the call works on (file, command, ...). Empty on a finish: the
     /// start's detail stays.
     pub detail: String,
+    /// Short agent-written progress label. Empty on a finish: the start's
+    /// label stays. Absent on older rows.
+    pub label: String,
     /// Absolute paths of images the tool returned (screenshots), shown
     /// inline under the row. Paths only: never image bytes.
     pub images: Vec<String>,
@@ -167,6 +170,9 @@ pub struct CommandView {
     /// Images on a send.
     pub attachments: Vec<Attachment>,
     pub outcome: Option<String>,
+    /// False for an implement turn the transcript does not draw. Absent in
+    /// older commands, which are shown.
+    pub shown: bool,
 }
 
 /// Typed mirror kept next to the document.
@@ -701,6 +707,7 @@ impl SessionDoc {
                 message_id,
                 text,
                 attachments,
+                shown,
                 ..
             } => {
                 entry.insert("kind", "send")?;
@@ -708,6 +715,9 @@ impl SessionDoc {
                 entry.insert("text", text.as_str())?;
                 if !attachments.is_empty() {
                     entry.insert("attachments", encode_attachments(attachments)?.as_str())?;
+                }
+                if !shown {
+                    entry.insert("shown", false)?;
                 }
             }
             UserCommand::Steer {
@@ -1030,6 +1040,10 @@ fn read_commands(doc: &LoroDoc) -> Vec<CommandView> {
             answers: map_str(&entry, "answers"),
             attachments: decode_attachments(&map_str(&entry, "attachments")),
             outcome: map_opt_str(&entry, "outcome"),
+            shown: match entry.get("shown") {
+                Some(loro::ValueOrContainer::Value(loro::LoroValue::Bool(value))) => value,
+                _ => true,
+            },
         });
     }
     commands
@@ -1257,6 +1271,7 @@ fn read_parts(parts: &LoroList) -> Vec<PartView> {
                 input_bytes: map_u64(&part, "input_bytes"),
                 output_bytes: map_u64(&part, "output_bytes"),
                 detail: map_str(&part, "detail"),
+                label: map_str(&part, "label"),
                 images: map_str(&part, "images")
                     .lines()
                     .filter(|line| !line.is_empty())
@@ -1300,6 +1315,9 @@ fn write_tool(part: &LoroMap, row: &ToolRow, summary: &str) -> Result<(), DocErr
     }
     if !row.detail.is_empty() {
         part.insert("detail", row.detail.as_str())?;
+    }
+    if !row.label.is_empty() {
+        part.insert("label", row.label.as_str())?;
     }
     // Empty leaves the start's value: a finish upsert does not carry these.
     if !row.kind.is_empty() {
@@ -1509,6 +1527,7 @@ mod tests {
             message_id: format!("m{id}"),
             text: text.into(),
             attachments: Vec::new(),
+            shown: true,
         }
     }
 
@@ -1522,6 +1541,7 @@ mod tests {
             message_id: "m77".into(),
             text: "look".into(),
             attachments: vec![good.clone(), bad.clone()],
+            shown: true,
         };
         doc.append_command("phone", "phone", &command, 5).expect("append");
         let stored = doc.view().commands.into_iter().find(|c| c.message_id == "m77").expect("command");

@@ -56,12 +56,32 @@ pub(crate) fn antigravity_acp_bin() -> Option<PathBuf> {
 /// `yolo` via `AGY_SKIP_PERMISSIONS`, as Pi runs unasked. `AGY_ACP_MODE` comes
 /// from `scripts/pi-patches/pi-antigravity-bridge.patch`. `permission` is
 /// `None` for probes and sign-in, which ask (and so deny).
-pub(crate) fn antigravity_env(bin: Option<&Path>, permission: Option<PermissionMode>) -> Vec<(&'static str, OsString)> {
+///
+/// ACP has no per-turn read-only tool list. The bridge's `acpMode` maps a
+/// plan mode to `default` and documents that sending `plan` fails the turn,
+/// so this function never sets `AGY_ACP_MODE=plan`.
+///
+/// Auto-edit (`auto_edit`) lets file edits through without asking, and full
+/// access (`AGY_SKIP_PERMISSIONS=1`) becomes `yolo`. Either way a mutating
+/// call never reaches Keel's permission deny. While `plan_mode` is on, both
+/// are forced back to ask: skip stays `0` and the mode stays `default`.
+pub(crate) fn antigravity_env(
+    bin: Option<&Path>,
+    permission: Option<PermissionMode>,
+    plan_mode: bool,
+) -> Vec<(&'static str, OsString)> {
     let Some(bin) = bin else {
         return Vec::new();
     };
-    let skip = if permission == Some(PermissionMode::FullAccess) { "1" } else { "0" };
-    let mode = if permission == Some(PermissionMode::AutoEdit) { "auto_edit" } else { "default" };
+    let (skip, mode) = if plan_mode {
+        ("0", "default")
+    } else if permission == Some(PermissionMode::FullAccess) {
+        ("1", "default")
+    } else if permission == Some(PermissionMode::AutoEdit) {
+        ("0", "auto_edit")
+    } else {
+        ("0", "default")
+    };
     vec![
         ("AGY_ACP_BIN", bin.as_os_str().to_owned()),
         ("AGY_ENGINE", "acp".into()),
@@ -136,20 +156,29 @@ pub(crate) fn device_id(agent: &Path) -> String {
         .and_then(|t| serde_json::from_str(&t).ok())
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(id) = settings["deviceId"].as_str().filter(|id| uuid::Uuid::parse_str(id).is_ok()) {
+    if let Some(id) = settings["deviceId"]
+        .as_str()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+    {
         return id.to_string();
     }
     let id = uuid::Uuid::new_v4().to_string();
     settings["deviceId"] = serde_json::json!(id);
     let _ = std::fs::create_dir_all(agent);
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&settings).unwrap_or_default(),
+    );
     id
 }
 
 /// [`LOGIN_EXTENSION`] on disk beside Keel's Pi folder (the temp dir when
 /// none is set), rewritten only when it changed.
 pub(crate) fn login_extension() -> std::io::Result<PathBuf> {
-    let dir = pi_agent_dir().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+    let dir = pi_agent_dir()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
     let path = dir.join("keel-login.ts");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(LOGIN_EXTENSION) {
         std::fs::create_dir_all(&dir)?;
@@ -175,7 +204,11 @@ fn register_packages(exe: &Path, agent: &Path, antigravity: bool) {
         let _ = std::fs::remove_dir_all(&legacy_skill);
     }
 
-    let Some(bundle) = exe.parent().and_then(Path::parent).map(|root| root.join("pi-packages")) else {
+    let Some(bundle) = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("pi-packages"))
+    else {
         return;
     };
     let mut want: Vec<String> = std::fs::read_dir(&bundle)
@@ -202,15 +235,20 @@ fn register_packages(exe: &Path, agent: &Path, antigravity: bool) {
         .collect();
     let want_names: Vec<String> = want
         .iter()
-        .filter_map(|p| Path::new(p).file_name().and_then(|f| f.to_str()).map(String::from))
+        .filter_map(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(String::from)
+        })
         .collect();
     // Keep user-configured packages, but drop any entries for bundled packages
     // (from older or other Keel app/dev locations) and any entries matching bundled package names.
     let is_stale = |p: &String| {
         p.contains("/pi-packages/")
-            || want_names
-                .iter()
-                .any(|name| p == name || p == &format!("npm:{name}") || p.ends_with(&format!("/{name}")))
+            || want_names.iter().any(|name| {
+                p == name || p == &format!("npm:{name}") || p.ends_with(&format!("/{name}"))
+            })
     };
     let mut next: Vec<String> = have.iter().filter(|p| !is_stale(p)).cloned().collect();
     for p in want {
@@ -218,10 +256,41 @@ fn register_packages(exe: &Path, agent: &Path, antigravity: bool) {
             next.push(p);
         }
     }
+    let mut changed = false;
     if next != have {
         settings["packages"] = serde_json::json!(next);
+        changed = true;
+    }
+    if settings.get("cacheWarming").is_none() {
+        settings["cacheWarming"] = serde_json::json!("idle");
+        changed = true;
+    }
+    if changed {
         let _ = std::fs::create_dir_all(agent);
-        let _ = std::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default());
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&settings).unwrap_or_default(),
+        );
+    }
+}
+
+/// Write Pi's `cacheWarming` global setting into `{agent}/settings.json`.
+/// "idle" when `keep_warm` is true, "streaming" when false.
+pub fn update_cache_warming_setting(agent: &Path, keep_warm: bool) {
+    let path = agent.join("settings.json");
+    let mut settings: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let target = if keep_warm { "idle" } else { "streaming" };
+    if settings.get("cacheWarming").and_then(|v| v.as_str()) != Some(target) {
+        settings["cacheWarming"] = serde_json::json!(target);
+        let _ = std::fs::create_dir_all(agent);
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&settings).unwrap_or_default(),
+        );
     }
 }
 
@@ -274,7 +343,12 @@ santai tapi jelas, ramah tapi tidak lebay.\n\
 - Eliminate calques and bureaucratic filler: no \"yang mana\" or \"dimana\" as relative pronouns, no \"merupakan\" as the default \"is\", no stacked di- passives, no \"tersebut\" in every sentence.\n\
 - Technical terms stay in standard developer forms the way Indonesian devs say them (commit, push, deploy, branch, merge, build, bug, PR, test, error, log, config, repo). Attach affixes with a hyphen (di-push, error-nya, nge-build). Never touch code, identifiers, paths, commands, or quoted output.\n\
 - No cosplay slang (no wkwk, anjay, sob, mantul, gaskeun) and no boilerplate pleasantries (\"Semoga membantu!\", \"Di era digital ini\"). Start directly with the answer.\n\
-- Match length: short questions get short answers.";
+- Match length: short questions get short answers.\n\n\
+Every tool call requires a `label` argument (never omit it): 3-6 words, present participle, sentence case, naming the concept you are working on (not the file, tool, or raw command). Match the language of the user's latest message, with the same rule as replies.\n\
+- Reads/Inspects: \"Reading the on/off cycle logic\" (id: \"Nge-cek konfigurasi database\"), not \"Reading file\" or \"cat session.rs\".\n\
+- Edits/Writes: \"Updating session state transition\" (id: \"Benerin bug memory leak\"), not \"Editing session.rs\" or \"Modifying code\".\n\
+- Commands/Builds: \"Compiling workspace binaries\" (id: \"Nge-build binary workspace\"), not \"Running cargo build\" or \"bash command\".\n\
+- Searches: \"Locating theme token definitions\" (id: \"Nyari deklarasi handler route\"), not \"Searching theme\" or \"rg oncycle\".";
 
 /// Keel's system prompt, extensions and tools on top of Pi.
 #[derive(Debug, Clone)]
@@ -323,13 +397,21 @@ impl KeelProfile {
             args.push("--session-dir".into());
             args.push(sessions.into());
         }
-        if let Some(prompt) = self.system_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        if let Some(prompt) = self
+            .system_prompt
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+        {
             args.push("--append-system-prompt".into());
             args.push(prompt.into());
         }
         let mut extensions: Vec<OsString> = self.extensions.iter().map(OsString::from).collect();
         if let Some(dir) = data_dir {
-            extensions.extend(folder_extensions(&Self::extensions_dir(dir)).into_iter().map(OsString::from));
+            extensions.extend(
+                folder_extensions(&Self::extensions_dir(dir))
+                    .into_iter()
+                    .map(OsString::from),
+            );
         }
         for ext in extensions {
             args.push("--extension".into());
@@ -346,7 +428,9 @@ fn folder_extensions(dir: &Path) -> Vec<PathBuf> {
     };
     let mut found: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.is_file() && matches!(path.extension().and_then(|e| e.to_str()), Some("ts" | "js")))
+        .filter(|path| {
+            path.is_file() && matches!(path.extension().and_then(|e| e.to_str()), Some("ts" | "js"))
+        })
         .collect();
     found.sort();
     found
@@ -393,14 +477,22 @@ mod tests {
         let p = KEEL_SYSTEM_PROMPT;
         assert!(p.contains("concise"), "{p}");
         // The reply follows the user's latest message; unclear input gets English.
-        assert!(p.contains("reply in the language of the user's latest message"), "{p}");
-        assert!(p.contains("no clear language") && p.contains("reply in English"), "{p}");
+        assert!(
+            p.contains("reply in the language of the user's latest message"),
+            "{p}"
+        );
+        assert!(
+            p.contains("no clear language") && p.contains("reply in English"),
+            "{p}"
+        );
         assert!(p.contains("\"Yooooo\""), "{p}");
         assert!(p.contains("does not imply a language"), "{p}");
         // The language rule comes before the Indonesian style guide, and the
         // guide only applies when the user writes Indonesian.
         let rule = p.find("Language:").expect("language rule");
-        let guide = p.find("Only when the user writes in Bahasa Indonesia").expect("gated guide");
+        let guide = p
+            .find("Only when the user writes in Bahasa Indonesia")
+            .expect("gated guide");
         assert!(rule < guide, "{p}");
         // Nothing may read as "default to Indonesian".
         assert!(!p.contains("Default (casual or unclear)"), "{p}");
@@ -413,15 +505,23 @@ mod tests {
         let first = device_id(&agent);
         assert!(uuid::Uuid::parse_str(&first).is_ok());
         assert_eq!(device_id(&agent), first);
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
-        assert_eq!((v["deviceId"].as_str(), &v["packages"]), (Some(first.as_str()), &serde_json::json!(["a"])));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            (v["deviceId"].as_str(), &v["packages"]),
+            (Some(first.as_str()), &serde_json::json!(["a"]))
+        );
         let _ = std::fs::remove_dir_all(&agent);
     }
 
     #[test]
     fn fetch_script_pins_the_same_pi() {
         let script = include_str!("../../../scripts/fetch-pi.sh");
-        assert!(script.contains(&format!("PI_VERSION={PI_VERSION}\n")), "scripts/fetch-pi.sh and PI_VERSION disagree");
+        assert!(
+            script.contains(&format!("PI_VERSION={PI_VERSION}\n")),
+            "scripts/fetch-pi.sh and PI_VERSION disagree"
+        );
     }
 
     #[test]
@@ -449,9 +549,14 @@ mod tests {
         register_bundled_packages(&exe, &agent);
         register_bundled_packages(&exe, &agent);
         assert!(!legacy_skill.exists());
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap())
+                .unwrap();
         assert_eq!(v["theme"], "dark");
-        assert_eq!(v["packages"], serde_json::json!(["npm:a", pkg.to_string_lossy()]));
+        assert_eq!(
+            v["packages"],
+            serde_json::json!(["npm:a", pkg.to_string_lossy()])
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -466,11 +571,17 @@ mod tests {
         let agent = root.join("agent");
         std::fs::create_dir_all(&agent).unwrap();
         let packages = || {
-            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap()).unwrap();
+            let v: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(agent.join("settings.json")).unwrap(),
+            )
+            .unwrap();
             v["packages"].clone()
         };
         register_packages(&exe, &agent, true);
-        assert_eq!(packages(), serde_json::json!([bridge.to_string_lossy(), other.to_string_lossy()]));
+        assert_eq!(
+            packages(),
+            serde_json::json!([bridge.to_string_lossy(), other.to_string_lossy()])
+        );
         // Server gone: the bridge drops out, so it cannot fetch its own.
         register_packages(&exe, &agent, false);
         assert_eq!(packages(), serde_json::json!([other.to_string_lossy()]));
@@ -479,10 +590,13 @@ mod tests {
 
     #[test]
     fn antigravity_env_follows_the_permission_mode() {
-        assert!(antigravity_env(None, Some(PermissionMode::FullAccess)).is_empty());
+        assert!(antigravity_env(None, Some(PermissionMode::FullAccess), false).is_empty());
         let bin = Path::new("/h/agy_acp_server.par");
         let env = |permission| -> Vec<(&str, String)> {
-            antigravity_env(Some(bin), permission).into_iter().map(|(k, v)| (k, v.to_string_lossy().into_owned())).collect()
+            antigravity_env(Some(bin), permission, false)
+                .into_iter()
+                .map(|(k, v)| (k, v.to_string_lossy().into_owned()))
+                .collect()
         };
         let asking = [
             ("AGY_ACP_BIN", "/h/agy_acp_server.par".to_string()),
@@ -495,8 +609,65 @@ mod tests {
         assert_eq!(env(None), asking);
         assert_eq!(env(Some(PermissionMode::Ask)), asking);
         let auto_edit = env(Some(PermissionMode::AutoEdit));
-        assert_eq!((&auto_edit[..4], &auto_edit[4..]), (&asking[..4], &[("AGY_SKIP_PERMISSIONS", "0".to_string()), ("AGY_ACP_MODE", "auto_edit".into())][..]));
-        assert_eq!(env(Some(PermissionMode::FullAccess))[4], ("AGY_SKIP_PERMISSIONS", "1".to_string()));
+        assert_eq!(
+            (&auto_edit[..4], &auto_edit[4..]),
+            (
+                &asking[..4],
+                &[
+                    ("AGY_SKIP_PERMISSIONS", "0".to_string()),
+                    ("AGY_ACP_MODE", "auto_edit".into())
+                ][..]
+            )
+        );
+        assert_eq!(
+            env(Some(PermissionMode::FullAccess))[4],
+            ("AGY_SKIP_PERMISSIONS", "1".to_string())
+        );
+        for permission in [None, Some(PermissionMode::Ask), Some(PermissionMode::AutoEdit), Some(PermissionMode::FullAccess)] {
+            let mode = env(permission)
+                .into_iter()
+                .find(|(key, _)| *key == "AGY_ACP_MODE")
+                .map(|(_, value)| value);
+            assert_ne!(mode.as_deref(), Some("plan"));
+        }
+    }
+
+    #[test]
+    fn plan_mode_makes_auto_edit_and_full_access_ask_then_denies_an_edit() {
+        let bin = Path::new("/h/agy_acp_server.par");
+        for permission in [PermissionMode::AutoEdit, PermissionMode::FullAccess] {
+            let env = antigravity_env(Some(bin), Some(permission), true);
+            let value = |key: &str| {
+                env.iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            assert_eq!(value("AGY_SKIP_PERMISSIONS"), "0", "{permission:?}");
+            assert_eq!(value("AGY_ACP_MODE"), "default", "{permission:?}");
+            assert_ne!(value("AGY_ACP_MODE"), "plan");
+            assert_ne!(value("AGY_ACP_MODE"), "auto_edit");
+        }
+        // The select only arrives because the env above asks. The same reply
+        // denies an edit and allows a read for both of those modes.
+        let edit = crate::plan_mode_ui_reply(&serde_json::json!({
+            "type": "extension_ui_request",
+            "method": "select",
+            "id": "s-edit",
+            "title": "agy requests: Edit src/lib.rs",
+            "options": ["Allow once", "Reject"],
+        }))
+        .unwrap();
+        let read = crate::plan_mode_ui_reply(&serde_json::json!({
+            "type": "extension_ui_request",
+            "method": "select",
+            "id": "s-read",
+            "title": "agy requests: Read src/lib.rs",
+            "options": ["Allow once", "Reject"],
+        }))
+        .unwrap();
+        assert_eq!(edit["value"], "Reject");
+        assert_eq!(read["value"], "Allow once");
     }
 
     #[test]
@@ -507,8 +678,15 @@ mod tests {
         std::fs::write(ext.join("b.ts"), "").unwrap();
         std::fs::write(ext.join("a.js"), "").unwrap();
         std::fs::write(ext.join("notes.md"), "").unwrap();
-        let profile = KeelProfile { system_prompt: Some("Be brief.".into()), extensions: vec!["builtin:x".into()] };
-        let args: Vec<String> = profile.run_args(Some(&data)).into_iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let profile = KeelProfile {
+            system_prompt: Some("Be brief.".into()),
+            extensions: vec!["builtin:x".into()],
+        };
+        let args: Vec<String> = profile
+            .run_args(Some(&data))
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         let tail = &args[2..];
         assert_eq!(
             tail,

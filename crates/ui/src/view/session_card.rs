@@ -514,8 +514,8 @@ pub(super) struct SessionCard {
     git_by_chat: HashMap<String, Git>,
     /// Task steps currently painted under the card (held across a switch
     /// until the new chat's messages settle, or swapped from cache).
-    held_steps: Option<crate::steps::Steps>,
-    held_steps_chat: Option<String>,
+    pub(super) held_steps: Option<crate::steps::Steps>,
+    pub(super) held_steps_chat: Option<String>,
     /// True while the current chat's messages are still loading and we have
     /// not yet committed what steps (if any) belong under the card.
     steps_pending: bool,
@@ -697,15 +697,9 @@ fn elapsed(now_ms: i64, since_ms: i64) -> String {
     crate::motion::elapsed_label(Duration::from_millis((now_ms - since_ms).max(0) as u64))
 }
 
-/// The token split for the context section: "In 20k · Out 4.2k · Cached 7k".
+/// The token split for the context section: "In 20k · Out 4.2k · Read 15k · Write 2k".
 fn token_split(usage: &ChatUsage) -> Option<String> {
-    let mut sum = ModelTokens::default();
-    for m in &usage.models {
-        sum.input += m.input;
-        sum.output += m.output;
-        sum.cache_read += m.cache_read;
-        sum.cache_write += m.cache_write;
-    }
+    let sum = usage.sum();
     if sum.total() == 0 {
         return None;
     }
@@ -713,11 +707,17 @@ fn token_split(usage: &ChatUsage) -> Option<String> {
         format!("In {}", compact(sum.input)),
         format!("Out {}", compact(sum.output)),
     ];
-    if sum.cache_read + sum.cache_write > 0 {
-        parts.push(format!(
-            "Cached {}",
-            compact(sum.cache_read + sum.cache_write)
-        ));
+    if sum.cache_read > 0 {
+        parts.push(format!("Read {}", compact(sum.cache_read)));
+    }
+    if sum.cache_write > 0 {
+        parts.push(format!("Write {}", compact(sum.cache_write)));
+    }
+    if sum.cache_warm > 0 {
+        parts.push(format!("Warm {}", compact(sum.cache_warm)));
+    }
+    if let Some(rate) = sum.hit_rate() {
+        parts.push(format!("Hit rate {:.0}%", (rate * 100.0).round()));
     }
     Some(parts.join(" · "))
 }
@@ -2288,7 +2288,11 @@ impl KeelWindow {
                                     )
                                 },
                             ))
-                            .child(reveal_on_hover("actions-reveal", group_id.clone(), 0., 1.,
+                            .child(reveal_on_hover(
+                                "actions-reveal",
+                                group_id.clone(),
+                                0.,
+                                1.,
                                 div()
                                     .absolute()
                                     .right(zpx(2.))
@@ -2355,7 +2359,8 @@ impl KeelWindow {
                                                     this.show_file_diff(target.clone(), window, cx);
                                                 }
                                             })),
-                                    ))),
+                                    ),
+                            )),
                     );
                 children_col = children_col.child(item);
             }
@@ -2850,7 +2855,9 @@ impl KeelWindow {
     }
 
     fn render_task_steps_card(&self, steps: &crate::steps::Steps, t: Tokens) -> AnyElement {
-        let done = steps.done();
+        let is_pending = self.is_plan_pending();
+        let is_running = self.active_status() == Some(ChatStatus::Running) || self.dev_live;
+        let done = if is_pending { 0 } else { steps.done() };
         let header = div()
             .h(zpx(30.))
             .px_3()
@@ -2865,7 +2872,9 @@ impl KeelWindow {
             .child(format!("{done} of {}", steps.items.len()));
 
         let rows = steps.items.iter().enumerate().map(|(ix, label)| {
-            let state = if steps.current == Some(ix) {
+            let state = if is_pending {
+                "later"
+            } else if is_running && steps.current == Some(ix) {
                 "now"
             } else if ix < done {
                 "done"
@@ -3054,10 +3063,9 @@ impl KeelWindow {
                     .tooltip(move |_, cx| cx.new(|_| Tip::new(tip, t)).into())
                     .tooltip_show_delay(crate::view::tooltip::delay())
                     .when(blocked.is_none(), |d| {
-                        d.cursor_pointer()
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.card_open_branches(window, cx)
-                            }))
+                        d.cursor_pointer().on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.card_open_branches(window, cx),
+                        ))
                     }),
             );
             if info.added + info.removed > 0 {
@@ -3111,13 +3119,23 @@ impl KeelWindow {
 
 /// The context row's tooltip: this chat's token totals and their split.
 fn context_tip(usage: &ChatUsage) -> String {
+    let sum = usage.sum();
     let split = |m: &ModelTokens| {
         let mut parts = vec![
             format!("in {}", compact(m.input)),
             format!("out {}", compact(m.output)),
         ];
-        if m.cache_read + m.cache_write > 0 {
-            parts.push(format!("cache {}", compact(m.cache_read + m.cache_write)));
+        if m.cache_read > 0 {
+            parts.push(format!("read {}", compact(m.cache_read)));
+        }
+        if m.cache_write > 0 {
+            parts.push(format!("write {}", compact(m.cache_write)));
+        }
+        if m.cache_warm > 0 {
+            parts.push(format!("warm {}", compact(m.cache_warm)));
+        }
+        if let Some(rate) = m.hit_rate() {
+            parts.push(format!("hit rate {:.0}%", (rate * 100.0).round()));
         }
         parts.join(" · ")
     };
@@ -3126,7 +3144,12 @@ fn context_tip(usage: &ChatUsage) -> String {
     match models.as_slice() {
         [] => {}
         [only] => lines.push(split(only)),
-        many => lines.extend(many.iter().map(|m| format!("{}: {}", m.model, split(m)))),
+        many => {
+            if let Some(rate) = sum.hit_rate() {
+                lines.push(format!("Hit rate: {:.0}%", (rate * 100.0).round()));
+            }
+            lines.extend(many.iter().map(|m| format!("{}: {}", m.model, split(m))));
+        }
     }
     if usage.fill().is_none() && usage.context_used > 0 {
         lines.push("This agent doesn't report its context window".into());
@@ -3358,6 +3381,7 @@ mod tests {
             output: 300,
             cache_read: 0,
             cache_write: 0,
+            cache_warm: 0,
         });
         assert!(token_split(&usage).is_some_and(|s| s.starts_with("In ")
             && s.contains(" · Out ")
@@ -3374,6 +3398,29 @@ mod tests {
     fn context_tooltip_carries_the_totals_and_split() {
         let usage = ChatUsage::default();
         assert_eq!(context_tip(&usage), "This chat: 0 tokens");
+    }
+
+    #[test]
+    fn context_tooltip_shows_cache_split_and_hit_rate() {
+        let usage = ChatUsage {
+            models: vec![ModelTokens {
+                model: "claude".into(),
+                input: 200,
+                output: 50,
+                cache_read: 800,
+                cache_write: 0,
+                cache_warm: 100,
+            }],
+            context_used: 1050,
+            context_window: 200_000,
+        };
+        let tip = context_tip(&usage);
+        assert!(tip.contains("This chat: 1.1k tokens"), "{tip}");
+        assert!(tip.contains("in 200"), "{tip}");
+        assert!(tip.contains("out 50"), "{tip}");
+        assert!(tip.contains("read 800"), "{tip}");
+        assert!(tip.contains("warm 100"), "{tip}");
+        assert!(tip.contains("hit rate 80%"), "{tip}");
     }
 
     #[test]

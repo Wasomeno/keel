@@ -11,10 +11,10 @@
 
 use crate::motion::ease_out;
 use gpui::{
-    AbsoluteLength, AnyElement, App, Bounds, Corners, Element, ElementId, GlobalElementId,
-    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Style, Styled,
-    Window, prelude::*,
+    AbsoluteLength, AnyElement, App, Bounds, Corners, Element, ElementId, GlobalElementId, Hitbox,
+    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Style, Styled, Window,
+    prelude::*,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -39,29 +39,48 @@ pub struct Fade {
     on: bool,
     from: f32,
     since: Option<Instant>,
+    in_dur: Duration,
+    out_dur: Duration,
+    strong: bool,
 }
 
 impl Fade {
-    fn new(on: bool) -> Self {
-        Self { on, from: if on { 1. } else { 0. }, since: None }
+    pub fn new(on: bool) -> Self {
+        Self::new_with(on, HOVER_IN, HOVER_OUT, false)
+    }
+
+    pub fn new_with(on: bool, in_dur: Duration, out_dur: Duration, strong: bool) -> Self {
+        Self {
+            on,
+            from: if on { 1. } else { 0. },
+            since: None,
+            in_dur,
+            out_dur,
+            strong,
+        }
     }
 
     /// Current value and whether it is still moving.
-    fn value(&self, now: Instant) -> (f32, bool) {
+    pub fn value(&self, now: Instant) -> (f32, bool) {
         let target = if self.on { 1. } else { 0. };
         let Some(since) = self.since else {
             return (target, false);
         };
-        let dur = if self.on { HOVER_IN } else { HOVER_OUT };
+        let dur = if self.on { self.in_dur } else { self.out_dur };
         let t = (now.saturating_duration_since(since).as_secs_f32() / dur.as_secs_f32()).min(1.);
         if t >= 1. {
             return (target, false);
         }
-        (self.from + (target - self.from) * ease_out(t), true)
+        let e = if self.strong {
+            crate::motion::ease_out_strong(t)
+        } else {
+            ease_out(t)
+        };
+        (self.from + (target - self.from) * e, true)
     }
 
     /// Retarget from wherever the value is now. Returns true on a change.
-    fn set(&mut self, on: bool, now: Instant, reduced: bool) -> bool {
+    pub fn set(&mut self, on: bool, now: Instant, reduced: bool) -> bool {
         if on == self.on {
             return false;
         }
@@ -101,7 +120,14 @@ impl Element for HoverTint {
     type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
-        Some(if self.probe.is_some() { "hover-probe" } else { "hover-tint" }.into())
+        Some(
+            if self.probe.is_some() {
+                "hover-probe"
+            } else {
+                "hover-tint"
+            }
+            .into(),
+        )
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -259,7 +285,13 @@ impl HoverFadeExt for Stateful<gpui::Div> {
             bottom_right: r.bottom_right,
             bottom_left: r.bottom_left,
         };
-        self.child(HoverTint { probe: None, color, press, radii, style: layer_style(x, y) })
+        self.child(HoverTint {
+            probe: None,
+            color,
+            press,
+            radii,
+            style: layer_style(x, y),
+        })
     }
 
     fn hover_probe(self, group: impl Into<SharedString>) -> Self {
@@ -293,6 +325,9 @@ pub struct RevealOnHover<E> {
     group: SharedString,
     off: f32,
     on: f32,
+    in_dur: Duration,
+    out_dur: Duration,
+    strong: bool,
     el: Option<E>,
 }
 
@@ -306,7 +341,38 @@ pub fn reveal_on_hover<E: IntoElement + Styled + 'static>(
     on: f32,
     el: E,
 ) -> RevealOnHover<E> {
-    RevealOnHover { id: id.into(), group: group.into(), off, on, el: Some(el) }
+    RevealOnHover {
+        id: id.into(),
+        group: group.into(),
+        off,
+        on,
+        in_dur: HOVER_IN,
+        out_dur: HOVER_OUT,
+        strong: false,
+        el: Some(el),
+    }
+}
+
+/// Reveal with custom in/out durations and strong ease-out curve (`cubic-bezier(0.23, 1, 0.32, 1)`).
+pub fn reveal_on_hover_curved<E: IntoElement + Styled + 'static>(
+    id: impl Into<ElementId>,
+    group: impl Into<SharedString>,
+    off: f32,
+    on: f32,
+    in_dur: Duration,
+    out_dur: Duration,
+    el: E,
+) -> RevealOnHover<E> {
+    RevealOnHover {
+        id: id.into(),
+        group: group.into(),
+        off,
+        on,
+        in_dur,
+        out_dur,
+        strong: true,
+        el: Some(el),
+    }
 }
 
 impl<E: IntoElement + Styled + 'static> IntoElement for RevealOnHover<E> {
@@ -335,16 +401,27 @@ impl<E: IntoElement + Styled + 'static> Element for RevealOnHover<E> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let state = window.with_element_state(id.unwrap(), |s: Option<Rc<RefCell<Option<Fade>>>>, _| {
-            let s = s.unwrap_or_default();
-            (s.clone(), s)
-        });
-        let (v, moving) = state.borrow().map_or((0., false), |f| f.value(Instant::now()));
+        let in_dur = self.in_dur;
+        let out_dur = self.out_dur;
+        let strong = self.strong;
+        let state =
+            window.with_element_state(id.unwrap(), |s: Option<Rc<RefCell<Option<Fade>>>>, _| {
+                let s = s.unwrap_or_else(|| Rc::new(RefCell::new(Some(Fade::new_with(false, in_dur, out_dur, strong)))));
+                (s.clone(), s)
+            });
+        let (v, moving) = state
+            .borrow()
+            .map_or((0., false), |f| f.value(Instant::now()));
         if moving {
             window.request_animation_frame();
         }
         let opacity = self.off + (self.on - self.off) * v;
-        let mut el = self.el.take().expect("laid out once").opacity(opacity).into_any_element();
+        let mut el = self
+            .el
+            .take()
+            .expect("laid out once")
+            .opacity(opacity)
+            .into_any_element();
         (el.request_layout(window, cx), (el, state))
     }
 
@@ -375,11 +452,14 @@ impl<E: IntoElement + Styled + 'static> Element for RevealOnHover<E> {
         let group = group.clone();
         let hovered = group.as_ref().is_some_and(|g| g.is_hovered(window)) && !cx.has_active_drag();
         let now = Instant::now();
+        let in_dur = self.in_dur;
+        let out_dur = self.out_dur;
+        let strong = self.strong;
         let changed = {
             let mut st = state.borrow_mut();
             match st.as_mut() {
                 None => {
-                    *st = Some(Fade::new(hovered));
+                    *st = Some(Fade::new_with(hovered, in_dur, out_dur, strong));
                     hovered
                 }
                 Some(f) => f.set(hovered, now, cx.reduce_motion()),

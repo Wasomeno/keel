@@ -190,6 +190,14 @@ pub struct KeelWindow {
     selected_effort: String,
     /// Sticks across new chats; sent as Ask where the harness lacks it.
     selected_permission: keel_proto::PermissionMode,
+    /// Plan toggle on the hero, before a chat exists. A chat stores its own.
+    plan_mode_draft: bool,
+    /// Plan cards keyed by row id: edits, phase, and the fixture.
+    plan_cards: HashMap<String, crate::plan::CardState>,
+    /// Remembered approval mode (manual vs auto) per session/chat id.
+    plan_manual_approval: HashMap<String, bool>,
+    /// Debug fixture: keep the injected plan row when the session republishes.
+    dev_plan_lock: bool,
     show_permission_menu: bool,
     /// The chip's mode before the latest pick, for its roll (`permission_roll` > 0).
     permission_prev: keel_proto::PermissionMode,
@@ -269,12 +277,21 @@ pub struct KeelWindow {
     glide_gen: u64,
     /// The floating "Latest" pill's enter/exit.
     latest_pill: crate::motion::Presence,
+    pub(super) last_sent_prompt: Option<(String, String)>,
+    pub(super) pending_composer_restore: Option<(String, String)>,
     /// Sent, and nothing visible has come back yet: show the thinking row.
     awaiting_first_output: bool,
     /// What the loader says: verbs for the current phase, and when and with
     /// which seed this turn started (so verbs rotate, and differ per turn).
     loader_verbs: &'static [&'static str],
     loader_seed: (std::time::Instant, usize),
+    /// The live trace line's wording, and the one it is fading from.
+    step_line: Option<StepLine>,
+    tool_lines: HashMap<String, StepLine>,
+    /// Dev only (`live` socket command): the open chat's last turn renders
+    /// as if it were still running, optionally naming `dev_step`.
+    pub(super) dev_live: bool,
+    pub(super) dev_step: Option<String>,
     /// Transcript row the inline loader was attached to last frame, so the
     /// rows it leaves and joins get remeasured.
     loader_row: Option<usize>,
@@ -530,6 +547,10 @@ pub struct KeelWindow {
     /// `lightbox_fx` plays.
     lightbox: Option<Lightbox>,
     lightbox_fx: crate::motion::Presence,
+    /// Currently open diagram copy dropdown (row_id).
+    pub diagram_menu: Option<String>,
+    pub diagram_menu_ix: usize,
+    pub diagram_menu_keyboard: bool,
     /// Shells under the transcript.
     terminal: terminal_panel::TerminalPanel,
     browser: browser_panel::BrowserPanel,
@@ -1115,6 +1136,10 @@ impl KeelWindow {
             selected_model: String::new(),
             selected_effort: String::new(),
             selected_permission: Default::default(),
+            plan_mode_draft: false,
+            plan_cards: HashMap::new(),
+            plan_manual_approval: HashMap::new(),
+            dev_plan_lock: false,
             show_permission_menu: false,
             permission_prev: Default::default(),
             permission_roll: 0,
@@ -1163,9 +1188,15 @@ impl KeelWindow {
             space_fold_gen: HashMap::new(),
             glide_gen: 0,
             latest_pill: crate::motion::Presence::hidden(),
+            last_sent_prompt: None,
+            pending_composer_restore: None,
             awaiting_first_output: false,
-            loader_verbs: main_pane::THINKING_VERBS,
+            loader_verbs: &["Thinking"],
             loader_seed: (std::time::Instant::now(), 0),
+            step_line: None,
+            tool_lines: HashMap::new(),
+            dev_live: false,
+            dev_step: None,
             loader_row: None,
             loader_at: None,
             row_motion_once: false,
@@ -1297,7 +1328,13 @@ impl KeelWindow {
             images_folding: Vec::new(),
             images_row_gen: 0,
             lightbox: None,
-            lightbox_fx: crate::motion::Presence::hidden(),
+            lightbox_fx: crate::motion::Presence::hidden().with_durations(
+                std::time::Duration::from_millis(220),
+                std::time::Duration::from_millis(150),
+            ),
+            diagram_menu: None,
+            diagram_menu_ix: 0,
+            diagram_menu_keyboard: false,
             terminal: terminal_panel::TerminalPanel::new(cx.focus_handle()),
             browser,
             files,
@@ -1899,6 +1936,8 @@ impl KeelWindow {
         self.chat_stream = None;
         self.pending_events.clear();
         self.messages.clear();
+        self.step_line = None;
+        self.tool_lines.clear();
         self.msg_order.clear();
         self.dirty.clear();
         self.turn_chips.clear();
@@ -1938,7 +1977,7 @@ impl KeelWindow {
 
         if let Some((pending_chat, text)) = self.pending_first_message.take() {
             if pending_chat == chat_id {
-                self.send_text(&chat_id, text, false, cx);
+                self.send_text(&chat_id, text, false, true, cx);
             } else {
                 self.pending_first_message = Some((pending_chat, text));
             }
@@ -2056,7 +2095,29 @@ impl KeelWindow {
             self.permission_prev = before;
             self.permission_roll += 1;
         }
+        if let Some(id) = self.current_chat.clone()
+            && let Some(chat) = self.state.chats.get_mut(&id)
+        {
+            chat.plan_mode = false;
+        } else {
+            self.plan_mode_draft = false;
+        }
         self.remember_harness_prefs();
+        self.show_permission_menu = false;
+        self.push_chat_options(cx);
+        cx.notify();
+    }
+
+    /// Plan is a mode of the access control, as in Claude Code. It does not
+    /// change the stored permission until the plan is approved.
+    fn select_plan(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.current_chat.clone()
+            && let Some(chat) = self.state.chats.get_mut(&id)
+        {
+            chat.plan_mode = true;
+        } else {
+            self.plan_mode_draft = true;
+        }
         self.show_permission_menu = false;
         self.push_chat_options(cx);
         cx.notify();
@@ -2332,14 +2393,18 @@ impl KeelWindow {
 
     /// One message's doc view (rebuilt from push frames) onto its transcript entry.
     fn apply_message_view(&mut self, id: &str, view: &serde_json::Value, cx: &mut Context<Self>) {
-        let Some(text) = crate::turn::view_text(view) else {
-            return;
-        };
-        let text = text.as_str();
         let role = view
             .get("role")
             .and_then(|v| v.as_str())
             .unwrap_or("assistant");
+        // An approved plan starts the work without a user bubble.
+        if role == "control" {
+            return;
+        }
+        let Some(text) = crate::turn::view_text(view) else {
+            return;
+        };
+        let text = text.as_str();
         let images = ImageRef::parse_list(view);
         let entry = self.message_entry(id, role);
         entry.blocks.set_text(text);
@@ -2401,19 +2466,57 @@ impl KeelWindow {
                     name,
                     kind,
                     subagent,
+                    label,
                     ..
                 } => {
                     self.step_break = true;
                     self.awaiting_first_output = false;
                     // A subagent's own tools leave the loader on "Waiting on a subagent".
                     if subagent.is_none() {
+                        let cleaned = keel_proto::trim_progress_label(&label);
+                        if !cleaned.is_empty() {
+                            self.note_live_step(cleaned, std::time::Instant::now());
+                            self.kick_motion(cx);
+                        }
                         self.loader_verbs =
                             main_pane::tool_verbs(&name, kind.as_deref().unwrap_or_default());
+                        cx.notify();
                     }
                 }
                 AgentEvent::ToolFinished { .. } => {}
+                AgentEvent::ToolLabel {
+                    tool_id,
+                    label,
+                    subagent,
+                } => {
+                    if subagent.is_none() {
+                        let cleaned = keel_proto::trim_progress_label(&label);
+                        if !cleaned.is_empty() {
+                            self.note_live_step(cleaned, std::time::Instant::now());
+                            let mut target_msg = None;
+                            for (entry_id, entry) in self.messages.iter_mut() {
+                                for step in &mut entry.steps {
+                                    if let crate::turn::Step::Tools(tools) = step {
+                                        for tool in tools {
+                                            if tool.tool_id == tool_id {
+                                                tool.label = cleaned.to_string();
+                                                target_msg = Some(entry_id.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(msg_id) = target_msg {
+                                self.publish_rows(&msg_id);
+                            }
+                            self.kick_motion(cx);
+                            cx.notify();
+                        }
+                    }
+                }
                 // Progress and plans also arrive as the engine's message push.
-                AgentEvent::ToolProgress { .. } | AgentEvent::Plan { .. } => {}
+                AgentEvent::ToolProgress { .. }
+                | AgentEvent::Plan { .. } => {}
                 // The engine also pushes the subagent's record (with its
                 // transcript) right after each of these; the panel and the
                 // indicator row are drawn from that.
@@ -2502,6 +2605,12 @@ impl KeelWindow {
                         TurnStatus::Completed {} | TurnStatus::Interrupted {} => None,
                     };
                     if let Some(reason) = reason {
+                        if reason.contains("Couldn't resume this session") {
+                            if let Some((chat, text)) = self.last_sent_prompt.clone() {
+                                self.state.set_draft(&chat, &text);
+                                self.pending_composer_restore = Some((chat, text));
+                            }
+                        }
                         let id = format!("error-{}", uuid::Uuid::new_v4());
                         let entry = self.message_entry(&id, "error");
                         entry.blocks.set_text(&format!("⚠ {reason}"));
@@ -2514,7 +2623,6 @@ impl KeelWindow {
                 AgentEvent::Reasoning {
                     message_id, delta, ..
                 } => {
-                    self.loader_verbs = main_pane::THINKING_VERBS;
                     let new_step = std::mem::take(&mut self.step_break);
                     crate::turn::push_reasoning(
                         &mut self.message_entry(&message_id, "assistant").steps,
@@ -2549,6 +2657,12 @@ impl KeelWindow {
     /// driver may split around tool calls) is one block: its thinking, tool
     /// groups and text interleaved in stream order, then file/result chips.
     fn publish_rows(&mut self, id: &str) {
+        if self.dev_plan_lock {
+            return;
+        }
+        if self.messages.get(id).is_some_and(|entry| entry.role == "control") {
+            return;
+        }
         let Some(entry) = self.messages.get(id) else {
             return;
         };
@@ -2588,8 +2702,9 @@ impl KeelWindow {
         let expanded = |row_id: &str| self.expanded_tools.contains(row_id);
         let mut finished = 0usize;
         // The live turn is still streaming.
-        let streaming =
-            end + 1 == self.msg_order.len() && self.active_status() == Some(ChatStatus::Running);
+        let last_turn = end + 1 == self.msg_order.len();
+        let streaming = last_turn
+            && (self.active_status() == Some(ChatStatus::Running) || self.dev_live);
         for m in turn {
             let Some(entry) = self.messages.get(m) else {
                 continue;
@@ -2606,6 +2721,35 @@ impl KeelWindow {
                 .sum::<usize>();
             // Thinking, tools and text interleaved, in the order they streamed.
             crate::turn::push_rows(m, &entry.steps, &expanded, &mut rows);
+        }
+        #[cfg(debug_assertions)]
+        if self.dev_live && last_turn {
+            if self.dev_step.as_deref() == Some("") {
+                rows.clear();
+            } else if let Some(label) = &self.dev_step {
+                if let Some(tool) = rows.iter_mut().rev().find_map(|row| match row {
+                    TranscriptBlock::ToolGroup { tools, .. } => tools.last_mut(),
+                    _ => None,
+                }) {
+                    tool.label = label.clone();
+                    tool.state = "running".into();
+                    tool.ended_ms = None;
+                }
+            }
+        }
+        // Observe before folding, including while the trace is closed. A label
+        // update must retain the title that was actually on screen.
+        let now = std::time::Instant::now();
+        for row in &rows {
+            if let TranscriptBlock::ToolGroup { tools, .. } = row {
+                for tool in tools.iter().filter(|tool| !tool.is_receipt()) {
+                    let title = crate::trace::TraceStep::from(tool).title();
+                    let previous = self.tool_lines.remove(&tool.tool_id);
+                    self.tool_lines.insert(
+                        tool.tool_id.clone(), next_step_line(previous, &title, now),
+                    );
+                }
+            }
         }
         let key = TurnChipKey {
             finished,
@@ -2638,13 +2782,37 @@ impl KeelWindow {
         if let Some(TranscriptBlock::FileChanges { id, expanded, .. }) = &mut chips {
             *expanded = self.expanded_tools.contains(id.as_str());
         }
-        // A finished turn's steps fold into one expandable "Show works" / "Hide works" line.
-        if !streaming {
-            let summary_id = format!("{head}#worked");
-            let open = self.expand_steps || self.expanded_tools.contains(&summary_id);
-            if let Some(summary) = worked_summary(&rows, summary_id, open) {
-                rows = fold_turn_rows(rows, summary, open);
+        // Steps fold into one line. While the turn runs that line names the
+        // current step; afterwards it is the "N steps completed" byline.
+        let summary_id = format!("{head}#worked");
+        let open = self.expand_steps || self.expanded_tools.contains(&summary_id);
+        // Only the last turn owns the live line: republishing an older turn
+        // (opening its steps) must not cut a swap in flight.
+        let mut summary = worked_summary(&rows, summary_id, open, streaming);
+        if let Some(TranscriptBlock::TurnSummary {
+            live: true, label, ..
+        }) = &mut summary
+            && streaming
+        {
+            if let Some(step) = &self.dev_step {
+                *label = step.clone();
             }
+            let cleaned = keel_proto::trim_progress_label(label).to_string();
+            *label = cleaned.clone();
+            self.note_live_step(&cleaned, std::time::Instant::now());
+        } else if last_turn && !streaming {
+            self.step_line = None;
+        }
+        if let Some(summary) = summary {
+            rows = fold_turn_rows(rows, summary, open, streaming);
+        } else if streaming && opening_is_provisional(&rows) {
+            // Before the first step, a short opening sentence ("I'll look
+            // up…") is about to fold behind it: hold it so it never paints
+            // outside the trace. It lands once it grows into an answer, a
+            // step arrives, or the turn ends (republished then).
+            rows.retain(|row| !is_trace_text(row));
+        }
+        if !streaming {
             if !file_changes.is_empty() {
                 rows.extend(file_changes);
             } else {
@@ -2887,6 +3055,7 @@ impl KeelWindow {
                 for id in std::mem::take(&mut this.publish_queue) {
                     this.publish_rows(&id);
                 }
+                this.kick_motion(cx);
                 cx.notify();
             });
         }));
@@ -2976,9 +3145,27 @@ impl KeelWindow {
 
     /// The newest task steps in the conversation, shown under the session card.
     pub(super) fn current_task_steps(&self) -> Option<crate::steps::Steps> {
+        for item in self.transcript.items.iter().rev() {
+            if let crate::markdown::TranscriptBlock::PlanCard { plan, .. } = &item.block {
+                let items: Vec<String> = plan.steps.iter().map(|s| s.title.clone()).collect();
+                return Some(crate::steps::Steps {
+                    items,
+                    current: Some(0),
+                    kind: crate::steps::StepKind::Task,
+                });
+            }
+        }
         for msg_id in self.msg_order.iter().rev() {
             if let Some(entry) = self.messages.get(msg_id) {
                 for step in entry.steps.iter().rev() {
+                    if let crate::turn::Step::PlanCard { plan, .. } = step {
+                        let items: Vec<String> = plan.steps.iter().map(|s| s.title.clone()).collect();
+                        return Some(crate::steps::Steps {
+                            items,
+                            current: Some(0),
+                            kind: crate::steps::StepKind::Task,
+                        });
+                    }
                     if let crate::turn::Step::Steps { steps, .. } = step {
                         if steps.kind == crate::steps::StepKind::Task {
                             return Some(steps.clone());
@@ -3025,17 +3212,17 @@ impl KeelWindow {
     /// while only shimmers run, nothing when idle or the app is in the
     /// background. One task; it ends itself when nothing moves.
     pub(super) fn kick_motion(&mut self, cx: &mut Context<Self>) {
-        if self.motion_ticker.is_some() || self.reduced() {
+        if self.motion_ticker.is_some() {
             return;
         }
         self.motion_ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 let Ok(frame) = this.update(cx, |this, cx| {
-                    let folding = this
+                    let folding = !this.reduced() && this
                         .fold_toggles
                         .values()
                         .any(|(_, at)| at.elapsed() < Duration::from_millis(900));
-                    let running = this
+                    let running = !this.reduced() && this
                         .transcript
                         .items
                         .iter()
@@ -3050,7 +3237,16 @@ impl KeelWindow {
                                 .is_some_and(|at| {
                                     at.elapsed() < Duration::from_millis(MODEL_FADE_MS + 40)
                                 }));
-                    let folding = folding || picker || this.model_menu_animating();
+                    let step_fade = this.step_line.as_ref().is_some_and(|line| {
+                        line.from
+                            .as_ref()
+                            .is_some_and(|swap| swap.running(std::time::Instant::now()))
+                    });
+                    let tool_fade = this.tool_lines.values().any(|line| {
+                        line.from.as_ref().is_some_and(|swap| swap.running(std::time::Instant::now()))
+                    });
+                    let folding = folding || (!this.reduced() && picker) || step_fade || tool_fade
+                        || (!this.reduced() && this.model_menu_animating());
                     if !folding && !running {
                         this.motion_ticker = None;
                         return None;
@@ -3086,6 +3282,30 @@ impl KeelWindow {
         cx: &mut Context<Self>,
     ) {
         let Some(job) = crate::mermaid::png_job(&source, &tokens) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let Some(png) = cx.background_spawn(async move { job() }).await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png);
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                this.mark_copied(row_id, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A generative UI chart as a 2x PNG with card background and padding.
+    pub(super) fn copy_chart_image(
+        &mut self,
+        row_id: String,
+        chart: crate::chart::Chart,
+        tokens: Tokens,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(job) = chart.png_job(&tokens) else {
             return;
         };
         cx.spawn(async move |this, cx| {
@@ -3610,11 +3830,11 @@ impl KeelWindow {
             PrimaryButtonAction::Steer if text.is_empty() => {}
             PrimaryButtonAction::Send => {
                 self.clear_composer(window, cx);
-                self.send_text(&chat_id, text, false, cx);
+                self.send_text(&chat_id, text, false, true, cx);
             }
             PrimaryButtonAction::Steer => {
                 self.clear_composer(window, cx);
-                self.send_text(&chat_id, text, true, cx);
+                self.send_text(&chat_id, text, true, true, cx);
             }
             PrimaryButtonAction::Stop => self.handle_interrupt(cx),
         }
@@ -3634,38 +3854,407 @@ impl KeelWindow {
         }
     }
 
+    fn toggle_plan_mode(&mut self, cx: &mut Context<Self>) {
+        let next = !self.plan_on_value();
+        if let Some(id) = self.current_chat.clone()
+            && let Some(chat) = self.state.chats.get_mut(&id)
+        {
+            chat.plan_mode = next;
+            self.push_chat_options(cx);
+        } else {
+            self.plan_mode_draft = next;
+        }
+        cx.notify();
+    }
+
+    fn plan_on_value(&self) -> bool {
+        if let Some(id) = &self.current_chat
+            && let Some(chat) = self.state.chats.get(id)
+        {
+            return chat.plan_mode;
+        }
+        self.plan_mode_draft
+    }
+
+    fn reject_open_plans(&mut self) {
+        let ids: Vec<String> = self
+            .transcript
+            .items
+            .iter()
+            .filter_map(|item| match &item.block {
+                crate::markdown::TranscriptBlock::PlanCard { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            if !self.plan_cards.contains_key(&id) {
+                let Some(plan) = self.plan_of(&id) else {
+                    continue;
+                };
+                self.plan_cards
+                    .insert(id.clone(), crate::plan::CardState::from_plan(&plan, crate::plan::Phase::Ready));
+            }
+            let Some(entry) = self.plan_cards.get_mut(&id) else {
+                continue;
+            };
+            if entry.phase != crate::plan::Phase::Approved {
+                entry.phase = crate::plan::Phase::Rejected;
+                entry.expanded = false;
+                entry.fade = entry.fade.wrapping_add(1);
+            }
+        }
+    }
+
+    fn plan_of(&self, row_id: &str) -> Option<crate::plan::Plan> {
+        self.transcript.items.iter().find_map(|item| match &item.block {
+            crate::markdown::TranscriptBlock::PlanCard { id, plan } if id == row_id => Some(plan.clone()),
+            _ => None,
+        })
+    }
+
+    fn ensure_plan(&mut self, row_id: &str, phase: crate::plan::Phase) -> bool {
+        if self.plan_cards.contains_key(row_id) {
+            return true;
+        }
+        let Some(plan) = self.plan_of(row_id) else {
+            return false;
+        };
+        let mut card = crate::plan::CardState::from_plan(&plan, phase);
+        if let Some(chat_id) = &self.current_chat {
+            if let Some(&manual) = self.plan_manual_approval.get(chat_id) {
+                card.manual = manual;
+            }
+        }
+        self.plan_cards
+            .insert(row_id.to_string(), card);
+        true
+    }
+
+    fn read_plan_inputs(&mut self, row_id: &str, cx: &mut Context<Self>) {
+        let Some(card) = self.plan_cards.get(row_id) else {
+            return;
+        };
+        let titles: Vec<String> = card
+            .titles
+            .iter()
+            .map(|input| input.read(cx).value().to_string())
+            .collect();
+        let notes: Vec<String> = card
+            .notes
+            .iter()
+            .map(|input| input.read(cx).value().to_string())
+            .collect();
+        let Some(card) = self.plan_cards.get_mut(row_id) else {
+            return;
+        };
+        for (ix, title) in titles.into_iter().enumerate() {
+            if let Some(step) = card.steps.get_mut(ix) {
+                let title = title.trim();
+                if !title.is_empty() {
+                    step.title = title.to_string();
+                }
+            }
+        }
+        for (ix, note) in notes.into_iter().enumerate() {
+            if let Some(step) = card.steps.get_mut(ix) {
+                step.note = note.trim().to_string();
+            }
+        }
+    }
+
+    fn fill_plan_inputs(&mut self, row_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.plan_cards.get(row_id) else {
+            return;
+        };
+        if card.titles.len() == card.steps.len() && !card.steps.is_empty() {
+            return;
+        }
+        let steps = card.steps.clone();
+        let mut titles = Vec::new();
+        let mut notes = Vec::new();
+        for step in &steps {
+            let title = cx.new(|cx| InputState::new(window, cx).placeholder("Step"));
+            let text = step.title.clone();
+            title.update(cx, |input, cx| input.set_value(text, window, cx));
+            let note = cx.new(|cx| InputState::new(window, cx).placeholder("Note"));
+            let text = step.note.clone();
+            note.update(cx, |input, cx| input.set_value(text, window, cx));
+            titles.push(title);
+            notes.push(note);
+        }
+        if let Some(card) = self.plan_cards.get_mut(row_id) {
+            card.titles = titles;
+            card.notes = notes;
+        }
+    }
+
+    pub(super) fn plan_action(
+        &mut self,
+        action: crate::transcript::RowAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::transcript::RowAction::*;
+        match action {
+            PlanApprove { row_id, manual } => {
+                let mode = self.plan_cards.get(&row_id).map(|c| c.mode).unwrap_or(
+                    if manual { crate::plan::ApprovalMode::Ask } else { crate::plan::ApprovalMode::AutoEdit }
+                );
+                self.approve_plan(&row_id, mode, window, cx);
+            }
+            PlanEdit { row_id } => {
+                if self.ensure_plan(&row_id, crate::plan::Phase::Editing) {
+                    if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                        card.phase = crate::plan::Phase::Editing;
+                        card.fade = card.fade.wrapping_add(1);
+                    }
+                    self.fill_plan_inputs(&row_id, window, cx);
+                }
+            }
+            PlanAsk { .. } => {
+                self.composer.update(cx, |input, cx| input.focus(window, cx));
+            }
+            PlanDone { row_id } => {
+                self.read_plan_inputs(&row_id, cx);
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.phase = crate::plan::Phase::Ready;
+                    card.titles.clear();
+                    card.notes.clear();
+                    card.fade = card.fade.wrapping_add(1);
+                }
+            }
+            PlanAdd { row_id } => {
+                self.read_plan_inputs(&row_id, cx);
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.steps.push(crate::plan::EditStep {
+                        title: "New step".into(),
+                        note: String::new(),
+                        kind: crate::plan::Kind::Other,
+                        targets: Vec::new(),
+                    });
+                    card.titles.clear();
+                    card.notes.clear();
+                }
+                self.fill_plan_inputs(&row_id, window, cx);
+            }
+            PlanDelete { row_id, index } => {
+                self.read_plan_inputs(&row_id, cx);
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    if index < card.steps.len() {
+                        card.steps.remove(index);
+                    }
+                    card.titles.clear();
+                    card.notes.clear();
+                    card.drag_from = None;
+                }
+                self.fill_plan_inputs(&row_id, window, cx);
+            }
+            PlanDrag { row_id, index } => {
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.drag_from = Some(index);
+                }
+            }
+            PlanDrop { row_id, index } => {
+                self.read_plan_inputs(&row_id, cx);
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    if let Some(from) = card.drag_from.take()
+                        && from != index
+                        && from < card.steps.len()
+                        && index < card.steps.len()
+                    {
+                        let step = card.steps.remove(from);
+                        card.steps.insert(index, step);
+                    }
+                    card.titles.clear();
+                    card.notes.clear();
+                }
+                self.fill_plan_inputs(&row_id, window, cx);
+            }
+            PlanToggle { row_id } => {
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.expanded = !card.expanded;
+                    card.fade = card.fade.wrapping_add(1);
+                }
+            }
+            PlanToggleTargets { row_id, step_ix } => {
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    if card.expanded_targets.contains(&step_ix) {
+                        card.expanded_targets.remove(&step_ix);
+                    } else {
+                        card.expanded_targets.insert(step_ix);
+                    }
+                }
+            }
+            PlanToggleModeMenu { row_id } => {
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.show_mode_menu = !card.show_mode_menu;
+                }
+            }
+            PlanSetManual { row_id, manual } => {
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.manual = manual;
+                    card.mode = if manual { crate::plan::ApprovalMode::Ask } else { crate::plan::ApprovalMode::AutoEdit };
+                    card.show_mode_menu = false;
+                }
+                if let Some(chat_id) = self.current_chat.clone() {
+                    self.plan_manual_approval.insert(chat_id, manual);
+                }
+            }
+            PlanSetMode { row_id, mode } => {
+                if let Some(card) = self.plan_cards.get_mut(&row_id) {
+                    card.set_mode(mode);
+                    card.show_mode_menu = false;
+                }
+                if let Some(chat_id) = self.current_chat.clone() {
+                    self.plan_manual_approval.insert(chat_id, mode == crate::plan::ApprovalMode::Ask);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    pub(super) fn is_plan_pending(&self) -> bool {
+        for card in self.plan_cards.values() {
+            if matches!(card.phase, crate::plan::Phase::Ready | crate::plan::Phase::Editing | crate::plan::Phase::Streaming) {
+                return true;
+            }
+        }
+        for item in self.transcript.items.iter() {
+            if let crate::markdown::TranscriptBlock::PlanCard { id, .. } = &item.block {
+                let phase = self.plan_cards.get(id).map(|c| c.phase).unwrap_or(crate::plan::Phase::Ready);
+                if matches!(phase, crate::plan::Phase::Ready | crate::plan::Phase::Editing | crate::plan::Phase::Streaming) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub(super) fn pending_plan_row_id(&self) -> Option<String> {
+        for (id, card) in &self.plan_cards {
+            if matches!(card.phase, crate::plan::Phase::Ready | crate::plan::Phase::Editing) {
+                return Some(id.clone());
+            }
+        }
+        for item in self.transcript.items.iter() {
+            if let crate::markdown::TranscriptBlock::PlanCard { id, .. } = &item.block {
+                let phase = self.plan_cards.get(id).map(|c| c.phase).unwrap_or(crate::plan::Phase::Ready);
+                if matches!(phase, crate::plan::Phase::Ready | crate::plan::Phase::Editing) {
+                    return Some(id.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn approve_pending_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(row_id) = self.pending_plan_row_id() else {
+            return false;
+        };
+        let mode = self.plan_cards.get(&row_id).map(|c| c.mode).unwrap_or(
+            if self.plan_cards.get(&row_id).is_some_and(|c| c.manual) {
+                crate::plan::ApprovalMode::Ask
+            } else {
+                crate::plan::ApprovalMode::AutoEdit
+            }
+        );
+        if let Some(card) = self.plan_cards.get_mut(&row_id) {
+            card.fade = 0; // No animation on keyboard actions!
+        }
+        self.approve_plan(&row_id, mode, window, cx);
+        true
+    }
+
+    fn approve_plan(
+        &mut self,
+        row_id: &str,
+        mode: crate::plan::ApprovalMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.read_plan_inputs(row_id, cx);
+        if !self.ensure_plan(row_id, crate::plan::Phase::Ready) {
+            return;
+        }
+        let Some(card) = self.plan_cards.get_mut(row_id) else {
+            return;
+        };
+        if card.steps.is_empty() {
+            return;
+        }
+        let text = crate::plan::approval_text(&card.steps);
+        card.phase = crate::plan::Phase::Approved;
+        card.expanded = false;
+        card.titles.clear();
+        card.notes.clear();
+        card.fade = card.fade.wrapping_add(1);
+        let perm = mode.to_permission();
+        self.selected_permission = perm;
+        if let Some(id) = self.current_chat.clone() {
+            self.plan_manual_approval.insert(id.clone(), mode == crate::plan::ApprovalMode::Ask);
+            if let Some(chat) = self.state.chats.get_mut(&id) {
+                chat.plan_mode = false;
+                chat.permission = perm.as_str().to_string();
+            }
+        } else {
+            self.plan_mode_draft = false;
+        }
+        self.push_chat_options(cx);
+        self.dev_plan_lock = false;
+        if let Some(chat_id) = self.current_chat.clone() {
+            self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+            self.send_text(&chat_id, text, false, false, cx);
+        }
+        cx.notify();
+    }
+
     /// Echo the user's message locally (same message id the engine persists),
     /// re-engage stick-to-bottom, and queue the command.
-    fn send_text(&mut self, chat_id: &str, text: String, steer: bool, cx: &mut Context<Self>) {
+    fn send_text(
+        &mut self,
+        chat_id: &str,
+        text: String,
+        steer: bool,
+        shown: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if shown && !self.plan_on_value() {
+            self.reject_open_plans();
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
         self.invalidate_suggestion();
+        self.last_sent_prompt = Some((chat_id.to_string(), text.clone()));
         let message_id = uuid::Uuid::new_v4().to_string();
         // Images go with a Send, never a steer.
-        let images = if steer {
+        let images = if steer || !shown {
             Vec::new()
         } else {
             std::mem::take(&mut self.pending_images)
         };
         self.close_images_row(images.clone(), cx);
-        let entry = self.message_entry(&message_id, "user");
-        entry.blocks.set_text(&text);
-        entry.images = images
-            .iter()
-            .map(|p| ImageRef {
-                name: p.attachment.name.clone(),
-                path: Some(p.path.to_string_lossy().into_owned()),
-            })
-            .collect();
         let attachments: Vec<keel_proto::Attachment> =
-            images.into_iter().map(|p| p.attachment).collect();
-        self.publish_rows(&message_id);
-        self.mark_dirty(message_id.clone(), cx);
-        self.transcript.on_own_send();
+            images.iter().map(|p| p.attachment.clone()).collect();
+        if shown {
+            let entry = self.message_entry(&message_id, "user");
+            entry.blocks.set_text(&text);
+            entry.images = images
+                .iter()
+                .map(|p| ImageRef {
+                    name: p.attachment.name.clone(),
+                    path: Some(p.path.to_string_lossy().into_owned()),
+                })
+                .collect();
+            self.publish_rows(&message_id);
+            self.mark_dirty(message_id.clone(), cx);
+            self.transcript.on_own_send();
+        }
         if !steer {
             self.awaiting_first_output = true;
-            self.loader_verbs = main_pane::THINKING_VERBS;
+            self.loader_verbs = &["Thinking"];
+            self.step_line = Some(next_step_line(None, "Thinking", std::time::Instant::now()));
             self.loader_seed = (
                 std::time::Instant::now(),
                 uuid::Uuid::new_v4().as_u128() as usize,
@@ -3684,6 +4273,7 @@ impl KeelWindow {
                 message_id,
                 text,
                 attachments,
+                shown,
             }
         };
         let chat_id = chat_id.to_string();
@@ -3729,7 +4319,7 @@ impl KeelWindow {
         ) {
             return;
         }
-        self.send_text(&chat_id, text, false, cx);
+        self.send_text(&chat_id, text, false, true, cx);
         cx.notify();
     }
 
@@ -3773,6 +4363,50 @@ impl KeelWindow {
             s.focus(window, cx);
         });
         cx.notify();
+    }
+
+    pub(super) fn retry_last_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.current_chat.clone() else { return; };
+        let text = self.state.draft(&chat_id);
+        let text = if text.is_empty() {
+            self.last_sent_prompt
+                .as_ref()
+                .filter(|(c, _)| c == &chat_id)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default()
+        } else {
+            text
+        };
+        if text.is_empty() { return; }
+        self.clear_composer(window, cx);
+        self.send_text(&chat_id, text, false, true, cx);
+    }
+
+    pub(super) fn start_fresh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.current_chat.clone() else { return; };
+        let text = self.state.draft(&chat_id);
+        let text = if text.is_empty() {
+            self.last_sent_prompt
+                .as_ref()
+                .filter(|(c, _)| c == &chat_id)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default()
+        } else {
+            text
+        };
+        if text.is_empty() { return; }
+        self.clear_composer(window, cx);
+        if let Some(client) = self.client.clone() {
+            let cid = chat_id.clone();
+            cx.spawn(async move |this, cx| {
+                let _ = client.call("clear_native_session", serde_json::json!({ "chat_id": cid })).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.send_text(&cid, text, false, true, cx);
+                });
+            }).detach();
+        } else {
+            self.send_text(&chat_id, text, false, true, cx);
+        }
     }
 
     /// An MR card's Merge button. The first click arms it for a few seconds;
@@ -4269,6 +4903,7 @@ impl KeelWindow {
             "model": model,
             "reasoning": effort,
             "permission": permission,
+            "plan_mode": self.plan_on_value(),
             "branch": self.state.selected_branch,
         });
         cx.spawn(async move |this, cx| {
@@ -4284,6 +4919,7 @@ impl KeelWindow {
                 match chat_id {
                     Ok(chat_id) => {
                         let now = AppState::now_ms();
+                        let plan_mode = this.plan_on_value();
                         let chat = this.state.chats.entry(chat_id.clone()).or_insert_with(|| {
                             ChatItem::test(
                                 &chat_id,
@@ -4299,6 +4935,7 @@ impl KeelWindow {
                         chat.reasoning = effort;
                         chat.reasoning_known = true;
                         chat.permission = permission.to_string();
+                        chat.plan_mode = plan_mode;
                         if let Some((project, scope)) = link {
                             this.projects.record_chat(&chat_id, &project, scope);
                         }
@@ -4501,7 +5138,11 @@ impl KeelWindow {
                 .timer(crate::motion::FAST + std::time::Duration::from_millis(20))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.delete_space_leaving.as_ref().is_some_and(|(m, _)| *m == n) {
+                if this
+                    .delete_space_leaving
+                    .as_ref()
+                    .is_some_and(|(m, _)| *m == n)
+                {
                     this.delete_space_leaving = None;
                     cx.notify();
                 }
@@ -4901,8 +5542,15 @@ impl KeelWindow {
         chat.reasoning = self.selected_effort.clone();
         chat.reasoning_known = true;
         let permission = self.effective_permission().as_str();
+        let plan_mode = self
+            .state
+            .chats
+            .get(&chat_id)
+            .map(|chat| chat.plan_mode)
+            .unwrap_or(self.plan_mode_draft);
         if let Some(chat) = self.state.chats.get_mut(&chat_id) {
             chat.permission = permission.to_string();
+            chat.plan_mode = plan_mode;
         }
         let Some(client) = self.client.clone() else {
             return;
@@ -4912,6 +5560,7 @@ impl KeelWindow {
             "model": self.selected_model,
             "reasoning": self.selected_effort,
             "permission": permission,
+            "plan_mode": plan_mode,
         });
         cx.spawn(async move |this, cx| {
             if let Err(err) = client.call("set_chat_options", params).await {
@@ -5269,8 +5918,7 @@ pub(super) fn menu_motion<E: IntoElement + Styled + 'static>(
         Some(n) => el
             .with_animation(
                 gpui::ElementId::Name(format!("{id}-leave-{n}").into()),
-                gpui::Animation::new(crate::motion::FAST)
-                    .with_easing(crate::motion::ease_out),
+                gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
                 move |el, delta| el.opacity(1. - delta).relative().top(zpx(rise * delta)),
             )
             .into_any_element(),
@@ -5369,8 +6017,8 @@ fn drag_region(id: &'static str) -> gpui::Stateful<gpui::Div> {
     )
 }
 
-/// Run state as a dot: running accent (breathing), waiting warning, aborted
-/// danger, idle none.
+/// Run state: a running turn uses the chat's dot-grid wave; waiting is a
+/// warning dot, aborted danger, unknown faint, idle nothing.
 fn status_dot(
     status: keel_proto::DisplayStatus,
     id: &str,
@@ -5385,12 +6033,23 @@ fn status_dot(
         DisplayStatus::Unknown => t.text_faint,
         DisplayStatus::Idle => return None,
     };
-    let dot = div().size(zpx(7.)).flex_none().rounded_full().bg(c(color));
     Some(match status {
-        DisplayStatus::Running => {
-            crate::motion::pulse(dot, ElementId::Name(format!("pulse-{id}").into()), reduced)
-        }
-        _ => dot.into_any_element(),
+        DisplayStatus::Running => div()
+            .flex_none()
+            .child(crate::motion::dot_grid_at(
+                c(color),
+                format!("status-{id}"),
+                2.,
+                1.,
+                reduced,
+            ))
+            .into_any_element(),
+        _ => div()
+            .size(zpx(7.))
+            .flex_none()
+            .rounded_full()
+            .bg(c(color))
+            .into_any_element(),
     })
 }
 
@@ -5631,7 +6290,7 @@ mod turn_tests {
         ];
 
         // Collapsed state
-        let summary_closed = super::worked_summary(&rows, "m#worked".into(), false).unwrap();
+        let summary_closed = super::worked_summary(&rows, "m#worked".into(), false, false).unwrap();
         let TranscriptBlock::TurnSummary {
             label,
             failed,
@@ -5646,7 +6305,7 @@ mod turn_tests {
         assert!(!expanded);
 
         // Expanded state
-        let summary_open = super::worked_summary(&rows, "m#worked".into(), true).unwrap();
+        let summary_open = super::worked_summary(&rows, "m#worked".into(), true, false).unwrap();
         let TranscriptBlock::TurnSummary {
             label,
             failed,
@@ -5660,7 +6319,7 @@ mod turn_tests {
         assert!(!failed);
         assert!(expanded);
 
-        // When a tool is still running: returns None
+        // A running tool collapses to that step's own title.
         let running_tool = ToolEntry {
             state: "running".into(),
             ..done_tool.clone()
@@ -5671,7 +6330,12 @@ mod turn_tests {
             expanded: false,
             overrides: Vec::new(),
         }];
-        assert!(super::worked_summary(&running_rows, "m#worked".into(), false).is_none());
+        let running = super::worked_summary(&running_rows, "m#worked".into(), false, true).unwrap();
+        let TranscriptBlock::TurnSummary { label, live, .. } = running else {
+            panic!()
+        };
+        assert!(live);
+        assert_eq!(label, "Working");
 
         // Duration formatted when >= 1s
         let timed_tool1 = ToolEntry {
@@ -5690,7 +6354,8 @@ mod turn_tests {
             expanded: false,
             overrides: Vec::new(),
         }];
-        let timed_summary = super::worked_summary(&timed_rows, "m#worked".into(), false).unwrap();
+        let timed_summary =
+            super::worked_summary(&timed_rows, "m#worked".into(), false, false).unwrap();
         let TranscriptBlock::TurnSummary { label, failed, .. } = timed_summary else {
             panic!()
         };
@@ -5709,7 +6374,8 @@ mod turn_tests {
             expanded: false,
             overrides: Vec::new(),
         }];
-        let min_summary = super::worked_summary(&min_rows, "m#worked".into(), false).unwrap();
+        let min_summary =
+            super::worked_summary(&min_rows, "m#worked".into(), false, false).unwrap();
         let TranscriptBlock::TurnSummary { label, .. } = min_summary else {
             panic!()
         };
@@ -5727,13 +6393,14 @@ mod turn_tests {
             expanded: false,
             overrides: Vec::new(),
         }];
-        let hour_summary = super::worked_summary(&hour_rows, "m#worked".into(), false).unwrap();
+        let hour_summary =
+            super::worked_summary(&hour_rows, "m#worked".into(), false, false).unwrap();
         let TranscriptBlock::TurnSummary { label, .. } = hour_summary else {
             panic!()
         };
         assert_eq!(label, "2 steps completed in 1h 1m 5s · View trace");
 
-        // Failures formatted cleanly
+        // Even when tools encountered errors, the turn summary stays regular and non-misleading
         let failed_tool = ToolEntry {
             state: "error".into(),
             ..done_tool
@@ -5744,16 +6411,276 @@ mod turn_tests {
             expanded: false,
             overrides: Vec::new(),
         }];
-        let failed_summary = super::worked_summary(&failed_rows, "m#worked".into(), false).unwrap();
+        let failed_summary =
+            super::worked_summary(&failed_rows, "m#worked".into(), false, false).unwrap();
         let TranscriptBlock::TurnSummary { label, failed, .. } = failed_summary else {
             panic!()
         };
-        assert_eq!(label, "1 step failed · View trace");
-        assert!(failed);
+        assert_eq!(label, "1 step completed · View trace");
+        assert!(!failed);
     }
 
     #[test]
-    fn fold_turn_rows_hides_intermediate_responses_when_collapsed() {
+    fn live_trace_names_the_current_step() {
+        use crate::markdown::{ToolEntry, TranscriptBlock};
+        use crate::trace::PlanItem;
+        let memory = TranscriptBlock::ToolGroup {
+            id: "m#tools".into(),
+            tools: vec![ToolEntry {
+                tool_id: "t".into(),
+                name: "memory_read".into(),
+                state: "running".into(),
+                ..ToolEntry::default()
+            }],
+            expanded: false,
+            overrides: Vec::new(),
+        };
+        let summary = super::worked_summary(&[memory], "m#worked".into(), false, true).unwrap();
+        let TranscriptBlock::TurnSummary { label, live, .. } = summary else {
+            panic!()
+        };
+        assert!(live);
+        assert_eq!(label, "Working");
+
+        let plan = TranscriptBlock::Plan {
+            id: "m#plan".into(),
+            entries: vec![PlanItem {
+                content: "Adjust the memory icon".into(),
+                status: "in_progress".into(),
+                priority: None,
+            }],
+            live: true,
+            expanded: None,
+        };
+        let summary = super::worked_summary(&[plan], "m#worked".into(), false, true).unwrap();
+        let TranscriptBlock::TurnSummary { label, .. } = summary else {
+            panic!()
+        };
+        assert_eq!(label, "Adjust the memory icon");
+
+        let thinking = TranscriptBlock::Reasoning {
+            id: "m#r".into(),
+            content: "…".into(),
+            expanded: false,
+        };
+        let summary = super::worked_summary(&[thinking], "m#worked".into(), false, true).unwrap();
+        let TranscriptBlock::TurnSummary { label, .. } = summary else {
+            panic!()
+        };
+        assert_eq!(label, "Thinking");
+    }
+
+    #[test]
+    fn multi_tool_reasoning_hysteresis_prevents_flicker() {
+        use crate::markdown::{ToolEntry, TranscriptBlock};
+
+        let tool1_done = TranscriptBlock::ToolGroup {
+            id: "m#tools1".into(),
+            tools: vec![ToolEntry {
+                tool_id: "t1".into(),
+                name: "read_file".into(),
+                state: "done".into(),
+                label: "Reading config".into(),
+                started_ms: Some(9_000),
+                ended_ms: Some(10_000),
+                ..ToolEntry::default()
+            }],
+            expanded: false,
+            overrides: Vec::new(),
+        };
+
+        let thinking = TranscriptBlock::Reasoning {
+            id: "m#r1".into(),
+            content: "Analyzing configuration details...".into(),
+            expanded: false,
+        };
+
+        let rows = vec![tool1_done.clone(), thinking.clone()];
+
+        // 1. Initial inter-tool reasoning at 150ms (< 400ms): holds tool 1 label
+        let (label, failed) = super::current_step_at(&rows, 10_150);
+        assert_eq!(label, "Reading config");
+        assert!(!failed);
+
+        let summary = super::worked_summary_at(&rows, "m#worked".into(), false, true, 10_150).unwrap();
+        let TranscriptBlock::TurnSummary { label: sum_label, live, .. } = summary else {
+            panic!();
+        };
+        assert!(live);
+        assert_eq!(sum_label, "Reading config");
+
+        // 2. Near end of hysteresis at 390ms (< 400ms): still holds tool 1 label
+        let (label, _) = super::current_step_at(&rows, 10_390);
+        assert_eq!(label, "Reading config");
+
+        // 3. Exceeded 400ms: hysteresis expires, transitions to "Thinking"
+        let (label, _) = super::current_step_at(&rows, 10_450);
+        assert_eq!(label, "Thinking");
+
+        let summary_expired = super::worked_summary_at(&rows, "m#worked".into(), false, true, 10_450).unwrap();
+        let TranscriptBlock::TurnSummary { label: sum_expired, .. } = summary_expired else {
+            panic!();
+        };
+        assert_eq!(sum_expired, "Thinking");
+
+        // 4. If Tool 2 starts running at 10_250ms (during hysteresis): immediate transition to Tool 2
+        let tool2_running = TranscriptBlock::ToolGroup {
+            id: "m#tools2".into(),
+            tools: vec![ToolEntry {
+                tool_id: "t2".into(),
+                name: "write_file".into(),
+                state: "running".into(),
+                label: "Writing migration".into(),
+                started_ms: Some(10_250),
+                ..ToolEntry::default()
+            }],
+            expanded: false,
+            overrides: Vec::new(),
+        };
+        let rows_multi = vec![tool1_done, thinking.clone(), tool2_running];
+        let (label, _) = super::current_step_at(&rows_multi, 10_250);
+        assert_eq!(label, "Writing migration");
+
+        // 5. Initial reasoning (no prior completed tools): immediately "Thinking" with no delay
+        let (label, _) = super::current_step_at(&[thinking], 10_000);
+        assert_eq!(label, "Thinking");
+    }
+
+    #[test]
+    fn live_line_swaps_and_the_latest_wording_wins() {
+        use super::next_step_line;
+        use crate::trace_view::{STEP_ENTER, STEP_RETARGET};
+        let t0 = std::time::Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        let mut line = next_step_line(None, "Thinking", t0);
+        assert!(line.from.is_none());
+        line.shown_w = Some(60.);
+        // Same wording: nothing moves.
+        let line = next_step_line(Some(line), "Thinking", ms(10));
+        assert!(line.from.is_none());
+        // A new wording swaps from the old one, fully shown.
+        let mut line = next_step_line(Some(line), "Running ls", ms(1000));
+        let swap = line.from.clone().unwrap();
+        assert_eq!((swap.from.as_str(), swap.alpha, swap.lift), ("Thinking", 1., 0.));
+        assert_eq!(swap.from_w, Some(60.));
+        line.shown_w = Some(80.);
+        line.from.as_mut().unwrap().to_w = Some(80.);
+        // Replaced before it was readable: same swap, new words, no restart.
+        let line = next_step_line(Some(line), "Running ps", ms(1000) + STEP_RETARGET / 2);
+        let swap = line.from.clone().unwrap();
+        assert_eq!((line.shown.as_str(), swap.from.as_str()), ("Running ps", "Thinking"));
+        assert_eq!(swap.at, ms(1000));
+        // Replaced mid-arrival: leaves from where it was, not from full.
+        let mid = ms(1000) + swap.delay + STEP_ENTER / 2;
+        let line = next_step_line(Some(line), "Running kill", mid);
+        let swap = line.from.clone().unwrap();
+        assert_eq!((swap.from.as_str(), swap.at), ("Running ps", mid));
+        assert!(swap.alpha > 0. && swap.alpha < 1.);
+        assert!(swap.lift < 0.);
+        // Back to words still leaving: reverse from their current opacity.
+        let line = next_step_line(Some(line), "Running ps", mid + STEP_RETARGET / 2);
+        let reversal = line.from.as_ref().unwrap();
+        assert!(reversal.enter_alpha > 0. && reversal.enter_alpha < 1.);
+        assert_eq!(reversal.from, "Running kill");
+        assert_eq!(line.shown, "Running ps");
+        // Settled: a later change starts a fresh swap.
+        let line = next_step_line(Some(line), "Writing", mid + STEP_ENTER * 2);
+        let swap = line.from.unwrap();
+        assert_eq!((swap.from.as_str(), swap.alpha, swap.lift), ("Running ps", 1., 0.));
+    }
+
+    #[test]
+    fn tool_label_arrival_and_updates_keep_the_current_width() {
+        use super::next_step_line;
+        let now = std::time::Instant::now();
+        let ms = |n| now + std::time::Duration::from_millis(n);
+        for initial in ["Working", "Read", "Reading payroll logic"] {
+            let mut line = next_step_line(None, initial, now);
+            line.shown_w = Some(60.);
+            let mut line = next_step_line(Some(line), "Reading the on/off cycle logic", ms(1000));
+            line.from.as_mut().unwrap().to_w = Some(220.);
+            let width = line.from.as_ref().unwrap().arrival_at(ms(1030)).2.unwrap();
+            let mut line = next_step_line(Some(line), "Checking payroll rules", ms(1030));
+            let swap = line.from.as_mut().unwrap();
+            assert_eq!(swap.at, ms(1000)); // latest wins, without restarting the fade
+            assert_eq!(swap.from_w, Some(width));
+            swap.to_w = Some(150.);
+            assert_eq!(swap.arrival_at(ms(1030)).2, Some(width));
+            // Glides one way to the new width, never past it, and is done
+            // within the swap.
+            let toward = |w: f32| if width >= 150. { w <= width && w >= 150. } else { w >= width && w <= 150. };
+            let mut previous = width;
+            for elapsed in 1..=200 {
+                let current = swap.arrival_at(ms(1030 + elapsed)).2.unwrap();
+                assert!(toward(current));
+                assert!((current - 150.).abs() <= (previous - 150.).abs() + 1e-3);
+                previous = current;
+            }
+            assert_eq!(previous, 150.);
+            assert!(!swap.running(ms(1030 + 200)));
+        }
+    }
+
+    #[test]
+    fn thinking_and_working_stay_visible_until_full_title_can_crossfade() {
+        use super::{next_step_line, StepLine};
+        use crate::trace_view::STEP_DELAY;
+        let now = std::time::Instant::now();
+        let ms = |n| now + std::time::Duration::from_millis(n);
+        for placeholder in ["Thinking", "Working"] {
+            let mut line = next_step_line(None, placeholder, now);
+            line.shown_w = Some(56.);
+            let line = next_step_line(Some(line), "Reading the on/off cycle logic", ms(1000));
+            let swap = line.from.as_ref().unwrap();
+            assert_eq!(swap.from, placeholder);
+            assert_eq!(swap.delay, STEP_DELAY);
+            // Synchronized bloom: crossfade and width glide begin concurrently (no ghost box)
+            let (enter, exit) = swap.progress(ms(1040));
+            assert!(enter > 0.2 && enter < 0.85, "incoming title blooms in with width, enter={enter}");
+            assert!(exit > 0.05 && exit < 0.8, "outgoing title dissolves smoothly, exit={exit}");
+            let mut measured = swap.clone();
+            measured.to_w = Some(180.);
+            let (alpha, _, width) = measured.arrival_at(ms(1100));
+            assert!(width.unwrap() > 56. && width.unwrap() < 180., "width glides smoothly");
+            assert!(alpha > 0.5 && alpha < 1.0, "placeholder crossfades in real time, alpha={alpha}");
+            assert!(measured.progress(ms(1100)).1 < 1., "outgoing title overlaps arrival");
+        }
+        // Generative → generative also transitions with unified physical ease
+        let settled = StepLine {
+            shown: "Reading the on/off cycle logic".into(),
+            shown_w: Some(180.),
+            from: None,
+        };
+        let line = next_step_line(Some(settled), "Checking payroll rules", ms(2000));
+        let swap = line.from.as_ref().unwrap();
+        assert_eq!(swap.delay, STEP_DELAY);
+        let (alpha, _, _) = swap.arrival_at(ms(2040));
+        assert!(alpha > 0.2 && alpha < 0.85, "generative swaps bloom in immediately without disjoint pause, alpha={alpha}");
+    }
+
+    #[test]
+    fn stable_agent_label_does_not_animate_on_completion_or_republish() {
+        use super::next_step_line;
+        use crate::markdown::ToolEntry;
+        let now = std::time::Instant::now();
+        let mut tool = ToolEntry { label: "Reading payroll logic".into(), state: "running".into(), ..Default::default() };
+        let line = next_step_line(None, &crate::trace::TraceStep::from(&tool).title(), now);
+        tool.state = "done".into();
+        let line = next_step_line(Some(line), &crate::trace::TraceStep::from(&tool).title(), now);
+        assert!(line.from.is_none());
+    }
+
+    #[test]
+    fn opening_narration_is_held_until_it_is_an_answer() {
+        use crate::markdown::TranscriptBlock;
+        let para = |text: &str| TranscriptBlock::Paragraph { id: "m#t0".into(), content: text.into(), spans: Vec::new() };
+        assert!(super::opening_is_provisional(&[para("I'll look up the oncycle docs.")]));
+        assert!(!super::opening_is_provisional(&[para(&"word ".repeat(80))]));
+        assert!(!super::opening_is_provisional(&[para("Hi."), TranscriptBlock::Paragraph { id: "m#t1".into(), content: "More.".into(), spans: Vec::new() }]));
+    }
+
+    #[test]
+    fn fold_turn_rows_keeps_the_reply_and_hides_the_steps() {
         use crate::markdown::{ToolEntry, TranscriptBlock};
         let done_tool = ToolEntry {
             tool_id: "t1".into(),
@@ -5794,9 +6721,10 @@ mod turn_tests {
             },
         ];
 
-        let summary_closed = super::worked_summary(&rows, "m#worked".into(), false).unwrap();
-        let folded_closed = super::fold_turn_rows(rows.clone(), summary_closed, false);
-        // When collapsed: only TurnSummary ("3 steps completed · View trace") and the final response ("Here are the figures...")
+        let summary_closed = super::worked_summary(&rows, "m#worked".into(), false, false).unwrap();
+        let folded_closed = super::fold_turn_rows(rows.clone(), summary_closed, false, false);
+        // Collapsed: the line, then only the answer. The narration between
+        // steps folds with them.
         assert_eq!(folded_closed.len(), 2);
         assert!(
             matches!(&folded_closed[0], TranscriptBlock::TurnSummary { label, .. } if label == "3 steps completed · View trace")
@@ -5805,22 +6733,122 @@ mod turn_tests {
             matches!(&folded_closed[1], TranscriptBlock::Paragraph { content, .. } if content == "Here are the figures from the original reports.")
         );
 
-        let summary_open = super::worked_summary(&rows, "m#worked".into(), true).unwrap();
-        let folded_open = super::fold_turn_rows(rows, summary_open, true);
-        // When expanded: TurnSummary ("3 steps completed · Hide trace"), Thought, intermediate Paragraph, ToolGroup, Thought, final Paragraph
+        let summary_open = super::worked_summary(&rows, "m#worked".into(), true, false).unwrap();
+        let folded_open = super::fold_turn_rows(rows, summary_open, true, false);
+        // Expanded: the line, then the trace in stream order with the
+        // narration muted (same row id), then the answer as prose.
         assert_eq!(folded_open.len(), 6);
         assert!(
             matches!(&folded_open[0], TranscriptBlock::TurnSummary { label, .. } if label == "3 steps completed · Hide trace")
         );
         assert!(matches!(&folded_open[1], TranscriptBlock::Reasoning { .. }));
         assert!(
-            matches!(&folded_open[2], TranscriptBlock::Paragraph { content, .. } if content == "I'll pull the original reports behind those two figures, not just the reprints.")
+            matches!(&folded_open[2], TranscriptBlock::Interim(inner) if matches!(inner.as_ref(), TranscriptBlock::Paragraph { content, .. } if content.starts_with("I'll pull")))
         );
+        assert_eq!(folded_open[2].id(), "m#t0");
         assert!(matches!(&folded_open[3], TranscriptBlock::ToolGroup { .. }));
         assert!(matches!(&folded_open[4], TranscriptBlock::Reasoning { .. }));
         assert!(
             matches!(&folded_open[5], TranscriptBlock::Paragraph { content, .. } if content == "Here are the figures from the original reports.")
         );
+    }
+
+    #[test]
+    fn narration_folds_once_a_step_follows_it() {
+        use crate::markdown::{ToolEntry, TranscriptBlock};
+        let tool = |id: &str, state: &str| TranscriptBlock::ToolGroup {
+            id: format!("m#tools{id}"),
+            tools: vec![ToolEntry {
+                tool_id: id.into(),
+                name: "bash".into(),
+                summary: "ls".into(),
+                state: state.into(),
+                ..Default::default()
+            }],
+            expanded: false,
+            overrides: Vec::new(),
+        };
+        let para = |id: &str, text: &str| TranscriptBlock::Paragraph {
+            id: id.into(),
+            content: text.into(),
+            spans: Vec::new(),
+        };
+        let code = TranscriptBlock::Code {
+            id: "m#code".into(),
+            language: None,
+            content: "x".into(),
+            line_count: 1,
+            spans: Default::default(),
+            closed: true,
+            run: None,
+        };
+        // Streaming: text before the first step, text and code between
+        // steps, and the trailing sentence still being written.
+        let rows = vec![
+            para("m#t0", "I'll find the docs."),
+            tool("0", "done"),
+            para("m#t1", "Found the design docs, reading those next."),
+            code,
+            tool("1", "done"),
+            para("m#t2", "Here's the flow"),
+        ];
+        let ids = |rows: &[TranscriptBlock]| rows.iter().map(|r| r.id().to_string()).collect::<Vec<_>>();
+        let closed = super::fold_turn_rows(rows.clone(), super::worked_summary(&rows, "m#worked".into(), false, true).unwrap(), false, true);
+        assert_eq!(ids(&closed), ["m#worked"]);
+        let open = super::fold_turn_rows(rows.clone(), super::worked_summary(&rows, "m#worked".into(), true, true).unwrap(), true, true);
+        assert_eq!(ids(&open), ["m#worked", "m#t0", "m#tools0", "m#t1", "m#code", "m#tools1", "m#t2"]);
+        assert!(matches!(&open[1], TranscriptBlock::Interim(_)));
+        assert!(matches!(&open[4], TranscriptBlock::Code { .. }), "code stays a code block");
+        assert!(matches!(&open[6], TranscriptBlock::Interim(_)), "trailing live text is provisional narration");
+
+        // No more tools arrive: settling reveals the answer, without losing it.
+        let settled = super::fold_turn_rows(rows.clone(), super::worked_summary(&rows, "m#worked".into(), false, false).unwrap(), false, false);
+        assert_eq!(ids(&settled), ["m#worked", "m#t2"]);
+
+        // A new step starts after it: the sentence joins the trace, same row.
+        let mut rows = rows;
+        rows.push(tool("2", "running"));
+        let closed = super::fold_turn_rows(rows.clone(), super::worked_summary(&rows, "m#worked".into(), false, true).unwrap(), false, true);
+        assert_eq!(ids(&closed), ["m#worked"]);
+        let open = super::fold_turn_rows(rows.clone(), super::worked_summary(&rows, "m#worked".into(), true, true).unwrap(), true, true);
+        assert!(matches!(&open[6], TranscriptBlock::Interim(_)));
+        assert_eq!(open[6].id(), "m#t2");
+
+        // Cards keep their place outside the fold.
+        let mut rows = rows;
+        rows.insert(2, TranscriptBlock::Stats { id: "m#ui-stats".into(), items: Vec::new() });
+        let closed = super::fold_turn_rows(rows.clone(), super::worked_summary(&rows, "m#worked".into(), false, true).unwrap(), false, true);
+        assert_eq!(ids(&closed), ["m#worked", "m#ui-stats"]);
+    }
+
+    #[test]
+    fn live_narration_never_escapes_the_trace_between_steps() {
+        use crate::markdown::TranscriptBlock;
+        let prose = |id: &str, text: &str| TranscriptBlock::Paragraph {
+            id: id.into(), content: text.into(), spans: Vec::new(),
+        };
+        let mut rows = vec![prose("m#intro", "I'll look up the logic.")];
+        // A text-only response still streams normally before there is a trace.
+        assert!(super::worked_summary(&rows, "m#worked".into(), false, true).is_none());
+        rows.push(TranscriptBlock::Reasoning {
+            id: "m#thinking".into(), content: "Checking the code".into(), expanded: false,
+        });
+        let fold = |rows: Vec<TranscriptBlock>, streaming| {
+            let summary = super::worked_summary(&rows, "m#worked".into(), false, streaming).unwrap();
+            super::fold_turn_rows(rows, summary, false, streaming)
+        };
+        assert_eq!(fold(rows.clone(), true).len(), 1, "first step hides the introduction immediately");
+        for text in ["I'll", "I'll look up", "I'll look up the next file."] {
+            let mut tick = rows.clone();
+            tick.push(prose("m#next", text));
+            let visible = fold(tick, true);
+            assert_eq!(visible.len(), 1, "each partial text update stays inside the trace");
+            assert!(matches!(&visible[0], TranscriptBlock::TurnSummary { live: true, .. }));
+        }
+        rows.push(prose("m#answer", "Here is the final answer."));
+        let settled = fold(rows, false);
+        assert_eq!(settled.len(), 2);
+        assert_eq!(settled[1].id(), "m#answer");
     }
 
     #[test]
@@ -5873,8 +6901,8 @@ mod turn_tests {
             }
         });
 
-        let summary = super::worked_summary(&rows, "m#worked".into(), false).unwrap();
-        rows = super::fold_turn_rows(rows, summary, false);
+        let summary = super::worked_summary(&rows, "m#worked".into(), false, false).unwrap();
+        rows = super::fold_turn_rows(rows, summary, false, false);
         rows.extend(file_changes);
 
         assert_eq!(rows.len(), 3);
@@ -5971,6 +6999,17 @@ impl KeelWindow {
         cx.notify();
         true
     }
+
+    /// Close the overlay immediately without animation delay.
+    pub(super) fn close_lightbox_instant(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.lightbox_fx.shown() && self.lightbox.is_none() {
+            return false;
+        }
+        self.lightbox = None;
+        self.lightbox_fx.cut();
+        cx.notify();
+        true
+    }
 }
 
 /// What the full-window overlay shows.
@@ -6003,9 +7042,50 @@ fn is_step_row(row: &TranscriptBlock) -> bool {
     }
 }
 
-/// "Show works" / "Hide works" over the turn's steps; None when the turn
-/// did no visible work or is still working.
-fn worked_summary(rows: &[TranscriptBlock], id: String, expanded: bool) -> Option<TranscriptBlock> {
+/// The live trace line's wording, and the previous one still fading out.
+/// Widths are measured by the next frame (`shown_w`, `StepSwap` widths).
+#[derive(Debug)]
+pub(super) struct StepLine {
+    pub(super) shown: String,
+    pub(super) shown_w: Option<f32>,
+    pub(super) from: Option<crate::trace_view::StepSwap>,
+}
+
+/// One line over the turn's steps. While the turn is running (or a step is
+/// still in progress) the line names that step. None when the turn did no
+/// visible work.
+fn worked_summary(
+    rows: &[TranscriptBlock],
+    id: String,
+    expanded: bool,
+    streaming: bool,
+) -> Option<TranscriptBlock> {
+    worked_summary_at(rows, id, expanded, streaming, crate::timer::now_ms())
+}
+
+fn worked_summary_at(
+    rows: &[TranscriptBlock],
+    id: String,
+    expanded: bool,
+    streaming: bool,
+    now_ms: i64,
+) -> Option<TranscriptBlock> {
+    if !rows.iter().any(is_step_row) {
+        return None;
+    }
+    if streaming || turn_is_busy(rows) {
+        let (mut label, _) = current_step_at(rows, now_ms);
+        if streaming && !turn_is_busy(rows) && answer_after_steps(rows) {
+            label = "Writing".to_string();
+        }
+        return Some(TranscriptBlock::TurnSummary {
+            id,
+            label,
+            failed: false,
+            expanded,
+            live: true,
+        });
+    }
     let tools: Vec<_> = rows
         .iter()
         .filter(|row| is_step_row(row))
@@ -6014,26 +7094,6 @@ fn worked_summary(rows: &[TranscriptBlock], id: String, expanded: bool) -> Optio
             _ => &[],
         })
         .collect();
-    let running_subagent = rows
-        .iter()
-        .any(|r| matches!(r, TranscriptBlock::Subagent { state, .. } if state == "running"));
-    let live_plan = rows
-        .iter()
-        .any(|r| matches!(r, TranscriptBlock::Plan { live: true, .. }));
-    if !rows.iter().any(is_step_row)
-        || tools
-            .iter()
-            .any(|t| t.state == "running" || t.state == "pending")
-        || running_subagent
-        || live_plan
-    {
-        return None;
-    }
-    let failed = tools.iter().filter(|t| t.state == "failed" || t.state == "error").count() as u64
-        + rows
-            .iter()
-            .filter(|r| matches!(r, TranscriptBlock::Subagent { state, .. } if matches!(state.as_str(), "error" | "failed" | "errored")))
-            .count() as u64;
 
     let other_steps = rows
         .iter()
@@ -6065,45 +7125,299 @@ fn worked_summary(rows: &[TranscriptBlock], id: String, expanded: bool) -> Optio
 
     let action = if expanded { "Hide trace" } else { "View trace" };
 
-    let label = if failed > 0 {
-        if failed == 1 && count == 1 {
-            format!("1 step failed{duration} · {action}")
-        } else if failed == count as u64 {
-            format!("{count} steps failed{duration} · {action}")
-        } else {
-            format!("{failed} of {count} steps failed{duration} · {action}")
-        }
-    } else {
-        format!(
-            "{count} step{} completed{duration} · {action}",
-            if count == 1 { "" } else { "s" }
-        )
-    };
+    let label = format!(
+        "{count} step{} completed{duration} · {action}",
+        if count == 1 { "" } else { "s" }
+    );
 
     Some(TranscriptBlock::TurnSummary {
         id,
         label,
-        failed: failed > 0,
+        failed: false,
         expanded,
+        live: false,
     })
 }
 
-/// Folds a finished turn's rows: hides all steps and intermediate responses
-/// occurring before or during the work when collapsed (`!open`).
+impl KeelWindow {
+    fn note_live_step(&mut self, label: &str, now: std::time::Instant) {
+        let label = keel_proto::trim_progress_label(label);
+        let previous = self.step_line.take().or_else(|| {
+            Some(next_step_line(None, "Thinking", now))
+        });
+        self.step_line = Some(next_step_line(previous, label, now));
+    }
+}
+
+/// The live line after its wording becomes `label` at `now`. The latest
+/// wording always wins and nothing plays twice:
+/// - a wording replaced within [`STEP_RETARGET`] was never readable, so the
+///   new one takes its place in the same swap;
+/// - one replaced mid-arrival leaves from where it was (opacity, lift, width);
+/// - returning to wording still leaving reverses from its current opacity.
+fn next_step_line(line: Option<StepLine>, label: &str, now: std::time::Instant) -> StepLine {
+    use crate::trace_view::{STEP_DELAY, STEP_RETARGET, StepSwap};
+    let Some(line) = line else {
+        return StepLine {
+            shown: label.to_string(),
+            shown_w: None,
+            from: None,
+        };
+    };
+    if line.shown == label {
+        return line;
+    }
+    let from = match line.from {
+        Some(swap) if swap.from == label && swap.running(now) => {
+            let (alpha, lift, width) = swap.arrival_at(now);
+            let (_, exit) = swap.progress(now);
+            Some(StepSwap {
+                from: line.shown.clone(), at: now, width_at: now,
+                alpha, lift,
+                enter_alpha: swap.alpha * (1. - exit),
+                enter_lift: swap.lift + crate::trace_view::STEP_RISE * exit,
+                from_w: width, to_w: None,
+                delay: STEP_DELAY,
+            })
+        }
+        Some(swap) if now.saturating_duration_since(swap.at) < STEP_RETARGET => {
+            (swap.from != label).then(|| {
+                let width = swap.arrival_at(now).2;
+                StepSwap { from_w: width, to_w: None, width_at: now, ..swap }
+            })
+        }
+        Some(swap) if swap.running(now) => {
+            let (alpha, lift, width) = swap.arrival_at(now);
+            Some(StepSwap {
+                from: line.shown.clone(),
+                at: now,
+                width_at: now,
+                alpha,
+                lift,
+                enter_alpha: 0.,
+                enter_lift: -crate::trace_view::STEP_RISE,
+                from_w: width.or(line.shown_w),
+                to_w: None,
+                delay: STEP_DELAY,
+            })
+        }
+        _ => Some(StepSwap::fresh(line.shown, now, line.shown_w)),
+    };
+    StepLine {
+        shown: label.to_string(),
+        shown_w: None,
+        from,
+    }
+}
+
+/// A tool, plan, or subagent is still in progress.
+fn turn_is_busy(rows: &[TranscriptBlock]) -> bool {
+    rows.iter().any(|row| match row {
+        TranscriptBlock::ToolGroup { tools, .. } => tools
+            .iter()
+            .any(|tool| tool.is_live() && !tool.is_receipt()),
+        TranscriptBlock::Plan { live, .. } => *live,
+        TranscriptBlock::Subagent { state, .. } => state == "running",
+        _ => false,
+    })
+}
+
+/// The answer has started: a paragraph after the last step.
+fn answer_after_steps(rows: &[TranscriptBlock]) -> bool {
+    let Some(last) = rows.iter().rposition(is_step_row) else {
+        return false;
+    };
+    rows[last + 1..]
+        .iter()
+        .any(|row| matches!(row, TranscriptBlock::Paragraph { .. }))
+}
+
+/// What the collapsed line says while the turn runs: the newest running
+/// tool's title (agent label, else "Working"), with ` +N` when more tools
+/// run in parallel; else the plan item in progress; else "Thinking".
+#[allow(dead_code)]
+fn current_step(rows: &[TranscriptBlock]) -> (String, bool) {
+    current_step_at(rows, crate::timer::now_ms())
+}
+
+/// Brief pause hysteresis between tools: holds the last completed tool's label
+/// during brief inter-tool thinking/reasoning tokens (~400ms) rather than rapidly
+/// bouncing between "Tool 1" <-> "Thinking" <-> "Tool 2".
+pub(crate) const REASONING_HYSTERESIS_MS: i64 = 400;
+
+fn current_step_at(rows: &[TranscriptBlock], now_ms: i64) -> (String, bool) {
+    let mut now: Option<(String, bool, bool)> = None;
+    let mut live_tools = 0u32;
+    let mut last_tool_ended_ms: Option<i64> = None;
+    for row in rows {
+        match row {
+            TranscriptBlock::ToolGroup { tools, .. } => {
+                for tool in tools {
+                    if tool.is_receipt() {
+                        continue;
+                    }
+                    let step = crate::trace::TraceStep::from(tool);
+                    let live = matches!(
+                        step.status,
+                        crate::trace::StepStatus::Running | crate::trace::StepStatus::Pending
+                    );
+                    if live {
+                        live_tools += 1;
+                    } else if let Some(end) = step.ended_ms {
+                        last_tool_ended_ms = Some(last_tool_ended_ms.map_or(end, |prev| prev.max(end)));
+                    }
+                    hold(
+                        &mut now,
+                        step.title(),
+                        step.status == crate::trace::StepStatus::Error,
+                        live,
+                    );
+                }
+            }
+            TranscriptBlock::Plan {
+                entries,
+                live: true,
+                ..
+            } => {
+                let title = entries
+                    .iter()
+                    .find(|entry| {
+                        matches!(
+                            entry.status.as_str(),
+                            "in_progress" | "inProgress" | "running"
+                        )
+                    })
+                    .map(|entry| one_line(&entry.content))
+                    .unwrap_or_else(|| "Planning".to_string());
+                hold(&mut now, title, false, true);
+            }
+            TranscriptBlock::Subagent { name, state, .. } if state == "running" => {
+                hold(&mut now, subagent_running(name), false, true);
+            }
+            TranscriptBlock::Reasoning { .. } => {
+                let in_hysteresis = live_tools == 0
+                    && last_tool_ended_ms.is_some_and(|end| {
+                        let diff = now_ms - end;
+                        diff >= -50 && diff < REASONING_HYSTERESIS_MS
+                    });
+                if !in_hysteresis {
+                    hold(&mut now, "Thinking".to_string(), false, false);
+                }
+            }
+            _ => {}
+        }
+    }
+    let (mut title, failed) = now
+        .map(|(title, failed, _)| (title, failed))
+        .unwrap_or(("Thinking".to_string(), false));
+    title = keel_proto::trim_progress_label(&title).to_string();
+    if live_tools > 1 {
+        title = format!("{title} +{}", live_tools - 1);
+    }
+    (title, failed)
+}
+
+/// Keep a step that is still running. A settled step only fills in when nothing is.
+fn hold(now: &mut Option<(String, bool, bool)>, title: String, failed: bool, live: bool) {
+    if live || now.as_ref().is_none_or(|(_, _, held)| !held) {
+        *now = Some((title, failed, live));
+    }
+}
+
+fn one_line(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = keel_proto::trim_progress_label(&text);
+    if text.chars().count() <= 72 {
+        text.to_string()
+    } else {
+        let head: String = text.chars().take(72).collect();
+        keel_proto::trim_progress_label(head.trim()).to_string()
+    }
+}
+
+fn subagent_running(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || name == "subagent" {
+        "Running subagent".to_string()
+    } else if name.ends_with("agent") {
+        format!("Running {name}")
+    } else {
+        format!("Running {name} agent")
+    }
+}
+
+/// Folds steps and narration behind `summary`. While the turn is streaming,
+/// trailing prose is provisional: it may introduce the next tool, so it must
+/// never paint outside the trace. Once the turn settles, only prose after the
+/// last step is revealed as the answer.
+/// Cards (choices, charts, tests...) keep their place either way. Collapsed,
+/// the line sits where the first folded row was. Expanded, it leads the
+/// trace, and narration shows as muted prose among the steps.
 fn fold_turn_rows(
-    mut rows: Vec<TranscriptBlock>,
+    rows: Vec<TranscriptBlock>,
     summary: TranscriptBlock,
     open: bool,
+    streaming: bool,
 ) -> Vec<TranscriptBlock> {
-    if let Some(last) = rows.iter().rposition(is_step_row) {
-        if !open {
-            let final_rows = rows.split_off(last + 1);
-            rows.clear();
-            rows.extend(final_rows);
+    let Some(last) = rows.iter().rposition(is_step_row) else {
+        return rows;
+    };
+    let folds = |ix: usize, row: &TranscriptBlock| {
+        is_step_row(row) || ((streaming || ix < last) && is_trace_text(row))
+    };
+    let Some(first) = rows.iter().enumerate().position(|(ix, row)| folds(ix, row)) else {
+        return rows;
+    };
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    for (ix, row) in rows.into_iter().enumerate() {
+        if ix == first {
+            out.push(summary.clone());
         }
-        rows.insert(0, summary);
+        if !folds(ix, &row) {
+            out.push(row);
+        } else if open {
+            out.push(interim(row));
+        }
     }
-    rows
+    out
+}
+
+/// A stepless live turn whose text is still one short paragraph: likely the
+/// narration that introduces the first tool, not the answer.
+fn opening_is_provisional(rows: &[TranscriptBlock]) -> bool {
+    let text: Vec<_> = rows.iter().filter(|row| is_trace_text(row)).collect();
+    match text.as_slice() {
+        [TranscriptBlock::Paragraph { content, .. }] => content.chars().count() <= OPENING_HOLD_CHARS,
+        _ => false,
+    }
+}
+
+/// Longer than this, opening text is an answer and streams as usual.
+const OPENING_HOLD_CHARS: usize = 280;
+
+/// Text the agent writes between steps, which folds with them.
+fn is_trace_text(row: &TranscriptBlock) -> bool {
+    matches!(
+        row,
+        TranscriptBlock::Paragraph { .. }
+            | TranscriptBlock::Heading { .. }
+            | TranscriptBlock::List { .. }
+            | TranscriptBlock::Quote { .. }
+            | TranscriptBlock::Code { .. }
+            | TranscriptBlock::Table { .. }
+            | TranscriptBlock::Rule { .. }
+    )
+}
+
+/// Prose inside the fold is drawn muted; code and tables stay as they are.
+fn interim(row: TranscriptBlock) -> TranscriptBlock {
+    match row {
+        TranscriptBlock::Paragraph { .. }
+        | TranscriptBlock::Heading { .. }
+        | TranscriptBlock::List { .. }
+        | TranscriptBlock::Quote { .. } => TranscriptBlock::Interim(Box::new(row)),
+        row => row,
+    }
 }
 
 /// The model section's skeleton-to-rows crossfade and height glide.

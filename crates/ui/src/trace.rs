@@ -32,6 +32,8 @@ pub enum StepKind {
     Subagent,
     Plan,
     Sources,
+    /// `memory_read` or `memory_write`. Stays its own line.
+    Memory,
     Other,
 }
 
@@ -98,6 +100,13 @@ pub fn verb_for(kind: StepKind, name: &str) -> Verb {
             "check sources",
             "checking sources",
         ),
+        StepKind::Memory => {
+            if memory_writes(name) {
+                verb("Write", "Writing", "Wrote", "write", "writing")
+            } else {
+                verb("Read", "Reading", "Read", "read", "reading")
+            }
+        }
         StepKind::Other => verb("Use", "Using", "Used", "use", "using"),
     }
 }
@@ -155,6 +164,8 @@ pub struct TraceStep {
     pub status: StepStatus,
     pub verb: Verb,
     pub subject: String,
+    /// Agent-written progress label. When set, [`Self::title`] uses it as-is.
+    pub label: String,
     pub description: Option<String>,
     pub started_ms: Option<i64>,
     pub ended_ms: Option<i64>,
@@ -176,6 +187,7 @@ impl TraceStep {
             status,
             verb: verb_for(StepKind::Plan, "plan"),
             subject: String::new(),
+            label: String::new(),
             description: None,
             started_ms: None,
             ended_ms: None,
@@ -187,6 +199,11 @@ impl TraceStep {
     }
 
     /// The line's title for its status.
+    ///
+    /// An agent label wins for every status (same text, muted when done).
+    /// With no label: running/pending → "Working"; done → a plain past
+    /// verb; error → "Failed"; cancelled → "Stopped". Never derived from
+    /// the tool's args or command.
     pub fn title(&self) -> String {
         if self.kind == StepKind::Plan {
             let entries = match &self.body {
@@ -195,32 +212,24 @@ impl TraceStep {
             };
             return plan_title(entries, self.status);
         }
-        if self.kind == StepKind::Other {
-            let name = if self.subject.is_empty() {
-                "tool"
-            } else {
-                self.subject.as_str()
-            };
-            return match self.status {
-                StepStatus::Pending | StepStatus::Done => name.to_string(),
-                StepStatus::Running => format!("Running {name}"),
-                StepStatus::Error => format!("Failed to run {name}"),
-                StepStatus::Cancelled => format!("Stopped running {name}"),
-            };
+        if !self.label.is_empty() {
+            return keel_proto::trim_progress_label(&self.label).to_string();
         }
-        // A browser action that failed: "Couldn't open traveloka.com".
-        if self.kind == StepKind::Browser && self.status == StepStatus::Error {
-            return format!("Couldn't {}", join_subject(self.verb.failed, &self.subject));
+        match self.status {
+            StepStatus::Pending | StepStatus::Running => "Working".to_string(),
+            StepStatus::Done => plain_verb(self.verb.past),
+            StepStatus::Error => "Failed".to_string(),
+            StepStatus::Cancelled => "Stopped".to_string(),
         }
-        let (head, prefix) = match self.status {
-            StepStatus::Pending => (self.verb.imperative, ""),
-            StepStatus::Running => (self.verb.present, ""),
-            StepStatus::Done => (self.verb.past, ""),
-            StepStatus::Error => (self.verb.failed, "Failed to "),
-            StepStatus::Cancelled => (self.verb.stopped, "Stopped "),
-        };
-        format!("{prefix}{}", join_subject(head, &self.subject))
     }
+}
+
+/// Past tense without a dangling "for" / "to" (empty subject).
+fn plain_verb(past: &str) -> String {
+    past.strip_suffix(" for")
+        .or_else(|| past.strip_suffix(" to"))
+        .unwrap_or(past)
+        .to_string()
 }
 
 fn plan_title(entries: &[PlanItem], status: StepStatus) -> String {
@@ -244,6 +253,7 @@ fn plan_title(entries: &[PlanItem], status: StepStatus) -> String {
 }
 
 /// "Searching for" with no subject is "Searching".
+#[allow(dead_code)]
 fn join_subject(head: &str, subject: &str) -> String {
     let head = if subject.is_empty() {
         head.strip_suffix(" for")
@@ -271,13 +281,15 @@ impl From<&ToolEntry> for TraceStep {
         }
         let status = status_of(&tool.state);
         let kind = step_kind(&tool.name, &tool.kind);
+        let label = keel_proto::trim_progress_label(&tool.label).to_string();
         let subject = subject_for(kind, &tool.detail, &tool.name);
         let mut step = Self {
             id: tool.tool_id.clone(),
             kind,
             status,
             verb: verb_for(kind, &tool.name),
-            subject,
+            subject: if label.is_empty() { subject } else { String::new() },
+            label,
             description: None,
             started_ms: tool.started_ms,
             ended_ms: tool.ended_ms,
@@ -315,12 +327,19 @@ fn browser_step(tool: &ToolEntry) -> Option<TraceStep> {
             StepBody::Browser(body)
         }
     };
+    let label = keel_proto::trim_progress_label(&tool.label).to_string();
+    let subject = if label.is_empty() {
+        browser_trace::subject(op, &args, &outcome)
+    } else {
+        String::new()
+    };
     let mut step = TraceStep {
         id: tool.tool_id.clone(),
         kind: StepKind::Browser,
         status,
         verb: browser_trace::verb(op, &args),
-        subject: browser_trace::subject(op, &args, &outcome),
+        subject,
+        label,
         description: None,
         started_ms: tool.started_ms,
         ended_ms: tool.ended_ms,
@@ -520,12 +539,15 @@ fn web_step(tool: &ToolEntry) -> Option<TraceStep> {
     } else {
         body_of(tool, status)
     };
+    let label = keel_proto::trim_progress_label(&tool.label).to_string();
+    let subject = if label.is_empty() { subject } else { String::new() };
     let mut step = TraceStep {
         id: tool.tool_id.clone(),
         kind,
         status,
         verb,
         subject,
+        label,
         description: None,
         started_ms: tool.started_ms,
         ended_ms: tool.ended_ms,
@@ -578,6 +600,7 @@ fn known_kind(raw: &str) -> Option<StepKind> {
         "subagent" => Some(StepKind::Subagent),
         "plan" => Some(StepKind::Plan),
         "sources" => Some(StepKind::Sources),
+        "memory" => Some(StepKind::Memory),
         "list" | "ls" | "dir" => Some(StepKind::Search),
         _ => None,
     }
@@ -587,12 +610,22 @@ fn is_browser(name: &str) -> bool {
     browser_trace::tool_base(name).is_some()
 }
 
+/// `memory_write` (save or archive). Anything else named as memory is a read.
+pub fn memory_writes(name: &str) -> bool {
+    let base = name.rsplit("__").next().unwrap_or(name);
+    let base = base.rsplit(['/', ':']).next().unwrap_or(base);
+    base.to_ascii_lowercase().replace(['-', ' '], "_") == "memory_write"
+}
+
 /// Same fallback as `keel_harness::kind_from_name`. The UI crate does not
 /// depend on the harness, so old sessions with an empty kind infer it here.
 fn kind_from_name(name: &str) -> Option<&'static str> {
     let base = name.rsplit("__").next().unwrap_or(name);
     let base = base.rsplit(['/', ':']).next().unwrap_or(base);
     let n = base.to_ascii_lowercase().replace(['-', ' '], "_");
+    if n == "memory_read" || n == "memory_write" {
+        return Some("memory");
+    }
     if is_plan_name(&n) {
         return Some("plan");
     }
@@ -651,6 +684,7 @@ fn subject_for(kind: StepKind, detail: &str, name: &str) -> String {
     match kind {
         StepKind::Fetch => fetch_host(if detail.is_empty() { name } else { detail }),
         StepKind::Subagent => agent_subject(if detail.is_empty() { name } else { detail }),
+        StepKind::Memory => "memory".to_string(),
         StepKind::Other if detail.is_empty() => humanise(name),
         _ => detail.to_string(),
     }
@@ -891,31 +925,16 @@ pub struct TraceGroup {
 /// is never folded. An error stays inside and lifts the parent, unless a
 /// child is still running.
 pub fn group_steps(steps: Vec<TraceStep>) -> Vec<TraceNode> {
-    let mut out = Vec::new();
-    let mut run = Vec::new();
-    let mut browsing = Vec::new();
-    for step in steps {
-        if browsable(&step) {
-            flush_run(&mut run, &mut out);
-            browsing.push(step);
-        } else if foldable(&step) {
-            flush_browsing(&mut browsing, &mut out);
-            run.push(step);
-        } else {
-            flush_run(&mut run, &mut out);
-            flush_browsing(&mut browsing, &mut out);
-            out.push(TraceNode::Step(step));
-        }
-    }
-    flush_run(&mut run, &mut out);
-    flush_browsing(&mut browsing, &mut out);
-    out
+    // Each call stays on its own line so agent labels stay visible.
+    steps.into_iter().map(TraceNode::Step).collect()
 }
 
+#[allow(dead_code)]
 fn browsable(step: &TraceStep) -> bool {
     !step.needs_user && step.kind == StepKind::Browser
 }
 
+#[allow(dead_code)]
 fn flush_browsing(run: &mut Vec<TraceStep>, out: &mut Vec<TraceNode>) {
     let taken = std::mem::take(run);
     if taken.len() >= 3 {
@@ -926,6 +945,7 @@ fn flush_browsing(run: &mut Vec<TraceStep>, out: &mut Vec<TraceNode>) {
 }
 
 /// Calls a line stands for: a folded repeat says "×3".
+#[allow(dead_code)]
 fn weight(step: &TraceStep) -> usize {
     step.description
         .as_deref()
@@ -934,6 +954,7 @@ fn weight(step: &TraceStep) -> usize {
         .unwrap_or(1)
 }
 
+#[allow(dead_code)]
 fn browsed_group(steps: Vec<TraceStep>) -> TraceGroup {
     let actions: usize = steps.iter().map(weight).sum();
     let failed = steps
@@ -972,6 +993,7 @@ fn browsed_group(steps: Vec<TraceStep>) -> TraceGroup {
     }
 }
 
+#[allow(dead_code)]
 fn foldable(step: &TraceStep) -> bool {
     !step.needs_user
         && matches!(
@@ -980,6 +1002,7 @@ fn foldable(step: &TraceStep) -> bool {
         )
 }
 
+#[allow(dead_code)]
 fn flush_run(run: &mut Vec<TraceStep>, out: &mut Vec<TraceNode>) {
     let taken = std::mem::take(run);
     if taken.len() >= 3 {
@@ -989,6 +1012,7 @@ fn flush_run(run: &mut Vec<TraceStep>, out: &mut Vec<TraceNode>) {
     }
 }
 
+#[allow(dead_code)]
 fn explored_group(steps: Vec<TraceStep>) -> TraceGroup {
     let files = steps
         .iter()
@@ -1039,6 +1063,7 @@ fn explored_group(steps: Vec<TraceStep>) -> TraceGroup {
     }
 }
 
+#[allow(dead_code)]
 fn counts_label(files: usize, searches: usize, fetches: usize) -> String {
     let mut parts = Vec::new();
     if files > 0 {
@@ -1073,6 +1098,7 @@ mod tests {
             status,
             verb: verb_for(kind, subject),
             subject: subject.to_string(),
+            label: String::new(),
             description: None,
             started_ms: None,
             ended_ms: None,
@@ -1088,106 +1114,63 @@ mod tests {
     }
 
     #[test]
-    fn titles_follow_the_verb_forms() {
-        assert_eq!(
-            step(StepKind::Execute, StepStatus::Pending, "pnpm test").title(),
-            "Run pnpm test"
-        );
+    fn titles_use_label_or_plain_fallback() {
+        let mut labeled = step(StepKind::Execute, StepStatus::Running, "pnpm test");
+        labeled.label = "Running the test suite".into();
+        assert_eq!(labeled.title(), "Running the test suite");
+        labeled.status = StepStatus::Done;
+        assert_eq!(labeled.title(), "Running the test suite");
+        labeled.status = StepStatus::Error;
+        assert_eq!(labeled.title(), "Running the test suite");
+
         assert_eq!(
             step(StepKind::Execute, StepStatus::Running, "pnpm build").title(),
-            "Running pnpm build"
+            "Working"
+        );
+        assert_eq!(
+            step(StepKind::Execute, StepStatus::Pending, "pnpm test").title(),
+            "Working"
         );
         assert_eq!(
             step(StepKind::Execute, StepStatus::Done, "pnpm install").title(),
-            "Ran pnpm install"
+            "Ran"
         );
         assert_eq!(
             step(StepKind::Execute, StepStatus::Error, "pnpm lint").title(),
-            "Failed to run pnpm lint"
+            "Failed"
         );
         assert_eq!(
             step(StepKind::Execute, StepStatus::Cancelled, "pnpm test").title(),
-            "Stopped running pnpm test"
+            "Stopped"
         );
-
-        assert_eq!(
-            read("src/lib.rs", StepStatus::Pending).title(),
-            "Read src/lib.rs"
-        );
-        assert_eq!(
-            read("src/lib.rs", StepStatus::Running).title(),
-            "Reading src/lib.rs"
-        );
-        assert_eq!(
-            read("src/lib.rs", StepStatus::Done).title(),
-            "Read src/lib.rs"
-        );
+        assert_eq!(read("src/lib.rs", StepStatus::Done).title(), "Read");
         assert_eq!(
             step(StepKind::Edit, StepStatus::Done, "src/lib.rs").title(),
-            "Edited src/lib.rs"
-        );
-        assert_eq!(
-            step(StepKind::Delete, StepStatus::Running, "old.rs").title(),
-            "Deleting old.rs"
-        );
-        assert_eq!(
-            step(StepKind::Move, StepStatus::Done, "a.rs").title(),
-            "Moved a.rs"
-        );
-
-        assert_eq!(
-            step(StepKind::Search, StepStatus::Running, "foo").title(),
-            "Searching for foo"
+            "Edited"
         );
         assert_eq!(
             step(StepKind::Search, StepStatus::Done, "foo").title(),
-            "Searched for foo"
-        );
-        assert_eq!(
-            step(StepKind::Search, StepStatus::Error, "foo").title(),
-            "Failed to search for foo"
-        );
-        assert_eq!(
-            step(StepKind::Search, StepStatus::Running, "").title(),
-            "Searching"
-        );
-        assert_eq!(
-            step(StepKind::Search, StepStatus::Error, "").title(),
-            "Failed to search"
-        );
-        assert_eq!(
-            step(StepKind::Search, StepStatus::Done, "").title(),
             "Searched"
         );
-
+        assert_eq!(
+            step(StepKind::Search, StepStatus::Running, "foo").title(),
+            "Working"
+        );
         assert_eq!(
             step(StepKind::Fetch, StepStatus::Done, "example.com").title(),
-            "Fetched example.com"
+            "Fetched"
         );
         assert_eq!(
             step(StepKind::SwitchMode, StepStatus::Done, "plan").title(),
-            "Switched to plan"
-        );
-        assert_eq!(
-            step(StepKind::SwitchMode, StepStatus::Pending, "").title(),
-            "Switch"
-        );
-        assert_eq!(
-            step(StepKind::Subagent, StepStatus::Running, "explorer agent").title(),
-            "Running explorer agent"
-        );
-        assert_eq!(
-            step(StepKind::Subagent, StepStatus::Done, "explorer agent").title(),
-            "Ran explorer agent"
-        );
-        assert_eq!(
-            step(StepKind::Think, StepStatus::Running, "").title(),
-            "Thinking"
+            "Switched"
         );
         assert_eq!(
             step(StepKind::Think, StepStatus::Done, "").title(),
             "Thought"
         );
+        assert_eq!(plain_verb("Searched for"), "Searched");
+        assert_eq!(plain_verb("Switched to"), "Switched");
+        assert_eq!(plain_verb("Ran"), "Ran");
 
         let planning = TraceStep::plan(
             "p",
@@ -1270,6 +1253,42 @@ mod tests {
         assert_eq!(step_kind("TodoWrite", ""), StepKind::Plan);
         assert_eq!(step_kind("mcp__srv__str_replace", ""), StepKind::Edit);
         assert_eq!(step_kind("mystery_tool", ""), StepKind::Other);
+        assert_eq!(step_kind("memory_read", ""), StepKind::Memory);
+        assert_eq!(step_kind("memory_write", ""), StepKind::Memory);
+        assert_eq!(step_kind("mcp__keel__memory_write", ""), StepKind::Memory);
+        let read = TraceStep::from(&tool("memory_read", "done"));
+        assert_eq!(read.kind, StepKind::Memory);
+        assert_eq!(read.title(), "Read");
+        assert_eq!(
+            TraceStep::from(&tool("memory_read", "running")).title(),
+            "Working"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("memory_read", "error")).title(),
+            "Failed"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("memory_read", "cancelled")).title(),
+            "Stopped"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("memory_write", "done")).title(),
+            "Wrote"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("memory_write", "running")).title(),
+            "Working"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("memory_write", "error")).title(),
+            "Failed"
+        );
+        let mut labeled = tool("memory_read", "running");
+        labeled.label = "Reading the on/off cycle logic".into();
+        assert_eq!(
+            TraceStep::from(&labeled).title(),
+            "Reading the on/off cycle logic"
+        );
         assert_eq!(step_kind("bash", "read"), StepKind::Read);
         assert_eq!(
             step_kind("mcp__keel_browser__browser_screenshot", "execute"),
@@ -1283,7 +1302,9 @@ mod tests {
         let mut shot = tool("mcp__keel_browser__browser_screenshot", "done");
         assert_eq!(TraceStep::from(&shot).title(), "Took screenshot");
         shot.state = "running".into();
-        assert_eq!(TraceStep::from(&shot).title(), "Taking screenshot");
+        assert_eq!(TraceStep::from(&shot).title(), "Working");
+        shot.label = "Capturing the booking page".into();
+        assert_eq!(TraceStep::from(&shot).title(), "Capturing the booking page");
 
         let fetched = ToolEntry {
             tool_id: "f".into(),
@@ -1295,12 +1316,12 @@ mod tests {
         };
         let fetch = TraceStep::from(&fetched);
         assert_eq!(fetch.kind, StepKind::Fetch);
-        assert_eq!(fetch.title(), "Fetched example.com");
+        assert_eq!(fetch.title(), "Fetched");
         let plain = ToolEntry {
             detail: "docs".into(),
             ..fetched.clone()
         };
-        assert_eq!(TraceStep::from(&plain).title(), "Fetched docs");
+        assert_eq!(TraceStep::from(&plain).title(), "Fetched");
 
         let agent = ToolEntry {
             tool_id: "s".into(),
@@ -1310,14 +1331,14 @@ mod tests {
             kind: "subagent".into(),
             ..Default::default()
         };
-        assert_eq!(TraceStep::from(&agent).title(), "Running explorer agent");
+        assert_eq!(TraceStep::from(&agent).title(), "Working");
 
         let mut failed = tool("read", "error");
         failed.detail = "src/lib.rs".into();
         failed.summary = "no such file".into();
         failed.kind = "read".into();
         let failed = TraceStep::from(&failed);
-        assert_eq!(failed.title(), "Failed to read src/lib.rs");
+        assert_eq!(failed.title(), "Failed");
         assert!(
             matches!(failed.body, StepBody::Output { ref tail, error: true } if tail == "no such file")
         );
@@ -1363,7 +1384,7 @@ mod tests {
         assert!(old.diff.is_none());
         let step = TraceStep::from(&old);
         assert_eq!(step.kind, StepKind::Execute);
-        assert_eq!(step.title(), "Ran ls");
+        assert_eq!(step.title(), "Ran");
         assert!(matches!(step.body, StepBody::Output { ref tail, error: false } if tail == "ok"));
 
         let newer = ToolEntry::from_json(&serde_json::json!({
@@ -1392,11 +1413,11 @@ mod tests {
             state: "done".into(),
             ..Default::default()
         };
-        assert_eq!(TraceStep::from(&other).title(), "Create issue");
+        assert_eq!(TraceStep::from(&other).title(), "Used");
     }
 
     #[test]
-    fn grouping_folds_reads_and_lifts_errors() {
+    fn grouping_keeps_each_call_on_its_own_line() {
         let five: Vec<_> = (0..5)
             .map(|i| read(&format!("f{i}.rs"), StepStatus::Done))
             .collect();
@@ -1407,9 +1428,8 @@ mod tests {
         let mut many = five;
         many.extend(two_searches);
         let grouped = group_steps(many);
-        assert!(
-            matches!(&grouped[..], [TraceNode::Explored(group)] if group.title == "Explored 5 files, 2 searches")
-        );
+        assert_eq!(grouped.len(), 7);
+        assert!(grouped.iter().all(|n| matches!(n, TraceNode::Step(_))));
 
         assert!(matches!(
             group_steps(vec![
@@ -1429,30 +1449,20 @@ mod tests {
             read("e", StepStatus::Done),
             read("f", StepStatus::Done),
         ]);
-        assert!(matches!(
-            &broken[..],
-            [
-                TraceNode::Step(_),
-                TraceNode::Step(_),
-                TraceNode::Step(edit),
-                TraceNode::Step(exec),
-                TraceNode::Explored(group),
-            ] if edit.kind == StepKind::Edit && exec.kind == StepKind::Execute && group.steps.len() == 3
-        ));
+        assert_eq!(broken.len(), 7);
+        assert!(broken.iter().all(|n| matches!(n, TraceNode::Step(_))));
 
-        let mut failed = vec![
+        let failed = group_steps(vec![
             read("a", StepStatus::Done),
             read("b", StepStatus::Error),
             read("c", StepStatus::Done),
             read("d", StepStatus::Done),
-        ];
-        let group = group_steps(failed.split_off(0));
-        let TraceNode::Explored(group) = &group[0] else {
-            panic!("{:?}", group)
-        };
-        assert_eq!(group.title, "Explored 4 files · 1 failed");
-        assert_eq!(group.status, StepStatus::Error);
-        assert_eq!(group.steps.len(), 4);
+        ]);
+        assert_eq!(failed.len(), 4);
+        assert!(matches!(
+            &failed[1],
+            TraceNode::Step(s) if s.status == StepStatus::Error
+        ));
 
         let mut waiting = read("secret", StepStatus::Pending);
         waiting.needs_user = true;
@@ -1471,22 +1481,18 @@ mod tests {
             read("b.rs", StepStatus::Error),
             read("src/lib.rs", StepStatus::Running),
         ]);
-        let TraceNode::Explored(group) = &live[0] else {
-            panic!("{:?}", live)
-        };
-        assert_eq!(group.title, "Exploring · Reading src/lib.rs");
-        assert_eq!(group.status, StepStatus::Running);
-        assert!(!group.title.contains("failed"));
+        assert_eq!(live.len(), 3);
+        assert!(matches!(
+            &live[2],
+            TraceNode::Step(s) if s.status == StepStatus::Running && s.title() == "Working"
+        ));
 
         let mixed = group_steps(vec![
             read("a", StepStatus::Done),
             step(StepKind::Search, StepStatus::Done, "q"),
             step(StepKind::Fetch, StepStatus::Done, "example.com"),
         ]);
-        let TraceNode::Explored(group) = &mixed[0] else {
-            panic!("{:?}", mixed)
-        };
-        assert_eq!(group.title, "Explored 1 file, 1 search, 1 fetch");
+        assert_eq!(mixed.len(), 3);
 
         let top = group_steps(vec![
             step(StepKind::Delete, StepStatus::Done, "a"),
@@ -1497,6 +1503,13 @@ mod tests {
             TraceStep::plan("p", vec![], StepStatus::Done),
         ]);
         assert_eq!(top.len(), 6);
+        let memory = group_steps(vec![
+            step(StepKind::Memory, StepStatus::Done, "memory"),
+            step(StepKind::Memory, StepStatus::Done, "memory"),
+            step(StepKind::Memory, StepStatus::Done, "memory"),
+        ]);
+        assert_eq!(memory.len(), 3);
+        assert!(memory.iter().all(|node| matches!(node, TraceNode::Step(_))));
         assert!(top.iter().all(|node| matches!(node, TraceNode::Step(_))));
     }
 
@@ -1582,7 +1595,7 @@ mod browser_line_tests {
             "{\n  \"url\": \"https://www.traveloka.com/en-id\",\n  \"title\": \"Traveloka\"\n}",
         ));
         assert_eq!(nav.browser, Some(BrowserOp::Navigate));
-        assert_eq!(nav.title(), "Opened traveloka.com/en-id");
+        assert_eq!(nav.title(), "Opened");
 
         let running = TraceStep::from(&tool(
             "2",
@@ -1591,10 +1604,10 @@ mod browser_line_tests {
             r#"{"url":"https://www.traveloka.com"}"#,
             "",
         ));
-        assert_eq!(running.title(), "Opening traveloka.com");
+        assert_eq!(running.title(), "Working");
 
         let pane = TraceStep::from(&tool("4", "keel-browser_browser_open_pane", "done", "", ""));
-        assert_eq!(pane.title(), "Opened browser");
+        assert_eq!(pane.title(), "Opened");
         let pane = TraceStep::from(&tool(
             "4",
             "mcp__keel_browser__browser_open_pane",
@@ -1602,7 +1615,7 @@ mod browser_line_tests {
             "",
             "",
         ));
-        assert_eq!(pane.title(), "Opening browser");
+        assert_eq!(pane.title(), "Working");
 
         let resona = TraceStep::from(&tool(
             "5",
@@ -1611,10 +1624,7 @@ mod browser_line_tests {
             "https://www.resonafinance.co.id/id/about-us/company-profile",
             "browser request timed out",
         ));
-        assert_eq!(
-            resona.title(),
-            "Couldn't open resonafinance.co.id/id/about-us/company-profile"
-        );
+        assert_eq!(resona.title(), "Failed");
 
         let typed = TraceStep::from(&tool(
             "6",
@@ -1623,10 +1633,7 @@ mod browser_line_tests {
             r##"{"selector":"#q","text":"Jakarta to Bali"}"##,
             "{\n  \"text\": \"typed 15 chars into input#q \\\"Jakarta to Bali\\\", pressed Enter\",\n  \"title\": \"Traveloka\",\n  \"url\": \"https://www.traveloka.com/en-id\"\n}",
         ));
-        assert_eq!(
-            typed.title(),
-            "Typed \u{201c}Jakarta to Bali\u{201d} in input#q"
-        );
+        assert_eq!(typed.title(), "Typed");
         let StepBody::Browser(b) = &typed.body else {
             panic!("{:?}", typed.body)
         };
@@ -1639,7 +1646,7 @@ mod browser_line_tests {
             r#"{"dy":800}"#,
             "",
         ));
-        assert_eq!(scroll.title(), "Scrolled down");
+        assert_eq!(scroll.title(), "Scrolled");
         let read = TraceStep::from(&tool(
             "8",
             "mcp__keel_browser__browser_snapshot",
@@ -1647,7 +1654,7 @@ mod browser_line_tests {
             "",
             "{\n  \"text\": \"Flights Hotels\",\n  \"url\": \"https://www.traveloka.com/en-id\"\n}",
         ));
-        assert_eq!(read.title(), "Read page traveloka.com");
+        assert_eq!(read.title(), "Read page");
         let mut shot = tool(
             "9",
             "mcp__keel_browser__browser_screenshot",
@@ -1660,14 +1667,11 @@ mod browser_line_tests {
         assert_eq!(shot.title(), "Took screenshot");
         assert!(matches!(shot.body, StepBody::Shots(_)));
 
-        // Consecutive browser lines fold into one natural title.
+        // Each browser call stays on its own line.
         let steps = vec![nav, typed, scroll, read, shot];
         let nodes = group_steps(steps);
-        assert_eq!(nodes.len(), 1);
-        let TraceNode::Browsed(group) = &nodes[0] else {
-            panic!("{nodes:?}")
-        };
-        assert_eq!(group.title, "Browsed traveloka.com \u{b7} 5 actions");
+        assert_eq!(nodes.len(), 5);
+        assert!(nodes.iter().all(|n| matches!(n, TraceNode::Step(_))));
     }
 
     #[test]
@@ -1702,7 +1706,7 @@ mod browser_line_tests {
     #[test]
     fn grok_web_tools_read_as_searches_and_reads() {
         let running = web("Web search:", "running", "", "");
-        assert_eq!(running.title(), "Searching the web");
+        assert_eq!(running.title(), "Working");
         assert_eq!(running.kind, StepKind::Search);
         let done = web(
             "Web search:",
@@ -1710,10 +1714,7 @@ mod browser_line_tests {
             "",
             "Indonesia haze today\n\nhttps://a.example/x\nhttps://b.example/y",
         );
-        assert_eq!(
-            done.title(),
-            "Searched \u{201c}Indonesia haze today\u{201d}"
-        );
+        assert_eq!(done.title(), "Searched");
         assert!(
             matches!(&done.body, StepBody::Links(links) if links.len() == 2 && links[0].title == "a.example")
         );
@@ -1723,29 +1724,23 @@ mod browser_line_tests {
             "",
             "https://bernama.com/en/news.php?id=2621719",
         );
-        assert_eq!(page.title(), "Read bernama.com");
+        assert_eq!(page.title(), "Read");
         assert_eq!(page.kind, StepKind::Fetch);
         assert_eq!(
             web("web_search", "running", "rust gpui", "").title(),
-            "Searching \u{201c}rust gpui\u{201d}"
+            "Working"
         );
         assert_eq!(
             web("web_fetch", "running", "https://docs.rs/gpui", "").title(),
-            "Reading docs.rs"
+            "Working"
         );
         assert_eq!(
             web("fetch_content", "running", "https://docs.rs/gpui", "").title(),
-            "Reading docs.rs"
+            "Working"
         );
-        assert_eq!(
-            web("x_search", "done", "keel app", "").title(),
-            "Searched X for \u{201c}keel app\u{201d}"
-        );
-        assert_eq!(web("x_search", "running", "", "").title(), "Searching X");
-        assert_eq!(
-            web("WebSearch", "error", "q", "boom").title(),
-            "Failed to search \u{201c}q\u{201d}"
-        );
+        assert_eq!(web("x_search", "done", "keel app", "").title(), "Searched X");
+        assert_eq!(web("x_search", "running", "", "").title(), "Working");
+        assert_eq!(web("WebSearch", "error", "q", "boom").title(), "Failed");
     }
 
     /// Grok's running search title carries the verb and a counter:
@@ -1758,10 +1753,7 @@ mod browser_line_tests {
             "",
             "Searching \"Indonesia fire haze latest news 2026\" (0/4 completed)",
         );
-        assert_eq!(
-            running.title(),
-            "Searching \u{201c}Indonesia fire haze latest news 2026\u{201d}"
-        );
+        assert_eq!(running.title(), "Working");
         assert_eq!(running.description.as_deref(), Some("0/4"));
         assert!(matches!(running.body, StepBody::None));
         let curly = web(
@@ -1770,7 +1762,7 @@ mod browser_line_tests {
             "Searching \u{201c}rust gpui\u{201d} (2/4)",
             "",
         );
-        assert_eq!(curly.title(), "Searching \u{201c}rust gpui\u{201d}");
+        assert_eq!(curly.title(), "Working");
         assert_eq!(curly.description.as_deref(), Some("2/4"));
         assert_eq!(
             web_progress("Indonesia haze today"),

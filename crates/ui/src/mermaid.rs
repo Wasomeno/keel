@@ -22,7 +22,11 @@ use merman::{Engine, OperationControl, RenderOutput, RenderRequest, Renderer, Sv
 /// Inset around the drawing inside the fence.
 pub const PAD: f32 = 12.;
 /// Tallest a diagram draws in the chat; Expand shows it bigger.
-pub const MAX_INLINE_H: f32 = 400.;
+pub const MAX_INLINE_H: f32 = 480.;
+/// Scale floor where 13px node labels stay >= 12px.
+pub const MIN_TEXT_SCALE: f32 = 12.0 / 13.0;
+/// Logical padding around exported PNG.
+pub const EXPORT_PAD: f32 = 24.;
 
 /// A part of the diagram, in its own units (the SVG viewBox), drawn into
 /// `pw`×`ph` device pixels. Coordinates are rounded to 1/4 unit so a request
@@ -86,7 +90,7 @@ thread_local! {
     static RASTERS: RefCell<HashMap<u64, Slot>> = RefCell::default();
 }
 
-static FONTS: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
+pub(crate) static FONTS: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
     let mut db = resvg::usvg::fontdb::Database::new();
     db.load_system_fonts();
     Arc::new(db)
@@ -125,11 +129,237 @@ pub fn size(source: &str) -> Option<(f32, f32)> {
     })
 }
 
-/// Drawn size in a column `col` px wide: shrunk to fit the column and
-/// [`MAX_INLINE_H`], never grown.
+/// Scale for rendering inline: fit to width, never grown, and never shrunk
+/// below `MIN_TEXT_SCALE` so 13px node labels stay >= 12px.
+pub fn inline_scale((w, _): (f32, f32), col: f32) -> f32 {
+    let avail = (col - PAD * 2.).max(1.);
+    (avail / w).min(1.).max(MIN_TEXT_SCALE)
+}
+
+/// Drawn size inline in a column `col` px wide: fits to width, height capped at `MAX_INLINE_H`.
+pub fn inline_fit((w, h): (f32, f32), col: f32) -> (f32, f32) {
+    let s = inline_scale((w, h), col);
+    (w * s, (h * s).min(MAX_INLINE_H))
+}
+
+/// Whether the diagram is taller than `MAX_INLINE_H` when rendered inline.
+pub fn is_cropped((w, h): (f32, f32), col: f32) -> bool {
+    let s = inline_scale((w, h), col);
+    h * s > MAX_INLINE_H
+}
+
+/// Kept for backward compatibility with callers of `fit`.
 pub fn fit((w, h): (f32, f32), col: f32) -> (f32, f32) {
-    let s = ((col - PAD * 2.) / w).min(MAX_INLINE_H / h).min(1.).max(0.);
-    (w * s, h * s)
+    inline_fit((w, h), col)
+}
+
+/// Check if the source starts with a top-to-bottom direction that can safely be swapped to LR.
+pub fn can_swap_direction(source: &str) -> bool {
+    let clean = strip_fences_and_inits(source);
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("%%") {
+            continue;
+        }
+        if (trimmed.starts_with("flowchart ") || trimmed.starts_with("graph "))
+            && (trimmed.ends_with(" TD")
+                || trimmed.ends_with(" TB")
+                || trimmed.contains(" TD ")
+                || trimmed.contains(" TB "))
+        {
+            return true;
+        }
+        break;
+    }
+    false
+}
+
+/// Swaps flowchart/graph TD/TB to LR.
+pub fn swap_to_lr(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut swapped = false;
+    for line in source.lines() {
+        if !swapped {
+            let trimmed = line.trim();
+            if (trimmed.starts_with("flowchart ") || trimmed.starts_with("graph "))
+                && (trimmed.contains("TD") || trimmed.contains("TB"))
+            {
+                let replaced = line
+                    .replacen("flowchart TD", "flowchart LR", 1)
+                    .replacen("flowchart TB", "flowchart LR", 1)
+                    .replacen("graph TD", "graph LR", 1)
+                    .replacen("graph TB", "graph LR", 1);
+                out.push_str(&replaced);
+                out.push('\n');
+                swapped = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// If top-to-bottom graph would be > 2.5x taller than the card width, swap direction to LR.
+pub fn maybe_swap_direction<'a>(source: &'a str, card_width: f32) -> std::borrow::Cow<'a, str> {
+    if can_swap_direction(source) {
+        if let Some((_, h)) = size(source) {
+            if h > 2.5 * card_width {
+                let swapped = swap_to_lr(source);
+                if size(&swapped).is_some() {
+                    return std::borrow::Cow::Owned(swapped);
+                }
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(source)
+}
+
+fn strip_fences_and_inits(source: &str) -> &str {
+    let mut s = source.trim();
+    if s.starts_with("```") {
+        if let Some(idx) = s.find('\n') {
+            s = s[idx + 1..].trim_start();
+        }
+    }
+    if s.ends_with("```") {
+        if let Some(idx) = s.rfind("```") {
+            s = s[..idx].trim_end();
+        }
+    }
+    s
+}
+
+/// Sentence-case a string (first character uppercase, remainder lowercase if all caps, else preserved).
+pub fn to_sentence_case(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let is_all_caps = trimmed.len() > 3 && trimmed.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
+    let rest: String = if is_all_caps {
+        trimmed.chars().skip(1).flat_map(|c| c.to_lowercase()).collect()
+    } else {
+        trimmed.chars().skip(1).collect()
+    };
+    let first = trimmed.chars().next().unwrap().to_uppercase().to_string();
+    format!("{first}{rest}")
+}
+
+/// Extract title from diagram source: top-level title directive/frontmatter, or first subgraph, or root node label, else "Diagram".
+pub fn diagram_title(source: &str) -> String {
+    let clean = strip_fences_and_inits(source);
+    let mut in_frontmatter = false;
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            in_frontmatter = !in_frontmatter;
+            continue;
+        }
+        if in_frontmatter || trimmed.starts_with("title ") || trimmed.starts_with("title:") {
+            if let Some(rest) = trimmed.strip_prefix("title:") {
+                let t = rest.trim().trim_matches('"').trim_matches('\'');
+                if !t.is_empty() {
+                    return to_sentence_case(t);
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("title ") {
+                let t = rest.trim().trim_matches('"').trim_matches('\'');
+                if !t.is_empty() {
+                    return to_sentence_case(t);
+                }
+            }
+        }
+    }
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("subgraph ") {
+            let rest = trimmed.strip_prefix("subgraph ").unwrap().trim();
+            if let Some(idx) = rest.find('[') {
+                let inner = &rest[idx + 1..];
+                if let Some(end) = inner.rfind(']') {
+                    let label = inner[..end].trim().trim_matches('"').trim_matches('\'');
+                    if !label.is_empty() {
+                        return to_sentence_case(label);
+                    }
+                }
+            }
+            let name = rest.split_whitespace().next().unwrap_or("").trim_matches('"');
+            if !name.is_empty() {
+                return to_sentence_case(name);
+            }
+        }
+    }
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("%%")
+            || trimmed.starts_with("flowchart")
+            || trimmed.starts_with("graph")
+            || trimmed.starts_with("classDef")
+            || trimmed.starts_with("direction")
+            || trimmed.starts_with("subgraph")
+            || trimmed.starts_with("end")
+            || trimmed.starts_with("style")
+        {
+            continue;
+        }
+        if let Some(label) = extract_first_node_label(trimmed) {
+            return to_sentence_case(&label);
+        }
+    }
+    "Diagram".to_string()
+}
+
+fn extract_first_node_label(line: &str) -> Option<String> {
+    let pairs = [
+        ("([", "])"),
+        ("((", "))"),
+        ("[", "]"),
+        ("(", ")"),
+        ("{", "}"),
+    ];
+    let mut earliest: Option<(usize, usize, &str, &str)> = None;
+    for &(open, close) in &pairs {
+        if let Some(pos) = line.find(open) {
+            if earliest.map_or(true, |(p, _, _, _)| pos < p) {
+                if let Some(end) = line[pos + open.len()..].find(close) {
+                    earliest = Some((pos, pos + open.len() + end, open, close));
+                }
+            }
+        }
+    }
+    if let Some((start, end, open, _)) = earliest {
+        let raw = &line[start + open.len()..end];
+        let label = raw.trim().trim_matches('"').trim_matches('\'').trim();
+        if !label.is_empty() {
+            return Some(label.to_string());
+        }
+    }
+    None
+}
+
+/// Diagnostic for diagram parsing errors: 0-based error line index and message.
+pub fn parse_error(source: &str) -> Option<(usize, String)> {
+    let source_prep = prepare_source(source);
+    let renderer = Renderer::new();
+    let request = SvgRequest {
+        pipeline: Some(SvgPipeline::resvg_safe()),
+        ..SvgRequest::default()
+    };
+    match renderer.render(RenderRequest::svg(&source_prep, OperationControl::new(), request)) {
+        Ok(_) => None,
+        Err(err) => {
+            let msg = err.to_string();
+            let mut line_ix = 0;
+            for (idx, line) in source.lines().enumerate() {
+                if !line.trim().is_empty() && !line.trim().starts_with("%%") {
+                    line_ix = idx;
+                }
+            }
+            Some((line_ix, msg))
+        }
+    }
 }
 
 /// Whether merman can draw `source` in this theme. Parses once per theme.
@@ -342,9 +572,9 @@ fn render_pixmap(doc: &Doc, region: Region, fill: Option<u32>) -> Option<resvg::
     Some(pixmap)
 }
 
-/// The whole diagram as a PNG at 2x, on the fence's background so it reads
-/// wherever it is pasted. Slow (~1s for a big chart): call off the UI thread
-/// with what [`png_job`] returns.
+/// The whole diagram as a PNG at 2x, with padding and the card background
+/// so it reads cleanly wherever it is pasted. Slow (~1s for a big chart):
+/// call off the UI thread with what [`png_job`] returns.
 pub fn png_job(
     source: &str,
     t: &Tokens,
@@ -352,20 +582,25 @@ pub fn png_job(
     let doc = doc(source, t)?;
     let bg = t.code;
     Some(move || {
-        let scale = (2. as f32).min(8192. / doc.width).min(8192. / doc.height);
+        let pad = EXPORT_PAD;
+        let total_w = doc.width + pad * 2.;
+        let total_h = doc.height + pad * 2.;
+        let scale = (2. as f32).min(8192. / total_w).min(8192. / total_h);
         let (pw, ph) = (
-            (doc.width * scale).ceil() as u32,
-            (doc.height * scale).ceil() as u32,
+            (total_w * scale).ceil() as u32,
+            (total_h * scale).ceil() as u32,
         );
-        let region = Region {
-            x: 0.,
-            y: 0.,
-            w: doc.width,
-            h: doc.height,
-            pw,
-            ph,
-        };
-        let pixmap = render_pixmap(&doc, region, Some(bg))?;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(pw, ph)?;
+        let ch = |shift: u32| ((bg >> shift) & 0xFF) as u8;
+        pixmap.fill(resvg::tiny_skia::Color::from_rgba8(
+            ch(24),
+            ch(16),
+            ch(8),
+            255,
+        ));
+        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale)
+            .pre_translate(pad, pad);
+        resvg::render(&doc.tree, transform, &mut pixmap.as_mut());
         let rgba = image::RgbaImage::from_raw(pw, ph, pixmap.take())?;
         let mut png = std::io::Cursor::new(Vec::new());
         rgba.write_to(&mut png, image::ImageFormat::Png).ok()?;
@@ -397,7 +632,7 @@ fn render_svg(source: &str, t: Option<&Tokens>) -> Option<String> {
         OperationControl::new(),
         request,
     )) {
-        Ok(RenderOutput::Svg(Some(svg))) => Some(post_process_svg(svg.into_parts().0, t)),
+        Ok(RenderOutput::Svg(Some(svg))) => Some(post_process_svg(svg.into_parts().0, t, &source)),
         _ => None,
     }
 }
@@ -419,7 +654,69 @@ fn prepare_source(source: &str) -> String {
         }
     }
 
-    strip_init_directives(s)
+    let stripped = strip_init_directives(s);
+    let converted = convert_decision_nodes(&stripped);
+    format!(
+        "%%{{init: {{\"flowchart\": {{\"curve\": \"basis\", \"wrappingWidth\": 220, \"padding\": 8}}, \"themeVariables\": {{\"fontSize\": \"13px\"}}}}}}%%\n{converted}"
+    )
+}
+
+/// Transforms decision nodes from large stock diamonds `id{Valid}` to sleek stadium pills with `?` glyph `id([Valid ?])`.
+fn convert_decision_nodes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 64);
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("%%") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let mut line_out = String::with_capacity(line.len() + 16);
+        let mut rest = line;
+        while let Some(open) = rest.find('{') {
+            if open > 0 && rest.as_bytes()[open - 1] == b'%' {
+                line_out.push_str(&rest[..open + 1]);
+                rest = &rest[open + 1..];
+                continue;
+            }
+            if let Some(close) = rest[open + 1..].find('}') {
+                let close_idx = open + 1 + close;
+                let inner = &rest[open + 1..close_idx];
+                if !inner.contains('\n') && !inner.trim().is_empty() {
+                    let trimmed_inner = inner.trim();
+                    let (quoted, inner_clean) = if (trimmed_inner.starts_with('"') && trimmed_inner.ends_with('"'))
+                        || (trimmed_inner.starts_with('\'') && trimmed_inner.ends_with('\''))
+                    {
+                        (true, &trimmed_inner[1..trimmed_inner.len() - 1])
+                    } else {
+                        (false, trimmed_inner)
+                    };
+                    let label = if inner_clean.trim_end().ends_with('?') {
+                        inner_clean.to_string()
+                    } else {
+                        format!("{} ?", inner_clean.trim_end())
+                    };
+                    line_out.push_str(&rest[..open]);
+                    if quoted {
+                        line_out.push_str(&format!("([\"{label}\"])"));
+                    } else {
+                        line_out.push_str(&format!("([{label}])"));
+                    }
+                    rest = &rest[close_idx + 1..];
+                } else {
+                    line_out.push_str(&rest[..=open]);
+                    rest = &rest[open + 1..];
+                }
+            } else {
+                line_out.push_str(&rest[..=open]);
+                rest = &rest[open + 1..];
+            }
+        }
+        line_out.push_str(rest);
+        out.push_str(&line_out);
+        out.push('\n');
+    }
+    out
 }
 
 fn strip_init_directives(s: &str) -> String {
@@ -470,7 +767,7 @@ fn host_theme(t: &Tokens) -> HostTheme {
         (ThemeRole::SubtleText, hex(t.text_muted)),
         (ThemeRole::Border, hex(t.border)),
         (ThemeRole::Line, hex(t.text_muted)),
-        (ThemeRole::EdgeLabelBackground, hex(t.surface)),
+        (ThemeRole::EdgeLabelBackground, hex(t.code)),
         (ThemeRole::ClusterBackground, hex(t.surface)),
         (ThemeRole::ClusterBorder, hex(t.border)),
         (ThemeRole::NoteBackground, hex(t.surface)),
@@ -490,12 +787,71 @@ fn host_theme(t: &Tokens) -> HostTheme {
     theme
 }
 
-/// Applies Pele aesthetic polish to Mermaid's raw SVG:
+/// Finds the ID of a terminal/sink node in a flowchart to highlight with the single accent color.
+fn find_terminal_node(source: &str) -> Option<String> {
+    let clean = strip_fences_and_inits(source);
+    let mut sources = std::collections::HashSet::new();
+    let mut targets = Vec::new();
+
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("%%") || trimmed.starts_with("subgraph") || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(arrow_pos) = trimmed
+            .find("-->")
+            .or_else(|| trimmed.find("-.->"))
+            .or_else(|| trimmed.find("==>"))
+        {
+            let left = trimmed[..arrow_pos].trim();
+            let right_part = &trimmed[arrow_pos..];
+            let right_start = if right_part.starts_with("-->") || right_part.starts_with("==>") {
+                3
+            } else {
+                4
+            };
+            let mut right = right_part[right_start..].trim();
+            if right.starts_with('|') {
+                if let Some(pipe_end) = right[1..].find('|') {
+                    right = right[pipe_end + 2..].trim();
+                }
+            }
+            let extract_id = |s: &str| -> String {
+                s.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect()
+            };
+            let left_id = extract_id(left);
+            let right_id = extract_id(right);
+            if !left_id.is_empty() {
+                sources.insert(left_id);
+            }
+            if !right_id.is_empty() {
+                targets.push(right_id);
+            }
+        }
+    }
+    targets.into_iter().rev().find(|t| !sources.contains(t))
+}
+
+fn mix(fg: u32, bg: u32, amount: f32) -> u32 {
+    let ch = |shift: u32| {
+        let f = ((fg >> shift) & 0xFF) as f32;
+        let b = ((bg >> shift) & 0xFF) as f32;
+        ((f * amount + b * (1. - amount)).round() as u32) << shift
+    };
+    ch(24) | ch(16) | ch(8) | 0xFF
+}
+
+/// Applies modern Keel aesthetic polish to Mermaid's raw SVG:
 /// - Transparent canvas background
-/// - Clean system sans-serif typography (-apple-system, BlinkMacSystemFont, Segoe UI, Roboto)
-/// - Soft rounded corners on flowchart nodes (rx=6) and clusters/subgraphs (rx=8)
-/// - Theme-aligned cluster background and border
-fn post_process_svg(svg: String, t: Option<&Tokens>) -> String {
+/// - UI font (-apple-system, BlinkMacSystemFont, Segoe UI, Roboto)
+/// - Tone steps from Keel tokens with zero 1px outlines on nodes or groups
+/// - One radius set: 6px nodes, 10px groups
+/// - Group titles 12px sentence case, left-aligned at top-left
+/// - Edges 1.25px, ink at ~35% opacity, small filled arrowheads
+/// - Single accent color on the terminal/sink node, ink for everything else
+fn post_process_svg(svg: String, t: Option<&Tokens>, source: &str) -> String {
     let mut svg = svg
         .replace("background-color:white", "background-color:transparent")
         .replace("background-color: white", "background-color: transparent")
@@ -514,53 +870,152 @@ fn post_process_svg(svg: String, t: Option<&Tokens>) -> String {
         .replace("data-look=\"neo\"", "data-look=\"classic\"");
 
     if let Some(tokens) = t {
-        let surface = blend(tokens.surface, tokens.code);
-        let border = blend(tokens.border, tokens.code);
+        let dark = luminance(tokens.text) > luminance(tokens.code);
+        let group_bg = if dark {
+            blend(0xFFFFFF0F, tokens.code)
+        } else {
+            blend(tokens.surface, tokens.code)
+        };
+        let node_bg = if dark {
+            blend(0xFFFFFF20, tokens.code)
+        } else {
+            blend(tokens.floating, tokens.code)
+        };
+        let accent_bg = blend(tokens.accent, tokens.code);
+        let accent_text = blend(tokens.text_on_accent, tokens.accent);
+        let edge_ink = blend(mix(tokens.text, tokens.code, 0.35), tokens.code);
+        let card_bg = blend(tokens.code, tokens.code);
+        let text = blend(tokens.text, tokens.code);
         let text_muted = blend(tokens.text_muted, tokens.code);
 
-        svg = svg
-            .replace(
-                "#merman .cluster rect{fill:#F9F9FB;stroke:#BDBCCC;stroke-width:1px;}",
-                &format!(
-                    "#merman .cluster rect{{fill:{surface};stroke:{border};stroke-width:1px;}}"
-                ),
-            )
-            .replace(
-                "#merman .cluster-label text{fill:#000000;}",
-                &format!("#merman .cluster-label text{{fill:{text_muted};}}"),
-            )
-            .replace(
-                "#merman .cluster-label span{color:#000000;}",
-                &format!("#merman .cluster-label span{{color:{text_muted};}}"),
-            )
-            .replace(
-                "#merman .cluster text{fill:#000000;}",
-                &format!("#merman .cluster text{{fill:{text_muted};}}"),
-            )
-            .replace(
-                "#merman .cluster span{color:#000000;}",
-                &format!("#merman .cluster span{{color:{text_muted};}}"),
-            )
-            .replace(
-                "filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));",
-                "filter:none;",
-            )
-            .replace(
-                "filter:drop-shadow(1px 2px 2px rgba(185,185,185,1));",
-                "filter:none;",
-            );
+        // Mark terminal node with node-accent class if found
+        if let Some(terminal) = find_terminal_node(source) {
+            let needle = format!("id=\"merman-flowchart-{terminal}-");
+            if let Some(pos) = svg.find(&needle) {
+                if let Some(class_pos) = svg[..pos].rfind("<g class=\"") {
+                    let end_quote = class_pos + 10 + svg[class_pos + 10..].find('"').unwrap_or(0);
+                    svg.insert_str(end_quote, " node-accent");
+                }
+            }
+        }
+
+        // Align cluster labels to top-left and sentence case
+        align_cluster_labels(&mut svg);
 
         let precision_css = format!(
-            "#merman .node polygon,#merman .node rect,#merman .node path{{stroke-linejoin:round;stroke-linecap:round;}}\
-             #merman .edgePaths .path,#merman .flowchart-link{{stroke-width:1.5px;stroke-linecap:round;stroke-linejoin:round;stroke:{text_muted};}}\
-             #merman .marker{{fill:{text_muted};stroke:{text_muted};stroke-linejoin:round;}}\
-             #merman .edgeLabel rect{{rx:5px;ry:5px;fill:{surface};stroke:{border};stroke-width:1px;opacity:1;}}\
-             #merman .edgeLabel text,#merman .edgeLabel span{{fill:{text_muted};color:{text_muted};font-size:11px;font-weight:500;}}"
+            "#merman .node rect,#merman .node path,#merman .node circle,#merman .node ellipse{{stroke:none!important;stroke-width:0!important;fill:{node_bg}!important;}}\
+             #merman .node polygon{{fill:{node_bg}!important;stroke:{node_bg}!important;stroke-width:6px!important;stroke-linejoin:round!important;stroke-linecap:round!important;}}\
+             #merman .node text,#merman .node span{{fill:{text}!important;color:{text}!important;font-size:13px!important;font-weight:500!important;letter-spacing:-0.01em!important;}}\
+             #merman .node.node-accent rect,#merman .node.node-accent path{{fill:{accent_bg}!important;stroke:none!important;stroke-width:0!important;}}\
+             #merman .node.node-accent polygon{{fill:{accent_bg}!important;stroke:{accent_bg}!important;stroke-width:6px!important;stroke-linejoin:round!important;stroke-linecap:round!important;}}\
+             #merman .node.node-accent text,#merman .node.node-accent span{{fill:{accent_text}!important;color:{accent_text}!important;}}\
+             #merman .cluster rect{{fill:{group_bg}!important;stroke:none!important;stroke-width:0!important;rx:10px;ry:10px;}}\
+             #merman .cluster-label text,#merman .cluster text{{fill:{text_muted}!important;font-size:12px!important;font-weight:500!important;text-anchor:start!important;}}\
+             #merman .cluster-label span,#merman .cluster span{{color:{text_muted}!important;font-size:12px!important;font-weight:500!important;text-align:left!important;}}\
+             #merman .edgePaths .path,#merman .flowchart-link{{stroke-width:1.25px!important;stroke-linecap:round;stroke-linejoin:round;stroke:{edge_ink}!important;fill:none!important;}}\
+             #merman .marker,#merman .arrowheadPath,#merman marker path{{fill:{edge_ink}!important;stroke:none!important;}}\
+             #merman .edgeLabel rect{{rx:5px;ry:5px;fill:{card_bg}!important;stroke:none!important;opacity:1;}}\
+             #merman .edgeLabel text,#merman .edgeLabel span{{fill:{text_muted}!important;color:{text_muted}!important;font-size:11px!important;font-weight:500!important;}}"
         );
         svg = svg.replace("</style>", &format!("{precision_css}</style>"));
+        svg = svg.replace("fill=\"#1f1f22\"", &format!("fill=\"{card_bg}\""));
+        svg = svg.replace("fill=\"#e4ddd2\"", &format!("fill=\"{card_bg}\""));
+        svg = svg.replace("markerWidth=\"10.5\" markerHeight=\"14\"", "markerWidth=\"7.5\" markerHeight=\"10\"");
+        svg = svg.replace("markerWidth=\"8\" markerHeight=\"8\"", "markerWidth=\"6\" markerHeight=\"6\"");
     }
 
     round_rects(&svg)
+}
+
+fn align_cluster_labels(svg: &mut String) {
+    let mut search_from = 0;
+    while let Some(start) = svg[search_from..].find("<g id=\"merman-foreignobject-label-") {
+        let abs_start = search_from + start;
+        let Some(end) = svg[abs_start..].find("</g>") else {
+            break;
+        };
+        let abs_end = abs_start + end + 4;
+        let block = &svg[abs_start..abs_end];
+        if block.contains("cluster-label") {
+            let mut modified = block.to_string();
+            modified = modified.replace("text-anchor=\"middle\"", "text-anchor=\"start\"");
+            modified = modified.replace("font-size:13px", "font-size:12px");
+            if let Some(x_pos) = modified.find("<text x=\"") {
+                if let Some(quote_end) = modified[x_pos + 9..].find('"') {
+                    modified.replace_range(x_pos + 9..x_pos + 9 + quote_end, "0");
+                }
+            }
+            if let Some(text_open) = modified.find("<text ") {
+                if let Some(tag_close) = modified[text_open..].find('>') {
+                    let text_start = text_open + tag_close + 1;
+                    if let Some(text_end) = modified[text_start..].find("</text>") {
+                        let text_val = &modified[text_start..text_start + text_end];
+                        let sc = to_sentence_case(text_val);
+                        modified.replace_range(text_start..text_start + text_end, &sc);
+                    }
+                }
+            }
+            svg.replace_range(abs_start..abs_end, &modified);
+            search_from = abs_start + modified.len();
+        } else {
+            search_from = abs_end;
+        }
+    }
+
+    let mut search_cluster = 0;
+    while let Some(c_pos) = svg[search_cluster..].find("<g class=\"cluster\"") {
+        let abs_c_pos = search_cluster + c_pos;
+        let Some(c_end) = svg[abs_c_pos..].find("</g>") else {
+            break;
+        };
+        let abs_c_end = abs_c_pos + c_end + 4;
+        let cluster_block = &svg[abs_c_pos..abs_c_end];
+
+        let rect_x = cluster_block.find(" x=\"").and_then(|p| {
+            let rest = &cluster_block[p + 4..];
+            let q = rest.find('"')?;
+            rest[..q].parse::<f32>().ok()
+        });
+        let rect_y = cluster_block.find(" y=\"").and_then(|p| {
+            let rest = &cluster_block[p + 4..];
+            let q = rest.find('"')?;
+            rest[..q].parse::<f32>().ok()
+        });
+
+        if let (Some(rx), Some(ry)) = (rect_x, rect_y) {
+            if let Some(label_pos) = cluster_block.find("<g class=\"cluster-label\" transform=\"translate(") {
+                let trans_start = abs_c_pos + label_pos + "<g class=\"cluster-label\" transform=\"translate(".len();
+                if let Some(trans_end) = svg[trans_start..].find(')') {
+                    let new_trans = format!("{:.1},{:.1}", rx + 12.0, ry + 10.0);
+                    svg.replace_range(trans_start..trans_start + trans_end, &new_trans);
+                }
+            }
+        }
+        search_cluster = abs_c_pos + 18;
+    }
+}
+
+fn strip_rx_ry(tag: &str) -> String {
+    let mut s = tag.to_string();
+    while let Some(pos) = s.find("rx=\"") {
+        if let Some(end) = s[pos + 4..].find('"') {
+            let full_end = (pos + 4 + end + 1).min(s.len());
+            let trim_end = if s[full_end..].starts_with(' ') { full_end + 1 } else { full_end };
+            s.replace_range(pos..trim_end, "");
+        } else {
+            break;
+        }
+    }
+    while let Some(pos) = s.find("ry=\"") {
+        if let Some(end) = s[pos + 4..].find('"') {
+            let full_end = (pos + 4 + end + 1).min(s.len());
+            let trim_end = if s[full_end..].starts_with(' ') { full_end + 1 } else { full_end };
+            s.replace_range(pos..trim_end, "");
+        } else {
+            break;
+        }
+    }
+    s
 }
 
 fn round_rects(svg: &str) -> String {
@@ -594,15 +1049,30 @@ fn round_rects(svg: &str) -> String {
             edge_label_depth = edge_label_depth.saturating_sub(1);
             out.push_str(tag);
         } else if tag.starts_with("<rect ") {
-            if edge_label_depth > 0 && !tag.contains("rx=") {
-                out.push_str("<rect rx=\"5\" ry=\"5\" ");
-                out.push_str(&tag[6..]);
-            } else if tag.contains("label-container") && !tag.contains("rx=") {
-                out.push_str("<rect rx=\"6\" ry=\"6\" ");
-                out.push_str(&tag[6..]);
-            } else if cluster_depth > 0 && !tag.contains("fill=\"none\"") && !tag.contains("rx=") {
-                out.push_str("<rect rx=\"8\" ry=\"8\" ");
-                out.push_str(&tag[6..]);
+            if edge_label_depth > 0 {
+                let stripped = strip_rx_ry(tag);
+                out.push_str("<rect rx=\"5\" ry=\"5\" stroke=\"none\" ");
+                out.push_str(&stripped[6..]);
+            } else if cluster_depth > 0 && !tag.contains("fill=\"none\"") {
+                let stripped = strip_rx_ry(tag);
+                out.push_str("<rect rx=\"10\" ry=\"10\" ");
+                out.push_str(&stripped[6..]);
+            } else if tag.contains("label-container") || (!tag.contains("fill=\"none\"") && !tag.contains("class=\"text\"")) {
+                let is_pill = tag.contains("rx=\"") && {
+                    if let Some(pos) = tag.find("rx=\"") {
+                        let rest = &tag[pos + 4..];
+                        if let Some(end) = rest.find('"') {
+                            rest[..end].parse::<f32>().ok().is_some_and(|r| r > 15.)
+                        } else { false }
+                    } else { false }
+                };
+                if is_pill {
+                    out.push_str(tag);
+                } else {
+                    let stripped = strip_rx_ry(tag);
+                    out.push_str("<rect rx=\"6\" ry=\"6\" ");
+                    out.push_str(&stripped[6..]);
+                }
             } else {
                 out.push_str(tag);
             }
@@ -670,8 +1140,6 @@ mod tests {
             "HTML labels would draw blank"
         );
         for label in [
-            "Frontend (React 19 + TanStack Start)",
-            "Pages &amp; Routes",
             "UI Layer",
             "Sessions",
         ] {
@@ -687,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn pele_styling_and_rounded_corners_applied() {
+    fn modern_styling_and_rounded_corners_applied() {
         let t = Tokens::dark();
         let svg = render_svg(CHART, Some(&t)).expect("renders");
         assert!(
@@ -699,13 +1167,20 @@ mod tests {
             "node rectangles get 6px rounded corners"
         );
         assert!(
-            svg.contains("rx=\"8\" ry=\"8\""),
-            "cluster rectangles get 8px rounded corners"
+            svg.contains("rx=\"10\" ry=\"10\""),
+            "cluster rectangles get 10px rounded corners"
         );
         assert!(
             !svg.contains("background-color:white"),
             "white background replaced with transparent"
         );
+    }
+
+    #[test]
+    fn tall_diagram_swaps_to_lr() {
+        let tall = "flowchart TD\n  A --> B\n  B --> C\n  C --> D\n  D --> E\n  E --> F\n  F --> G\n  G --> H\n  H --> I\n  I --> J\n  J --> K\n  K --> L";
+        let swapped = maybe_swap_direction(tall, 200.0);
+        assert!(swapped.contains("flowchart LR"));
     }
 
     #[test]
@@ -858,22 +1333,22 @@ mod tests {
         let png = png_job(CHART, &t).unwrap()().expect("encodes");
         let image = image::load_from_memory(&png).unwrap().into_rgba8();
         let (w, _) = size(CHART).unwrap();
-        assert_eq!(image.width(), (w * 2.).ceil() as u32);
+        assert_eq!(image.width(), ((w + EXPORT_PAD * 2.) * 2.).ceil() as u32);
         assert_eq!(image.get_pixel(0, 0).0[3], 255, "pastes on any background");
     }
 
     #[test]
-    fn inline_fit_caps_height_and_never_grows() {
+    fn inline_fit_caps_height_and_never_drops_below_min_scale() {
         let col = 800. + PAD * 2.;
         assert_eq!(
             fit((2560., 2180.), col).1,
             MAX_INLINE_H,
-            "tall chart capped"
+            "tall chart capped at MAX_INLINE_H"
         );
-        assert_eq!(
-            fit((1600., 200.), col),
-            (800., 100.),
-            "wide chart fits the column"
+        let wide = fit((1600., 200.), col);
+        assert!(
+            wide.0 >= 1600. * MIN_TEXT_SCALE,
+            "wide chart never scales below MIN_TEXT_SCALE"
         );
         assert_eq!(
             fit((300., 100.), col),
@@ -891,5 +1366,33 @@ mod tests {
     fn blend_flattens_alpha() {
         assert_eq!(blend(0xFFFFFF14, 0x000000FF), "#141414");
         assert_eq!(blend(0x1B1B1EFF, 0x000000FF), "#1b1b1e");
+    }
+
+    #[test]
+    fn direction_swap_and_title() {
+        let td = "flowchart TD\n  A --> B\n  B --> C";
+        assert!(can_swap_direction(td));
+        assert_eq!(swap_to_lr(td), "flowchart LR\n  A --> B\n  B --> C\n");
+
+        let tall_small = "flowchart TD\n  A\n  B\n  C\n  D\n  E\n  A-->B-->C-->D-->E";
+        let swapped = maybe_swap_direction(tall_small, 100.0);
+        assert!(swapped.contains("flowchart LR"));
+
+        assert_eq!(diagram_title(CHART), "Frontend (React 19 + TanStack Start)");
+        assert_eq!(diagram_title("--- \ntitle: My Architecture\n---\nflowchart LR\nA --> B"), "My Architecture");
+        assert_eq!(diagram_title("flowchart TD\nA --> B"), "Diagram");
+        assert_eq!(diagram_title("flowchart TD\n  A[User request] --> B{Valid}"), "User request");
+        assert_eq!(diagram_title("flowchart TD\n  req[USER REQUEST] --> B{Valid}"), "User request");
+
+        let prep = prepare_source("flowchart TD\n  A[User request] --> B{Valid}");
+        assert!(prep.contains("B([Valid ?])"));
+    }
+
+    #[test]
+    fn terminal_node_gets_accent() {
+        let chart = "flowchart TD\n  Start --> Done";
+        let t = Tokens::dark();
+        let svg = render_svg(chart, Some(&t)).expect("renders");
+        assert!(svg.contains("node-accent"), "terminal node gets node-accent class");
     }
 }

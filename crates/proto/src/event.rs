@@ -103,12 +103,24 @@ pub enum AgentEvent {
         /// empty when unknown. Absent in older journals.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         detail: String,
+        /// Short agent-written progress label. Empty when missing or rejected.
+        /// Absent in older journals.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        label: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent: Option<SubagentRef>,
         /// ACP `kind` (`read`, `edit`, …), or a name inferred when the
         /// harness omitted it. Absent in older journals.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
+    },
+    /// The agent named this tool call. Sent as soon as the label is known,
+    /// and again if it changes before the call finishes.
+    ToolLabel {
+        tool_id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<SubagentRef>,
     },
     /// Streaming tool output, or a later frame that names `kind` (Grok's
     /// status-less `tool_call_update`). At most ten output updates a second
@@ -201,6 +213,9 @@ pub struct TokenUsage {
     pub cache_read: u64,
     #[serde(default)]
     pub cache_write: u64,
+    /// Tokens spent on cache warming (Pi `usage` entry with `kind: "cache_warm"`).
+    #[serde(default)]
+    pub cache_warm: u64,
     /// Tokens in the context after the latest call, when the CLI says.
     #[serde(default)]
     pub context_used: Option<u64>,
@@ -211,7 +226,7 @@ pub struct TokenUsage {
 
 impl TokenUsage {
     pub fn total(&self) -> u64 {
-        self.input + self.output + self.cache_read + self.cache_write
+        self.input + self.output + self.cache_read + self.cache_write + self.cache_warm
     }
 }
 
@@ -233,6 +248,7 @@ impl AgentEvent {
             | Self::Reasoning { subagent, .. }
             | Self::ToolStarted { subagent, .. }
             | Self::ToolProgress { subagent, .. }
+            | Self::ToolLabel { subagent, .. }
             | Self::ToolFinished { subagent, .. }
             | Self::Plan { subagent, .. }
             | Self::Question { subagent, .. } => subagent.as_ref(),

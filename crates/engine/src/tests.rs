@@ -91,6 +91,7 @@ fn send(text: &str) -> UserCommand {
         message_id: format!("user-{}", Uuid::new_v4()),
         text: text.to_string(),
         attachments: Vec::new(),
+        shown: true,
     }
 }
 
@@ -154,6 +155,7 @@ fn put_chat(
             model: "mock".to_string(),
             reasoning: String::new(),
             permission: String::new(),
+            plan_mode: false,
             status: status.to_string(),
             usage: Default::default(),
         })
@@ -382,6 +384,7 @@ fn crash_after_the_mark_inserts_one_aborted_turn() {
             message_id: "user-1".to_string(),
             text: "go".to_string(),
             attachments: Vec::new(),
+            shown: true,
         },
         5_000,
     )
@@ -443,6 +446,7 @@ fn non_terminal_journal_does_not_add_a_second_abort_message() {
             message_id: "user-1".to_string(),
             text: "go".to_string(),
             attachments: Vec::new(),
+            shown: true,
         },
         5_000,
     )
@@ -849,7 +853,7 @@ async fn question_then_answer_reaches_the_mock() {
 
 /// The receipt a settled question left in the chat's doc.
 fn receipt_of(engine: &Engine, chat_id: &str, question_id: &str) -> Option<keel_proto::Receipt> {
-    let mut state = engine.lock();
+    let state = engine.lock();
     let view = state.store.session(chat_id)?.view();
     view.messages.iter().find_map(|message| {
         message.parts.iter().find_map(|part| match part {
@@ -1410,6 +1414,7 @@ fn subscribe_and_live_events_cross_the_duplex() {
         message_id: "user-live".to_string(),
         text: "hello".to_string(),
         attachments: Vec::new(),
+        shown: true,
     };
     let (queued, mut queued_events) = rpc(
         &guard,
@@ -1779,6 +1784,35 @@ async fn steer_after_the_child_ended_is_promoted_not_lost() {
 }
 
 #[tokio::test]
+async fn steer_during_a_live_run_is_delivered_not_queued() {
+    let tmp = Tmp::new("steer-live");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::script(wait_then_done()));
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let id = chat(&engine);
+    engine.queue_command(&id, send("go")).expect("start");
+    until(&engine, || engine.live_runs() == 1 && harness.runs() == 1).await;
+    assert_eq!(
+        engine
+            .queue_command(&id, steer("hold the next edit"))
+            .expect("steer"),
+        QueueStatus::Processed
+    );
+    until(&engine, || {
+        harness.observed().iter().any(|msg| {
+            matches!(msg, ControlMsg::Steer { text } if text == "hold the next edit")
+        })
+    })
+    .await;
+    let queued = engine.lock().store.session(&id).expect("session").view();
+    let pending = queued
+        .commands
+        .iter()
+        .any(|cmd| cmd.kind == "steer" && cmd.outcome.as_deref() != Some("processed"));
+    assert!(!pending, "a live steer is not left queued");
+}
+
+#[tokio::test]
 async fn supervisor_folds_and_flushes_without_manual_polls() {
     let tmp = Tmp::new("supervisor");
     let clock = Arc::new(ManualClock::new(5_000));
@@ -1824,6 +1858,7 @@ fn recovery_stamps_once_and_skips_live_steers_and_old_commands() {
                 message_id: format!("u-{id}"),
                 text: "x".into(),
                 attachments: Vec::new(),
+                shown: true,
             }
         } else {
             UserCommand::Steer {
@@ -1950,6 +1985,7 @@ async fn ensure_session_maps_every_harness() {
                     model: "m".into(),
                     reasoning: String::new(),
                     permission: String::new(),
+                    plan_mode: false,
                     status: "idle".into(),
                     usage: Default::default(),
                 })
@@ -2560,6 +2596,7 @@ async fn a_failed_tool_is_stored_as_error() {
             name: "bash".to_string(),
             input_bytes: 3,
             detail: String::new(),
+            label: String::new(),
             subagent: None,
             kind: None,
         }),
@@ -2619,6 +2656,7 @@ async fn trace_fields_survive_finish_and_a_stop_cancels_the_open_tool() {
             name: "bash".to_string(),
             input_bytes: 4,
             detail: "pnpm test".to_string(),
+            label: String::new(),
             subagent: None,
             kind: Some("execute".to_string()),
         }),
@@ -2648,6 +2686,7 @@ async fn trace_fields_survive_finish_and_a_stop_cancels_the_open_tool() {
             name: "list_dir".to_string(),
             input_bytes: 1,
             detail: "src".to_string(),
+            label: String::new(),
             subagent: None,
             kind: None,
         }),
@@ -2770,6 +2809,7 @@ async fn a_tool_image_is_saved_and_stored_as_a_path() {
             name: "mcp__keel_browser__browser_screenshot".to_string(),
             input_bytes: 2,
             detail: String::new(),
+            label: String::new(),
             subagent: None,
             kind: None,
         }),
@@ -2900,6 +2940,7 @@ async fn attached_image_reaches_the_harness_and_the_user_message() {
                 message_id: "u-img".to_string(),
                 text: "what is this".to_string(),
                 attachments: vec![attachment.clone()],
+                shown: true,
             },
         )
         .expect("send");
@@ -3212,6 +3253,7 @@ async fn subagent_traffic_lands_in_its_own_record_and_indicator() {
             name: "bash".to_string(),
             input_bytes: 3,
             detail: String::new(),
+            label: String::new(),
             subagent: Some(SubagentRef::new("sub-1")),
             kind: None,
         }),
@@ -3401,6 +3443,7 @@ async fn a_ui_tool_call_stores_the_chart_on_its_message() {
             name: "mcp__keel-ui__show_chart".into(),
             input_bytes: 10,
             detail: String::new(),
+            label: String::new(),
             subagent: None,
             kind: None,
         }),
@@ -3428,7 +3471,7 @@ async fn a_ui_tool_call_stores_the_chart_on_its_message() {
     })
     .await;
     let ui_on = |message_id: &str| {
-        let mut state = engine.lock();
+        let state = engine.lock();
         let view = state.store.session(&id).expect("session").view();
         view.messages
             .iter()
@@ -3442,6 +3485,66 @@ async fn a_ui_tool_call_stores_the_chart_on_its_message() {
     };
     assert_eq!(ui_on("m1"), ["chart"]);
     assert!(ui_on("m2").is_empty());
+}
+
+#[tokio::test]
+async fn a_ui_tool_call_stores_the_plan_on_its_message() {
+    let tmp = Tmp::new("genui-plan");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let spec = r#"{"component":"plan","title":"Ship plan mode","summary":"Add the card.","steps":[{"title":"Read the composer","kind":"read","targets":["crates/ui/src/view/composer_view.rs"]}],"footer":"composer"}"#;
+    let harness = Arc::new(MockHarness::script(vec![
+        Step::Emit(AgentEvent::ToolStarted {
+            tool_id: "t1".into(),
+            name: "show_plan".into(),
+            input_bytes: 10,
+            detail: String::new(),
+            label: String::new(),
+            subagent: None,
+            kind: None,
+        }),
+        Step::Emit(AgentEvent::ToolFinished {
+            tool_id: "t1".into(),
+            summary: "plan".into(),
+            output_bytes: spec.len() as u64,
+            is_error: false,
+            images: Vec::new(),
+            output_tail: spec.into(),
+            subagent: None,
+            diff: None,
+            duration_ms: None,
+        }),
+        Step::Emit(AgentEvent::Done {
+            status: TurnStatus::Completed {},
+        }),
+    ]));
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let id = chat(&engine);
+    engine.set_chat_plan_mode(&id, true).expect("plan");
+    engine.queue_command(&id, send("go")).expect("start");
+    until(&engine, || engine.chat_status(&id).as_deref() == Some("idle")).await;
+    assert!(harness.plan_mode());
+    let state = engine.lock();
+    let view = state.store.session(&id).expect("session").view();
+    let spec = view
+        .messages
+        .iter()
+        .flat_map(|m| m.parts.clone())
+        .find_map(|p| match p {
+            PartView::Ui { id, spec } if id == "plan" => Some(spec),
+            _ => None,
+        })
+        .expect("plan part");
+    assert!(spec.contains("Ship plan mode"));
+    let chat = state
+        .store
+        .registry()
+        .view()
+        .chats
+        .into_iter()
+        .find(|c| c.id == id)
+        .unwrap();
+    assert!(chat.plan_mode);
+    assert!(chat.permission.is_empty());
 }
 
 #[tokio::test]
@@ -3470,7 +3573,7 @@ async fn text_with_the_same_part_id_stays_in_its_own_message() {
         engine.chat_status(&id).as_deref() == Some("idle")
     })
     .await;
-    let mut state = engine.lock();
+    let state = engine.lock();
     let view = state.store.session(&id).expect("session").view();
     let texts: Vec<&str> = view
         .messages

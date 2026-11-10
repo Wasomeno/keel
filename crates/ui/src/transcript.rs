@@ -14,12 +14,14 @@
 //! - Paint-only syntax colors.
 
 use crate::hover_fade::HoverFadeExt;
+use crate::motion::reveal_on_hover_curved;
 use crate::style::zpx;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, ElementId, FollowMode, Hsla, IntoElement, ListAlignment, ListState,
+    AnimationExt as _, AnyElement, Context, ElementId, FollowMode, Hsla, IntoElement, ListAlignment, ListState,
     Pixels, Render, SharedString, Styled, TextAlign, TextRun, Window, div, prelude::*, px,
     relative,
 };
@@ -119,6 +121,21 @@ impl TranscriptRowItem {
         let at = self.enter?;
         crate::motion::row_enter(at, now, reduced)
     }
+}
+
+/// Prose that folds into a turn's trace (see `fold_turn_rows`).
+fn is_folded_prose(block: &TranscriptBlock) -> bool {
+    matches!(
+        block,
+        TranscriptBlock::Paragraph { .. }
+            | TranscriptBlock::Heading { .. }
+            | TranscriptBlock::List { .. }
+            | TranscriptBlock::Quote { .. }
+            | TranscriptBlock::Code { .. }
+            | TranscriptBlock::Table { .. }
+            | TranscriptBlock::Rule { .. }
+            | TranscriptBlock::Interim(_)
+    )
 }
 
 impl TranscriptRowItem {
@@ -293,7 +310,7 @@ impl TranscriptState {
     /// "Latest" pill; the list's Tail mode does the actual snapping, once per
     /// layout, so nothing scrolls from `render` and nothing re-engages behind
     /// the user's back (Normal mode never self-re-engages).
-    fn set_stick(&mut self, on: bool) {
+    pub(crate) fn set_stick(&mut self, on: bool) {
         self.stick_to_bottom = on;
         if on {
             // Tail also anchors the scroll at the end right away.
@@ -340,6 +357,19 @@ impl TranscriptState {
     /// Jump to the bottom of the list without changing follow state.
     pub fn scroll_to_bottom(&self) {
         self.list_state.scroll_to_end();
+    }
+
+    /// Whether the transcript is currently scrolled to the bottom (or fits within view).
+    pub fn is_at_bottom(&self) -> bool {
+        if self.items.is_empty() {
+            return true;
+        }
+        let max = self.list_state.max_offset_for_scrollbar().y;
+        if max <= zpx(0.) {
+            return true;
+        }
+        let current = -self.list_state.scroll_px_offset_for_scrollbar().y;
+        self.stick_to_bottom || (max - current) <= Self::RE_ENGAGE_THRESHOLD
     }
 
     /// Put the row at `index` at the top and stop following, so the jump
@@ -464,11 +494,22 @@ impl TranscriptState {
                 .count();
         let wanted: std::collections::HashSet<String> =
             blocks.iter().map(|b| b.id().to_string()).collect();
+        // Narration that just folded behind the turn's step line leaves at
+        // once: no fade or collapse outside the fold.
+        let folding = blocks
+            .iter()
+            .any(|b| matches!(b, TranscriptBlock::TurnSummary { .. }));
+        let snaps = |row: &TranscriptRowItem| folding && is_folded_prose(&row.block);
         let mut ix = start;
         for block in blocks {
             loop {
                 if ix < end && self.items[ix].leaving.is_some() {
-                    ix += 1;
+                    if snaps(&self.items[ix]) && !wanted.contains(self.items[ix].row_id()) {
+                        self.retire(ix, false, now);
+                        end -= 1;
+                    } else {
+                        ix += 1;
+                    }
                     continue;
                 }
                 if ix < end && self.items[ix].row_id() == block.id() {
@@ -486,7 +527,8 @@ impl TranscriptState {
                     break;
                 }
                 if ix < end && !wanted.contains(self.items[ix].row_id()) {
-                    if self.retire(ix, live, now) {
+                    let animate = live && !snaps(&self.items[ix]);
+                    if self.retire(ix, animate, now) {
                         ix += 1;
                     } else {
                         end -= 1;
@@ -507,11 +549,17 @@ impl TranscriptState {
         // What's left was dropped (or moved, and already drawn anew above).
         while ix < end {
             if self.items[ix].leaving.is_some() {
-                ix += 1;
+                if snaps(&self.items[ix]) && !wanted.contains(self.items[ix].row_id()) {
+                    self.retire(ix, false, now);
+                    end -= 1;
+                } else {
+                    ix += 1;
+                }
                 continue;
             }
             let moved = wanted.contains(self.items[ix].row_id());
-            if self.retire(ix, live && !moved, now) {
+            let animate = live && !moved && !snaps(&self.items[ix]);
+            if self.retire(ix, animate, now) {
                 ix += 1;
             } else {
                 end -= 1;
@@ -597,6 +645,8 @@ impl TranscriptState {
             return cached;
         }
         let height = match block {
+            // Muted narration keeps the prose type, so it is as tall.
+            TranscriptBlock::Interim(inner) => return self.compute_block_height(inner, width),
             TranscriptBlock::Code {
                 line_count,
                 language,
@@ -709,6 +759,9 @@ impl TranscriptState {
                 let points = columns.iter().map(|c| c.points.len()).max().unwrap_or(1);
                 px(COMPARE_HEAD_H + 22.0 * points as f32 + 22.0)
             }
+            TranscriptBlock::PlanCard { plan, .. } => {
+                px(36. + 20. + plan.steps.len() as f32 * 40. + 48.)
+            }
         };
         self.height_memo.insert(row_id, content_len, width, height);
         height
@@ -796,6 +849,41 @@ pub enum RowAction {
         content: String,
         error: bool,
     },
+    /// Open or close a diagram's copy dropdown menu.
+    ToggleDiagramMenu {
+        row_id: String,
+    },
+    /// Close any open diagram copy dropdown menu.
+    CloseDiagramMenu,
+    /// Copy a chart as an image (2x, padded, card background) to clipboard.
+    CopyChartImage {
+        row_id: String,
+        chart: Box<crate::chart::Chart>,
+        tokens: Tokens,
+    },
+    /// Approve the plan and leave plan mode. `manual` reviews each edit.
+    PlanApprove { row_id: String, manual: bool },
+    PlanEdit { row_id: String },
+    PlanAsk { row_id: String },
+    PlanDone { row_id: String },
+    PlanAdd { row_id: String },
+    PlanDelete { row_id: String, index: usize },
+    PlanDrag { row_id: String, index: usize },
+    PlanDrop { row_id: String, index: usize },
+    /// Expand or fold an approved or rejected plan.
+    PlanToggle { row_id: String },
+    /// Toggle target list expansion for a specific step.
+    PlanToggleTargets { row_id: String, step_ix: usize },
+    /// Toggle the edit mode split dropdown menu.
+    PlanToggleModeMenu { row_id: String },
+    /// Set the chosen edit mode for approval (manual vs auto-accept).
+    PlanSetManual { row_id: String, manual: bool },
+    /// Set the chosen approval mode (AutoEdit, Ask, Bypass).
+    PlanSetMode { row_id: String, mode: crate::plan::ApprovalMode },
+    /// Retry prompt send after resume failure.
+    ResumeRetry,
+    /// Clear native session and send prompt fresh.
+    ResumeStartFresh,
 }
 
 /// Where an MR card's Merge button is, by row id. No entry: idle.
@@ -816,6 +904,10 @@ pub struct RowContext {
     pub tokens: Tokens,
     pub syntax: SyntaxPaintMap,
     pub reduced: bool,
+    /// Currently open diagram copy dropdown (row_id).
+    pub diagram_menu: Option<String>,
+    pub diagram_menu_ix: usize,
+    pub diagram_menu_keyboard: bool,
     /// Folded rows the user just opened or closed: row id → (toggle number,
     /// when). Recent ones animate; the number names the animation.
     pub toggles: std::rc::Rc<HashMap<String, (u64, std::time::Instant)>>,
@@ -836,6 +928,13 @@ pub struct RowContext {
     pub tracked_mr: Option<std::rc::Rc<crate::mr::Tracked>>,
     /// Risky Run buttons clicked once, waiting for the second click.
     pub armed_runs: std::rc::Rc<std::collections::HashSet<String>>,
+    /// When the running turn started. A live trace line shows the elapsed time.
+    pub run_at: Option<std::time::Instant>,
+    /// The live step's wording changing: what it leaves, from where.
+    pub step_from: Option<crate::trace_view::StepSwap>,
+    pub tool_from: std::rc::Rc<std::collections::HashMap<String, crate::trace_view::StepSwap>>,
+    /// Drawing narration inside an open fold: prose in the muted color.
+    pub muted: bool,
     /// This frame's time. Trace motion is computed from it.
     pub now: std::time::Instant,
     pub now_ms: i64,
@@ -855,6 +954,10 @@ pub struct RowContext {
     pub bubble_max_w: Option<f32>,
     /// Debug trace: records a code block's or tool row's painted box.
     pub probe: Option<std::rc::Rc<dyn Fn(RowProbe) -> Option<AnyElement>>>,
+    /// The open chat is running, so a plan with no saved phase is streaming.
+    pub plan_running: bool,
+    /// Plan cards the user has edited, approved, or that a fixture set.
+    pub plan_cards: std::rc::Rc<std::collections::HashMap<String, crate::plan::CardState>>,
 }
 
 /// Which row box a debug probe reads.
@@ -873,9 +976,12 @@ fn diagram_height(
     if let Some(diagram) = crate::diagram::parse(language.as_deref(), content) {
         return Some(px(crate::diagram::size(&diagram, f32::from(width)).1 + 36.));
     }
-    let size = crate::mermaid::size(content).filter(|_| is_mermaid(language, closed))?;
-    let (_, h) = crate::mermaid::fit(size, f32::from(width) - 2.);
-    Some(px(h + crate::mermaid::PAD * 2. + 36.))
+    let col = (f32::from(width) - 2.).max(100.);
+    let swapped = crate::mermaid::maybe_swap_direction(content, col);
+    let size = crate::mermaid::size(&swapped).filter(|_| is_mermaid(language, closed))?;
+    let (_, h) = crate::mermaid::inline_fit(size, col);
+    let crop_bar = if crate::mermaid::is_cropped(size, col) { 34. } else { 0. };
+    Some(px(36. + h + crate::mermaid::PAD * 2. + crop_bar))
 }
 
 /// A finished `mermaid` fence, or a `diagram` fence that is not a box drawing.
@@ -890,47 +996,105 @@ fn is_mermaid(language: &Option<String>, closed: bool) -> bool {
 
 fn render_mermaid(
     item: &TranscriptRowItem,
-    language: &Option<String>,
+    _language: &Option<String>,
     content: &str,
     rc: &RowContext,
 ) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
-    let label = language.clone().unwrap_or_else(|| "mermaid".into());
-    let (row_id, text) = (item.row_id().to_string(), content.to_string());
-    let size = crate::mermaid::size(content).unwrap_or((1., 1.));
-    let source = content.to_string();
+    let row_id = item.row_id().to_string();
+    let col = rc.prose_max_w;
+    let swapped = crate::mermaid::maybe_swap_direction(content, col);
+    let source = swapped.into_owned();
+    let size = crate::mermaid::size(&source).unwrap_or((1., 1.));
+    let s = crate::mermaid::inline_scale(size, col);
+    let cropped = crate::mermaid::is_cropped(size, col);
+    let drawn_h = (size.1 * s).min(crate::mermaid::MAX_INLINE_H);
+    let title = crate::mermaid::diagram_title(&source);
+    let menu_open = rc.diagram_menu.as_deref() == Some(item.row_id());
+    let group: gpui::SharedString = format!("diagram-{}", item.row_id()).into();
+
+    let show_full = if cropped {
+        let (open_id, open_src) = (row_id.clone(), source.clone());
+        let open = rc.on_action.clone();
+        Some(
+            div()
+                .id(ElementId::Name(format!("show-full-{}", item.row_id()).into()))
+                .h(zpx(34.))
+                .w_full()
+                .bg(c(t.code))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .cursor_pointer()
+                .text_color(c(t.text_muted))
+                .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
+                .active(|s| s.bg(c(t.selected)).opacity(0.75))
+                .on_click(move |_, _, cx| {
+                    open(
+                        RowAction::OpenDiagram {
+                            row_id: open_id.clone(),
+                            source: open_src.clone(),
+                        },
+                        cx,
+                    );
+                })
+                .child(Icon::Expand.el(zpx(12.)))
+                .child(
+                    div()
+                        .t_small()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child("Show full diagram"),
+                ),
+        )
+    } else {
+        None
+    };
+
     div()
         .id(ElementId::Name(format!("diagram-{}", item.row_id()).into()))
+        .relative()
+        .hover_probe(group.clone())
+        .group(group.clone())
         .w_full()
         .my_2()
-        .rounded(RADIUS_LG)
+        .rounded(RADIUS_MD)
         .bg(c(t.code))
-        .border_1()
-        .border_color(c(t.border))
         .overflow_hidden()
         .flex()
         .flex_col()
-        .child(diagram_bar(
+        .child(diagram_header(
             item,
-            &label,
-            rc.copied.as_deref(),
+            &title,
+            rc.copied.as_deref() == Some(item.row_id()),
+            menu_open,
+            rc.diagram_menu_ix,
+            rc.diagram_menu_keyboard,
+            group,
             rc.on_action.clone(),
             row_id,
-            text,
-            Some(t),
+            source.clone(),
             t,
         ))
         .child(
-            div().w_full().px_4().py_3().flex().justify_center().child(
-                // Same sizing as `mermaid::fit`: the column's width, capped in
-                // height; the canvas centers the drawing in whatever it gets.
-                mermaid_canvas(source, t, "inline", rc.on_action.clone())
-                    .w_full()
-                    .max_w(px(size.0))
-                    .aspect_ratio(size.0 / size.1)
-                    .max_h(px(size.1.min(crate::mermaid::MAX_INLINE_H))),
-            ),
+            div()
+                .w_full()
+                .px_4()
+                .pt_1()
+                .pb_4()
+                .flex()
+                .justify_center()
+                .overflow_hidden()
+                .max_h(px(drawn_h + crate::mermaid::PAD * 2.))
+                .child(
+                    mermaid_canvas(source, t, "inline", rc.on_action.clone())
+                        .w_full()
+                        .max_w(px(size.0 * s))
+                        .h(px(size.1 * s)),
+                ),
         )
+        .children(show_full)
 }
 
 fn render_diagram(
@@ -1005,267 +1169,390 @@ fn render_diagram(
         )
 }
 
-/// Header bar for a generative UI chart: badge, chart/table segmented toggle, and copy action.
+/// Header bar for a generative UI chart: badge on left, hover-only copy dropdown on right.
 fn chart_bar(
     item: &TranscriptRowItem,
     chart: &crate::chart::Chart,
-    replaces: &Option<Box<TranscriptBlock>>,
-    show_table: bool,
+    group: gpui::SharedString,
+    menu_open: bool,
+    menu_ix: usize,
+    keyboard_opened: bool,
     copied: Option<&str>,
     on_action: OnRowAction,
     t: Tokens,
 ) -> gpui::Div {
     let id = item.row_id();
-    let copy_key = format!("chart-copy-{id}");
-    let is_copied = copied == Some(copy_key.as_str());
-    let tint = |done: bool| if done { t.success } else { t.text_faint };
+    let row_id = id.to_string();
+    let is_copied = copied.is_some_and(|c| {
+        c == id || c == format!("{id}#csv") || c == format!("{id}#image")
+    });
 
-    let copy_content = replaces
-        .as_deref()
-        .and_then(block_markdown)
-        .unwrap_or_else(|| chart.to_markdown());
+    let icon = match chart.kind {
+        crate::chart::Kind::Bar => Icon::ChartColumn,
+        crate::chart::Kind::Line => Icon::ChartLine,
+    };
+    let title = chart.display_title();
 
-    let (copy_id, copy_text, copy_act) = (copy_key, copy_content, on_action.clone());
-
-    let mut actions = div()
+    let badge = div()
+        .min_w_0()
+        .flex_1()
         .flex()
         .flex_row()
         .items_center()
-        .gap_1()
-        .p_0p5()
-        .rounded_full()
-        .bg(c(t.surface))
-        .border_1()
-        .border_color(c(t.border));
+        .gap(zpx(8.))
+        .t_caption()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(c(t.text_muted))
+        .child(icon.el(zpx(14.)))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(zpx(12.))
+                .child(title),
+        );
 
-    if replaces.is_some() {
-        let (to_chart, to_table) = (on_action.clone(), on_action.clone());
-        let (row_id1, row_id2) = (id.to_string(), id.to_string());
-        actions = actions
-            .child(
-                div()
-                    .id(ElementId::Name(format!("chart-toggle-chart-{id}").into()))
-                    .h(zpx(20.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_size(zpx(11.))
-                    .when(!show_table, |d| {
-                        d.bg(c(t.selected))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                    })
-                    .when(show_table, |d| {
-                        d.text_color(c(t.text_faint))
-                            .hover(|s| s.text_color(c(t.text)))
-                            .hover_fade(c(t.hover), None)
-                    })
-                    .active(|s| s.opacity(0.85))
-                    .on_click(move |_, _, cx| {
-                        to_chart(
-                            RowAction::Toggle {
-                                row_id: format!("{row_id1}~table=0"),
-                            },
-                            cx,
-                        )
-                    })
-                    .child("Chart"),
-            )
-            .child(
-                div()
-                    .id(ElementId::Name(format!("chart-toggle-table-{id}").into()))
-                    .h(zpx(20.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_size(zpx(11.))
-                    .when(show_table, |d| {
-                        d.bg(c(t.selected))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                    })
-                    .when(!show_table, |d| {
-                        d.text_color(c(t.text_faint))
-                            .hover(|s| s.text_color(c(t.text)))
-                            .hover_fade(c(t.hover), None)
-                    })
-                    .active(|s| s.opacity(0.85))
-                    .on_click(move |_, _, cx| {
-                        to_table(
-                            RowAction::Toggle {
-                                row_id: format!("{row_id2}~table=1"),
-                            },
-                            cx,
-                        )
-                    })
-                    .child("Table"),
-            );
-    }
-
-    actions = actions.child(
-        bar_button(
-            format!("copy-chart-{id}"),
-            if is_copied { Icon::Check } else { Icon::Copy },
-            if is_copied { "Copied" } else { "Copy" },
-            tint(is_copied),
-            t,
-        )
-        .on_click(move |_, _, cx| {
-            copy_act(
-                RowAction::Copy {
-                    row_id: copy_id.clone(),
-                    content: copy_text.clone(),
-                },
-                cx,
-            )
-        }),
+    let copy_trigger = chart_copy_dropdown(
+        id,
+        row_id,
+        chart.clone(),
+        is_copied,
+        menu_open,
+        menu_ix,
+        keyboard_opened,
+        t,
+        on_action,
     );
 
-    let kind_label = match chart.kind {
-        crate::chart::Kind::Bar => "Bar",
-        crate::chart::Kind::Line => "Line",
-    };
-    let badge_label = if chart.x.is_empty() {
-        format!("{kind_label} Chart")
-    } else {
-        format!("{} · {kind_label}", chart.x)
-    };
+    let reveal = reveal_on_hover_curved(
+        format!("chart-actions-{id}"),
+        group,
+        if menu_open { 1. } else { 0. },
+        1.,
+        std::time::Duration::from_millis(150),
+        std::time::Duration::from_millis(100),
+        div().child(copy_trigger),
+    );
 
     div()
-        .w_full()
-        .h(zpx(32.))
-        .px_3()
+        .h(zpx(36.))
+        .px_4()
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .border_b_1()
-        .border_color(c(t.border))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(Icon::Sparkle.el(zpx(12.)))
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_size(zpx(12.))
-                        .text_color(c(t.text_muted))
-                        .child(badge_label),
-                ),
-        )
-        .child(actions)
+        .child(badge)
+        .child(reveal)
 }
 
-/// A generative UI chart: a header with type badge and table toggle, a legend,
-/// and a painted bar or line chart with interactive hover feedback.
+fn chart_copy_dropdown(
+    id: &str,
+    row_id: String,
+    chart: crate::chart::Chart,
+    copied: bool,
+    menu_open: bool,
+    menu_ix: usize,
+    keyboard_opened: bool,
+    t: Tokens,
+    on_action: OnRowAction,
+) -> impl IntoElement {
+    let action_copy_csv = on_action.clone();
+    let action_copy_img = on_action.clone();
+    let action_close = on_action.clone();
+    let action_toggle = on_action.clone();
+    let (csv_row, chart_csv) = (row_id.clone(), chart.clone());
+    let (img_row, chart_img) = (row_id.clone(), chart.clone());
+    let t_row = row_id;
+
+    let trigger = div()
+        .id(ElementId::Name(format!("copy-trigger-{id}").into()))
+        .flex_none()
+        .size(zpx(28.))
+        .rounded(RADIUS_SM)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(if copied { c(t.accent) } else { c(t.text_muted) })
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .hover(move |s| s.text_color(c(t.text)))
+        .active(|s| s.opacity(0.85))
+        .on_click(move |_, _, cx| {
+            action_toggle(RowAction::ToggleDiagramMenu { row_id: t_row.clone() }, cx);
+        })
+        .tooltip(move |_, cx| {
+            let tip = if copied { "Copied" } else { "Copy" };
+            cx.new(|_| crate::view::Tip::new(tip, t)).into()
+        })
+        .tooltip_show_delay(crate::view::tooltip::delay())
+        .child(if copied {
+            div()
+                .with_animation(
+                    ElementId::Name(format!("chart-copy-check-{id}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(150))
+                        .with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(delta),
+                )
+                .child(Icon::Check.el(zpx(13.)))
+        } else {
+            div()
+                .with_animation(
+                    ElementId::Name(format!("chart-copy-icon-{id}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(150))
+                        .with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(delta),
+                )
+                .child(Icon::Copy.el(zpx(13.)))
+        });
+
+    let selected_csv = keyboard_opened && menu_ix == 0;
+    let selected_img = keyboard_opened && menu_ix == 1;
+
+    let menu = if menu_open {
+        let menu_el = div()
+            .id(ElementId::Name(format!("copy-menu-{id}").into()))
+            .absolute()
+            .top(zpx(32.))
+            .right_0()
+            .w(zpx(136.))
+            .occlude()
+            .p(zpx(3.))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .bg(c(t.floating))
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(c(t.border).opacity(0.20))
+            .shadow(vec![gpui::BoxShadow {
+                color: c(t.shadow).opacity(0.35),
+                offset: gpui::point(zpx(0.), zpx(4.)),
+                blur_radius: zpx(10.),
+                spread_radius: zpx(-2.),
+                inset: false,
+            }])
+            .on_mouse_down_out(move |_, _, cx| {
+                action_close(RowAction::CloseDiagramMenu, cx);
+            })
+            .child(
+                dropdown_row(
+                    format!("copy-csv-{id}"),
+                    Icon::FileText,
+                    "Copy as CSV",
+                    selected_csv,
+                    t,
+                    move |_, _, cx| {
+                        action_copy_csv(RowAction::Copy {
+                            row_id: format!("{csv_row}#csv"),
+                            content: chart_csv.to_csv(),
+                        }, cx);
+                    },
+                ),
+            )
+            .child(
+                dropdown_row(
+                    format!("copy-image-{id}"),
+                    Icon::Image,
+                    "Copy as image",
+                    selected_img,
+                    t,
+                    move |_, _, cx| {
+                        action_copy_img(RowAction::CopyChartImage {
+                            row_id: format!("{img_row}#image"),
+                            chart: Box::new(chart_img.clone()),
+                            tokens: t,
+                        }, cx);
+                    },
+                ),
+            );
+
+        Some(if keyboard_opened {
+            menu_el.into_any_element()
+        } else {
+            menu_el
+                .with_animation(
+                    ElementId::Name(format!("copy-menu-in-{id}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(150))
+                        .with_easing(crate::motion::ease_out),
+                    |el, delta| {
+                        el.opacity(delta)
+                            .top(zpx(32. - 3. * (1. - delta)))
+                    },
+                )
+                .into_any_element()
+        })
+    } else {
+        None
+    };
+
+    div()
+        .relative()
+        .flex_none()
+        .child(trigger)
+        .children(menu)
+}
+
+/// A generative UI chart: quiet, sleek, modern, consistent with refined cards.
 fn render_chart(
     item: &TranscriptRowItem,
     chart: &crate::chart::Chart,
-    replaces: &Option<Box<TranscriptBlock>>,
+    _replaces: &Option<Box<TranscriptBlock>>,
     rc: &RowContext,
 ) -> gpui::Div {
     let t = rc.tokens;
     let row_id = item.row_id().to_string();
-    let show_table = rc
-        .open_lines
-        .get(&format!("{row_id}~table"))
-        .copied()
-        .unwrap_or(false);
+    let group = SharedString::from(format!("chart-group-{row_id}"));
+    let menu_open = rc.diagram_menu.as_deref() == Some(&row_id);
 
     let header_bar = chart_bar(
         item,
         chart,
-        replaces,
-        show_table,
+        group.clone(),
+        menu_open,
+        rc.diagram_menu_ix,
+        rc.diagram_menu_keyboard,
         rc.copied.as_deref(),
         rc.on_action.clone(),
         t,
     );
 
-    let content = if show_table && let Some(replaces) = replaces {
-        if let TranscriptBlock::Table {
-            align,
-            header,
-            rows,
-            ..
-        } = replaces.as_ref()
-        {
-            render_table(item, align, header, rows, rc)
-        } else {
-            div()
-        }
-    } else {
-        let row_id_str = row_id.clone();
-        let legend = chart.series.iter().enumerate().map(move |(ix, series)| {
-            div()
-                .id(ElementId::Name(format!("legend-{row_id_str}-{ix}").into()))
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .px_2()
-                .py_0p5()
-                .rounded_full()
-                .bg(c(t.surface))
-                .border_1()
-                .border_color(c(t.border))
-                .hover(|s| s.text_color(c(t.text)))
-                .hover_fade(c(t.hover), None)
-                .active(|s| s.opacity(0.85))
-                .child(div().size(px(7.)).rounded(px(2.)).bg(series_color(t, ix)))
-                .child(
-                    div()
-                        .text_size(zpx(11.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(series.name.clone()),
-                )
-        });
-        let chart = chart.clone();
+    // Optional headline value row under the header
+    let headline_row = chart.headline.as_ref().map(|h| {
+        let delta_color = match h.better.as_deref() {
+            Some("higher") => {
+                if h.delta.as_deref().unwrap_or("").starts_with('-') {
+                    c(t.danger)
+                } else {
+                    c(t.success)
+                }
+            }
+            Some("lower") => {
+                if h.delta.as_deref().unwrap_or("").starts_with('-') {
+                    c(t.success)
+                } else {
+                    c(t.danger)
+                }
+            }
+            _ => c(t.text_muted),
+        };
         div()
+            .px_4()
+            .pt_1()
+            .pb_1()
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_baseline()
+            .gap_2()
             .child(
                 div()
-                    .px_3()
-                    .pt_2p5()
-                    .pb_1()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(zpx(18.))
+                    .text_color(c(t.text))
+                    .child(h.value.clone()),
+            )
+            .children(h.delta.as_ref().map(|d| {
+                div()
+                    .text_size(zpx(12.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(delta_color)
+                    .child(d.clone())
+            }))
+            .children(h.label.as_ref().map(|lbl| {
+                div()
+                    .text_size(zpx(12.))
                     .text_color(c(t.text_muted))
-                    .children(legend),
+                    .child(lbl.clone())
+            }))
+    });
+
+    let row_id_str = row_id.clone();
+    let active_series: Vec<bool> = (0..chart.series.len())
+        .map(|ix| !rc.open_lines.get(&format!("{row_id_str}~hide-series-{ix}")).copied().unwrap_or(false))
+        .collect();
+
+    let legend = chart.series.iter().enumerate().map(|(ix, series)| {
+        let hide_key = format!("{row_id_str}~hide-series-{ix}");
+        let hidden = rc.open_lines.get(&hide_key).copied().unwrap_or(false);
+        let color = series_color(t, ix, series.highlight);
+        let on_toggle = rc.on_action.clone();
+        let toggle_key = if hidden {
+            format!("{hide_key}=0")
+        } else {
+            format!("{hide_key}=1")
+        };
+
+        div()
+            .id(ElementId::Name(format!("legend-{row_id_str}-{ix}").into()))
+            .flex()
+            .items_center()
+            .gap(zpx(6.))
+            .cursor_pointer()
+            .text_color(c(t.text_muted))
+            .hover(|s| s.text_color(c(t.text)))
+            .active(|s| s.opacity(0.75))
+            .when(hidden, |s| s.opacity(0.35))
+            .on_click(move |_, _, cx| {
+                on_toggle(RowAction::Toggle { row_id: toggle_key.clone() }, cx);
+            })
+            .child(
+                div()
+                    .size(px(8.))
+                    .rounded(px(2.))
+                    .bg(color),
             )
             .child(
-                gpui::canvas(
-                    |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-                    move |bounds, hitbox, window, cx| {
-                        paint_chart(&chart, bounds, &hitbox, t, window, cx)
-                    },
-                )
-                .w_full()
-                .h(px(crate::chart::HEIGHT)),
+                div()
+                    .text_size(zpx(12.))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .child(series.name.clone()),
             )
-    };
+    });
+
+    let chart_clone = chart.clone();
+    let row_id_clone = row_id.clone();
+    let reduced = rc.reduced;
+    let content = div()
+        .flex()
+        .flex_col()
+        .children(headline_row)
+        .child(
+            div()
+                .px_4()
+                .pt_1()
+                .pb_2()
+                .flex()
+                .flex_wrap()
+                .gap_3()
+                .children(legend),
+        )
+        .child(
+            gpui::canvas(
+                |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+                move |bounds, hitbox, window, cx| {
+                    paint_chart(&chart_clone, &row_id_clone, menu_open, bounds, &hitbox, &active_series, reduced, t, window, cx)
+                },
+            )
+            .w_full()
+            .h(px(crate::chart::HEIGHT)),
+        );
 
     let card = div()
         .id(ElementId::Name(format!("chart-card-{row_id}").into()))
+        .relative()
+        .hover_probe(group.clone())
+        .group(group.clone())
         .w_full()
         .my_2()
-        .rounded(RADIUS_LG)
+        .rounded(RADIUS_MD)
         .bg(c(t.code))
         .border_1()
-        .border_color(c(t.border))
+        .border_color(c(t.border).opacity(0.18))
+        .group_hover(group, move |s| s.border_color(c(t.border).opacity(0.50)))
         .overflow_hidden()
         .flex()
         .flex_col()
-        .on_mouse_move(|_, window, _| window.refresh())
-        .on_hover(|_, window, _| window.refresh())
         .child(header_bar)
         .child(content);
 
@@ -2462,272 +2749,713 @@ const CHOICE_ROW_H: f32 = 40.;
 const CALLOUT_H: f32 = 64.;
 const COMPARE_HEAD_H: f32 = 36.;
 
-/// Series colors: the accent, then lighter steps of it.
-fn series_color(t: Tokens, ix: usize) -> Hsla {
-    c(t.accent).opacity([1., 0.55, 0.3, 0.15][ix % 4])
+/// Series colors: tone steps from ink, or accent for highlighted series.
+fn series_color(t: Tokens, ix: usize, highlight: bool) -> Hsla {
+    if highlight {
+        return c(t.accent);
+    }
+    match ix {
+        0 => c(t.text),
+        1 => c(t.text).opacity(0.40),
+        2 => c(t.text_muted),
+        3 => c(t.text_faint),
+        _ => c(t.text).opacity(0.20),
+    }
+}
+
+#[derive(Clone)]
+struct ChartState {
+    created_at: Instant,
+    prev_axis: (f64, f64, f64),
+    target_axis: (f64, f64, f64),
+    axis_start: Instant,
+    hovered_group: Option<usize>,
+    dev_hovered: Option<Option<usize>>,
+    first_hover_at: Option<Instant>,
+    tip_is_visible: bool,
+    tip_curr_x: f32,
+    tip_target_x: f32,
+    tip_start_x: f32,
+    tip_move_start: Instant,
+    tip_opacity: f32,
+    tip_opacity_target: f32,
+    tip_opacity_from: f32,
+    tip_opacity_start: Instant,
+    tip_last_group: Option<usize>,
+    hover_dim: f32,
+    hover_dim_target: f32,
+    hover_dim_from: f32,
+    hover_dim_start: Instant,
+    keyboard_focused: bool,
+}
+
+impl ChartState {
+    fn new(now: Instant, axis: (f64, f64, f64)) -> Self {
+        Self {
+            created_at: now,
+            prev_axis: axis,
+            target_axis: axis,
+            axis_start: now,
+            hovered_group: None,
+            dev_hovered: None,
+            first_hover_at: None,
+            tip_is_visible: false,
+            tip_curr_x: 0.,
+            tip_target_x: 0.,
+            tip_start_x: 0.,
+            tip_move_start: now,
+            tip_opacity: 0.0,
+            tip_opacity_target: 0.0,
+            tip_opacity_from: 0.0,
+            tip_opacity_start: now,
+            tip_last_group: None,
+            hover_dim: 1.0,
+            hover_dim_target: 1.0,
+            hover_dim_from: 1.0,
+            hover_dim_start: now,
+            keyboard_focused: false,
+        }
+    }
+}
+
+thread_local! {
+    static CHART_STATES: std::cell::RefCell<HashMap<String, ChartState>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+pub(crate) fn dev_set_chart_hover(row_id: &str, group: Option<Option<usize>>) {
+    CHART_STATES.with(|states| {
+        let mut map = states.borrow_mut();
+        let mut matched = false;
+        for (k, state) in map.iter_mut() {
+            if row_id.is_empty() || k == row_id || k.contains(row_id) || row_id.contains(k.as_str()) {
+                matched = true;
+                state.dev_hovered = group;
+                if let Some(Some(ix)) = group {
+                    state.tip_is_visible = true;
+                    state.tip_last_group = Some(ix);
+                    state.tip_opacity = 1.0;
+                    state.tip_opacity_target = 1.0;
+                    state.tip_opacity_from = 1.0;
+                    state.tip_opacity_start = Instant::now();
+                    state.hover_dim = 0.55;
+                    state.hover_dim_target = 0.55;
+                    state.hover_dim_from = 0.55;
+                    state.hover_dim_start = Instant::now();
+                } else if let Some(None) = group {
+                    state.tip_is_visible = false;
+                    state.hovered_group = None;
+                    state.tip_last_group = None;
+                    state.tip_opacity = 0.0;
+                    state.tip_opacity_target = 0.0;
+                    state.tip_opacity_from = 0.0;
+                    state.hover_dim = 1.0;
+                    state.hover_dim_target = 1.0;
+                    state.hover_dim_from = 1.0;
+                } else {
+                    state.dev_hovered = None;
+                }
+            }
+        }
+        if !matched {
+            let mut state = ChartState::new(Instant::now(), (0., 1., 0.25));
+            state.dev_hovered = group;
+            if let Some(Some(ix)) = group {
+                state.tip_is_visible = true;
+                state.tip_last_group = Some(ix);
+                state.tip_opacity = 1.0;
+                state.tip_opacity_target = 1.0;
+                state.tip_opacity_from = 1.0;
+                state.tip_opacity_start = Instant::now();
+                state.hover_dim = 0.55;
+                state.hover_dim_target = 0.55;
+                state.hover_dim_from = 0.55;
+                state.hover_dim_start = Instant::now();
+            } else if let Some(None) = group {
+                state.tip_is_visible = false;
+                state.hovered_group = None;
+                state.tip_last_group = None;
+                state.tip_opacity = 0.0;
+                state.tip_opacity_target = 0.0;
+                state.tip_opacity_from = 0.0;
+                state.hover_dim = 1.0;
+                state.hover_dim_target = 1.0;
+                state.hover_dim_from = 1.0;
+            }
+            map.insert(row_id.to_string(), state);
+        }
+    });
+}
+
+fn paint_chart_tick(
+    text: &str,
+    origin: gpui::Point<Pixels>,
+    x: f32,
+    y: f32,
+    right_align: bool,
+    color: Hsla,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let mut font = gpui::font(crate::style::SANS);
+    font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(SharedString::from(text.to_string()), px(11.), &[run], None);
+    let draw_x = if right_align {
+        x - f32::from(line.width)
+    } else {
+        x
+    };
+    let _ = line.paint(shift(origin, draw_x, y), px(14.), TextAlign::Left, None, window, cx);
 }
 
 fn paint_chart(
     chart: &crate::chart::Chart,
+    row_id: &str,
+    menu_open: bool,
     bounds: gpui::Bounds<Pixels>,
     hitbox: &gpui::Hitbox,
+    active_series: &[bool],
+    reduced: bool,
     t: Tokens,
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) {
+    let now = Instant::now();
     let origin = bounds.origin;
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let (left, top, plot_w, plot_h) = crate::chart::plot_box(w, h);
+    let (target_lo, target_hi, target_step) = chart.axis_for(active_series);
+
+    let mut state = CHART_STATES.with(|states| {
+        states
+            .borrow_mut()
+            .entry(row_id.to_string())
+            .or_insert_with(|| ChartState::new(now, (target_lo, target_hi, target_step)))
+            .clone()
+    });
+
+    let mut needs_refresh = false;
+
+    // Rescale axis smoothly if target changed
+    if state.target_axis != (target_lo, target_hi, target_step) {
+        state.prev_axis = state.target_axis;
+        state.target_axis = (target_lo, target_hi, target_step);
+        state.axis_start = now;
+    }
+    let (lo, hi, step) = if reduced {
+        (target_lo, target_hi, target_step)
+    } else {
+        let t_axis = (now.duration_since(state.axis_start).as_secs_f32() / 0.20).clamp(0.0, 1.0);
+        let ease = crate::motion::ease_out(t_axis);
+        let lo = state.prev_axis.0 + (target_lo - state.prev_axis.0) * ease as f64;
+        let hi = state.prev_axis.1 + (target_hi - state.prev_axis.1) * ease as f64;
+        let step = state.prev_axis.2 + (target_step - state.prev_axis.2) * ease as f64;
+        if t_axis < 1.0 {
+            needs_refresh = true;
+        }
+        (lo, hi, step)
+    };
+
     let pointer = window.mouse_position();
-    let hover = hitbox
-        .is_hovered(window)
+    let is_hovered = !menu_open && hitbox.is_hovered(window);
+    let pointer_hover = is_hovered
         .then(|| {
             let x = f32::from(pointer.x - origin.x) - left;
             crate::chart::category_at(chart, plot_w, x)
         })
         .flatten();
-    if hover.is_some() {
+
+    if is_hovered {
         window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
     }
+
     let hb = hitbox.clone();
     window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, window, _| {
         if phase == gpui::DispatchPhase::Bubble && hb.is_hovered(window) {
             window.refresh();
         }
     });
-    let (lo, hi, step) = chart.axis();
-    let y_of = |v: f64| top + plot_h * (1. - ((v - lo) / (hi - lo)) as f32);
-    let faint = c(t.text_faint);
-    let grid = c(t.border);
+
+    // Track hover transitions and 100ms first-hover delay
+    let effective_hover = if menu_open {
+        state.hovered_group = None;
+        state.first_hover_at = None;
+        state.tip_is_visible = false;
+        state.tip_opacity = 0.0;
+        state.tip_opacity_target = 0.0;
+        state.tip_opacity_from = 0.0;
+        state.hover_dim = 1.0;
+        state.hover_dim_target = 1.0;
+        state.hover_dim_from = 1.0;
+        None
+    } else {
+        match state.dev_hovered {
+            Some(forced) => {
+                state.hovered_group = forced;
+                if forced.is_none() {
+                    state.first_hover_at = None;
+                    state.tip_is_visible = false;
+                }
+                forced
+            }
+            None => {
+                if pointer_hover.is_some() {
+                    if state.hovered_group.is_none() && state.first_hover_at.is_none() {
+                        state.first_hover_at = Some(now);
+                    }
+                    state.hovered_group = pointer_hover;
+                } else if !state.keyboard_focused {
+                    state.hovered_group = None;
+                    state.first_hover_at = None;
+                    state.tip_is_visible = false;
+                }
+                state.hovered_group
+            }
+        }
+    };
+
+    if let Some(ix) = effective_hover {
+        state.tip_last_group = Some(ix);
+    }
+
+    // Hover dimming easing (120ms enter, 100ms exit)
+    let target_dim = if !menu_open && effective_hover.is_some() { 0.55 } else { 1.0 };
+    if (state.hover_dim_target - target_dim).abs() > 0.01 {
+        state.hover_dim_from = state.hover_dim;
+        state.hover_dim_target = target_dim;
+        state.hover_dim_start = now;
+    }
+    if !reduced {
+        let dim_dur = if target_dim < 0.9 { 0.12 } else { 0.10 };
+        let dim_t = (now.duration_since(state.hover_dim_start).as_secs_f32() / dim_dur).clamp(0.0, 1.0);
+        let ease = crate::motion::ease_out(dim_t);
+        state.hover_dim = state.hover_dim_from + (state.hover_dim_target - state.hover_dim_from) * ease;
+        if dim_t < 1.0 {
+            needs_refresh = true;
+        }
+    } else {
+        state.hover_dim = target_dim;
+    }
+
+    // Tooltip entrance (150ms) and exit (100ms) fade
+    let delay_passed = !menu_open && effective_hover.is_some() && (
+        state.tip_is_visible
+            || matches!(state.dev_hovered, Some(Some(_)))
+            || state.keyboard_focused
+            || state.first_hover_at.map_or(false, |at| now.duration_since(at) >= Duration::from_millis(100))
+    );
+    if delay_passed {
+        state.tip_is_visible = true;
+    }
+    let target_opacity = if !menu_open && state.tip_is_visible && effective_hover.is_some() {
+        1.0
+    } else {
+        0.0
+    };
+    if (state.tip_opacity_target - target_opacity).abs() > 0.01 {
+        state.tip_opacity_from = state.tip_opacity;
+        state.tip_opacity_target = target_opacity;
+        state.tip_opacity_start = now;
+    }
+    if !reduced && !state.keyboard_focused {
+        let op_dur = if state.tip_opacity_target > 0.5 { 0.15 } else { 0.10 };
+        let op_t = (now.duration_since(state.tip_opacity_start).as_secs_f32() / op_dur).clamp(0.0, 1.0);
+        let ease = crate::motion::ease_out(op_t);
+        state.tip_opacity = state.tip_opacity_from + (state.tip_opacity_target - state.tip_opacity_from) * ease;
+        if op_t < 1.0 {
+            needs_refresh = true;
+        }
+    } else {
+        state.tip_opacity = target_opacity;
+    }
+
+    // Check entry animation status
+    let entry_elapsed_ms = now.duration_since(state.created_at).as_secs_f32() * 1000.0;
+    let total_entry_ms = match chart.kind {
+        crate::chart::Kind::Bar => 240.0 + (chart.labels.len().saturating_sub(1) as f32 * 30.0).min(200.0),
+        crate::chart::Kind::Line => 280.0,
+    };
+    if !reduced && entry_elapsed_ms < total_entry_ms {
+        needs_refresh = true;
+    }
+
+    // Paint Gridlines and Y-axis Ticks
+    let y_of = |v: f64| top + plot_h * (1. - ((v - lo) / (hi - lo).max(1e-6)) as f32);
     let mut tick = lo;
-    while tick <= hi + step / 2. {
+    while tick <= hi + step * 0.1 {
         let y = y_of(tick);
+        let is_zero = tick.abs() < 1e-5;
+        let grid_color = if is_zero {
+            c(t.text).opacity(0.18)
+        } else {
+            c(t.text).opacity(0.08)
+        };
         window.paint_quad(gpui::fill(
-            gpui::Bounds::new(shift(origin, left, y), gpui::size(px(plot_w), px(1.))),
-            grid,
+            gpui::Bounds::new(shift(origin, left, y.round()), gpui::size(px(plot_w), px(1.))),
+            grid_color,
         ));
-        paint_label(
-            &crate::chart::label(tick),
-            origin,
-            6.,
-            y - 8.,
-            faint,
-            window,
-            cx,
-        );
+        let tick_str = chart.format_tick(tick);
+        paint_chart_tick(&tick_str, origin, left - 8., y - 6., true, c(t.text_muted), window, cx);
         tick += step;
     }
+
+    // Paint X-axis Category Labels
     let n = chart.labels.len();
     let slot = plot_w / n as f32;
-    // Label every k-th category so names don't overlap.
-    let every = (64. / slot).ceil().max(1.) as usize;
+    let every = (60. / slot).ceil().max(1.) as usize;
     for (ix, name) in chart.labels.iter().enumerate().step_by(every) {
         let x = left + slot * (ix as f32 + 0.5);
-        let shown: String = name
-            .chars()
-            .take((slot * every as f32 / 7.5) as usize)
-            .collect();
-        let half = shown.chars().count() as f32 * 3.6;
-        paint_label(
-            &shown,
-            origin,
-            x - half,
-            top + plot_h + 6.,
-            faint,
+        let mut font = gpui::font(crate::style::SANS);
+        font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
+        let run = TextRun {
+            len: name.len(),
+            font,
+            color: c(t.text_muted),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window
+            .text_system()
+            .shape_line(SharedString::from(name.to_string()), px(11.), &[run], None);
+        let line_w = f32::from(line.width);
+        let _ = line.paint(
+            shift(origin, x - line_w / 2., top + plot_h + 8.),
+            px(14.),
+            TextAlign::Left,
+            None,
             window,
             cx,
         );
     }
-    let zero = y_of(0f64.clamp(lo, hi));
+
+    let zero_y = y_of(0f64.clamp(lo, hi));
+
     match chart.kind {
         crate::chart::Kind::Bar => {
-            if let Some(ix) = hover {
-                let col_pad = (slot * 0.08).clamp(2., 6.);
-                window.paint_quad(
-                    gpui::fill(
-                        gpui::Bounds::new(
-                            shift(origin, left + slot * ix as f32 + col_pad, top + 2.),
-                            gpui::size(px(slot - 2. * col_pad), px(plot_h - 4.)),
-                        ),
-                        c(t.hover).opacity(0.85),
-                    )
-                    .corner_radii(px(6.)),
-                );
-            }
-            let k = chart.series.len() as f32;
-            let bar = (slot * 0.7 / k).min(36.);
-            for (si, series) in chart.series.iter().enumerate() {
-                let base_color = series_color(t, si);
-                for (ix, v) in series.values.iter().enumerate() {
-                    // A gap in the table: no bar.
-                    let Some(v) = *v else { continue };
-                    let is_active = hover == Some(ix);
-                    let color = if hover.is_some() && !is_active {
-                        base_color.opacity(0.45)
+            let active_indices: Vec<usize> = active_series
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| **a)
+                .map(|(i, _)| i)
+                .collect();
+            let k = active_indices.len() as f32;
+            if k > 0. {
+                let gw = slot * 0.60;
+                let bar_w = ((gw - (k - 1.) * 2.0) / k).clamp(3.0, 36.0);
+                let total_gw = k * bar_w + (k - 1.) * 2.0;
+
+                for (ix, _) in chart.labels.iter().enumerate() {
+                    let entry_progress = if reduced {
+                        1.0
                     } else {
-                        base_color
+                        let stagger = (ix as f32 * 30.0).min(200.0);
+                        let t = ((entry_elapsed_ms - stagger) / 240.0).clamp(0.0, 1.0);
+                        crate::motion::ease_out(t)
                     };
-                    let x = left + slot * (ix as f32 + 0.5) - bar * k / 2. + bar * si as f32;
-                    let (top_y, bottom_y) = (y_of(v).min(zero), y_of(v).max(zero));
-                    let h = (bottom_y - top_y).max(2.);
-                    let corners = if v >= 0. {
-                        gpui::Corners {
-                            top_left: px(3.),
-                            top_right: px(3.),
-                            bottom_left: px(0.5),
-                            bottom_right: px(0.5),
-                        }
+                    if entry_progress <= 0.0 {
+                        continue;
+                    }
+
+                    let is_target = effective_hover == Some(ix);
+                    let dim = if effective_hover.is_some() && !is_target {
+                        state.hover_dim
                     } else {
-                        gpui::Corners {
-                            top_left: px(0.5),
-                            top_right: px(0.5),
-                            bottom_left: px(3.),
-                            bottom_right: px(3.),
-                        }
+                        1.0
                     };
-                    window.paint_quad(
-                        gpui::fill(
-                            gpui::Bounds::new(
-                                shift(origin, x + 1., top_y),
-                                gpui::size(px((bar - 2.).max(1.)), px(h)),
-                            ),
-                            color,
-                        )
-                        .corner_radii(corners),
-                    );
+                    let lift = if is_target && !reduced {
+                        ((1.0 - state.hover_dim) / 0.45).clamp(0.0, 1.0) * 1.5
+                    } else {
+                        0.0
+                    };
+
+                    for (pos, &si) in active_indices.iter().enumerate() {
+                        let series = &chart.series[si];
+                        let Some(Some(v)) = series.values.get(ix) else { continue };
+                        let base_color = series_color(t, si, series.highlight);
+                        let color = base_color.opacity(base_color.a * dim * entry_progress);
+                        let bar_x = left + slot * (ix as f32 + 0.5) - total_gw / 2.0 + pos as f32 * (bar_w + 2.0);
+                        let val_y = y_of(*v);
+                        let (mut top_y, bottom_y) = (val_y.min(zero_y), val_y.max(zero_y));
+                        let full_h = (bottom_y - top_y).max(1.0);
+                        let h = (full_h * (0.08 + 0.92 * entry_progress)).max(1.0) + lift;
+                        if *v >= 0. {
+                            top_y = bottom_y - h;
+                        } else {
+                            top_y = zero_y;
+                        }
+                        let corners = if *v >= 0. {
+                            gpui::Corners {
+                                top_left: px(4.),
+                                top_right: px(4.),
+                                bottom_left: px(0.),
+                                bottom_right: px(0.),
+                            }
+                        } else {
+                            gpui::Corners {
+                                top_left: px(0.),
+                                top_right: px(0.),
+                                bottom_left: px(4.),
+                                bottom_right: px(4.),
+                            }
+                        };
+                        window.paint_quad(
+                            gpui::fill(
+                                gpui::Bounds::new(shift(origin, bar_x, top_y), gpui::size(px(bar_w), px(h))),
+                                color,
+                            )
+                            .corner_radii(corners),
+                        );
+                    }
                 }
             }
         }
         crate::chart::Kind::Line => {
-            if let Some(ix) = hover {
-                let x = left + slot * (ix as f32 + 0.5);
-                window.paint_quad(
-                    gpui::fill(
-                        gpui::Bounds::new(
-                            shift(origin, x - 0.75, top + 2.),
-                            gpui::size(px(1.5), px(plot_h - 4.)),
-                        ),
-                        c(t.border).opacity(0.85),
-                    )
-                    .corner_radii(px(0.75)),
-                );
-            }
+            let line_reveal_progress = if reduced {
+                1.0
+            } else {
+                crate::motion::ease_out((entry_elapsed_ms / 280.0).clamp(0.0, 1.0))
+            };
+            let max_reveal_x = left + plot_w * line_reveal_progress;
+
             for (si, series) in chart.series.iter().enumerate() {
-                let base_color = series_color(t, si);
-                // A gap breaks the line: each run of values is its own stroke.
+                if !active_series.get(si).copied().unwrap_or(true) {
+                    continue;
+                }
+                let color = series_color(t, si, series.highlight);
                 let points: Vec<Option<(f32, f32)>> = series
                     .values
                     .iter()
                     .enumerate()
                     .map(|(ix, v)| v.map(|v| (left + slot * (ix as f32 + 0.5), y_of(v))))
                     .collect();
+
                 for run in points.split(Option::is_none) {
-                    let run: Vec<(f32, f32)> = run.iter().flatten().copied().collect();
-                    if run.len() < 2 {
+                    let pts: Vec<(f32, f32)> = run.iter().flatten().copied().collect();
+                    if pts.len() < 2 {
                         continue;
                     }
-                    let mut path = gpui::PathBuilder::stroke(px(2.0));
-                    path.move_to(shift(origin, run[0].0, run[0].1));
-                    for &(x, y) in &run[1..] {
-                        path.line_to(shift(origin, x, y));
+                    let curve_pts = crate::chart::monotone_spline(&pts);
+
+                    // Optional faint area fill for series 0 at ~6% opacity
+                    if si == 0 && curve_pts[0].0 <= max_reveal_x {
+                        let mut area = gpui::PathBuilder::fill();
+                        area.move_to(shift(origin, curve_pts[0].0, zero_y));
+                        let mut last_x = curve_pts[0].0;
+                        for &(x, y) in &curve_pts {
+                            if x > max_reveal_x {
+                                break;
+                            }
+                            area.line_to(shift(origin, x, y));
+                            last_x = x;
+                        }
+                        area.line_to(shift(origin, last_x, zero_y));
+                        area.close();
+                        if let Ok(p) = area.build() {
+                            window.paint_path(p, color.opacity(0.06));
+                        }
                     }
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, base_color);
+
+                    // Stroke curve
+                    if curve_pts[0].0 <= max_reveal_x {
+                        let mut stroke = gpui::PathBuilder::stroke(px(1.75));
+                        stroke.move_to(shift(origin, curve_pts[0].0, curve_pts[0].1));
+                        for &(x, y) in &curve_pts[1..] {
+                            if x > max_reveal_x {
+                                break;
+                            }
+                            stroke.line_to(shift(origin, x, y));
+                        }
+                        if let Ok(p) = stroke.build() {
+                            window.paint_path(p, color);
+                        }
                     }
                 }
-                for (ix, pt) in points.iter().enumerate() {
-                    let Some(&(x, y)) = pt.as_ref() else { continue };
-                    let is_active = hover == Some(ix);
-                    if is_active {
-                        // Magnetic active point: outer halo + surface border + solid core
+            }
+
+            // Hover guide and dot with smooth fade and scaling
+            let guide_alpha = if menu_open {
+                0.0
+            } else if reduced {
+                if effective_hover.is_some() { 1.0 } else { 0.0 }
+            } else {
+                ((1.0 - state.hover_dim) / 0.45).clamp(0.0, 1.0)
+            };
+
+            if !menu_open && guide_alpha > 0.01 && let Some(ix) = effective_hover.or(state.tip_last_group) {
+                let gx = left + slot * (ix as f32 + 0.5);
+                window.paint_quad(gpui::fill(
+                    gpui::Bounds::new(
+                        shift(origin, gx - 0.5, top),
+                        gpui::size(px(1.0), px(plot_h)),
+                    ),
+                    c(t.text).opacity(0.20 * guide_alpha),
+                ));
+
+                for (si, series) in chart.series.iter().enumerate() {
+                    if !active_series.get(si).copied().unwrap_or(true) {
+                        continue;
+                    }
+                    if let Some(Some(v)) = series.values.get(ix) {
+                        let gy = y_of(*v);
+                        let dot_color = series_color(t, si, series.highlight);
+                        let r = 2.0 + 1.0 * guide_alpha;
                         window.paint_quad(
                             gpui::fill(
                                 gpui::Bounds::new(
-                                    shift(origin, x - 6., y - 6.),
-                                    gpui::size(px(12.), px(12.)),
+                                    shift(origin, gx - r, gy - r),
+                                    gpui::size(px(r * 2.), px(r * 2.)),
                                 ),
-                                base_color.opacity(0.22),
+                                dot_color.opacity(guide_alpha),
                             )
-                            .corner_radii(px(6.)),
-                        );
-                        window.paint_quad(
-                            gpui::fill(
-                                gpui::Bounds::new(
-                                    shift(origin, x - 4., y - 4.),
-                                    gpui::size(px(8.), px(8.)),
-                                ),
-                                c(t.surface),
-                            )
-                            .corner_radii(px(4.))
-                            .border_widths(px(1.5))
-                            .border_color(base_color),
-                        );
-                        window.paint_quad(
-                            gpui::fill(
-                                gpui::Bounds::new(
-                                    shift(origin, x - 2., y - 2.),
-                                    gpui::size(px(4.), px(4.)),
-                                ),
-                                base_color,
-                            )
-                            .corner_radii(px(2.)),
-                        );
-                    } else {
-                        let pt_color = if hover.is_some() {
-                            base_color.opacity(0.5)
-                        } else {
-                            base_color
-                        };
-                        window.paint_quad(
-                            gpui::fill(
-                                gpui::Bounds::new(
-                                    shift(origin, x - 2.5, y - 2.5),
-                                    gpui::size(px(5.), px(5.)),
-                                ),
-                                pt_color,
-                            )
-                            .corner_radii(px(2.5)),
+                            .corner_radii(px(r)),
                         );
                     }
                 }
             }
         }
     }
-    if let Some(ix) = hover
+
+    // Keyboard support: Left/Right to step between groups
+    let r_id = row_id.to_string();
+    let n_groups = chart.labels.len();
+    window.on_key_event(move |event: &gpui::KeyDownEvent, phase, window, _| {
+        if phase != gpui::DispatchPhase::Bubble {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        if key == "left" || key == "arrowleft" || key == "right" || key == "arrowright" {
+            CHART_STATES.with(|states| {
+                let mut map = states.borrow_mut();
+                if let Some(state) = map.get_mut(&r_id) {
+                    let has_focus_or_hover = state.keyboard_focused || state.hovered_group.is_some() || state.dev_hovered.is_some();
+                    if has_focus_or_hover {
+                        let cur = state.hovered_group.unwrap_or(0);
+                        let next = if key == "left" || key == "arrowleft" {
+                            (cur + n_groups - 1) % n_groups
+                        } else {
+                            (cur + 1) % n_groups
+                        };
+                        state.keyboard_focused = true;
+                        state.hovered_group = Some(next);
+                        state.dev_hovered = None;
+                        state.tip_is_visible = true;
+                        state.tip_last_group = Some(next);
+                        state.tip_opacity = 1.0;
+                        state.tip_opacity_target = 1.0;
+                        state.tip_curr_x = state.tip_target_x; // instant jump, no animation per Emil rule
+                        window.refresh();
+                    }
+                }
+            });
+        }
+    });
+
+    let r_id_mouse = row_id.to_string();
+    let hb_mouse = hitbox.clone();
+    window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, window, _| {
+        if phase == gpui::DispatchPhase::Bubble && hb_mouse.is_hovered(window) {
+            CHART_STATES.with(|states| {
+                if let Some(state) = states.borrow_mut().get_mut(&r_id_mouse) {
+                    state.keyboard_focused = true;
+                }
+            });
+            window.refresh();
+        }
+    });
+
+    // Tooltip handling
+    if !menu_open
+        && state.tip_opacity > 0.005
+        && let Some(ix) = effective_hover.or(state.tip_last_group)
         && let Some((name, rows)) = crate::chart::hover_rows(chart, ix)
     {
-        paint_chart_tip(
-            &name, &rows, origin, left, top, plot_w, slot, ix, t, window, cx,
-        );
+        // Filter rows by active series
+        let active_rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(si, _, _)| active_series.get(*si).copied().unwrap_or(true))
+            .collect();
+
+        if !active_rows.is_empty() {
+            paint_chart_tip(
+                &name,
+                &active_rows,
+                &mut state,
+                origin,
+                left,
+                top,
+                plot_w,
+                slot,
+                ix,
+                reduced,
+                now,
+                &mut needs_refresh,
+                t,
+                window,
+                cx,
+            );
+        }
+    }
+
+    // Persist state updates
+    CHART_STATES.with(|states| {
+        states.borrow_mut().insert(row_id.to_string(), state);
+    });
+
+    if needs_refresh {
+        window.refresh();
     }
 }
 
-/// The category under the pointer and each series' exact value, in an elevated
-/// card beside the hovered column that stays inside the plot: the category on top,
-/// hairline divider, then one row per series (swatch, name, right-aligned value).
 #[allow(clippy::too_many_arguments)]
 fn paint_chart_tip(
     name: &str,
     rows: &[(usize, String, String)],
+    state: &mut ChartState,
     origin: gpui::Point<Pixels>,
     left: f32,
     top: f32,
     plot_w: f32,
     slot: f32,
     ix: usize,
+    reduced: bool,
+    now: Instant,
+    needs_refresh: &mut bool,
     t: Tokens,
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) {
-    const PAD: f32 = 10.;
-    const ROW: f32 = 19.;
+    let tip_alpha = state.tip_opacity;
+    if tip_alpha <= 0.005 {
+        return;
+    }
+    let dy = if reduced || state.keyboard_focused { 0. } else { (1.0 - tip_alpha) * 3.0 };
+
+    const PAD_Y: f32 = 8.;
+    const PAD_X: f32 = 10.;
+    const ROW: f32 = 18.;
     const SWATCH: f32 = 7.;
-    const GAP: f32 = 16.;
+    const GAP: f32 = 12.;
+
     let shape = |text: &str, size: f32, color: Hsla, bold: bool, window: &mut gpui::Window| {
         let mut font = gpui::font(crate::style::SANS);
         if bold {
             font.weight = gpui::FontWeight::SEMIBOLD;
         }
+        font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
         let run = TextRun {
             len: text.len(),
             font,
@@ -2743,13 +3471,14 @@ fn paint_chart_tip(
             None,
         )
     };
+
     let max_w = (plot_w - 16.).max(130.);
     let value_w = rows
         .iter()
         .map(|(_, _, v)| f32::from(shape(v, 11.5, c(t.text), true, window).width))
         .fold(0., f32::max);
-    let name_room = max_w - 2. * PAD - SWATCH - 6. - GAP - value_w;
-    // A series name that doesn't fit loses characters from its end.
+    let name_room = max_w - 2. * PAD_X - SWATCH - 6. - GAP - value_w;
+
     let fit = |text: &str, window: &mut gpui::Window| -> String {
         if f32::from(shape(text, 11.5, c(t.text_muted), false, window).width) <= name_room {
             return text.to_string();
@@ -2758,60 +3487,77 @@ fn paint_chart_tip(
         while !cut.is_empty() {
             cut.pop();
             let candidate = format!("{}…", cut.trim_end());
-            if f32::from(shape(&candidate, 11.5, c(t.text_muted), false, window).width) <= name_room
-            {
+            if f32::from(shape(&candidate, 11.5, c(t.text_muted), false, window).width) <= name_room {
                 return candidate;
             }
         }
         "…".to_string()
     };
+
     let names: Vec<String> = rows.iter().map(|(_, n, _)| fit(n, window)).collect();
     let name_w = names
         .iter()
         .map(|n| f32::from(shape(n, 11.5, c(t.text_muted), false, window).width))
         .fold(0., f32::max);
-    let head_w = f32::from(shape(name, 11.5, c(t.text), true, window).width);
+    let head_w = f32::from(shape(name, 12., c(t.text), true, window).width);
     let body_w = SWATCH + 6. + name_w + GAP + value_w;
-    let wide = (head_w.max(body_w) + 2. * PAD).min(max_w);
-    let high = PAD * 2. + ROW * (rows.len() + 1) as f32 + 2.;
-    let at = left + slot * (ix as f32 + 0.5);
-    let mut x = at + 10.;
-    if x + wide > left + plot_w {
-        x = (at - wide - 10.).max(left);
-    }
-    let y = top + 4.;
+    let wide = (head_w.max(body_w) + 2. * PAD_X).clamp(130., max_w);
+    let high = PAD_Y * 2. + ROW * (rows.len() + 1) as f32;
 
-    // Multi-tier ambient elevation
-    let shadow_color = c(t.shadow);
+    let at = left + slot * (ix as f32 + 0.5);
+    let mut target_x = at + 12.;
+    if target_x + wide > left + plot_w {
+        target_x = (at - wide - 12.).max(left);
+    }
+
+    if (state.tip_target_x - target_x).abs() > 0.5 {
+        if state.tip_start_x <= 0. || state.tip_curr_x <= 0. || state.keyboard_focused || reduced {
+            state.tip_start_x = target_x;
+            state.tip_curr_x = target_x;
+            state.tip_target_x = target_x;
+            state.tip_move_start = now;
+        } else {
+            state.tip_start_x = state.tip_curr_x;
+            state.tip_target_x = target_x;
+            state.tip_move_start = now;
+        }
+    }
+
+    let x = if reduced || state.keyboard_focused {
+        target_x
+    } else {
+        let t_move = (now.duration_since(state.tip_move_start).as_secs_f32() / 0.12).clamp(0.0, 1.0);
+        let ease = crate::motion::ease_out(t_move);
+        let cur = state.tip_start_x + (state.tip_target_x - state.tip_start_x) * ease;
+        state.tip_curr_x = cur;
+        if t_move < 1.0 {
+            *needs_refresh = true;
+        }
+        cur
+    };
+    let y = top + 4. + dy;
+
+    // Minimal shadow
     window.paint_quad(
         gpui::fill(
-            gpui::Bounds::new(shift(origin, x, y + 3.), gpui::size(px(wide), px(high))),
-            shadow_color.opacity(0.12),
+            gpui::Bounds::new(shift(origin, x, y + 2.), gpui::size(px(wide), px(high))),
+            c(t.shadow).opacity(0.18 * tip_alpha),
         )
         .corner_radii(px(9.)),
     );
+
+    // Solid surface one tone step up (c(t.surface)), no border, radius 8px
     window.paint_quad(
         gpui::fill(
-            gpui::Bounds::new(shift(origin, x, y + 1.), gpui::size(px(wide), px(high))),
-            shadow_color.opacity(0.08),
+            gpui::Bounds::new(shift(origin, x, y), gpui::size(px(wide), px(high))),
+            c(t.surface).opacity(tip_alpha),
         )
         .corner_radii(px(8.)),
     );
 
-    // Floating card surface
-    window.paint_quad(
-        gpui::fill(
-            gpui::Bounds::new(shift(origin, x, y), gpui::size(px(wide), px(high))),
-            c(t.surface),
-        )
-        .corner_radii(px(7.))
-        .border_widths(px(1.))
-        .border_color(c(t.border)),
-    );
-
-    let line_y = |row: usize| y + PAD + row as f32 * ROW;
-    let _ = shape(name, 11.5, c(t.text), true, window).paint(
-        shift(origin, x + PAD, line_y(0)),
+    let line_y = |row: usize| y + PAD_Y + row as f32 * ROW;
+    let _ = shape(name, 12., c(t.text).opacity(tip_alpha), true, window).paint(
+        shift(origin, x + PAD_X, line_y(0)),
         px(ROW),
         TextAlign::Left,
         None,
@@ -2819,37 +3565,28 @@ fn paint_chart_tip(
         cx,
     );
 
-    // Subtle hairline divider separating category header from metric rows
-    window.paint_quad(gpui::fill(
-        gpui::Bounds::new(
-            shift(origin, x + PAD, line_y(0) + ROW - 3.),
-            gpui::size(px(wide - 2. * PAD), px(1.)),
-        ),
-        c(t.border).opacity(0.65),
-    ));
-
     for (row, ((si, _, value), label)) in rows.iter().zip(&names).enumerate() {
-        let ly = line_y(row + 1) + 2.;
+        let ly = line_y(row + 1);
         window.paint_quad(
             gpui::fill(
                 gpui::Bounds::new(
-                    shift(origin, x + PAD, ly + (ROW - SWATCH) / 2.),
+                    shift(origin, x + PAD_X, ly + (ROW - SWATCH) / 2.),
                     gpui::size(px(SWATCH), px(SWATCH)),
                 ),
-                series_color(t, *si),
+                series_color(t, *si, false).opacity(tip_alpha),
             )
-            .corner_radii(px(2.5)),
+            .corner_radii(px(2.)),
         );
-        let _ = shape(label, 11.5, c(t.text_muted), false, window).paint(
-            shift(origin, x + PAD + SWATCH + 6., ly),
+        let _ = shape(label, 11.5, c(t.text_muted).opacity(tip_alpha), false, window).paint(
+            shift(origin, x + PAD_X + SWATCH + 6., ly),
             px(ROW),
             TextAlign::Left,
             None,
             window,
             cx,
         );
-        let v = shape(value, 11.5, c(t.text), true, window);
-        let vx = x + wide - PAD - f32::from(v.width);
+        let v = shape(value, 11.5, c(t.text).opacity(tip_alpha), true, window);
+        let vx = x + wide - PAD_X - f32::from(v.width);
         let _ = v.paint(
             shift(origin, vx, ly),
             px(ROW),
@@ -2869,18 +3606,30 @@ pub fn mermaid_canvas(
     view: &'static str,
     on_action: OnRowAction,
 ) -> gpui::Canvas<Vec<(gpui::Hitbox, String)>> {
-    // Where the diagram lands in `bounds`: scaled to fit, centered.
-    let fit = |source: &str, bounds: gpui::Bounds<Pixels>| {
+    // Where the diagram lands in `bounds`: scaled to fit, centered in lightbox, top-anchored inline.
+    let fit = move |source: &str, bounds: gpui::Bounds<Pixels>| {
         let (w, h) = crate::mermaid::size(source)?;
-        let s = (f32::from(bounds.size.width) / w).min(f32::from(bounds.size.height) / h);
+        let s = if view == "inline" {
+            crate::mermaid::inline_scale((w, h), f32::from(bounds.size.width))
+        } else {
+            (f32::from(bounds.size.width) / w).min(f32::from(bounds.size.height) / h)
+        };
         let size = gpui::size(px(w * s), px(h * s));
-        Some((
-            s,
+        let at = if view == "inline" {
+            gpui::Bounds::new(
+                gpui::point(
+                    bounds.origin.x + (bounds.size.width - size.width) / 2.,
+                    bounds.origin.y,
+                ),
+                size,
+            )
+        } else {
             gpui::Bounds::new(
                 bounds.center() - gpui::point(size.width / 2., size.height / 2.),
                 size,
-            ),
-        ))
+            )
+        };
+        Some((s, at))
     };
     let at_source = source.clone();
     gpui::canvas(
@@ -2905,15 +3654,12 @@ pub fn mermaid_canvas(
         },
         move |bounds, nodes, window, _| {
             clickable_nodes(nodes, on_action.clone(), window);
-            let Some((w, h)) = crate::mermaid::size(&source) else {
+            let Some((s, at)) = fit(&source, bounds) else {
                 return;
             };
-            let s = (f32::from(bounds.size.width) / w).min(f32::from(bounds.size.height) / h);
-            let size = gpui::size(px(w * s), px(h * s));
-            let at = gpui::Bounds::new(
-                bounds.center() - gpui::point(size.width / 2., size.height / 2.),
-                size,
-            );
+            let Some((w, _)) = crate::mermaid::size(&source) else {
+                return;
+            };
             let raster = crate::mermaid::raster(&source, &t, w * s * window.scale_factor(), view);
             if let Some(stale) = raster.stale {
                 let _ = window.drop_image(stale);
@@ -3023,6 +3769,9 @@ fn block_markdown(block: &TranscriptBlock) -> Option<String> {
             ..
         } => return block_markdown(table),
         TranscriptBlock::Chart { chart, .. } => return Some(chart.to_markdown()),
+        // The narration between steps is part of the trace, not the answer:
+        // Copy gives the same text whether the fold is open or closed.
+        TranscriptBlock::Interim(_) => return None,
         _ => return None,
     })
 }
@@ -3073,6 +3822,294 @@ pub fn message_copy(
 /// "Copied" key for a diagram's image copy; its code copy uses the row id.
 pub fn image_copy_key(row_id: &str) -> String {
     format!("{row_id}#image")
+}
+
+fn diagram_header(
+    item: &TranscriptRowItem,
+    title: &str,
+    copied: bool,
+    menu_open: bool,
+    menu_ix: usize,
+    keyboard_opened: bool,
+    group: gpui::SharedString,
+    on_action: OnRowAction,
+    row_id: String,
+    source: String,
+    t: Tokens,
+) -> gpui::Div {
+    let id = item.row_id();
+    let badge = div()
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(8.))
+        .t_caption()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(c(t.text_muted))
+        .child(Icon::Network.el(zpx(14.)))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(zpx(12.))
+                .child(title.to_string()),
+        );
+
+    let (open_id, open_src) = (row_id.clone(), source.clone());
+    let open = on_action.clone();
+    let expand_btn = div()
+        .id(ElementId::Name(format!("expand-{}", id).into()))
+        .flex_none()
+        .size(zpx(28.))
+        .rounded(RADIUS_SM)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(c(t.text_muted))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .hover(move |s| s.text_color(c(t.text)))
+        .active(|s| s.opacity(0.85))
+        .on_click(move |_, _, cx| {
+            open(
+                RowAction::OpenDiagram {
+                    row_id: open_id.clone(),
+                    source: open_src.clone(),
+                },
+                cx,
+            );
+        })
+        .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Expand", t)).into())
+        .tooltip_show_delay(crate::view::tooltip::delay())
+        .child(Icon::Expand.el(zpx(13.)));
+
+    let copy_trigger = copy_dropdown(
+        id,
+        row_id,
+        source,
+        copied,
+        menu_open,
+        menu_ix,
+        keyboard_opened,
+        t,
+        on_action,
+    );
+
+    let toolbar_actions = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(4.))
+        .child(expand_btn)
+        .child(copy_trigger);
+
+    let reveal = reveal_on_hover_curved(
+        format!("diagram-actions-{}", id),
+        group,
+        if menu_open { 1. } else { 0. },
+        1.,
+        std::time::Duration::from_millis(150),
+        std::time::Duration::from_millis(100),
+        toolbar_actions,
+    );
+
+    div()
+        .h(zpx(36.))
+        .px_4()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(badge)
+        .child(reveal)
+}
+
+fn copy_dropdown(
+    id: &str,
+    row_id: String,
+    source: String,
+    copied: bool,
+    menu_open: bool,
+    menu_ix: usize,
+    keyboard_opened: bool,
+    t: Tokens,
+    on_action: OnRowAction,
+) -> impl IntoElement {
+    let action_copy_code = on_action.clone();
+    let action_copy_img = on_action.clone();
+    let action_close = on_action.clone();
+    let action_toggle = on_action.clone();
+    let (c_row, c_src) = (row_id.clone(), source.clone());
+    let (i_row, i_src) = (row_id.clone(), source.clone());
+    let t_row = row_id;
+
+    let trigger = div()
+        .id(ElementId::Name(format!("copy-trigger-{id}").into()))
+        .flex_none()
+        .size(zpx(28.))
+        .rounded(RADIUS_SM)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(if copied { c(t.accent) } else { c(t.text_muted) })
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .hover(move |s| s.text_color(c(t.text)))
+        .active(|s| s.opacity(0.85))
+        .on_click(move |_, _, cx| {
+            action_toggle(RowAction::ToggleDiagramMenu { row_id: t_row.clone() }, cx);
+        })
+        .tooltip(move |_, cx| {
+            let tip = if copied { "Copied" } else { "Copy" };
+            cx.new(|_| crate::view::Tip::new(tip, t)).into()
+        })
+        .tooltip_show_delay(crate::view::tooltip::delay())
+        .child(if copied {
+            div()
+                .with_animation(
+                    ElementId::Name(format!("inline-copy-check-{id}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(150))
+                        .with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(delta),
+                )
+                .child(Icon::Check.el(zpx(13.)))
+        } else {
+            div()
+                .with_animation(
+                    ElementId::Name(format!("inline-copy-icon-{id}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(150))
+                        .with_easing(crate::motion::ease_out),
+                    |el, delta| el.opacity(delta),
+                )
+                .child(Icon::Copy.el(zpx(13.)))
+        });
+
+    let selected_code = keyboard_opened && menu_ix == 0;
+    let selected_img = keyboard_opened && menu_ix == 1;
+
+    let menu = if menu_open {
+        let menu_el = div()
+            .id(ElementId::Name(format!("copy-menu-{id}").into()))
+            .absolute()
+            .top(zpx(32.))
+            .right_0()
+            .w(zpx(136.))
+            .occlude()
+            .p(zpx(3.))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .bg(c(t.floating))
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(c(t.border).opacity(0.20))
+            .shadow(vec![gpui::BoxShadow {
+                color: c(t.shadow).opacity(0.35),
+                offset: gpui::point(zpx(0.), zpx(4.)),
+                blur_radius: zpx(10.),
+                spread_radius: zpx(-2.),
+                inset: false,
+            }])
+            .on_mouse_down_out(move |_, _, cx| {
+                action_close(RowAction::CloseDiagramMenu, cx);
+            })
+            .child(
+                dropdown_row(
+                    format!("copy-code-{id}"),
+                    Icon::Code,
+                    "Copy as code",
+                    selected_code,
+                    t,
+                    move |_, _, cx| {
+                        action_copy_code(RowAction::Copy {
+                            row_id: c_row.clone(),
+                            content: c_src.clone(),
+                        }, cx);
+                    },
+                ),
+            )
+            .child(
+                dropdown_row(
+                    format!("copy-image-{id}"),
+                    Icon::Image,
+                    "Copy as image",
+                    selected_img,
+                    t,
+                    move |_, _, cx| {
+                        action_copy_img(RowAction::CopyImage {
+                            row_id: i_row.clone(),
+                            source: i_src.clone(),
+                            tokens: t,
+                        }, cx);
+                    },
+                ),
+            );
+
+        Some(if keyboard_opened {
+            menu_el.into_any_element()
+        } else {
+            menu_el
+                .with_animation(
+                    ElementId::Name(format!("copy-menu-in-{id}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(150))
+                        .with_easing(crate::motion::ease_out),
+                    |el, delta| {
+                        el.opacity(delta)
+                            .top(zpx(32. - 3. * (1. - delta)))
+                    },
+                )
+                .into_any_element()
+        })
+    } else {
+        None
+    };
+
+    div()
+        .relative()
+        .flex_none()
+        .child(trigger)
+        .children(menu)
+}
+
+fn dropdown_row(
+    id: String,
+    icon: Icon,
+    label: &'static str,
+    selected: bool,
+    t: Tokens,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(ElementId::Name(id.into()))
+        .h(zpx(26.))
+        .px_2()
+        .rounded(RADIUS_SM)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(6.))
+        .cursor_pointer()
+        .text_size(zpx(12.))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(c(t.text))
+        .when(selected, |d| d.bg(c(t.selected)))
+        .when(!selected, |d| d.hover_fade(c(t.hover), Some(c(t.selected))))
+        .active(|s| s.opacity(0.85))
+        .on_click(on_click)
+        .child(
+            div()
+                .w(zpx(14.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .text_color(c(t.text_muted))
+                .child(icon.el(zpx(12.))),
+        )
+        .child(div().whitespace_nowrap().child(label))
 }
 
 /// Header bar: subtle title badge on the left, floating segmented pill on the right.
@@ -3450,6 +4487,8 @@ enum Flow {
     Text,
     Heading(u8),
     Trace,
+    /// Narration inside an open fold, among the trace lines.
+    Note,
     Block,
 }
 
@@ -3464,6 +4503,7 @@ fn flow(block: &TranscriptBlock) -> Flow {
         | TranscriptBlock::Plan { .. }
         | TranscriptBlock::TurnSummary { .. }
         | TranscriptBlock::Subagent { .. } => Flow::Trace,
+        TranscriptBlock::Interim(_) => Flow::Note,
         _ => Flow::Block,
     }
 }
@@ -3502,6 +4542,9 @@ pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32
             _ => 6.,
         },
         (Flow::Trace, Flow::Trace) => 2.,
+        // Narration sits in the step list: a little air around it, tighter
+        // than between paragraphs of the answer.
+        (Flow::Trace | Flow::Note, Flow::Note) | (Flow::Note, Flow::Trace) => 6.,
         (Flow::Text, Flow::Text) if !first => 11.,
         _ => 14.,
     }
@@ -3520,6 +4563,11 @@ pub fn render_row(
     };
     let gap = row_gap(prev, item);
     let row = render_row_body(item, rc).pt(zpx(gap));
+    // The live header continues the waiting loader's line. Its words already
+    // animate via StepSwap; a second row entrance would dim and shift both.
+    if matches!(item.block, TranscriptBlock::TurnSummary { live: true, .. }) {
+        return row.into_any_element();
+    }
     let Some(look) = item.look(rc.now, reduced) else {
         return row.into_any_element();
     };
@@ -3577,6 +4625,12 @@ pub fn render_row(
                 let lines = content.lines().count().max(1);
                 Some((lines as f32) * 22.0 + 12.0)
             }
+            TranscriptBlock::Interim(inner) => match inner.as_ref() {
+                TranscriptBlock::Paragraph { content, .. } => {
+                    Some((content.lines().count().max(1) as f32) * 22.0 + 12.0)
+                }
+                _ => None,
+            },
             TranscriptBlock::Heading { level, .. } => Some(match level {
                 1 => 52.0,
                 2 => 44.0,
@@ -3622,16 +4676,125 @@ pub fn render_row(
 }
 
 fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
+    if let TranscriptBlock::Interim(inner) = &item.block {
+        // The same prose, muted: same type and wrap, so moving into the fold
+        // only changes its color.
+        let inner = TranscriptRowItem {
+            block: inner.as_ref().clone(),
+            ..item.clone()
+        };
+        let rc = RowContext {
+            muted: true,
+            ..rc.clone()
+        };
+        return render_row_body(&inner, &rc);
+    }
     let (t, syntax) = (rc.tokens, rc.syntax);
     let role_is_user = item.role == "user";
     let role_is_error = item.role == "error";
+
+    let is_resume_error = role_is_error && match &item.block {
+        TranscriptBlock::Paragraph { content, .. } => content.contains("Couldn't resume this session"),
+        _ => false,
+    };
+    if is_resume_error {
+        let (on_retry, on_fresh) = (rc.on_action.clone(), rc.on_action.clone());
+        return div()
+            .id(ElementId::Name(format!("row-{}", item.row_id()).into()))
+            .w_full()
+            .px_4()
+            .pb(zpx(2.))
+            .child(
+                div()
+                    .w_full()
+                    .p_4()
+                    .rounded(RADIUS_LG)
+                    .border_1()
+                    .border_color(c(t.border))
+                    .bg(c(t.surface))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(c(t.warning))
+                                    .child(Icon::Alert.el(zpx(16.))),
+                            )
+                            .child(
+                                div()
+                                    .t_body()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                                    .child("Couldn't resume this session"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .t_small()
+                            .text_color(c(t.text_muted))
+                            .child("The saved conversation could not be reloaded. Your message has been kept in the composer below."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .pt_1()
+                            .child(
+                                div()
+                                    .id("resume-retry-btn")
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded(RADIUS_MD)
+                                    .border_1()
+                                    .border_color(c(t.border))
+                                    .bg(c(t.surface))
+                                    .hover(|s| s.bg(c(t.hover)))
+                                    .active(|s| s.opacity(0.8))
+                                    .cursor_pointer()
+                                    .t_small()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(c(t.text))
+                                    .child("Retry")
+                                    .on_click(move |_, _, cx| on_retry(RowAction::ResumeRetry, cx)),
+                            )
+                            .child(
+                                div()
+                                    .id("resume-fresh-btn")
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded(RADIUS_MD)
+                                    .bg(c(t.accent))
+                                    .hover(|s| s.opacity(0.9))
+                                    .active(|s| s.opacity(0.8))
+                                    .cursor_pointer()
+                                    .t_small()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(c(t.text_on_accent))
+                                    .child("Start fresh")
+                                    .on_click(move |_, _, cx| on_fresh(RowAction::ResumeStartFresh, cx)),
+                            ),
+                    ),
+            );
+    }
     // Body text a touch dimmer than headings and bold, so they lead.
     let prose = |d: gpui::Div| {
         d.w_full()
             .max_w(zpx(rc.prose_max_w))
             .text_size(zpx(READING.size))
             .line_height(TranscriptState::prose_line_height())
-            .text_color(c(t.text).opacity(0.88))
+            .text_color(if rc.muted {
+                c(t.text_muted)
+            } else {
+                c(t.text).opacity(0.88)
+            })
     };
     let content_elem = match &item.block {
         TranscriptBlock::Code {
@@ -3645,10 +4808,27 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             if let Some(diagram) = crate::diagram::parse(language.as_deref(), content) {
                 return render_diagram(item, language, content, &diagram, rc);
             }
-            if is_mermaid(language, *closed) && crate::mermaid::renders(content, &t) {
+            let is_mermaid_lang = matches!(
+                language.as_deref().map(str::trim),
+                Some("mermaid" | "diagram")
+            );
+            if is_mermaid_lang && *closed && crate::mermaid::renders(content, &t) {
                 return render_mermaid(item, language, content, rc);
             }
-            let props = fence_props(item, language, content, spans, *closed, run.is_some(), rc);
+            let mut props = fence_props(item, language, content, spans, *closed, run.is_some(), rc);
+            let streaming_mermaid = is_mermaid_lang && !*closed;
+            if is_mermaid_lang && *closed && !crate::mermaid::renders(content, &t) {
+                props.variant = crate::code_block::CodeVariant::Destructive;
+                props.title = Some(crate::mermaid::diagram_title(content));
+                let line_count = content.lines().count().max(1);
+                let mut variants = vec![crate::code_block::LineVariant::Default; line_count];
+                if let Some((err_line, _)) = crate::mermaid::parse_error(content) {
+                    if err_line < variants.len() {
+                        variants[err_line] = crate::code_block::LineVariant::Removed;
+                    }
+                }
+                props.line_variants = Some(variants);
+            }
             let (on_action, row_id, text, run) = (
                 rc.on_action.clone(),
                 item.row_id().to_string(),
@@ -3710,6 +4890,7 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 .relative()
                 .w_full()
                 .my_1()
+                .when(streaming_mermaid, |d| d.opacity(0.6))
                 .child(crate::code_block::render(
                     &props,
                     t,
@@ -3738,7 +4919,7 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 .text_size(zpx(size))
                 .line_height(zpx(line))
                 .font_weight(weight)
-                .text_color(c(if *level >= 5 { t.text_muted } else { t.text }))
+                .text_color(c(if *level >= 5 || rc.muted { t.text_muted } else { t.text }))
                 .child(inline_text(
                     format!("h-{}", item.row_id()),
                     content,
@@ -3747,6 +4928,8 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                     rc,
                 ))
         }
+        // Unwrapped at the top of this fn.
+        TranscriptBlock::Interim(_) => div(),
         TranscriptBlock::Paragraph { content, spans, .. } => prose(div()).child(inline_text(
             format!("p-{}", item.row_id()),
             content,
@@ -3855,8 +5038,9 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             label,
             failed,
             expanded,
+            live,
             ..
-        } => crate::trace_view::render_turn_summary(item, label, *failed, *expanded, rc),
+        } => crate::trace_view::render_turn_summary(item, label, *failed, *expanded, *live, rc),
         TranscriptBlock::Chart {
             chart, replaces, ..
         } => render_chart(item, chart, replaces, rc),
@@ -3875,6 +5059,15 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
         TranscriptBlock::Steps { steps, .. } => render_steps(item, steps, rc),
         TranscriptBlock::Callout { callout, .. } => render_callout(item, callout, rc),
         TranscriptBlock::Compare { columns, .. } => render_compare(item, columns, rc),
+        TranscriptBlock::PlanCard { plan, .. } => crate::plan::render(
+            item,
+            plan,
+            rc.plan_cards.get(item.row_id()),
+            rc.plan_running,
+            rc.reduced,
+            rc.on_action.clone(),
+            rc.tokens,
+        ),
         TranscriptBlock::Files { items, .. } => div()
             .w_full()
             .py_1()
@@ -3924,6 +5117,8 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                 .when(role_is_user, |s| {
                     s.max_w(relative(0.85))
                         .when_some(rc.bubble_max_w, |s, w| s.max_w(px(w)))
+                        .min_w_0()
+                        .overflow_hidden()
                         .px_3()
                         .py_2()
                         .rounded(RADIUS_LG)
@@ -4625,7 +5820,10 @@ fn link_chip(
         .text_size(zpx(12.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
-        .hover(|s| s.border_color(c(t.info).opacity(0.55)).text_color(c(t.text)))
+        .hover(|s| {
+            s.border_color(c(t.info).opacity(0.55))
+                .text_color(c(t.text))
+        })
         .hover_fade(c(t.hover), Some(c(t.selected)))
         .child(favicon_badge(&host, 13., t))
         .child(
@@ -4854,10 +6052,12 @@ impl Render for FileTip {
 }
 
 /// An interactive file chip rendered inline in response prose.
+/// `max_w` caps the chip so a long path ellipsizes inside a bubble or prose column.
 fn file_inline_chip(
     id: &str,
     path: &str,
     t: Tokens,
+    max_w: gpui::Pixels,
     on_action: OnRowAction,
 ) -> gpui::Stateful<gpui::Div> {
     let file_kind = crate::files::FileKind::of(std::path::Path::new(path));
@@ -4869,6 +6069,8 @@ fn file_inline_chip(
     div()
         .id(ElementId::Name(format!("fchip-{id}").into()))
         .flex_none()
+        .max_w(max_w)
+        .min_w_0()
         .h(zpx(20.))
         .px(zpx(6.))
         .flex()
@@ -4879,8 +6081,12 @@ fn file_inline_chip(
         .bg(c(t.surface))
         .border_1()
         .border_color(c(t.border))
+        .overflow_hidden()
         .cursor_pointer()
-        .hover(|s| s.border_color(c(t.accent).opacity(0.6)).text_color(c(t.text)))
+        .hover(|s| {
+            s.border_color(c(t.accent).opacity(0.6))
+                .text_color(c(t.text))
+        })
         .hover_fade(c(t.hover), Some(c(t.selected)))
         .child(
             div()
@@ -4890,7 +6096,10 @@ fn file_inline_chip(
         )
         .child(
             div()
-                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis_middle()
                 .font_family(crate::style::MONO)
                 .text_size(zpx(11.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -4911,8 +6120,62 @@ fn file_inline_chip(
         })
 }
 
-/// Text with its inline styles: bold, italic, strikethrough, inline code
-/// (tinted like a code block), links, and clickable file chips.
+/// Whether a paragraph needs the chip layout (links or file paths).
+/// Path-like tokens inside a multi-word code span do not count: inline code
+/// stays one text run unless the whole span is a file path.
+fn needs_inline_chips(text: &str, spans: &[InlineSpan]) -> bool {
+    if spans.iter().any(|s| s.link.is_some()) {
+        return true;
+    }
+    if spans
+        .iter()
+        .any(|s| s.style.code && looks_like_file_path(&text[s.range.clone()], true).is_some())
+    {
+        return true;
+    }
+    let mut cursor = 0;
+    for span in spans {
+        if span.range.start > cursor {
+            let plain = &text[cursor..span.range.start];
+            if plain
+                .split_whitespace()
+                .any(|w| looks_like_file_path(w, false).is_some())
+            {
+                return true;
+            }
+        }
+        cursor = span.range.end;
+    }
+    if cursor < text.len() {
+        let plain = &text[cursor..];
+        if plain
+            .split_whitespace()
+            .any(|w| looks_like_file_path(w, false).is_some())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pixel cap for an inline file chip. `bubble_max_w` is already window
+/// pixels (`px`); `prose_max_w` is design pixels (`zpx`). Hard-capped like
+/// the block file chip so a shrink-to-fit bubble cannot grow past the path.
+fn inline_chip_max_w(rc: &RowContext) -> gpui::Pixels {
+    const CHIP_CHROME: f32 = 32.;
+    const HARD_CAP: f32 = 340.;
+    let from_prose = ((rc.prose_max_w - CHIP_CHROME).max(120.)) * crate::style::zoom();
+    let from_bubble = rc
+        .bubble_max_w
+        .map(|w| (w - CHIP_CHROME).max(120.))
+        .unwrap_or(from_prose);
+    px(from_bubble.min(from_prose).min(HARD_CAP * crate::style::zoom()))
+}
+
+/// Text with its inline styles: bold, italic, strikethrough, inline code,
+/// links, and clickable file chips. Inline code stays in the text run, a
+/// step heavier than the sentence. A code-block fill here is a line-tall
+/// slab, so a short span reads as a highlighter.
 fn inline_text(
     id: String,
     text: &str,
@@ -4921,15 +6184,9 @@ fn inline_text(
     rc: &RowContext,
 ) -> AnyElement {
     let t = rc.tokens;
+    let chip_max = inline_chip_max_w(rc);
 
-    let has_interactive = spans.iter().any(|s| {
-        s.link.is_some()
-            || (s.style.code && looks_like_file_path(&text[s.range.clone()], true).is_some())
-    }) || text
-        .split_whitespace()
-        .any(|w| looks_like_file_path(w, false).is_some());
-
-    if !has_interactive {
+    if !needs_inline_chips(text, spans) {
         let key = format!("sel-{id}");
         if spans.is_empty() {
             return selectable(
@@ -4943,14 +6200,19 @@ fn inline_text(
         }
         let highlights = spans.iter().map(|span| {
             let style = gpui::HighlightStyle {
-                font_weight: span.style.bold.then_some(gpui::FontWeight::SEMIBOLD),
+                font_weight: if span.style.bold {
+                    Some(gpui::FontWeight::SEMIBOLD)
+                } else if span.style.code {
+                    Some(gpui::FontWeight::MEDIUM)
+                } else {
+                    None
+                },
                 font_style: span.style.italic.then_some(gpui::FontStyle::Italic),
                 strikethrough: span.style.strike.then(|| gpui::StrikethroughStyle {
                     thickness: px(1.),
                     color: None,
                 }),
-                background_color: span.style.code.then(|| c(t.code)),
-                // Bold leads by brightness as much as weight (body text is dimmer).
+                // Bold and code lead by brightness as much as weight (body text is dimmer).
                 color: if span.style.code || span.style.bold {
                     Some(c(t.text))
                 } else {
@@ -4998,6 +6260,7 @@ fn inline_text(
                         &format!("{id}-{item_ix}"),
                         file_path,
                         t,
+                        chip_max,
                         rc.on_action.clone(),
                     )
                     .into_any_element(),
@@ -5029,6 +6292,7 @@ fn inline_text(
                             &format!("{id}-{item_ix}"),
                             &file_path,
                             t,
+                            chip_max,
                             rc.on_action.clone(),
                         )
                         .into_any_element(),
@@ -5036,6 +6300,24 @@ fn inline_text(
                     item_ix += 1;
                     continue;
                 }
+                // Multi-word (or non-path) inline code stays one mono run.
+                elements.push(
+                    div()
+                        .flex_none()
+                        .max_w_full()
+                        .min_w_0()
+                        .px(zpx(4.))
+                        .py(zpx(0.5))
+                        .rounded(RADIUS_SM)
+                        .bg(c(t.code))
+                        .text_color(c(t.text))
+                        .font_family(crate::style::MONO)
+                        .text_size(zpx(12.))
+                        .child(slice_str.to_string())
+                        .into_any_element(),
+                );
+                item_ix += 1;
+                continue;
             }
 
             for word in slice_str.split_whitespace() {
@@ -5048,12 +6330,13 @@ fn inline_text(
                     || word == "?";
                 let (trimmed_word, trailing_punct) = split_trailing_punct(word);
 
-                if let Some(file_path) = looks_like_file_path(trimmed_word, style.code) {
+                if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
                     elements.push(
                         file_inline_chip(
                             &format!("{id}-{item_ix}"),
                             &file_path,
                             t,
+                            chip_max,
                             rc.on_action.clone(),
                         )
                         .into_any_element(),
@@ -5080,21 +6363,6 @@ fn inline_text(
                             .into_any_element(),
                     );
                     item_ix += 1;
-                } else if style.code {
-                    elements.push(
-                        div()
-                            .flex_none()
-                            .px(zpx(4.))
-                            .py(zpx(0.5))
-                            .rounded(RADIUS_SM)
-                            .bg(c(t.code))
-                            .text_color(c(t.text))
-                            .font_family(crate::style::MONO)
-                            .text_size(zpx(12.))
-                            .child(word.to_string())
-                            .into_any_element(),
-                    );
-                    item_ix += 1;
                 } else {
                     let el = div()
                         .flex_none()
@@ -5116,6 +6384,7 @@ fn inline_text(
 
     let flow = div()
         .w_full()
+        .min_w_0()
         .flex()
         .flex_row()
         .flex_wrap()
@@ -5867,6 +7136,17 @@ mod tests {
     }
 
     #[test]
+    fn resume_failure_row_identifies_error_with_actions() {
+        let item = TranscriptRowItem::new("err1", "error", para("err1#0", "⚠ Couldn't resume this session"));
+        assert_eq!(item.role, "error");
+        let is_resume_error = item.role == "error" && match &item.block {
+            TranscriptBlock::Paragraph { content, .. } => content.contains("Couldn't resume this session"),
+            _ => false,
+        };
+        assert!(is_resume_error, "resume error must be detected for custom card rendering");
+    }
+
+    #[test]
     fn history_and_a_fresh_open_render_rows_without_motion() {
         let mut idle = live_transcript();
         idle.upsert_message("a", "assistant", vec![para("a#0", "old")]);
@@ -6293,6 +7573,53 @@ mod tests {
     }
 
     #[test]
+    fn narration_folding_behind_the_step_line_leaves_at_once() {
+        let mut transcript = live_transcript();
+        transcript.animate_new = true;
+        transcript.upsert_message("a", "assistant", vec![para("a#0", "I'll look up the news.")]);
+        let summary = TranscriptBlock::TurnSummary {
+            id: "a#worked".into(),
+            label: "Searching".into(),
+            failed: false,
+            expanded: false,
+            live: true,
+        };
+        transcript.upsert_message("a", "assistant", vec![summary]);
+        assert_eq!(transcript.items.len(), 1, "no ghost of the narration");
+        assert!(transcript.items.iter().all(|r| r.leaving.is_none()));
+    }
+
+    #[test]
+    fn narration_already_exiting_is_removed_when_the_trace_appears() {
+        let mut transcript = live_transcript();
+        transcript.animate_new = true;
+        transcript.upsert_message("a", "assistant", vec![para("a#0", "I'll look up the news.")]);
+        transcript.upsert_message("a", "assistant", vec![]);
+        assert!(transcript.items[0].leaving.is_some());
+        transcript.upsert_message("a", "assistant", vec![TranscriptBlock::TurnSummary {
+            id: "a#worked".into(),
+            label: "Searching".into(),
+            failed: false,
+            expanded: false,
+            live: true,
+        }]);
+        assert_eq!(transcript.items.len(), 1, "even an existing exit ghost must not paint");
+        assert_eq!(transcript.items[0].row_id(), "a#worked");
+    }
+
+    #[test]
+    fn narration_in_the_fold_is_as_tall_as_its_prose() {
+        let mut transcript = TranscriptState::new(false);
+        let text = "Found the design docs and wiki pages.\nReading those next.";
+        let plain = transcript.compute_block_height(&para("a#0", text), px(600.));
+        let note = TranscriptBlock::Interim(Box::new(para("a#0", text)));
+        assert_eq!(note.id(), "a#0");
+        assert_eq!(transcript.compute_block_height(&note, px(600.)), plain);
+        // Copy gives the answer, not the trace's narration.
+        assert_eq!(block_markdown(&note), None);
+    }
+
+    #[test]
     fn rows_are_spaced_by_what_they_follow() {
         let row =
             |m: &str, role: &str, block: TranscriptBlock| TranscriptRowItem::new(m, role, block);
@@ -6320,6 +7647,12 @@ mod tests {
         assert!(row_gap(Some(&p1), &tg) >= 14.);
         assert!(row_gap(Some(&tg), &p2) >= 14.);
         assert_eq!(row_gap(Some(&tg), &tg2), 2.);
+        // Narration inside an open fold sits among the trace lines, closer
+        // than paragraphs; the answer after the trace still gets its room.
+        let note = row("a", "assistant", TranscriptBlock::Interim(Box::new(para("a#2", "next"))));
+        assert_eq!(row_gap(Some(&tg), &note), 6.);
+        assert_eq!(row_gap(Some(&note), &tg2), 6.);
+        assert!(row_gap(Some(&note), &p2) >= 14.);
         // A new message's text after another's reads as a new block.
         let next = row("b", "assistant", para("b#0", "three"));
         assert!(row_gap(Some(&p2), &next) > row_gap(Some(&p1), &p2));
@@ -6467,7 +7800,78 @@ mod tests {
             looks_like_file_path("/Users/user/project/main.rs", true).as_deref(),
             Some("/Users/user/project/main.rs")
         );
+        // npm-style temp dirs and log paths that overflowed user bubbles:
+        assert_eq!(
+            looks_like_file_path(
+                "/Users/kevinananda/Library/pnpm/nodejs/20.20.2/lib/node_modules/@xai-official/.grok-1",
+                false
+            )
+            .as_deref(),
+            Some(
+                "/Users/kevinananda/Library/pnpm/nodejs/20.20.2/lib/node_modules/@xai-official/.grok-1"
+            )
+        );
+        assert_eq!(
+            looks_like_file_path(
+                "/Users/kevinananda/.npm/_logs/2026-11-06T09_43_20_101Z-debug-0.log",
+                false
+            )
+            .as_deref(),
+            Some("/Users/kevinananda/.npm/_logs/2026-11-06T09_43_20_101Z-debug-0.log")
+        );
+        // A bare package name is not a file:
+        assert_eq!(
+            looks_like_file_path(
+                "/Users/kevinananda/Library/pnpm/nodejs/20.20.2/lib/node_modules/@xai-official/grok",
+                false
+            ),
+            None
+        );
     }
+
+    fn code_span(_text: &str, start: usize, end: usize) -> InlineSpan {
+        InlineSpan {
+            range: start..end,
+            style: crate::markdown::InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+            link: None,
+        }
+    }
+
+    #[test]
+    fn needs_inline_chips_keeps_multiword_commands_as_text() {
+        let text = "Run them with go run main.go --migration true --exec up if ready.";
+        let start = text.find("go run").unwrap();
+        let end = text.find(" if ready").unwrap();
+        let spans = vec![code_span(text, start, end)];
+        assert!(
+            !needs_inline_chips(text, &spans),
+            "main.go inside a multi-word code span must not open the chip layout"
+        );
+    }
+
+    #[test]
+    fn needs_inline_chips_for_whole_span_paths_and_plain_paths() {
+        let text = "See main.go for details.";
+        let start = text.find("main.go").unwrap();
+        let end = start + "main.go".len();
+        assert!(needs_inline_chips(
+            text,
+            &[code_span(text, start, end)],
+        ));
+        assert!(needs_inline_chips("Open src/main.go please.", &[]));
+        assert!(!needs_inline_chips("No paths here.", &[]));
+        let linked = InlineSpan {
+            range: 0..4,
+            style: Default::default(),
+            link: Some("https://example.com".into()),
+        };
+        assert!(needs_inline_chips("here", &[linked]));
+    }
+
+
 }
 
 /// The markdown fence as a full [`crate::code_block`]: show-more lives in
@@ -6500,3 +7904,4 @@ fn fence_props(
     props.runnable = runnable;
     props
 }
+

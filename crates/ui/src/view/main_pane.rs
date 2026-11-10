@@ -3,7 +3,7 @@
 use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use gpui::{
-    ClickEvent, Context, ElementId, IntoElement, Render, ScrollWheelEvent, Window,
+    AnimationExt as _, ClickEvent, Context, ElementId, IntoElement, Render, ScrollWheelEvent, Window,
     WindowAppearance, div, list, prelude::*, px,
 };
 use keel_proto::ChatStatus;
@@ -18,6 +18,14 @@ use crate::transcript::{RowAction, RowContext, render_row};
 
 impl Render for KeelWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((target_chat, text)) = self.pending_composer_restore.take() {
+            if self.current_chat.as_ref() == Some(&target_chat) {
+                self.composer.update(cx, |s, cx| {
+                    s.set_value(text, window, cx);
+                    s.focus(window, cx);
+                });
+            }
+        }
         self.frame_now.set(Some(std::time::Instant::now()));
         self.menus_cut_now = std::mem::take(&mut self.menus_cut);
         self.sync_active_chat(window, cx);
@@ -370,6 +378,7 @@ impl Render for KeelWindow {
                                 // transcript reserves its height as room under the newest row. Held still while
                                 // the hero drop morphs it.
                                 let dock_h = self.dock_h.clone();
+                                let cur_dock_h = self.dock_h.get();
                                 // The session card's gutter, as the transcript keeps it
                                 // (gliding with it), so the composer shares its column.
                                 let (room_l, room_r) = self.target_card_column_room(window);
@@ -379,37 +388,67 @@ impl Render for KeelWindow {
                                 // landing width made the right edge jump one way, then
                                 // travel back the other.
                                 let dock_w = self.column_slide.map(|_| self.column_last.dock_w);
-                                d.child(
+                                d.when(cur_dock_h > 0., |d| {
+                                    d.child(
                                         div()
                                             .absolute()
                                             .bottom_0()
-                                            .when_some(dock_w, |d, w| d.left(px(room_l)).w(px(w)))
-                                            .when(dock_w.is_none(), |d| {
-                                                d.left_0().right_0().pl(px(room_l)).pr(px(room_r))
-                                            })
-                                            .child(composer)
-                                            .children(super::dev::GeoTrace::probe(
-                                                &self.geo_trace,
-                                                |g| &g.dock,
-                                            ))
-                                            .when(!exiting, |d| {
-                                                d.child(
-                                                    gpui::canvas(
-                                                        move |bounds, window, _| {
-                                                            let h = f32::from(bounds.size.height);
-                                                            if (dock_h.get() - h).abs() > 0.5 {
-                                                                dock_h.set(h);
-                                                                window.refresh();
-                                                            }
-                                                        },
-                                                        |_, _, _, _| {},
-                                                    )
-                                                    .absolute()
-                                                    .inset_0(),
-                                                )
-                                            }),
+                                            .left_0()
+                                            .right_0()
+                                            .h(px(cur_dock_h))
+                                            .bg(c(t.window)),
                                     )
-                                    .children(self.render_latest_pill(t, cx))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .bottom(px(cur_dock_h))
+                                            .left_0()
+                                            .right_0()
+                                            .h(zpx(28.))
+                                            .bg(gpui::linear_gradient(
+                                                180.,
+                                                gpui::linear_color_stop(
+                                                    gpui::Hsla {
+                                                        a: 0.,
+                                                        ..c(t.window)
+                                                    },
+                                                    0.,
+                                                ),
+                                                gpui::linear_color_stop(c(t.window), 1.),
+                                            )),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .when_some(dock_w, |d, w| d.left(px(room_l)).w(px(w)))
+                                        .when(dock_w.is_none(), |d| {
+                                            d.left_0().right_0().pl(px(room_l)).pr(px(room_r))
+                                        })
+                                        .child(composer)
+                                        .children(super::dev::GeoTrace::probe(
+                                            &self.geo_trace,
+                                            |g| &g.dock,
+                                        ))
+                                        .when(!exiting, |d| {
+                                            d.child(
+                                                gpui::canvas(
+                                                    move |bounds, window, _| {
+                                                        let h = f32::from(bounds.size.height);
+                                                        if (dock_h.get() - h).abs() > 0.5 {
+                                                            dock_h.set(h);
+                                                            window.refresh();
+                                                        }
+                                                    },
+                                                    |_, _, _, _| {},
+                                                )
+                                                .absolute()
+                                                .inset_0(),
+                                            )
+                                        }),
+                                )
+                                .children(self.render_latest_pill(t, cx))
                             }),
                     ),
             )
@@ -470,7 +509,8 @@ fn hero_title_text() -> gpui::Div {
 }
 
 /// Space under the newest message, on top of the input slot's own 16 px.
-const TAIL_ROOM: f32 = 64.;
+/// Generous tail room so the Latest pill and composer dock never occlude diagram cards or actions.
+const TAIL_ROOM: f32 = 120.;
 /// How much of the picture the chat glow shows at the pane's foot, and how
 /// far up the pane it rises (fractions).
 const CHAT_GLOW: f32 = 0.08;
@@ -518,6 +558,13 @@ pub(super) fn tool_verbs(name: &str, kind: &str) -> &'static [&'static str] {
         Subagent => &["Waiting on a subagent"],
         Plan => &["Planning"],
         Think => THINKING_VERBS,
+        Memory => {
+            if crate::trace::memory_writes(name) {
+                &["Writing memory"]
+            } else {
+                &["Reading memory"]
+            }
+        }
         SwitchMode | Sources | Other => WORKING_VERBS,
     }
 }
@@ -1123,14 +1170,12 @@ impl KeelWindow {
                                     .bg(c(t.accent)),
                             )
                         })
-                        .on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                // The press that closed it from outside is not a reopen.
-                                if !this.menu_just_dismissed("subagent-menu") {
-                                    this.toggle_subagent_menu(cx)
-                                }
-                            }),
-                        ),
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            // The press that closed it from outside is not a reopen.
+                            if !this.menu_just_dismissed("subagent-menu") {
+                                this.toggle_subagent_menu(cx)
+                            }
+                        })),
                 )
             })
     }
@@ -1219,6 +1264,40 @@ impl KeelWindow {
         )
     }
 
+    /// The live line's widths, once per wording: the swap glides between
+    /// them. Shaped lines are cached by the text system.
+    fn measure_step_line(&mut self, window: &mut Window) {
+        let measure = |text: &str, weight: gpui::FontWeight, window: &mut Window| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: gpui::Font { weight, ..gpui::font(SANS) },
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let size = crate::style::zpx(crate::style::SMALL.size);
+            f32::from(
+                window
+                    .text_system()
+                    .shape_line(text.to_string().into(), size, &[run], None)
+                    .width,
+            )
+        };
+        for (line, weight) in self.step_line.iter_mut()
+            .map(|line| (line, gpui::FontWeight::NORMAL))
+            .chain(self.tool_lines.values_mut().map(|line| (line, gpui::FontWeight::MEDIUM)))
+        {
+            let shown_w = *line.shown_w.get_or_insert_with(|| measure(&line.shown, weight, window));
+            if let Some(swap) = line.from.as_mut() {
+                if swap.from_w.is_none() {
+                    swap.from_w = Some(measure(&swap.from, weight, window));
+                }
+                swap.to_w = Some(shown_w);
+            }
+        }
+    }
+
     fn render_transcript(
         &mut self,
         t: Tokens,
@@ -1233,7 +1312,7 @@ impl KeelWindow {
             ),
         );
         let reduced = self.reduced();
-        let running = self.active_status() == Some(ChatStatus::Running);
+        let running = self.active_status() == Some(ChatStatus::Running) || self.dev_live;
         // A switched-to chat stays hidden until its history is in and parsed
         // (or CHAT_REVEAL_WAIT passes, for a chat that is streaming), then
         // fades in already at the end. The first settled frame paints at 0,
@@ -1273,7 +1352,14 @@ impl KeelWindow {
             None => 1.,
         };
         // Inline loader: the last line of the active turn, under the newest row.
-        let loader_row = (running && self.current_chat.is_some())
+        // The collapsed trace line is the status once a step exists.
+        let trace_status = self.transcript.items.iter().any(|item| {
+            matches!(
+                item.block,
+                crate::markdown::TranscriptBlock::TurnSummary { live: true, .. }
+            )
+        });
+        let loader_row = (running && self.current_chat.is_some() && !trace_status)
             .then(|| self.transcript.items.len().checked_sub(1))
             .flatten();
         // The loader fades and rises in when a run starts (not when it hops
@@ -1283,7 +1369,12 @@ impl KeelWindow {
             self.loader_at = Some(loader_now);
             self.loader_exit = None;
         }
-        if loader_row.is_none() && !reduced {
+        if trace_status {
+            // The live header replaces the loader, not a second row entering
+            // while the old status fades out below it.
+            self.loader_exit = None;
+        }
+        if loader_row.is_none() && !trace_status && !reduced {
             if let Some(ix) = self.loader_row {
                 self.loader_exit = Some((ix, loader_now));
             }
@@ -1370,7 +1461,7 @@ impl KeelWindow {
         // Shown for the whole time the user is away from the tail, including
         // the glide home. Hiding it for that glide was a flash: the pill
         // appeared, then vanished for the travel, then the list snapped.
-        let want_pill = self.current_chat.is_some() && !self.transcript.stick_to_bottom;
+        let want_pill = self.current_chat.is_some() && !self.transcript.stick_to_bottom && !self.transcript.is_at_bottom();
         self.latest_pill.set(want_pill, pill_now, reduced);
         if self.latest_pill.animating(pill_now) {
             window.request_animation_frame();
@@ -1428,11 +1519,29 @@ impl KeelWindow {
                 let weak = cx.entity().downgrade();
                 let hover_cell = self.hovered_row.clone();
                 let handle = window.window_handle();
-                let wrap_hold = self.column_slide.map(|s| s.wrap_w() - 2. * f32::from(window.rem_size()));
+                // Wrap width for prose/bubbles: during a panel slide hold the
+                // narrower end; otherwise use the column's current dock width
+                // so inline file chips get a real pixel cap (not only relative).
+                let rem = 2. * f32::from(window.rem_size());
+                let wrap_hold = self
+                    .column_slide
+                    .map(|s| s.wrap_w() - rem)
+                    .or_else(|| {
+                        let w = if self.column_last.dock_w > 0. {
+                            self.column_last.dock_w
+                        } else {
+                            self.column_last.w
+                        };
+                        (w > 0.).then_some((w - rem).max(200.))
+                    });
+                self.measure_step_line(window);
                 let rc = RowContext {
                     tokens: t,
                     syntax,
                     reduced: self.reduced(),
+                    diagram_menu: self.diagram_menu.clone(),
+                    diagram_menu_ix: self.diagram_menu_ix,
+                    diagram_menu_keyboard: self.diagram_menu_keyboard,
                     toggles: std::rc::Rc::new(self.fold_toggles.clone()),
                     copied: self.copied.as_ref().map(|(row, _)| row.clone()),
                     copied_at: self.copied.as_ref().map(|(_, at)| *at),
@@ -1459,7 +1568,25 @@ impl KeelWindow {
                         }
                         // Run and a diagram node also need the window (the
                         // terminal panel, the composer).
-                        if let RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } = &action {
+                        if let RowAction::Run { .. }
+                            | RowAction::InsertInTerminal { .. }
+                            | RowAction::AskAbout { .. }
+                            | RowAction::ResumeRetry
+                            | RowAction::ResumeStartFresh
+                            | RowAction::PlanApprove { .. }
+                            | RowAction::PlanEdit { .. }
+                            | RowAction::PlanAsk { .. }
+                            | RowAction::PlanDone { .. }
+                            | RowAction::PlanAdd { .. }
+                            | RowAction::PlanDelete { .. }
+                            | RowAction::PlanDrag { .. }
+                            | RowAction::PlanDrop { .. }
+                            | RowAction::PlanToggle { .. }
+                            | RowAction::PlanToggleTargets { .. }
+                            | RowAction::PlanToggleModeMenu { .. }
+                            | RowAction::PlanSetManual { .. }
+                            | RowAction::PlanSetMode { .. } = &action
+                        {
                             let weak = weak.clone();
                             cx.defer(move |cx| {
                                 let _ = handle.update(cx, |_, window, cx| {
@@ -1467,7 +1594,9 @@ impl KeelWindow {
                                         RowAction::Run { row_id, command, risky } => view.run_command(row_id, command, risky, window, cx),
                                         RowAction::InsertInTerminal { text } => view.insert_in_terminal(text, window, cx),
                                         RowAction::AskAbout { label } => view.ask_about(&label, window, cx),
-                                        _ => {}
+                                        RowAction::ResumeRetry => view.retry_last_prompt(window, cx),
+                                        RowAction::ResumeStartFresh => view.start_fresh_prompt(window, cx),
+                                        other => view.plan_action(other, window, cx),
                                     })
                                 });
                             });
@@ -1475,14 +1604,38 @@ impl KeelWindow {
                         }
                         let _ = weak.update(cx, |view, cx| match action {
                             RowAction::Toggle { row_id } => view.toggle_row(&row_id, cx),
-                            RowAction::Copy { row_id, content } => view.copy_code(row_id, content, cx),
+                            RowAction::Copy { row_id, content } => {
+                                view.diagram_menu = None;
+                                view.copy_code(row_id, content, cx);
+                            }
                             RowAction::OpenImage { path } => view.open_lightbox(super::Lightbox::Image(path.into()), cx),
                             RowAction::OpenDiagram { row_id, source } => {
                                 let view_state = Default::default();
                                 view.open_lightbox(super::Lightbox::Diagram { row_id, source, view: view_state }, cx);
                             }
                             RowAction::CopyImage { row_id, source, tokens } => {
-                                view.copy_image(row_id, source, tokens, cx)
+                                view.diagram_menu = None;
+                                view.copy_image(row_id, source, tokens, cx);
+                            }
+                            RowAction::CopyChartImage { row_id, chart, tokens } => {
+                                view.diagram_menu = None;
+                                view.copy_chart_image(row_id, *chart, tokens, cx);
+                            }
+                            RowAction::ToggleDiagramMenu { row_id } => {
+                                if view.diagram_menu.as_deref() == Some(&row_id) {
+                                    view.diagram_menu = None;
+                                } else {
+                                    view.diagram_menu_ix = 0;
+                                    view.diagram_menu_keyboard = false;
+                                    view.diagram_menu = Some(row_id);
+                                }
+                                cx.notify();
+                            }
+                            RowAction::CloseDiagramMenu => {
+                                if view.diagram_menu.is_some() {
+                                    view.diagram_menu = None;
+                                    cx.notify();
+                                }
                             }
                             RowAction::OpenSubagent { subagent_id } => view.open_subagent_session(&subagent_id, cx),
                             RowAction::Choose { text } => view.choose(text, cx),
@@ -1496,13 +1649,20 @@ impl KeelWindow {
                             RowAction::OpenFullOutput { title, content, error } => {
                                 view.open_lightbox(super::Lightbox::Output { title, content, error }, cx);
                             }
-                            RowAction::OpenFile { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } => {}
+                            RowAction::OpenFile { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } | RowAction::ResumeRetry | RowAction::ResumeStartFresh | RowAction::PlanApprove { .. } | RowAction::PlanEdit { .. } | RowAction::PlanAsk { .. } | RowAction::PlanDone { .. } | RowAction::PlanAdd { .. } | RowAction::PlanDelete { .. } | RowAction::PlanDrag { .. } | RowAction::PlanDrop { .. } | RowAction::PlanToggle { .. } | RowAction::PlanToggleTargets { .. } | RowAction::PlanToggleModeMenu { .. } | RowAction::PlanSetManual { .. } | RowAction::PlanSetMode { .. } => {}
                         });
                     }),
                     order: 0,
                     live_choices: self.live_choices(),
                     merges: std::rc::Rc::new(self.mr_merges.clone()),
                     armed_runs: std::rc::Rc::new(self.armed_runs.clone()),
+                    run_at: (self.active_status() == Some(ChatStatus::Running) || self.dev_live)
+                        .then_some(self.loader_seed.0),
+                    step_from: self.step_line.as_ref().and_then(|line| line.from.clone()),
+                    tool_from: std::rc::Rc::new(self.tool_lines.iter()
+                        .filter_map(|(id, line)| line.from.clone().filter(|swap| swap.running(std::time::Instant::now()))
+                            .map(|swap| (id.clone(), swap))).collect()),
+                    muted: false,
                     now: std::time::Instant::now(),
                     now_ms: crate::trace_view::now_ms(),
                     clock_epoch: self.clock_epoch,
@@ -1518,6 +1678,8 @@ impl KeelWindow {
                     // of the slide (inside a row's px_4), and holds it.
                     prose_max_w: wrap_hold.map_or(crate::transcript::PROSE_MAX_W, |w| crate::transcript::PROSE_MAX_W.min(w / crate::style::zoom())),
                     bubble_max_w: wrap_hold.map(|w| 0.85 * w),
+                    plan_running: self.active_status() == Some(ChatStatus::Running),
+                    plan_cards: std::rc::Rc::new(self.plan_cards.clone()),
                     probe: self.geo_trace.on.get().then(|| {
                         let tr = self.geo_trace.clone();
                         std::rc::Rc::new(move |which: crate::transcript::RowProbe| match which {
@@ -1654,19 +1816,17 @@ impl KeelWindow {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let now = std::time::Instant::now();
-        if !self.latest_pill.mounted(now) {
+        if !self.latest_pill.mounted(now) || self.transcript.is_at_bottom() {
             return None;
         }
         let reduced = self.reduced();
         let running_since =
             (self.active_status() == Some(ChatStatus::Running)).then_some(self.loader_seed.0);
-        // Floating (absolute), so its motion never shifts the list. Scale is
-        // drawn by sizing about its centre: gpui divs have no transform.
-        // Leaving, it takes no clicks or hover.
+        // Floating (absolute), so its motion never shifts the list. Sits just above
+        // the composer dock outside the message column's text area.
         let look = self.latest_pill.look_at(now);
         let live = !self.latest_pill.leaving(now);
-        let k = look.scale;
-        let rise = 12. - look.dy + 14. * (1. - k);
+        let rise = 4. - look.dy;
         let dock_h = self.dock_h.get();
         // Deferred so the page column's clip and the composer's shadow
         // cannot cover it. Priority 1 keeps it under menus.
@@ -1685,31 +1845,29 @@ impl KeelWindow {
                         div()
                             .id("jump-to-latest")
                             .opacity(look.opacity)
-                            .h(zpx(28. * k))
-                            .pl(zpx(8. * k))
-                            .pr(zpx(12. * k))
+                            .h(zpx(28.))
+                            .px(zpx(12.))
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(zpx(4. * k))
+                            .gap(zpx(5.))
                             .rounded_full()
-                            .floating_surface(t)
-                            // Over the floating surface: a 6% text-colour lift and
-                            // an 18% edge, so it reads on the transcript without shouting.
-                            .bg(c(lift(t.floating, t.text, 0.06)))
-                            .border_color(c(t.text & 0xFFFF_FF00 | 0x2E))
+                            .bg(c(t.floating))
+                            .border_1()
+                            .border_color(c(t.border))
                             .t_small()
-                            .text_size(zpx(crate::style::SMALL.size * k))
-                            .line_height(zpx(crate::style::SMALL.line * k))
-                            .text_color(c(t.text & 0xFFFF_FF00 | 0xE6))
+                            .text_size(zpx(crate::style::SMALL.size))
+                            .line_height(zpx(crate::style::SMALL.line))
+                            .text_color(c(t.text_muted))
                             .when(live, |d| {
-                                d.cursor_pointer().hover(|s| s.text_color(c(t.text)))
+                                d.cursor_pointer()
+                                    .hover(|s| s.text_color(c(t.text)).bg(c(t.hover)))
                             })
                             .map(|d| match running_since {
                                 // Run is live but out of view: the one small cue
                                 // (the inline loader is up there, not duplicated here).
                                 Some(since) => d
-                                    .gap(zpx(6. * k))
+                                    .gap(zpx(6.))
                                     .child(crate::motion::dot_grid(
                                         c(t.text),
                                         "latest-running-dots",
@@ -1721,8 +1879,8 @@ impl KeelWindow {
                                             .text_color(c(t.text_muted))
                                             .child(crate::motion::elapsed_label(since.elapsed())),
                                     )
-                                    .child(Icon::ChevronDown.el(zpx(13. * k))),
-                                None => d.child(Icon::ChevronDown.el(zpx(13. * k))).child("Latest"),
+                                    .child(Icon::ChevronDown.el(zpx(13.))),
+                                None => d.child(Icon::ChevronDown.el(zpx(13.))).child("Latest"),
                             })
                             .when(live, |d| {
                                 d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1926,7 +2084,11 @@ impl KeelWindow {
             gpui::deferred(crate::motion::scrim(
                 backdrop,
                 (
-                    if leaving { "delete-space-scrim-out" } else { "delete-space-scrim-in" },
+                    if leaving {
+                        "delete-space-scrim-out"
+                    } else {
+                        "delete-space-scrim-in"
+                    },
                     modal_gen as usize,
                 ),
                 0.7,
@@ -2043,7 +2205,11 @@ impl KeelWindow {
                     )
                     .child(card),
                 (
-                    if leaving { "delete-chats-scrim-out" } else { "delete-chats-scrim-in" },
+                    if leaving {
+                        "delete-chats-scrim-out"
+                    } else {
+                        "delete-chats-scrim-in"
+                    },
                     modal_gen as usize,
                 ),
                 0.7,
@@ -2109,14 +2275,14 @@ impl KeelWindow {
             } => self.render_output_lightbox(t, title, content, error, cx),
         };
         // Scale is drawn by sizing about the centre: gpui divs have no transform.
-        let k = 0.9 * look.scale;
+        let k = 0.96 * look.scale;
         Some(
             gpui::deferred(
                 div()
                     .id("lightbox")
                     .absolute()
                     .inset_0()
-                    .bg(gpui::black().opacity(0.7 * look.opacity))
+                    .bg(gpui::black().opacity(0.85 * look.opacity))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2150,88 +2316,319 @@ impl KeelWindow {
         view: crate::mermaid_viewer::SharedViewport,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        use crate::transcript::{bar_button, image_copy_key};
         let natural = crate::mermaid::size(&source).unwrap_or((1., 1.));
-        let percent = (view.borrow().scale(natural) * 100.).round();
-        let copied = self.copied.as_ref().map(|(row, _)| row.as_str());
-        let (code_done, image_done) = (
-            copied == Some(row_id.as_str()),
-            copied == Some(image_copy_key(&row_id).as_str()),
-        );
-        let tint = |done: bool| if done { t.success } else { t.text_muted };
-        let zoom = |id: &'static str, icon: Icon, factor: f32| {
+        let percent = (view.borrow().zoom * 100.).round() as i32;
+        let copied = self.copied.as_ref().map(|(row, _)| row.as_str()) == Some(row_id.as_str());
+        let reduced = self.reduced();
+
+        // Plain solid pill bottom center for zoom controls
+        let zoom_out = {
             let view = view.clone();
-            bar_button(id.into(), icon, "", t.text_muted, t).on_click(move |_, window, _| {
-                view.borrow_mut().zoom_center(factor, natural);
-                window.refresh();
-            })
+            div()
+                .id("viewer-zoom-out")
+                .size(zpx(28.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(crate::style::c(t.text_muted))
+                .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+                .hover(move |s| s.text_color(crate::style::c(t.text)))
+                .active(|s| s.opacity(0.85))
+                .on_click(move |_, window, _| {
+                    view.borrow_mut().zoom_center_animated(1. / 1.25, natural, reduced);
+                    window.refresh();
+                })
+                .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Zoom out", t)).into())
+                .tooltip_show_delay(crate::view::tooltip::delay())
+                .child(Icon::Minus.el(zpx(13.)))
         };
-        let fit = view.clone();
-        let (image_id, image_src, code_id, code_src) =
-            (row_id.clone(), source.clone(), row_id, source);
-        div()
+
+        let zoom_fit = {
+            let fit = view.clone();
+            div()
+                .id("viewer-fit")
+                .h(zpx(28.))
+                .px_2p5()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(crate::style::c(t.text_muted))
+                .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+                .hover(move |s| s.text_color(crate::style::c(t.text)))
+                .active(|s| s.opacity(0.85))
+                .on_click(move |_, window, _| {
+                    fit.borrow_mut().reset();
+                    window.refresh();
+                })
+                .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Reset to fit (100%)", t)).into())
+                .tooltip_show_delay(crate::view::tooltip::delay())
+                .child(format!("{percent}%"))
+        };
+
+        let zoom_in = {
+            let view = view.clone();
+            div()
+                .id("viewer-zoom-in")
+                .size(zpx(28.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(crate::style::c(t.text_muted))
+                .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+                .hover(move |s| s.text_color(crate::style::c(t.text)))
+                .active(|s| s.opacity(0.85))
+                .on_click(move |_, window, _| {
+                    view.borrow_mut().zoom_center_animated(1.25, natural, reduced);
+                    window.refresh();
+                })
+                .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Zoom in", t)).into())
+                .tooltip_show_delay(crate::view::tooltip::delay())
+                .child(Icon::Plus.el(zpx(13.)))
+        };
+
+        let bottom_bar = div()
             .absolute()
-            .top_3()
-            .right_3()
+            .bottom_4()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .rounded_full()
+                    .bg(crate::style::c(t.floating))
+                    .t_caption()
+                    .child(zoom_out)
+                    .child(zoom_fit)
+                    .child(zoom_in),
+            );
+
+        // Top right: Copy trigger + dropdown and Close button in plain solid pill
+        let menu_open = self.diagram_menu.as_deref() == Some(&row_id);
+        let toggle_id = row_id.clone();
+        let copy_trigger = div()
+            .id("viewer-copy-trigger")
+            .h(zpx(28.))
+            .px_3()
+            .rounded_full()
             .flex()
             .flex_row()
             .items_center()
-            .gap_0p5()
-            .p_1()
-            .rounded(RADIUS_MD)
-            .bg(crate::style::c(t.floating))
-            .border_1()
-            .border_color(crate::style::c(t.border))
-            .t_caption()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_color(if copied { crate::style::c(t.accent) } else { crate::style::c(t.text_muted) })
+            .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+            .hover(move |s| s.text_color(crate::style::c(t.text)))
+            .active(|s| s.opacity(0.85))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if this.diagram_menu.as_deref() == Some(&toggle_id) {
+                    this.diagram_menu = None;
+                } else {
+                    this.diagram_menu_ix = 0;
+                    this.diagram_menu_keyboard = false;
+                    this.diagram_menu = Some(toggle_id.clone());
+                }
+                cx.notify();
+            }))
+            .child(if copied {
+                div()
+                    .with_animation(
+                        ElementId::Name(format!("viewer-copy-check-{row_id}").into()),
+                        gpui::Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(crate::motion::ease_out),
+                        |el, delta| el.opacity(delta),
+                    )
+                    .child(Icon::Check.el(zpx(13.)))
+            } else {
+                div()
+                    .with_animation(
+                        ElementId::Name(format!("viewer-copy-icon-{row_id}").into()),
+                        gpui::Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(crate::motion::ease_out),
+                        |el, delta| el.opacity(delta),
+                    )
+                    .child(Icon::Copy.el(zpx(13.)))
+            })
+            .child(div().t_small().child(if copied { "Copied" } else { "Copy" }));
+
+        let copy_menu = if menu_open {
+            let (code_id, code_src) = (row_id.clone(), source.clone());
+            let (image_id, image_src) = (row_id.clone(), source.clone());
+            let selected_ix = self.diagram_menu_ix;
+            let keyboard_opened = self.diagram_menu_keyboard;
+            let menu_el = div()
+                .id("viewer-copy-dropdown")
+                .absolute()
+                .top(zpx(34.))
+                .right_0()
+                .w(zpx(156.))
+                .occlude()
+                .p_1()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .bg(crate::style::c(t.floating))
+                .rounded(RADIUS_MD)
+                .shadow(vec![gpui::BoxShadow {
+                    color: crate::style::c(t.shadow),
+                    offset: gpui::point(zpx(0.), zpx(4.)),
+                    blur_radius: zpx(12.),
+                    spread_radius: zpx(-2.),
+                    inset: false,
+                }])
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.diagram_menu = None;
+                    cx.notify();
+                }))
+                .child(
+                    self.dropdown_action(
+                        "viewer-copy-code",
+                        Icon::Code,
+                        "Copy as code",
+                        selected_ix == 0,
+                        t,
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.diagram_menu = None;
+                            this.copy_code(code_id.clone(), code_src.clone(), cx);
+                        }),
+                    )
+                )
+                .child(
+                    self.dropdown_action(
+                        "viewer-copy-image",
+                        Icon::Image,
+                        "Copy as image",
+                        selected_ix == 1,
+                        t,
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.diagram_menu = None;
+                            this.copy_image(image_id.clone(), image_src.clone(), t, cx);
+                        }),
+                    )
+                );
+
+            Some(if keyboard_opened {
+                menu_el.into_any_element()
+            } else {
+                menu_el
+                    .with_animation(
+                        ElementId::Name(format!("viewer-copy-menu-in-{row_id}").into()),
+                        gpui::Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(crate::motion::ease_out),
+                        |el, delta| {
+                            el.opacity(delta)
+                                .relative()
+                                .top(zpx(-3. * (1. - delta)))
+                                .right(zpx(-3. * (1. - delta)))
+                        },
+                    )
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
+
+        let copy_wrapper = div()
+            .relative()
+            .flex_none()
+            .child(copy_trigger)
+            .children(copy_menu);
+
+        let close_button = div()
+            .id("viewer-close")
+            .size(zpx(28.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
             .text_color(crate::style::c(t.text_muted))
-            .child(zoom("viewer-zoom-out", Icon::Minus, 1. / 1.25))
-            .child(
-                bar_button("viewer-fit".into(), Icon::Shrink, "", t.text_muted, t)
-                    .child(format!("{percent}%"))
-                    .on_click(move |_, window, _| {
-                        fit.borrow_mut().reset();
-                        window.refresh();
-                    }),
-            )
-            .child(zoom("viewer-zoom-in", Icon::Plus, 1.25))
+            .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+            .hover(move |s| s.text_color(crate::style::c(t.text)))
+            .active(|s| s.opacity(0.85))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.close_lightbox(cx);
+            }))
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Close (Esc)", t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(Icon::Close.el(zpx(13.)));
+
+        let top_right = div()
+            .absolute()
+            .top_4()
+            .right_4()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(crate::style::c(t.floating))
+            .t_caption()
+            .child(copy_wrapper)
             .child(
                 div()
-                    .w_px()
                     .h(zpx(14.))
-                    .mx_1()
+                    .w_px()
                     .bg(crate::style::c(t.border)),
             )
+            .child(close_button);
+
+        div()
+            .absolute()
+            .inset_0()
+            .child(top_right)
+            .child(bottom_bar)
+    }
+
+    fn dropdown_action(
+        &self,
+        id: &'static str,
+        icon: Icon,
+        label: &'static str,
+        selected: bool,
+        t: Tokens,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .h(zpx(32.))
+            .px_2p5()
+            .rounded(RADIUS_SM)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .t_small()
+            .text_color(crate::style::c(t.text))
+            .when(selected, |d| d.bg(crate::style::c(t.selected)))
+            .when(!selected, |d| {
+                d.hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+            })
+            .active(|s| s.opacity(0.85))
+            .on_click(on_click)
             .child(
-                bar_button(
-                    "viewer-copy-image".into(),
-                    if image_done { Icon::Check } else { Icon::Image },
-                    if image_done { "Copied" } else { "Copy image" },
-                    tint(image_done),
-                    t,
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.copy_image(image_id.clone(), image_src.clone(), t, cx)
-                })),
+                div()
+                    .w(zpx(16.))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .text_color(crate::style::c(t.text_muted))
+                    .child(icon.el(zpx(13.))),
             )
-            .child(
-                bar_button(
-                    "viewer-copy-code".into(),
-                    if code_done { Icon::Check } else { Icon::Copy },
-                    if code_done { "Copied" } else { "Copy code" },
-                    tint(code_done),
-                    t,
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.copy_code(code_id.clone(), code_src.clone(), cx)
-                })),
-            )
-            .child(
-                bar_button("viewer-close".into(), Icon::Close, "", t.text_muted, t).on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.close_lightbox(cx);
-                    }),
-                ),
-            )
+            .child(div().whitespace_nowrap().child(label))
     }
 
     /// Full-window scrollable overlay for command outputs and code blocks.
@@ -2912,10 +3309,6 @@ impl KeelWindow {
     }
 }
 
-/// Fixed height of the loader line, so rows below never shift as it appears,
-/// changes verb, or goes away.
-const LOADER_HEIGHT: f32 = 28.;
-
 /// The running turn's loader line: a verb for what the agent is doing,
 /// rotating every `VERB_SECS`, and the elapsed time.
 #[derive(Clone, Copy)]
@@ -2946,39 +3339,19 @@ impl InlineLoader {
             .w_full()
             .flex_none()
             .overflow_hidden()
-            .h(zpx(LOADER_HEIGHT * look.height))
-            .mt(zpx(4. * look.height))
+            .h(zpx(crate::trace_view::LINE_H * look.height))
+            .mt(zpx(14. * look.height))
             .px_4()
             .child(
-                div()
-                    .relative()
-                    .top(zpx(look.dy))
-                    .opacity(look.opacity)
-                    .h(zpx(LOADER_HEIGHT))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .t_small()
-                    .line_height(zpx(LOADER_HEIGHT))
-                    .text_color(c(t.text_muted))
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .child(crate::motion::dot_grid(
-                                c(t.text_muted),
-                                "thinking-dots",
-                                self.reduced,
-                            )),
-                    )
-                    .child(div().text_color(c(t.text_muted)).child(format!("{verb}…")))
-                    .child(
-                        div()
-                            .text_color(c(t.text_faint))
-                            .child(crate::motion::elapsed_label(self.since.elapsed())),
-                    ),
+                crate::trace_view::live_status_chrome(
+                    div().whitespace_nowrap().child(verb.to_string()).into_any_element(),
+                    None,
+                    t,
+                    self.reduced,
+                )
+                .relative()
+                .top(zpx(look.dy))
+                .opacity(look.opacity),
             )
             .into_any_element()
     }
@@ -3066,4 +3439,15 @@ fn lift(base: u32, toward: u32, amount: f32) -> u32 {
     let ch = |v: u32, s: u32| ((v >> s) & 0xFF) as f32;
     let mix = |s: u32| ((ch(base, s) + (ch(toward, s) - ch(base, s)) * amount).round() as u32) << s;
     mix(24) | mix(16) | mix(8) | (base & 0xFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_verbs;
+
+    #[test]
+    fn memory_loader_names_the_action() {
+        assert_eq!(tool_verbs("memory_read", ""), &["Reading memory"]);
+        assert_eq!(tool_verbs("memory_write", "memory"), &["Writing memory"]);
+    }
 }

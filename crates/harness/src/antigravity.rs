@@ -53,7 +53,9 @@ impl Paths {
     }
 
     pub(crate) fn of_home() -> Option<Self> {
-        std::env::var_os("HOME").filter(|home| !home.is_empty()).map(|home| Self::under(Path::new(&home)))
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| Self::under(Path::new(&home)))
     }
 
     fn settings(&self) -> PathBuf {
@@ -157,16 +159,29 @@ async fn run(
     let mut child = cmd.spawn().map_err(io)?;
     // Kills the server's whole group however this ends, cancel included.
     let group = Group(child.id().unwrap_or(0));
-    let stdin = child.stdin.take().ok_or_else(|| failed("the server has no stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| failed("the server has no stdout"))?;
-    let mut rpc = Rpc { stdin, lines: BufReader::new(stdout).lines(), next: 0 };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| failed("the server has no stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| failed("the server has no stdout"))?;
+    let mut rpc = Rpc {
+        stdin,
+        lines: BufReader::new(stdout).lines(),
+        next: 0,
+    };
 
     let mut shown = String::new();
     let mut watch = || {
-        let Some(url) = std::fs::read_to_string(&urls)
-            .ok()
-            .and_then(|text| text.lines().rev().map(str::trim).find(|l| l.starts_with("https://")).map(str::to_string))
-        else {
+        let Some(url) = std::fs::read_to_string(&urls).ok().and_then(|text| {
+            text.lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| l.starts_with("https://"))
+                .map(str::to_string)
+        }) else {
             return;
         };
         if url != shown {
@@ -210,7 +225,9 @@ async fn within<T>(
     why: &str,
     step: impl std::future::Future<Output = Result<T, HarnessError>>,
 ) -> Result<T, HarnessError> {
-    tokio::time::timeout(limit, step).await.unwrap_or_else(|_| Err(failed(why)))
+    tokio::time::timeout(limit, step)
+        .await
+        .unwrap_or_else(|_| Err(failed(why)))
 }
 
 /// The server's process group, killed on drop.
@@ -244,10 +261,16 @@ struct Rpc {
 impl Rpc {
     /// Send `method` and wait for its answer, calling `tick` every 300 ms
     /// meanwhile. Requests from the server are refused: sign-in needs none.
-    async fn request(&mut self, method: &str, params: Value, tick: &mut (dyn FnMut() + Send)) -> Result<Value, HarnessError> {
+    async fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        tick: &mut (dyn FnMut() + Send),
+    ) -> Result<Value, HarnessError> {
         self.next += 1;
         let id = self.next;
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await?;
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .await?;
         let mut every = tokio::time::interval(Duration::from_millis(300));
         loop {
             let line = tokio::select! {
@@ -298,13 +321,25 @@ fn set_auth_type(file: &Path) -> std::io::Result<()> {
         settings["auth"] = json!({});
     }
     settings["auth"]["type"] = json!("oauth-personal");
-    write_private(file, &format!("{}\n", serde_json::to_string_pretty(&settings).unwrap_or_default()))
+    write_private(
+        file,
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&settings).unwrap_or_default()
+        ),
+    )
 }
 
 /// The bridge's verified marker: a flag and a time, no credential.
 fn write_marker(file: &Path) -> std::io::Result<()> {
     let at = iso_now();
-    write_private(file, &format!("{}\n", serde_json::to_string_pretty(&json!({"verified": true, "at": at})).unwrap_or_default()))
+    write_private(
+        file,
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({"verified": true, "at": at})).unwrap_or_default()
+        ),
+    )
 }
 
 /// Owner-only, like the bridge writes it.
@@ -327,7 +362,12 @@ fn write_private(file: &Path, text: &str) -> std::io::Result<()> {
 fn browser_script(dir: &Path, urls: &Path) -> std::io::Result<PathBuf> {
     let path = dir.join("antigravity-browser.sh");
     let quoted = urls.to_string_lossy().replace('\'', r"'\''");
-    std::fs::write(&path, format!("#!/bin/sh\n# Written by Keel: Keel opens the sign-in page itself.\nprintf '%s\\n' \"$@\" >> '{quoted}'\n"))?;
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n# Written by Keel: Keel opens the sign-in page itself.\nprintf '%s\\n' \"$@\" >> '{quoted}'\n"
+        ),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -338,7 +378,10 @@ fn browser_script(dir: &Path, urls: &Path) -> std::io::Result<PathBuf> {
 
 /// Now as `2026-11-04T10:00:00Z`.
 fn iso_now() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let (days, rest) = (secs / 86_400, secs % 86_400);
     // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
     let z = days as i64 + 719_468;
@@ -350,7 +393,12 @@ fn iso_now() -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }
 
 fn failed(why: &str) -> HarnessError {
@@ -388,11 +436,20 @@ mod tests {
         let home = tmp("account");
         let paths = Paths::under(&home);
         let row = || account(&paths);
-        assert_eq!((row().signed_in, row().detail.as_str()), (false, "not signed in"));
-        assert_eq!((row().id.as_str(), row().name.as_str()), ("antigravity", "Antigravity"));
+        assert_eq!(
+            (row().signed_in, row().detail.as_str()),
+            (false, "not signed in")
+        );
+        assert_eq!(
+            (row().id.as_str(), row().name.as_str()),
+            ("antigravity", "Antigravity")
+        );
 
         // The auth type alone is the state before the browser round trip.
-        write(&home.join(".gemini/antigravity-acp/settings.json"), r#"{"auth":{"type":"oauth-personal"}}"#);
+        write(
+            &home.join(".gemini/antigravity-acp/settings.json"),
+            r#"{"auth":{"type":"oauth-personal"}}"#,
+        );
         assert!(!row().signed_in);
 
         let marker = home.join(".pi/agent/antigravity-bridge/acp-auth-verified.json");
@@ -405,7 +462,10 @@ mod tests {
         write(&home.join(".gemini/antigravity-acp/acp_token.json"), "{}");
         assert_eq!((row().signed_in, row().detail.as_str()), (true, "oauth"));
 
-        write(&home.join(".gemini/antigravity-acp/settings.json"), r#"{"auth":{"type":"gemini-api-key"}}"#);
+        write(
+            &home.join(".gemini/antigravity-acp/settings.json"),
+            r#"{"auth":{"type":"gemini-api-key"}}"#,
+        );
         assert_eq!((row().signed_in, row().detail.as_str()), (true, "api_key"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -446,13 +506,33 @@ done
     }
 
     fn methods(dir: &Path) -> Vec<String> {
-        std::fs::read_to_string(dir.join("methods.log")).unwrap_or_default().lines().map(str::to_string).collect()
+        std::fs::read_to_string(dir.join("methods.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     /// The fake's grandchild is gone: the server's whole group was killed.
     fn group_gone(dir: &Path) -> bool {
-        let pid = std::fs::read_to_string(dir.join("grandchild.pid")).unwrap();
-        let alive = std::process::Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success();
+        let path = dir.join("grandchild.pid");
+        let start = std::time::Instant::now();
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&path) {
+                if !pid.trim().is_empty() {
+                    break pid;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(2) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
         !alive
     }
 
@@ -470,14 +550,28 @@ done
         let events = Mutex::new(Vec::new());
         let on = |e: SignInEvent| events.lock().unwrap().push(e);
         let started = std::time::Instant::now();
-        sign_in(&bin, &paths, &home.join("scratch"), &on).await.unwrap();
-        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        sign_in(&bin, &paths, &home.join("scratch"), &on)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
         assert_eq!(methods(&home), ["initialize", "session/new"]);
-        assert!(!events.into_inner().unwrap().iter().any(|e| matches!(e, SignInEvent::Browser { .. })));
+        assert!(
+            !events
+                .into_inner()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, SignInEvent::Browser { .. }))
+        );
         assert!(account(&paths).signed_in);
         assert_eq!(marker_mode(&home), 0o600);
-        let settings: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap()).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(settings["auth"]["type"], "oauth-personal");
         assert!(group_gone(&home));
         let _ = std::fs::remove_dir_all(&home);
@@ -490,10 +584,20 @@ done
         let bin = fake_server(&home, "browser");
         let events = Mutex::new(Vec::new());
         let on = |e: SignInEvent| events.lock().unwrap().push(e);
-        sign_in(&bin, &paths, &home.join("scratch"), &on).await.unwrap();
+        sign_in(&bin, &paths, &home.join("scratch"), &on)
+            .await
+            .unwrap();
         let events = events.into_inner().unwrap();
-        assert!(events.contains(&SignInEvent::Browser { url: "https://accounts.example/o?state=1".into() }), "{events:?}");
-        assert_eq!(methods(&home), ["initialize", "session/new", "authenticate", "session/new"]);
+        assert!(
+            events.contains(&SignInEvent::Browser {
+                url: "https://accounts.example/o?state=1".into()
+            }),
+            "{events:?}"
+        );
+        assert_eq!(
+            methods(&home),
+            ["initialize", "session/new", "authenticate", "session/new"]
+        );
         assert!(account(&paths).signed_in);
         assert!(group_gone(&home));
         let _ = std::fs::remove_dir_all(&home);
@@ -503,12 +607,18 @@ done
     async fn a_hollow_sign_in_leaves_no_marker() {
         let home = tmp("hollow");
         let paths = Paths::under(&home);
-        write(&home.join(".gemini/antigravity-acp/settings.json"), r#"{"auth":{"type":"oauth-personal"},"queuedMessages":"x"}"#);
+        write(
+            &home.join(".gemini/antigravity-acp/settings.json"),
+            r#"{"auth":{"type":"oauth-personal"},"queuedMessages":"x"}"#,
+        );
         let bin = fake_server(&home, "hollow");
-        let err = sign_in(&bin, &paths, &home.join("scratch"), &|_| {}).await.unwrap_err();
+        let err = sign_in(&bin, &paths, &home.join("scratch"), &|_| {})
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("no usable sign-in"), "{err}");
         assert!(!account(&paths).signed_in);
-        let settings = std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap();
+        let settings =
+            std::fs::read_to_string(home.join(".gemini/antigravity-acp/settings.json")).unwrap();
         assert!(settings.contains("queuedMessages"));
         assert!(group_gone(&home));
         let _ = std::fs::remove_dir_all(&home);
@@ -519,10 +629,20 @@ done
         let home = tmp("mute");
         let paths = Paths::under(&home);
         let bin = fake_server(&home, "mute");
-        let limits = Limits { start: Duration::from_millis(800), probe: Duration::from_millis(800), sign_in: Duration::from_secs(2) };
+        let limits = Limits {
+            start: Duration::from_millis(800),
+            probe: Duration::from_millis(800),
+            sign_in: Duration::from_secs(2),
+        };
         let started = std::time::Instant::now();
-        let err = run(&bin, &paths, &home.join("scratch"), &|_| {}, limits).await.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        let err = run(&bin, &paths, &home.join("scratch"), &|_| {}, limits)
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
         assert!(err.to_string().contains("did not start"), "{err}");
         assert!(!account(&paths).signed_in);
         assert!(group_gone(&home));
@@ -533,6 +653,9 @@ done
     fn iso_now_is_a_utc_timestamp() {
         let at = iso_now();
         assert_eq!(at.len(), 20, "{at}");
-        assert!(at.starts_with("20") && at.ends_with('Z') && at.as_bytes()[10] == b'T', "{at}");
+        assert!(
+            at.starts_with("20") && at.ends_with('Z') && at.as_bytes()[10] == b'T',
+            "{at}"
+        );
     }
 }

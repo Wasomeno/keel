@@ -415,6 +415,7 @@ impl Engine {
             model: model.to_string(),
             reasoning: String::new(),
             permission: String::new(),
+            plan_mode: false,
             cwd: cwd.to_string(),
             use_worktree,
             branch: branch.map(str::to_string),
@@ -603,6 +604,7 @@ impl Engine {
             model: params.model.clone(),
             reasoning: params.reasoning.clone(),
             permission: params.permission.clone(),
+            plan_mode: params.plan_mode,
             status: "idle".to_string(),
             usage: Default::default(),
         };
@@ -769,6 +771,21 @@ impl Engine {
             .store
             .registry()
             .set_chat_permission(chat_id, permission)
+            .map_err(|_| EngineError::UnknownChat)?;
+        state.dirty = true;
+        save(&mut state, now, false, self.inner.compaction_bytes)?;
+        self.push_registry_chat(&state, chat_id);
+        Ok(())
+    }
+
+    /// Plan mode for the chat's next turn. It does not change permission.
+    pub fn set_chat_plan_mode(&self, chat_id: &str, plan_mode: bool) -> Result<(), EngineError> {
+        let now = self.now();
+        let mut state = self.lock();
+        state
+            .store
+            .registry()
+            .set_chat_plan_mode(chat_id, plan_mode)
             .map_err(|_| EngineError::UnknownChat)?;
         state.dirty = true;
         save(&mut state, now, false, self.inner.compaction_bytes)?;
@@ -1265,6 +1282,7 @@ impl Engine {
         if matches!(
             event,
             AgentEvent::ToolStarted { .. }
+                | AgentEvent::ToolLabel { .. }
                 | AgentEvent::Plan { .. }
                 | AgentEvent::SubagentStarted { .. }
                 | AgentEvent::Question { .. }
@@ -1313,30 +1331,73 @@ impl Engine {
                 name,
                 input_bytes,
                 detail,
+                label,
                 kind,
                 ..
             } => {
                 let message_id = self.assistant_message(state, chat_id, now);
                 if let Some(doc) = state.store.session(chat_id) {
-                    let _ = doc.upsert_tool(
-                        &message_id,
-                        &keel_doc::ToolRow {
-                            tool_id,
-                            name,
-                            state: "running".to_string(),
-                            summary: String::new(),
-                            input_bytes,
-                            output_bytes: 0,
-                            detail,
-                            images: Vec::new(),
-                            kind: kind.unwrap_or_default(),
-                            started_ms: Some(now),
+                    let mut row = tool_in_message(doc, &message_id, &tool_id).unwrap_or_else(|| {
+                        keel_doc::ToolRow {
+                            tool_id: tool_id.clone(),
                             ..Default::default()
-                        },
-                    );
+                        }
+                    });
+                    row.tool_id = tool_id;
+                    row.name = name;
+                    row.state = "running".to_string();
+                    row.input_bytes = input_bytes;
+                    if !detail.is_empty() {
+                        row.detail = detail;
+                    }
+                    if !label.is_empty() {
+                        row.label = label;
+                    }
+                    row.kind = kind.unwrap_or_default();
+                    if row.started_ms.is_none() {
+                        row.started_ms = Some(now);
+                    }
+                    let _ = doc.upsert_tool(&message_id, &row);
                 }
                 state.dirty = true;
                 self.push_message(state, chat_id, &message_id);
+                Vec::new()
+            }
+            AgentEvent::ToolLabel {
+                tool_id,
+                label,
+                ..
+            } => {
+                if label.is_empty() {
+                    return Vec::new();
+                }
+                let message_id = self.assistant_message(state, chat_id, now);
+                let updated = state.store.session(chat_id).and_then(|doc| {
+                    let mut row = tool_in_message(doc, &message_id, &tool_id).unwrap_or_else(|| {
+                        keel_doc::ToolRow {
+                            tool_id: tool_id.clone(),
+                            state: "running".to_string(),
+                            started_ms: Some(now),
+                            ..Default::default()
+                        }
+                    });
+                    if row.label == label {
+                        return None;
+                    }
+                    row.label = label;
+                    if row.state.is_empty() {
+                        row.state = "running".to_string();
+                    }
+                    if row.started_ms.is_none() {
+                        row.started_ms = Some(now);
+                    }
+                    let _ = doc.upsert_tool(&message_id, &row);
+                    Some(())
+                });
+                if updated.is_some() {
+                    state.dirty = true;
+                    self.push_message(state, chat_id, &message_id);
+                }
                 Vec::new()
             }
             AgentEvent::ToolProgress {
@@ -1611,26 +1672,71 @@ impl Engine {
                 name,
                 input_bytes,
                 detail,
+                label,
                 kind,
                 ..
             } => {
                 let _ = doc.ensure_subagent(sub, now);
-                let _ = doc.upsert_sub_tool(
-                    sub,
-                    &keel_doc::ToolRow {
-                        tool_id,
-                        name,
-                        state: "running".to_string(),
-                        summary: String::new(),
-                        input_bytes,
-                        output_bytes: 0,
-                        detail,
-                        images: Vec::new(),
-                        kind: kind.unwrap_or_default(),
-                        started_ms: Some(now),
-                        ..Default::default()
-                    },
-                );
+                let prev = doc.sub_parts(sub).ok().and_then(|parts| {
+                    parts.into_iter().find_map(|part| match part {
+                        keel_doc::PartView::Tool(row) if row.tool_id == tool_id => Some(row),
+                        _ => None,
+                    })
+                });
+                let mut row = prev.unwrap_or_else(|| keel_doc::ToolRow {
+                    tool_id: tool_id.clone(),
+                    ..Default::default()
+                });
+                row.tool_id = tool_id;
+                row.name = name;
+                row.state = "running".to_string();
+                row.input_bytes = input_bytes;
+                if !detail.is_empty() {
+                    row.detail = detail;
+                }
+                if !label.is_empty() {
+                    row.label = label;
+                }
+                row.kind = kind.unwrap_or_default();
+                if row.started_ms.is_none() {
+                    row.started_ms = Some(now);
+                }
+                let _ = doc.upsert_sub_tool(sub, &row);
+                state.dirty = true;
+                self.push_subagent(state, chat_id, sub);
+            }
+            AgentEvent::ToolLabel {
+                tool_id,
+                label,
+                ..
+            } => {
+                if label.is_empty() {
+                    return Vec::new();
+                }
+                let _ = doc.ensure_subagent(sub, now);
+                let prev = doc.sub_parts(sub).ok().and_then(|parts| {
+                    parts.into_iter().find_map(|part| match part {
+                        keel_doc::PartView::Tool(row) if row.tool_id == tool_id => Some(row),
+                        _ => None,
+                    })
+                });
+                let mut row = prev.unwrap_or_else(|| keel_doc::ToolRow {
+                    tool_id: tool_id.clone(),
+                    state: "running".to_string(),
+                    started_ms: Some(now),
+                    ..Default::default()
+                });
+                if row.label == label {
+                    return Vec::new();
+                }
+                row.label = label;
+                if row.state.is_empty() {
+                    row.state = "running".to_string();
+                }
+                if row.started_ms.is_none() {
+                    row.started_ms = Some(now);
+                }
+                let _ = doc.upsert_sub_tool(sub, &row);
                 state.dirty = true;
                 self.push_subagent(state, chat_id, sub);
             }
@@ -2430,7 +2536,8 @@ impl Engine {
                     .iter()
                     .any(|message| message.id == command.message_id)
             {
-                doc.append_message(&command.message_id, "user", now)?;
+                let role = if command.shown { "user" } else { "control" };
+                doc.append_message(&command.message_id, role, now)?;
                 doc.append_text(&command.message_id, "body", &command.text)?;
                 doc.set_attachments(&command.message_id, &command.attachments)?;
             }
@@ -2453,6 +2560,14 @@ impl Engine {
                     .is_some_and(|h| h.permission_modes().contains(mode))
             })
             .unwrap_or_default();
+        let plan_mode = state
+            .store
+            .registry()
+            .view()
+            .chats
+            .into_iter()
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| chat.plan_mode);
         self.mark(state, chat_id, command.command_id, Outcome::Processed, now);
         let _ = save(state, now, false, self.inner.compaction_bytes);
         let run_id = Uuid::new_v4().to_string();
@@ -2481,8 +2596,10 @@ impl Engine {
             },
         );
         self.set_status(state, chat_id, ChatStatus::Running);
-        self.title_untitled(state, chat_id, &command.text, harness_id, &meta.model);
-        self.touch_preview(state, chat_id, now, &command.text);
+        if command.shown {
+            self.title_untitled(state, chat_id, &command.text, harness_id, &meta.model);
+            self.touch_preview(state, chat_id, now, &command.text);
+        }
         let _ = save(state, now, false, self.inner.compaction_bytes);
         let command_id = state
             .live
@@ -2552,6 +2669,27 @@ impl Engine {
         let report_session: Option<SessionReport> = Some(Arc::new(move |native_id, file| {
             engine.store_native(&reported_chat, &native_id, file.as_deref());
         }));
+        let reported_chat_for_usage = chat_id.to_string();
+        let engine_for_usage = self.clone();
+        let report_usage: Option<Arc<dyn Fn(keel_proto::TokenUsage) + Send + Sync>> =
+            Some(Arc::new(move |usage| {
+                let mut state = engine_for_usage.lock();
+                let _ = state.store.registry().add_chat_usage(
+                    &engine_for_usage.inner.device_id,
+                    &reported_chat_for_usage,
+                    &usage,
+                );
+                state.dirty = true;
+                engine_for_usage.push_registry_chat(&mut state, &reported_chat_for_usage);
+            }));
+        let data_dir = compute_data_dir(&self.inner.profile);
+        // Token-optimal prompt cache configuration:
+        // - keep_cache_warm: true (Pi cacheWarming: "idle" maintains KV cache during idle gaps)
+        // - longer_cache: false (Standard retention avoids Anthropic's +25% write penalty while idle warming keeps cache hot)
+        // - idle_eviction_timeout_secs: 15 minutes (balances fast response availability vs background memory/warming costs)
+        let longer_cache = false;
+        let keep_cache_warm = true;
+        let idle_eviction_timeout_secs = Some(15 * 60);
         // Uploads for this chat's browser tab come from its project folder.
         self.inner
             .browser
@@ -2582,13 +2720,17 @@ impl Engine {
                     })
                     .collect(),
                 report_session,
-                data_dir: Some(compute_data_dir(&self.inner.profile)),
-                browser_sock: Some(browser::BrowserHost::path(&compute_data_dir(
-                    &self.inner.profile,
-                ))),
+                report_usage,
+                data_dir: Some(data_dir.clone()),
+                browser_sock: Some(browser::BrowserHost::path(&data_dir)),
                 browser_chat: Some(chat_id.to_string()),
+                chat_id: Some(chat_id.to_string()),
                 permission,
+                plan_mode,
                 project,
+                longer_cache,
+                keep_cache_warm,
+                idle_eviction_timeout_secs,
             },
             inbound,
         })
@@ -3549,12 +3691,20 @@ impl Engine {
             /// Absent: left as it is.
             #[serde(default)]
             permission: Option<String>,
+            /// Absent: left as it is.
+            #[serde(default)]
+            plan_mode: Option<bool>,
         }
         let Ok(params) = serde_json::from_value::<OptionsParams>(params.clone()) else {
             return failure(id, RpcErrorCode::BadParams, "bad params");
         };
         if let Some(permission) = &params.permission
             && let Err(err) = self.set_chat_permission(&params.chat_id, permission)
+        {
+            return engine_failure(id, err);
+        }
+        if let Some(plan_mode) = params.plan_mode
+            && let Err(err) = self.set_chat_plan_mode(&params.chat_id, plan_mode)
         {
             return engine_failure(id, err);
         }
@@ -3783,6 +3933,9 @@ impl Engine {
         self.push_registry_chat(&state, &params.chat_id);
         drop(state);
         remove_worktrees(removals);
+        if params.archived {
+            self.evict_chat(&params.chat_id);
+        }
         success(id, serde_json::json!({}))
     }
 
@@ -3818,7 +3971,7 @@ impl Engine {
             &format!("spaces.{}", params.space_id),
             serde_json::json!({ "id": params.space_id, "tombstoned": true }),
         );
-        for chat_id in chat_ids {
+        for chat_id in &chat_ids {
             self.push_diff(
                 &state,
                 None,
@@ -3829,6 +3982,9 @@ impl Engine {
         }
         drop(state);
         remove_worktrees(removals);
+        for chat_id in &chat_ids {
+            self.evict_chat(chat_id);
+        }
         success(id, serde_json::json!({}))
     }
 
@@ -3860,6 +4016,9 @@ impl Engine {
         }
         drop(state);
         remove_worktrees(removals);
+        for chat_id in &params.chat_ids {
+            self.evict_chat(chat_id);
+        }
         success(id, serde_json::json!({}))
     }
 
@@ -4667,6 +4826,18 @@ impl Engine {
         self.inner.browser.complete(request_id, result);
         success(id, serde_json::json!({}))
     }
+
+    pub fn evict_chat(&self, chat_id: &str) {
+        for harness in &self.inner.harnesses {
+            harness.evict_chat(chat_id);
+        }
+    }
+
+    pub fn evict_all(&self) {
+        for harness in &self.inner.harnesses {
+            harness.evict_all();
+        }
+    }
 }
 
 impl EngineHost for Engine {
@@ -4800,6 +4971,24 @@ impl EngineHost for Engine {
             "write_workspace_file" => self.rpc_write_workspace_file(&request.id, &request.params),
             "subscribe_browser" => self.rpc_subscribe_browser(&request.id, outbound),
             "browser_complete" => self.rpc_browser_complete(&request.id, &request.params),
+            "close_chat" | "evict_chat" => {
+                if let Some(chat_id) = request.params.get("chat_id").and_then(Value::as_str) {
+                    self.evict_chat(chat_id);
+                }
+                success(&request.id, serde_json::json!({}))
+            }
+            "clear_native_session" => {
+                if let Some(chat_id) = request.params.get("chat_id").and_then(Value::as_str) {
+                    let state = self.lock();
+                    let _ = state.store.delete_native_session(chat_id);
+                    if let Some(doc) = state.store.session(chat_id) {
+                        let _ = doc.set_native_session("");
+                    }
+                    drop(state);
+                    self.evict_chat(chat_id);
+                }
+                success(&request.id, serde_json::json!({}))
+            }
             _ => return None,
         };
         Some(body)
@@ -4813,6 +5002,9 @@ impl EngineHost for Engine {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        for harness in &self.harnesses {
+            harness.evict_all();
+        }
         let _ = self.shutdown.send(true);
         self.terminals.close_all();
         let mut state = match self.state.lock() {
@@ -4971,6 +5163,7 @@ fn chat_json(chat: &ChatRow) -> Value {
         "model": chat.model,
         "reasoning": chat.reasoning,
         "permission": chat.permission,
+        "plan_mode": chat.plan_mode,
         "last_message_at": chat.last_message_at,
         "last_message_preview": chat.last_message_preview,
         "last_seen_at": chat.last_seen_at,
@@ -4989,6 +5182,7 @@ fn usage_json(usage: &keel_doc::ChatUsage) -> Value {
                 "output": m.output,
                 "cache_read": m.cache_read,
                 "cache_write": m.cache_write,
+                "cache_warm": m.cache_warm,
             });
             (m.model.clone(), totals)
         })
@@ -5471,6 +5665,9 @@ fn part_json(part: &keel_doc::PartView) -> Option<Value> {
                 "detail": row.detail,
                 "images": row.images,
             });
+            if !row.label.is_empty() {
+                value["label"] = serde_json::json!(row.label);
+            }
             // `kind` is the part type. The ACP kind is `tool_kind`.
             if !row.kind.is_empty() {
                 value["tool_kind"] = serde_json::json!(row.kind);
@@ -5782,6 +5979,8 @@ struct CreateParams {
     reasoning: String,
     #[serde(default)]
     permission: String,
+    #[serde(default)]
+    plan_mode: bool,
     #[serde(default)]
     cwd: String,
     #[serde(default)]

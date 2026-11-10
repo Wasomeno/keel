@@ -60,7 +60,9 @@ impl Default for UpdateUi {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// One manifest request: the answer, and whether it was parsed (so
@@ -68,11 +70,20 @@ fn now_secs() -> u64 {
 fn check_once() -> keel_update::Result<Check> {
     let (url, loopback) = keel_update::manifest_url()?;
     let body = keel_update::fetch_manifest(&url)?;
-    keel_update::evaluate(&body, keel_update::CURRENT_VERSION, &keel_update::arch_key(), loopback)
+    keel_update::evaluate(
+        &body,
+        keel_update::CURRENT_VERSION,
+        &keel_update::arch_key(),
+        loopback,
+    )
 }
 
 /// Download, verify, stage. The work dir goes on any failure.
-fn fetch_and_stage(offer: &Offer, public_key: &str, progress: &AtomicU32) -> keel_update::Result<Ready> {
+fn fetch_and_stage(
+    offer: &Offer,
+    public_key: &str,
+    progress: &AtomicU32,
+) -> keel_update::Result<Ready> {
     let dir = keel_update::new_work_dir()?;
     let staged = (|| {
         let archive = keel_update::download(&offer.asset, &dir, |f| {
@@ -83,7 +94,11 @@ fn fetch_and_stage(offer: &Offer, public_key: &str, progress: &AtomicU32) -> kee
     })();
     match staged {
         Ok(ready) => {
-            keel_update::cleanup_stale(&std::env::temp_dir(), keel_update::CURRENT_VERSION, Some(&ready.dir));
+            keel_update::cleanup_stale(
+                &std::env::temp_dir(),
+                keel_update::CURRENT_VERSION,
+                Some(&ready.dir),
+            );
             Ok(ready)
         }
         Err(err) => {
@@ -131,7 +146,9 @@ impl KeelWindow {
     }
 
     fn updates_set_ready(&mut self, ready: Ready) {
-        self.updates.status = Status::Ready { version: ready.version.clone() };
+        self.updates.status = Status::Ready {
+            version: ready.version.clone(),
+        };
         self.updates.notes_url = ready.notes_url.clone();
         self.updates.ready = Some(ready);
     }
@@ -139,7 +156,10 @@ impl KeelWindow {
     fn updates_busy(&self) -> bool {
         matches!(
             self.updates.status,
-            Status::Checking | Status::Available { .. } | Status::Downloading { .. } | Status::Installing
+            Status::Checking
+                | Status::Available { .. }
+                | Status::Downloading { .. }
+                | Status::Installing
         )
     }
 
@@ -153,7 +173,9 @@ impl KeelWindow {
             Some(Ok(_)) => {}
             Some(Err(gate)) => {
                 if manual {
-                    self.updates.status = Status::Failed { message: gate.message().into() };
+                    self.updates.status = Status::Failed {
+                        message: gate.message().into(),
+                    };
                     cx.notify();
                 }
                 return;
@@ -185,11 +207,19 @@ impl KeelWindow {
                 match res {
                     Ok(Check::UpToDate) => this.updates.status = Status::UpToDate,
                     Ok(Check::NoBuild { version }) => {
-                        tracing::info!("update: {version} has no build for {}", keel_update::arch_key());
+                        tracing::info!(
+                            "update: {version} has no build for {}",
+                            keel_update::arch_key()
+                        );
                         this.updates_fail(manual, UpdateError::new(msg::NO_BUILD, ""));
                     }
-                    Ok(Check::Update(offer)) if !keel_update::public_key_usable(config.public_key) => {
-                        tracing::info!("update: {} is out, but this build has no update key", offer.version);
+                    Ok(Check::Update(offer))
+                        if !keel_update::public_key_usable(config.public_key) =>
+                    {
+                        tracing::info!(
+                            "update: {} is out, but this build has no update key",
+                            offer.version
+                        );
                         this.updates_fail(manual, UpdateError::new(msg::NO_KEY, ""));
                     }
                     Ok(Check::Update(offer)) => this.updates_download(offer, config.public_key, cx),
@@ -206,7 +236,9 @@ impl KeelWindow {
 
     fn updates_fail(&mut self, manual: bool, err: UpdateError) {
         self.updates.status = if manual {
-            Status::Failed { message: err.message }
+            Status::Failed {
+                message: err.message,
+            }
         } else {
             Status::Idle
         };
@@ -218,7 +250,10 @@ impl KeelWindow {
         let ticket = self.updates.ticket;
         let version = offer.version.clone();
         self.updates.notes_url = offer.notes_url.clone();
-        self.updates.status = Status::Downloading { version: version.clone(), fraction: None };
+        self.updates.status = Status::Downloading {
+            version: version.clone(),
+            fraction: None,
+        };
         let progress = Arc::new(AtomicU32::new(NO_FRACTION));
         // Progress: read on a slow timer while the download runs.
         let seen = progress.clone();
@@ -228,7 +263,10 @@ impl KeelWindow {
                 let bits = seen.load(Ordering::Relaxed);
                 let fraction = (bits != NO_FRACTION).then(|| f32::from_bits(bits));
                 let going = this.update(cx, |this, cx| {
-                    let Status::Downloading { fraction: shown, .. } = &mut this.updates.status else {
+                    let Status::Downloading {
+                        fraction: shown, ..
+                    } = &mut this.updates.status
+                    else {
                         return false;
                     };
                     if this.updates.ticket != ticket {
@@ -266,7 +304,9 @@ impl KeelWindow {
                     // after an automatic check: something is wrong upstream.
                     Err(err) => {
                         tracing::warn!("update: {version} not staged: {err}");
-                        this.updates.status = Status::Failed { message: err.message };
+                        this.updates.status = Status::Failed {
+                            message: err.message,
+                        };
                     }
                 }
                 cx.notify();
@@ -328,7 +368,8 @@ impl KeelWindow {
     /// the reopen to a `/bin/sh` waiter, then quit (the quit hook flushes
     /// the engine).
     fn updates_install(&mut self, cx: &mut Context<Self>) {
-        let (Some(ready), Some(Ok(gate))) = (self.updates.ready.clone(), self.updates.gate.clone()) else {
+        let (Some(ready), Some(Ok(gate))) = (self.updates.ready.clone(), self.updates.gate.clone())
+        else {
             return;
         };
         let Some(config) = keel_update::config() else {
@@ -343,7 +384,10 @@ impl KeelWindow {
                     let daemon = config
                         .plist_path
                         .as_deref()
-                        .map(|plist| keel_update::Daemon { plist, label: config.plist_label });
+                        .map(|plist| keel_update::Daemon {
+                            plist,
+                            label: config.plist_label,
+                        });
                     let installed = keel_update::install(&ready.app(), &gate.app, daemon)?;
                     keel_update::spawn_waiter(
                         std::process::id(),
@@ -367,7 +411,9 @@ impl KeelWindow {
                 Err(err) => {
                     tracing::warn!("update: install failed: {err}");
                     this.updates.ready = None;
-                    this.updates.status = Status::Failed { message: err.message };
+                    this.updates.status = Status::Failed {
+                        message: err.message,
+                    };
                     cx.notify();
                 }
             });
@@ -410,23 +456,36 @@ impl KeelWindow {
             Status::Checking => "Checking for updates…".into(),
             Status::UpToDate => format!("Keel {} is up to date.", keel_update::CURRENT_VERSION),
             Status::Available { version } => format!("Keel {version} is available."),
-            Status::Downloading { version, fraction: Some(f) } => {
+            Status::Downloading {
+                version,
+                fraction: Some(f),
+            } => {
                 format!("Downloading Keel {version}… {}%", (f * 100.).floor() as u32)
             }
-            Status::Downloading { version, fraction: None } => format!("Downloading Keel {version}…"),
-            Status::Ready { version } => format!("Keel {version} is ready. Relaunch to finish updating."),
+            Status::Downloading {
+                version,
+                fraction: None,
+            } => format!("Downloading Keel {version}…"),
+            Status::Ready { version } => {
+                format!("Keel {version} is ready. Relaunch to finish updating.")
+            }
             Status::Installing => "Installing the update…".into(),
             Status::Failed { message } => message.clone(),
         }
     }
 
     /// Settings home, after Appearance.
-    pub(super) fn render_updates_section(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_updates_section(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let failed = matches!(self.updates.status, Status::Failed { .. })
             || matches!(self.updates.gate, Some(Err(GateError::MustMove)));
         let hide_button = matches!(self.updates.gate, Some(Err(GateError::NotInstalled)) | None);
         let busy = self.updates_busy();
-        let ready = matches!(self.updates.status, Status::Ready { .. }) && self.updates.ready.is_some();
+        let ready =
+            matches!(self.updates.status, Status::Ready { .. }) && self.updates.ready.is_some();
         let fraction = match &self.updates.status {
             Status::Downloading { fraction, .. } => Some(fraction.unwrap_or(0.)),
             _ => None,
@@ -435,7 +494,9 @@ impl KeelWindow {
         let button = (!hide_button).then(|| {
             if ready {
                 text_button_owned("updates-relaunch".into(), "Relaunch to update", t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_update_confirm(cx)))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.open_update_confirm(cx)),
+                    )
                     .into_any_element()
             } else if busy {
                 div()
@@ -449,15 +510,22 @@ impl KeelWindow {
                     .into_any_element()
             } else {
                 text_button_owned("updates-check".into(), "Check now", t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.updates_check(true, cx)))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.updates_check(true, cx)),
+                    )
                     .into_any_element()
             }
         });
-        let notes = self.updates.notes_url.clone().filter(|u| u.starts_with("https://")).map(|url| {
-            text_button_owned("updates-notes".into(), "Release notes", t)
-                .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
-                .into_any_element()
-        });
+        let notes = self
+            .updates
+            .notes_url
+            .clone()
+            .filter(|u| u.starts_with("https://"))
+            .map(|url| {
+                text_button_owned("updates-notes".into(), "Release notes", t)
+                    .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
+                    .into_any_element()
+            });
 
         let version_row = div()
             .flex()
@@ -503,33 +571,57 @@ impl KeelWindow {
                             )
                     })),
             )
-            .child(div().flex().flex_row().items_center().gap_1().children(notes).children(button));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .children(notes)
+                    .children(button),
+            );
 
         let auto = self.state.ui_settings.auto_update != Some(false);
         let auto_row = setting_row(
             t,
             "Check automatically",
-            Some("Once a day on launch. Downloads in the background and installs only when you relaunch."),
-            toggle("updates-auto".into(), auto, self.recent_flip("updates-auto"), t)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    let on = this.state.ui_settings.auto_update == Some(false);
-                    this.note_switch_flip("updates-auto");
-                    this.state.ui_settings.auto_update = (!on).then_some(false);
-                    this.state.save_settings();
-                    cx.notify();
-                }))
-                .into_any_element(),
+            Some(
+                "Once a day on launch. Downloads in the background and installs only when you relaunch.",
+            ),
+            toggle(
+                "updates-auto".into(),
+                auto,
+                self.recent_flip("updates-auto"),
+                t,
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                let on = this.state.ui_settings.auto_update == Some(false);
+                this.note_switch_flip("updates-auto");
+                this.state.ui_settings.auto_update = (!on).then_some(false);
+                this.state.save_settings();
+                cx.notify();
+            }))
+            .into_any_element(),
         );
 
         div()
             .flex()
             .flex_col()
-            .child(section_header("Updates", "New versions of Keel, signed and verified before they install.", None, t))
+            .child(section_header(
+                "Updates",
+                "New versions of Keel, signed and verified before they install.",
+                None,
+                t,
+            ))
             .child(settings_list(vec![version_row, auto_row], t))
     }
 
     /// Centered relaunch confirm, in the delete-chats modal's style.
-    pub(super) fn render_update_confirm(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(super) fn render_update_confirm(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let (leaving, modal_gen) = match (self.updates.confirm, self.updates.confirm_leaving) {
             (true, _) => (false, self.updates.confirm_gen),
             (false, Some(n)) => (true, n),
@@ -573,19 +665,34 @@ impl KeelWindow {
                     .gap_2()
                     .child(
                         super::sidebar::text_button("cancel-update-btn", "Cancel", t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_update_confirm(cx)),
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.dismiss_update_confirm(cx)
+                            }),
                         ),
                     )
                     .child(
-                        super::sidebar::filled_button("confirm-update-btn", "Relaunch", t.accent, t)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.updates_install(cx))),
+                        super::sidebar::filled_button(
+                            "confirm-update-btn",
+                            "Relaunch",
+                            t.accent,
+                            t,
+                        )
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.updates_install(cx)),
+                        ),
                     ),
             );
         let card = if leaving {
             crate::motion::dismiss(card, ("update-modal-out", modal_gen as usize), reduced)
         } else {
-            crate::motion::appear(card, ("update-modal-in", modal_gen as usize), crate::motion::BASE, 14., reduced)
-                .into_any_element()
+            crate::motion::appear(
+                card,
+                ("update-modal-in", modal_gen as usize),
+                crate::motion::BASE,
+                14.,
+                reduced,
+            )
+            .into_any_element()
         };
         Some(
             gpui::deferred(crate::motion::scrim(
@@ -598,9 +705,18 @@ impl KeelWindow {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_update_confirm(cx)))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_update_confirm(cx)),
+                    )
                     .child(card),
-                (if leaving { "update-scrim-out" } else { "update-scrim-in" }, modal_gen as usize),
+                (
+                    if leaving {
+                        "update-scrim-out"
+                    } else {
+                        "update-scrim-in"
+                    },
+                    modal_gen as usize,
+                ),
                 0.7,
                 leaving,
                 reduced,
@@ -612,7 +728,11 @@ impl KeelWindow {
     /// The one-line "ready" note under the header while Settings is closed.
     /// Its action opens Settings, where Updates sits near the top. Closing
     /// it keeps the staged build; the next launch shows it again.
-    pub(super) fn render_update_line(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_update_line(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let Status::Ready { version } = &self.updates.status else {
             return None;
         };
@@ -661,12 +781,14 @@ impl KeelWindow {
                     .child(format!("Keel {version} is ready to install.")),
             )
             .child(
-                text_button_owned("update-line-open".into(), "Open Settings", t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
+                text_button_owned("update-line-open".into(), "Open Settings", t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.open_settings(cx);
-                        this.dotify.settings_scroll.set_offset(gpui::point(px(0.), px(0.)));
-                    },
-                )),
+                        this.dotify
+                            .settings_scroll
+                            .set_offset(gpui::point(px(0.), px(0.)));
+                    }),
+                ),
             )
             .child(
                 div()
@@ -682,7 +804,9 @@ impl KeelWindow {
                     .hover(|s| s.text_color(c(t.text)))
                     .hover_fade(c(t.hover), None)
                     .child(Icon::Close.el(zpx(11.)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_update_line(cx))),
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_update_line(cx)),
+                    ),
             );
         // The error notice's motion: drop in on a strong ease-out, lift out faster.
         let travel = if self.reduced() { 0. } else { 1. };
@@ -696,7 +820,8 @@ impl KeelWindow {
         } else {
             card.with_animation(
                 ElementId::Name(format!("update-line-in-{generation}").into()),
-                gpui::Animation::new(super::NOTICE_ENTER).with_easing(crate::motion::ease_out_strong),
+                gpui::Animation::new(super::NOTICE_ENTER)
+                    .with_easing(crate::motion::ease_out_strong),
                 move |el, d| el.opacity(d).relative().top(zpx(-10. * (1. - d) * travel)),
             )
             .into_any_element()

@@ -3,7 +3,7 @@
 //! (sidebar width, the new-chat composer drop, and the wide right-side
 //! panels). Reduced motion turns every transition into an instant cut.
 
-pub use crate::hover_fade::{HOVER_IN, HOVER_OUT, HoverFadeExt, reveal_on_hover};
+pub use crate::hover_fade::{HOVER_IN, HOVER_OUT, HoverFadeExt, reveal_on_hover, reveal_on_hover_curved};
 use crate::style::zpx;
 use std::time::Duration;
 
@@ -172,19 +172,19 @@ impl Look {
     }
 }
 
-/// The "Latest" pill arriving: rises 8 px and grows from 96%.
-pub const PILL_IN: Duration = Duration::from_millis(240);
-/// Leaving: quicker, to 6 px lower at 97%.
-pub const PILL_OUT: Duration = Duration::from_millis(180);
+/// The "Latest" pill arriving: 150ms, rises 4 px.
+pub const PILL_IN: Duration = Duration::from_millis(150);
+/// Leaving: 100ms.
+pub const PILL_OUT: Duration = Duration::from_millis(100);
 const PILL_ENTER_FROM: Look = Look {
     opacity: 0.,
-    dy: 8.,
-    scale: 0.96,
+    dy: 4.,
+    scale: 1.0,
 };
 const PILL_EXIT_TO: Look = Look {
     opacity: 0.,
-    dy: 6.,
-    scale: 0.97,
+    dy: 4.,
+    scale: 1.0,
 };
 
 /// `cubic-bezier(0.2, 0.8, 0.2, 1)`: the pill's entrance.
@@ -201,6 +201,8 @@ pub struct Presence {
     from: Look,
     at: Option<std::time::Instant>,
     duration: Duration,
+    in_duration: Duration,
+    out_duration: Duration,
 }
 
 impl Default for Presence {
@@ -216,7 +218,18 @@ impl Presence {
             from: PILL_EXIT_TO,
             at: None,
             duration: PILL_OUT,
+            in_duration: PILL_IN,
+            out_duration: PILL_OUT,
         }
+    }
+
+    pub fn with_durations(mut self, in_duration: Duration, out_duration: Duration) -> Self {
+        self.in_duration = in_duration;
+        self.out_duration = out_duration;
+        if !self.shown {
+            self.duration = out_duration;
+        }
+        self
     }
 
     fn target(&self) -> Look {
@@ -225,6 +238,13 @@ impl Presence {
 
     pub fn shown(&self) -> bool {
         self.shown
+    }
+
+    /// Hide immediately without animation delay.
+    pub fn cut(&mut self) {
+        self.shown = false;
+        self.from = PILL_EXIT_TO;
+        self.at = None;
     }
 
     pub fn animating(&self, now: std::time::Instant) -> bool {
@@ -271,7 +291,7 @@ impl Presence {
             self.at = None;
             return;
         }
-        let full = if shown { PILL_IN } else { PILL_OUT };
+        let full = if shown { self.in_duration } else { self.out_duration };
         let left = (self.target().opacity - from.opacity).abs().clamp(0., 1.);
         self.from = from;
         self.duration = full.mul_f32(left).max(Duration::from_millis(1));
@@ -521,7 +541,11 @@ pub fn scrim(
     if reduced {
         return el.bg(wash(1.)).into_any_element();
     }
-    let (duration, from, to) = if leaving { (FAST, 1., 0.) } else { (BASE, 0., 1.) };
+    let (duration, from, to) = if leaving {
+        (FAST, 1., 0.)
+    } else {
+        (BASE, 0., 1.)
+    };
     el.with_animation(
         id,
         Animation::new(duration).with_easing(ease_out),
@@ -715,31 +739,47 @@ pub fn spin(
 }
 
 /// A 3×3 grid of dots with a brightness wave running corner to corner:
-/// the turn's loader. Static under reduced motion.
-pub fn dot_grid(color: gpui::Hsla, id: &'static str, reduced: bool) -> gpui::AnyElement {
-    let dot = || gpui::div().size(zpx(3.)).rounded_full().bg(color);
+/// the turn's loader. 3 px dots, 2 px gaps (13 px). Static under reduced motion.
+pub fn dot_grid(
+    color: gpui::Hsla,
+    id: impl Into<gpui::SharedString>,
+    reduced: bool,
+) -> gpui::AnyElement {
+    dot_grid_at(color, id, 3., 2., reduced)
+}
+
+/// [`dot_grid`] with `dot` px dots and `gap` px gaps.
+pub fn dot_grid_at(
+    color: gpui::Hsla,
+    id: impl Into<gpui::SharedString>,
+    dot: f32,
+    gap: f32,
+    reduced: bool,
+) -> gpui::AnyElement {
+    let id: gpui::SharedString = id.into();
+    let cell = || gpui::div().size(zpx(dot)).rounded_full().bg(color);
     let grid = |cell: &dyn Fn(usize) -> gpui::AnyElement| {
         gpui::div()
             .flex()
             .flex_col()
-            .gap(zpx(2.))
+            .gap(zpx(gap))
             .children((0..3).map(|row| {
                 gpui::div()
                     .flex()
                     .flex_row()
-                    .gap(zpx(2.))
+                    .gap(zpx(gap))
                     .children((0..3).map(|col| cell(row * 3 + col)))
             }))
     };
     if reduced {
-        return grid(&|_| dot().opacity(0.6).into_any_element()).into_any_element();
+        return grid(&|_| cell().opacity(0.6).into_any_element()).into_any_element();
     }
     grid(&|i| {
         // Diagonal index 0..=4: the wave reaches each diagonal a fifth of a cycle apart.
         let diagonal = (i / 3 + i % 3) as f32;
-        dot()
+        cell()
             .with_animation(
-                (id, i),
+                (id.clone(), i),
                 Animation::new(SPIN + SPIN / 3).repeat(),
                 move |el, delta| {
                     let phase = (delta - diagonal / 5.0).rem_euclid(1.0);
@@ -927,7 +967,7 @@ mod tests {
         assert_eq!(p.look_at(t0), PILL_ENTER_FROM);
         let mid = p.look_at(t0 + ms(60));
         assert!(
-            mid.opacity > 0.3 && mid.opacity < 1. && mid.dy > 0. && mid.scale < 1.,
+            mid.opacity > 0.3 && mid.opacity < 1. && mid.dy > 0. && mid.scale <= 1.,
             "{mid:?}"
         );
         assert!(near(p.look_at(t0 + PILL_IN), Look::REST));
