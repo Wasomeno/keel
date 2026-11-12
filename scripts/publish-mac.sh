@@ -100,6 +100,22 @@ tar -xJf "$ARCHIVE" -C "$CHECK"
 [ "$(ls "$CHECK")" = Keel.app ] || { echo "archive has more than Keel.app at the top" >&2; exit 1; }
 codesign --verify --strict --verbose=2 "$CHECK/Keel.app"
 
+DMG="$OUT/Keel-$VERSION-macos-arm64.dmg"
+ZIP="$OUT/Keel-$VERSION-macos-arm64.zip"
+rm -f "$DMG" "$ZIP"
+
+echo "building $DMG..."
+DMG_STAGE=$(mktemp -d)
+cp -R "$STAGE/Keel.app" "$DMG_STAGE/"
+ln -s /Applications "$DMG_STAGE/Applications"
+hdiutil create -volname Keel -srcfolder "$DMG_STAGE" -format UDZO -ov "$DMG" >/dev/null
+rm -rf "$DMG_STAGE"
+
+echo "building $ZIP..."
+ditto -c -k --keepParent "$STAGE/Keel.app" "$ZIP"
+
 echo "upload, in this order:"
 echo "$ARCHIVE"
+echo "$DMG"
+echo "$ZIP"
 echo "$OUT/latest.json"
