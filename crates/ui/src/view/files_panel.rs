@@ -124,8 +124,6 @@ struct OpenFile {
 }
 
 pub(super) struct FilesPanel {
-    pub(super) open: bool,
-    pub(super) anim: Option<(Instant, u64)>,
     pub(super) tab: FilesTab,
     pub(super) change_detail_tab: ChangeDetailTab,
     /// The chat everything below belongs to; another chat starts over.
@@ -150,7 +148,7 @@ pub(super) struct FilesPanel {
     file: Option<OpenFile>,
     /// A file being read for the editor.
     opening: Option<String>,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     /// The window, for replies that land with no frame running.
     handle: gpui::AnyWindowHandle,
 }
@@ -158,8 +156,6 @@ pub(super) struct FilesPanel {
 impl FilesPanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<KeelWindow>) -> Self {
         Self {
-            open: false,
-            anim: None,
             tab: FilesTab::Changes,
             change_detail_tab: ChangeDetailTab::Diff,
             chat: None,
@@ -189,6 +185,25 @@ impl FilesPanel {
     /// Edits not saved yet.
     pub(super) fn dirty(&self) -> bool {
         self.file.as_ref().is_some_and(|f| f.dirty)
+    }
+
+    pub(super) fn changes_count(&self) -> Option<usize> {
+        match &self.changes {
+            Some(Load::Ready(list)) => Some(list.len()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn selected_file_name(&self) -> Option<&str> {
+        self.selected
+            .as_deref()
+            .map(|p| p.rsplit('/').next().unwrap_or(p))
+    }
+
+    pub(super) fn mark_selected_dirty_error(&mut self, msg: &str) {
+        if let Some(file) = &mut self.file {
+            file.error = Some(msg.into());
+        }
     }
 
     fn change(&self, path: &str) -> Option<&Change> {
@@ -469,51 +484,37 @@ fn highlight_diff(lines: &mut [DiffLine], path: &str) {
 }
 
 impl KeelWindow {
-    /// ⌘⇧E and the header button: slide the pane in or out. It shares the
-    /// browser's slot, so opening one closes the other.
+    /// ⌘⇧E: toggle the right side panel on Changes / File, or focus Changes if another tab is active.
     pub(super) fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.browser_allowed() {
             return;
         }
-        if !self.files.open && self.browser.open {
-            self.toggle_browser(window, cx);
-        }
-        if !self.files.open {
-            self.set_terminal_open(false, window, cx);
-        }
-        self.update_right_panel_anim();
-        let f = &mut self.files;
-        f.open = !f.open;
-        let n = f.anim.map_or(1, |(_, n)| n + 1);
-        f.anim = Some((Instant::now(), n));
-        if f.open {
-            window.focus(&f.focus, cx);
-            self.files_sync_chat(cx);
-            self.files_refresh(cx);
+        if self.right_panel.open
+            && matches!(
+                self.right_panel_active_kind(),
+                Some(
+                    super::right_panel::RightTabKind::Changes
+                        | super::right_panel::RightTabKind::File
+                )
+            )
+        {
+            self.close_right_panel(window, cx);
         } else {
-            self.composer.update(cx, |s, cx| s.focus(window, cx));
+            self.open_right_tab(super::right_panel::RightTabKind::Changes, window, cx);
         }
-        let settle = self.right_panel_duration();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(settle + Duration::from_millis(20))
-                .await;
-            let _ = this.update(cx, |_, cx| {
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
-    /// Open a changed file's diff in the right-side files panel: its section
-    /// in the stack, opened and brought to the top.
+    /// Open a changed file's diff in the right side panel's Changes tab:
+    /// its section in the stack, opened and brought to the top.
     pub(super) fn show_file_diff(
         &mut self,
         path: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.browser_allowed() {
+            return;
+        }
         let path = self.projects.map_path(
             self.current_chat.as_deref().or(self.files.chat.as_deref()),
             &path,
@@ -529,37 +530,15 @@ impl KeelWindow {
             path
         };
 
-        if !self.files.open {
-            if self.browser.open {
-                self.toggle_browser(window, cx);
-            }
-            self.set_terminal_open(false, window, cx);
-            self.update_right_panel_anim();
-            let f = &mut self.files;
-            f.open = true;
-            let n = f.anim.map_or(1, |(_, n)| n + 1);
-            f.anim = Some((Instant::now(), n));
-            window.focus(&f.focus, cx);
-            self.files_sync_chat(cx);
-            self.files_refresh(cx);
-            let settle = self.right_panel_duration();
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(settle + Duration::from_millis(20))
-                    .await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
-        } else {
-            self.files_sync_chat(cx);
-            self.files_refresh(cx);
-        }
-
+        self.open_right_tab(super::right_panel::RightTabKind::Changes, window, cx);
         self.files_goto_change(rel, cx);
     }
 
-    /// Open a file in the right-side files panel editor.
+    /// Open a file in the right side panel's File tab editor.
     pub(super) fn show_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.browser_allowed() {
+            return;
+        }
         let path = self.projects.map_path(
             self.current_chat.as_deref().or(self.files.chat.as_deref()),
             &path,
@@ -583,34 +562,9 @@ impl KeelWindow {
             if let Some(file) = &mut self.files.file {
                 file.error = Some("Save or discard your edits first.".into());
             }
+            self.open_right_tab(super::right_panel::RightTabKind::File, window, cx);
             cx.notify();
             return;
-        }
-
-        if !self.files.open {
-            if self.browser.open {
-                self.toggle_browser(window, cx);
-            }
-            self.set_terminal_open(false, window, cx);
-            self.update_right_panel_anim();
-            let f = &mut self.files;
-            f.open = true;
-            let n = f.anim.map_or(1, |(_, n)| n + 1);
-            f.anim = Some((Instant::now(), n));
-            window.focus(&f.focus, cx);
-            self.files_sync_chat(cx);
-            self.files_refresh(cx);
-            let settle = self.right_panel_duration();
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(settle + Duration::from_millis(20))
-                    .await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
-        } else {
-            self.files_sync_chat(cx);
-            self.files_refresh(cx);
         }
 
         let mut dir_accum = String::new();
@@ -626,6 +580,7 @@ impl KeelWindow {
         }
 
         self.files.tab = FilesTab::Files;
+        self.open_right_tab(super::right_panel::RightTabKind::File, window, cx);
         self.files_select(rel, window, cx);
         cx.notify();
     }
@@ -637,7 +592,7 @@ impl KeelWindow {
 
     /// Another chat is open: drop what belonged to the last one. Unsaved
     /// edits stay until saved or discarded (the pane says so).
-    fn files_sync_chat(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn files_sync_chat(&mut self, cx: &mut Context<Self>) {
         let chat = self.files_chat();
         let f = &mut self.files;
         if f.chat == chat || f.dirty() {
@@ -660,7 +615,7 @@ impl KeelWindow {
     /// one runs once it lands), and with them the open diff, and the open
     /// file when it has no edits.
     pub(super) fn files_refresh(&mut self, cx: &mut Context<Self>) {
-        if !self.files.open {
+        if !self.right_panel.open {
             return;
         }
         self.files_sync_chat(cx);
@@ -681,7 +636,11 @@ impl KeelWindow {
         } else {
             roots.iter().map(|(alias, _)| format!("@{alias}")).collect()
         };
-        if self.files.tab == FilesTab::Files {
+        if self.files.tab == FilesTab::Files
+            || self
+                .right_panel
+                .has_kind(&super::right_panel::RightTabKind::File)
+        {
             if roots.is_empty() {
                 if !self.files.dirs.contains_key("") {
                     self.files_load_dir(String::new(), cx);
@@ -725,7 +684,7 @@ impl KeelWindow {
                 }
             }
             let _ = this.update(cx, |this, cx| {
-                let (old, show_files, chat_now) = {
+                let old = {
                     let f = &mut this.files;
                     f.refreshing = false;
                     if f.chat.as_deref() != Some(chat.as_str()) {
@@ -741,30 +700,8 @@ impl KeelWindow {
                         Load::Failed(failed.unwrap_or_else(|| "Couldn't read changes".into()))
                     });
                     f.tree_cache = None;
-                    // A folder that isn't a repo has no changes to show.
-                    let show_files =
-                        matches!(f.changes, Some(Load::Failed(_))) && f.tab == FilesTab::Changes;
-                    if show_files {
-                        f.tab = FilesTab::Files;
-                    }
-                    (old, show_files, f.chat.clone())
+                    old
                 };
-                if show_files {
-                    let roots = this.projects.file_roots(chat_now.as_deref());
-                    if roots.is_empty() {
-                        if !this.files.dirs.contains_key("") {
-                            this.files_load_dir(String::new(), cx);
-                        }
-                    } else {
-                        for (alias, _) in roots {
-                            let key = format!("@{alias}");
-                            if !this.files.dirs.contains_key(&key) {
-                                this.files.expanded.insert(key.clone());
-                                this.files_load_dir(key, cx);
-                            }
-                        }
-                    }
-                }
                 this.files_reconcile_docs(old, cx);
                 if let Some(file) = &this.files.file
                     && !file.dirty
@@ -784,7 +721,7 @@ impl KeelWindow {
     }
 
     /// The engine saw the checkout change, or a turn ended: refresh if the
-    /// pane shows that chat.
+    /// right panel has Changes or File open for that chat.
     pub(super) fn files_on_checkout_changed(&mut self, checkout_id: &str, cx: &mut Context<Self>) {
         let ours = self
             .files
@@ -792,13 +729,25 @@ impl KeelWindow {
             .as_ref()
             .and_then(|id| self.state.chats.get(id))
             .is_some_and(|c| c.checkout_id == checkout_id);
-        if self.files.open && ours {
+        let showing_files = self
+            .right_panel
+            .has_kind(&super::right_panel::RightTabKind::Changes)
+            || self
+                .right_panel
+                .has_kind(&super::right_panel::RightTabKind::File);
+        if self.right_panel.open && showing_files && ours {
             self.files_refresh(cx);
         }
     }
 
     pub(super) fn files_on_turn_end(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        if self.files.open && self.files.chat.as_deref() == Some(chat_id) {
+        let showing_files = self
+            .right_panel
+            .has_kind(&super::right_panel::RightTabKind::Changes)
+            || self
+                .right_panel
+                .has_kind(&super::right_panel::RightTabKind::File);
+        if self.right_panel.open && showing_files && self.files.chat.as_deref() == Some(chat_id) {
             self.files_refresh(cx);
         }
     }
@@ -1104,111 +1053,29 @@ impl KeelWindow {
         }
     }
 
-    /// Spacer beside the chat plus the pane over the window's right edge,
-    /// like the browser pane (and the same width and drag edge).
-    pub(super) fn render_files_panel(
-        &mut self,
-        t: Tokens,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let allowed = self.browser_allowed();
-        let open = self.files.open && allowed;
-        let toggling = !self.reduced()
-            && self
-                .files
-                .anim
-                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.right_panel_duration());
-        if !open && !toggling {
-            return Vec::new();
-        }
-        if open {
-            self.files_sync_chat(cx);
-        }
-        let full = self.browser_width(window);
-        let body = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(c(t.window))
-            .border_l_1()
-            .border_color(c(t.border))
-            .child(self.render_files_toolbar(t, cx))
-            .child(self.render_files_body(full, t, window, cx));
-        let pane = div()
-            .id("files-panel")
-            .track_focus(&self.files.focus)
-            .key_context(crate::keys::FILES)
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(px(full))
-            .child(body)
-            .child(self.render_browser_edge(t, cx))
-            // Dev only (`files_tip`): a tooltip shown without a hover.
-            .children(
-                self.files
-                    .dev_tip
-                    .clone()
-                    .map(|tip| div().absolute().top(zpx(52.)).left(zpx(16.)).child(tip)),
-            );
-
-        let anim = self.files.anim.filter(|_| toggling);
-        if let Some((_, n)) = anim {
-            use gpui::AnimationExt as _;
-            let (from, to) = (self.right_panel_from, self.right_panel_target());
-            let curve = gpui::Animation::new(self.right_panel_duration())
-                .with_easing(crate::motion::glide_curve);
-            let pane = pane
-                .with_animation(
-                    ("files-slide", n as usize),
-                    curve.clone(),
-                    move |el, delta| {
-                        let k = from + (to - from) * delta;
-                        el.right(px(crate::motion::panel_shift(full, k)))
-                    },
-                )
-                .into_any_element();
-            // Full width at once. Animating it resizes the chat every frame,
-            // which is the jump; the pane sliding over it is the motion.
-            let spacer = div()
-                .h_full()
-                .flex_none()
-                .w(px(full * to))
-                .into_any_element();
-            vec![spacer, pane]
-        } else if open {
-            let pane = pane.right_0().into_any_element();
-            let spacer = div().h_full().flex_none().w(px(full)).into_any_element();
-            vec![spacer, pane]
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn render_files_toolbar(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Shared refresh button placed neatly in Changes / File subheaders.
+    pub(super) fn render_files_refresh_btn(&self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
         let reduced = self.reduced();
-        let f = &self.files;
-        let badge = match &f.changes {
-            Some(Load::Ready(list)) if !list.is_empty() => Some(list.len()),
-            _ => None,
-        };
-        let refresh = if f.refreshing {
-            // Spinning while it fetches: the click registered and work is on.
+        if self.files.refreshing {
             div()
-                .size(zpx(28.))
+                .size(zpx(24.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(c(t.text_muted))
                 .child(crate::motion::spin(
-                    Icon::Reload.el(zpx(14.)),
+                    Icon::Reload.el(zpx(13.)),
                     "files-refresh-spin",
                     reduced,
                 ))
                 .into_any_element()
         } else {
             icon_button("files-refresh", Icon::Reload, t)
+                .size(zpx(24.))
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::dotify_ui::Tip::new("Refresh", t)).into()
+                })
+                .tooltip_show_delay(crate::view::tooltip::delay())
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     // A manual refresh re-reads open folders too.
                     let open: Vec<String> = this.files.dirs.keys().cloned().collect();
@@ -1220,89 +1087,76 @@ impl KeelWindow {
                     this.files_refresh(cx);
                 }))
                 .into_any_element()
-        };
-        div()
-            .h(HEADER_HEIGHT)
-            .flex_none()
-            .pl_2()
-            .pr_1p5()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .child(
-                seg_track(t)
-                    .child(
-                        seg_item(
-                            "files-tab-changes",
-                            "Changes",
-                            badge,
-                            f.tab == FilesTab::Changes,
-                            t,
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.files.tab = FilesTab::Changes;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        seg_item(
-                            "files-tab-files",
-                            "Files",
-                            None,
-                            f.tab == FilesTab::Files,
-                            t,
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.files.tab = FilesTab::Files;
-                                this.files_refresh(cx);
-                                cx.notify();
-                            },
-                        )),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(refresh)
-            .child(icon_button("files-close", Icon::SidebarClose, t).on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_files(window, cx)),
-            ))
+        }
     }
 
-    fn render_files_body(
+    /// Changes tab body for the unified right side panel.
+    pub(super) fn render_changes_content(
         &mut self,
         width: f32,
         t: Tokens,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.files.chat.is_none() {
-            return div()
-                .flex_1()
-                .border_t_1()
-                .border_color(c(t.border))
-                .child(empty_state(
-                    Icon::Folder,
-                    "No chat open",
-                    "Open a chat to browse its folder and review what the agent changed.",
-                    t,
-                ))
-                .into_any_element();
-        }
-        let inner = match self.files.tab {
-            FilesTab::Changes => self.render_changes(width, t, window, cx),
-            FilesTab::Files => self.render_files_tab(width, t, window, cx),
+        self.files_sync_chat(cx);
+        let inner = if self.files.chat.is_none() {
+            empty_state(
+                Icon::Folder,
+                "No chat open",
+                "Open a chat to review what the agent changed.",
+                t,
+            )
+        } else {
+            self.render_changes(width, t, window, cx)
         };
         div()
+            .relative()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_row()
-            .border_t_1()
-            .border_color(c(t.border))
             .child(inner)
+            .children(
+                self.files
+                    .dev_tip
+                    .clone()
+                    .map(|tip| div().absolute().top(zpx(12.)).left(zpx(16.)).child(tip)),
+            )
+            .into_any_element()
+    }
+
+    /// File explorer tab body for the unified right side panel.
+    pub(super) fn render_files_tree_content(
+        &mut self,
+        width: f32,
+        t: Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.files_sync_chat(cx);
+        let inner = if self.files.chat.is_none() {
+            empty_state(
+                Icon::Folder,
+                "No chat open",
+                "Open a chat to browse its folder and edit files.",
+                t,
+            )
+        } else {
+            self.render_files_tab(width, t, window, cx)
+        };
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .child(inner)
+            .children(
+                self.files
+                    .dev_tip
+                    .clone()
+                    .map(|tip| div().absolute().top(zpx(12.)).left(zpx(16.)).child(tip)),
+            )
             .into_any_element()
     }
 
@@ -1328,6 +1182,27 @@ impl KeelWindow {
                 .h_full()
                 .flex()
                 .flex_col()
+                .child(
+                    div()
+                        .h(zpx(34.))
+                        .flex_none()
+                        .pl_3()
+                        .pr_1p5()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(c(t.border).opacity(0.7))
+                        .child(
+                            div()
+                                .flex_1()
+                                .t_caption()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(c(t.text_muted))
+                                .child("Explorer"),
+                        )
+                        .child(self.render_files_refresh_btn(t, cx)),
+                )
                 .child(self.render_tree(t, window, cx))
         });
         let content_w = if stacked {
@@ -1930,8 +1805,8 @@ impl KeelWindow {
                                     .into()
                             })
                             .tooltip_show_delay(crate::view::tooltip::delay())
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.files_goto_change(p.clone(), cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.show_file_diff(p.clone(), window, cx)
                             })),
                     )
                 })

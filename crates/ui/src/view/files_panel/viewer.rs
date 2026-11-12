@@ -221,6 +221,7 @@ impl KeelWindow {
         cx: &mut Context<Self>,
     ) {
         self.files.tab = FilesTab::Files;
+        self.open_right_tab(super::super::right_panel::RightTabKind::File, window, cx);
         if !self.files.dirs.contains_key("") {
             self.files_load_dir(String::new(), cx);
         }
@@ -672,7 +673,14 @@ impl KeelWindow {
                 ok("ok")
             }
             "files_tab" => {
-                self.files.tab = if arg == "files" { FilesTab::Files } else { FilesTab::Changes };
+                let kind = if arg == "files" {
+                    self.files.tab = FilesTab::Files;
+                    crate::view::right_panel::RightTabKind::File
+                } else {
+                    self.files.tab = FilesTab::Changes;
+                    crate::view::right_panel::RightTabKind::Changes
+                };
+                self.open_right_tab(kind, window, cx);
                 ok("ok")
             }
             "files_tree" => {

@@ -53,6 +53,7 @@ pub struct ChatItem {
     pub tombstoned: bool,
     pub branch: String,
     pub checkout_id: String,
+    pub cwd: String,
     /// Harness/model/reasoning when known (registry view or set by this UI).
     pub harness: String,
     pub model: String,
@@ -88,6 +89,7 @@ impl ChatItem {
             tombstoned: false,
             branch: String::new(),
             checkout_id: String::new(),
+            cwd: String::new(),
             harness: String::new(),
             model: String::new(),
             reasoning: String::new(),
@@ -152,6 +154,8 @@ pub struct AppState {
     pub space_filter: Option<String>,
     /// Folder picked on the new-chat screen; wins over the filter for the next chat.
     pub new_chat_space: Option<String>,
+    /// User explicitly picked "No project" (per-chat ephemeral scratch folder).
+    pub new_chat_no_project: bool,
     pub local_device_id: String,
     /// The space whose header menu is open.
     pub space_menu: Option<String>,
@@ -192,6 +196,7 @@ impl AppState {
             diffs: BTreeMap::new(),
             space_filter: None,
             new_chat_space: None,
+            new_chat_no_project: false,
             local_device_id,
             space_menu: None,
             space_show_all: BTreeSet::new(),
@@ -224,6 +229,39 @@ impl AppState {
         self.detached_head = None;
         self.branch_folder = None;
         self.branch_pending = true;
+    }
+
+    /// Leaving a folder for "No project": clear branches and stop pending load.
+    pub fn clear_branches_for_no_project(&mut self) {
+        self.reset_branch_for_folder();
+        self.branch_pending = false;
+    }
+
+    /// True when `s` is Keel's synthetic scratch container (`{data_dir}/scratch`
+    /// named `"No project"`) or a legacy `{data_dir}/No project` folder.
+    pub fn is_scratch_space(&self, s: &SpaceItem) -> bool {
+        let p = std::path::Path::new(&s.path);
+        if p == self.data_dir.join("scratch") {
+            return true;
+        }
+        p.file_name()
+            .is_some_and(|n| n == "No project" || (n == "scratch" && s.name == "No project"))
+    }
+
+    /// True when `c` belongs to an ephemeral scratch / no-project chat rather
+    /// than a real folder.
+    pub fn is_scratch_chat(&self, c: &ChatItem) -> bool {
+        if !c.cwd.is_empty() {
+            let p = std::path::Path::new(&c.cwd);
+            if p.starts_with(self.data_dir.join("scratch"))
+                || p.file_name().is_some_and(|n| n == "No project")
+            {
+                return true;
+            }
+        }
+        self.spaces
+            .get(&c.space_id)
+            .is_some_and(|s| self.is_scratch_space(s))
     }
 
     /// The branch chip's label, or `None` while a new folder's branches are
@@ -341,18 +379,11 @@ impl AppState {
             .filter(|(chat, _)| !skip.contains(&chat.id))
             .collect();
         let focused = self.space_filter.is_some();
-        // ponytail: matched by folder name, so every device's "No project" counts;
-        // a real folder named "No project" would land there too.
-        let is_no_project = |s: &SpaceItem| {
-            std::path::Path::new(&s.path)
-                .file_name()
-                .is_some_and(|n| n == "No project")
-        };
         let mut spaces: Vec<(String, String, bool)> = self
             .spaces
             .values()
             .filter(|s| !s.tombstoned && self.space_filter.as_ref().is_none_or(|f| f == &s.id))
-            .map(|s| (s.id.clone(), s.name.clone(), is_no_project(s)))
+            .map(|s| (s.id.clone(), s.name.clone(), self.is_scratch_space(s)))
             .collect();
         spaces.sort_by_key(|(_, name, loose)| (*loose, name.to_lowercase()));
         // A chat whose space row hasn't synced yet still needs a section.
@@ -366,41 +397,56 @@ impl AppState {
             }
         }
         let active = self.active_tab.as_deref();
-        spaces
-            .into_iter()
-            .map(|(space_id, name, loose)| {
-                let all: Vec<_> = chats
-                    .iter()
-                    .filter(|(c, _)| c.space_id == space_id)
-                    .cloned()
-                    .collect();
-                // "No project" isn't a real folder: nothing to fold.
-                let collapsed =
-                    !focused && !loose && self.ui_settings.collapsed_spaces.contains(&space_id);
-                let show_all = focused || self.space_show_all.contains(&space_id);
-                let pinned = |(c, s): &(AttentionChat, DisplayStatus)| {
-                    *s == DisplayStatus::AwaitingInput || Some(c.id.as_str()) == active
-                };
-                let rows: Vec<_> = all
-                    .iter()
-                    .enumerate()
-                    .filter(|(ix, row)| {
-                        pinned(row) || (!collapsed && (show_all || *ix < SPACE_ROW_CAP))
-                    })
-                    .map(|(_, row)| row.clone())
-                    .collect();
-                SpaceSection {
-                    urgent: all.first().map_or(DisplayStatus::Idle, |(_, s)| *s),
-                    total: all.len(),
-                    hidden: if collapsed { 0 } else { all.len() - rows.len() },
-                    space_id,
-                    name,
-                    collapsed,
-                    rows,
-                    loose,
-                }
-            })
-            .collect()
+        let build_section = |space_id: String, name: String, loose: bool, ids: &[String]| {
+            let all: Vec<_> = chats
+                .iter()
+                .filter(|(c, _)| ids.iter().any(|id| id == &c.space_id))
+                .cloned()
+                .collect();
+            // "No project" isn't a real folder: nothing to fold.
+            let collapsed =
+                !focused && !loose && self.ui_settings.collapsed_spaces.contains(&space_id);
+            let show_all = focused || ids.iter().any(|id| self.space_show_all.contains(id));
+            let pinned = |(c, s): &(AttentionChat, DisplayStatus)| {
+                *s == DisplayStatus::AwaitingInput || Some(c.id.as_str()) == active
+            };
+            let rows: Vec<_> = all
+                .iter()
+                .enumerate()
+                .filter(|(ix, row)| {
+                    pinned(row) || (!collapsed && (show_all || *ix < SPACE_ROW_CAP))
+                })
+                .map(|(_, row)| row.clone())
+                .collect();
+            SpaceSection {
+                urgent: all.first().map_or(DisplayStatus::Idle, |(_, s)| *s),
+                total: all.len(),
+                hidden: if collapsed { 0 } else { all.len() - rows.len() },
+                space_id,
+                name,
+                collapsed,
+                rows,
+                loose,
+            }
+        };
+        let mut sections = Vec::new();
+        let mut loose_spaces: Vec<(String, String)> = Vec::new();
+        for (space_id, name, loose) in spaces {
+            if loose {
+                loose_spaces.push((space_id, name));
+            } else {
+                let ids = [space_id.clone()];
+                sections.push(build_section(space_id, name, false, &ids));
+            }
+        }
+        if !loose_spaces.is_empty() {
+            let first = &loose_spaces[0];
+            let space_id = first.0.clone();
+            let name = first.1.clone();
+            let ids: Vec<String> = loose_spaces.into_iter().map(|(id, _)| id).collect();
+            sections.push(build_section(space_id, name, true, &ids));
+        }
+        sections
     }
 
     /// Fold or unfold a space section; remembered on this device.
@@ -447,9 +493,10 @@ impl AppState {
 
     /// Derive target space for new session.
     ///
-    /// Current space filter, or, when the filter is All spaces, the newest
-    /// space this device created (by `created_at`). Never another device's
-    /// space as a fallback: `None` means "ask for a folder".
+    /// Current space filter, or, when the filter is All spaces, the newest real
+    /// folder space this device created (by `created_at`). Never another device's
+    /// space or Keel's scratch container as a fallback: `None` means either
+    /// `"No project"` (when `new_chat_no_project` is set) or "ask for a folder".
     pub fn target_space_for_new_session(&self) -> Option<SpaceItem> {
         if let Some(space) = self
             .new_chat_space
@@ -459,12 +506,19 @@ impl AppState {
         {
             return Some(space.clone());
         }
+        if self.new_chat_no_project {
+            return None;
+        }
         if let Some(ref space_id) = self.space_filter {
             return self.spaces.get(space_id).cloned().filter(|s| !s.tombstoned);
         }
         self.spaces
             .values()
-            .filter(|s| !s.tombstoned && s.device_id == self.local_device_id)
+            .filter(|s| {
+                !s.tombstoned
+                    && s.device_id == self.local_device_id
+                    && !self.is_scratch_space(s)
+            })
             .max_by_key(|s| s.created_at)
             .cloned()
     }
@@ -474,15 +528,27 @@ impl AppState {
     pub fn record_created_space(&mut self, id: &str, path: &str) {
         let now = Self::now_ms();
         let device = self.local_device_id.clone();
+        let scratch_root = self.data_dir.join("scratch");
         let space = self.spaces.entry(id.to_string()).or_insert_with(|| {
-            let name = std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string());
+            let p = std::path::Path::new(path);
+            let name = if p == scratch_root {
+                "No project".to_string()
+            } else {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string())
+            };
             SpaceItem::test(id, &name, path, &device)
         });
         space.created_at = space.created_at.max(now);
         space.tombstoned = false;
+    }
+
+    /// Record Keel's synthetic scratch container space by id before its
+    /// registry diff lands.
+    pub fn record_created_scratch_space(&mut self, id: &str) {
+        let path = self.data_dir.join("scratch").to_string_lossy().into_owned();
+        self.record_created_space(id, &path);
     }
 
     pub fn draft(&self, chat_id: &str) -> String {
@@ -654,6 +720,7 @@ impl AppState {
         }
         merge_str(view, "space_id", &mut chat.space_id);
         merge_str(view, "title", &mut chat.title);
+        merge_str(view, "cwd", &mut chat.cwd);
         merge_i64(view, "last_message_at", &mut chat.last_message_at);
         merge_i64(view, "last_seen_at", &mut chat.last_seen_at);
         merge_bool(view, "archived", &mut chat.archived);
@@ -1236,5 +1303,67 @@ mod tests {
         assert!(render(&app, &mut shown, 2100));
         assert_eq!(shown.now, "Branch");
         assert_eq!(shown.roll, 2);
+    }
+
+    #[test]
+    fn scratch_helpers_and_merged_loose_sections() {
+        let temp = std::env::temp_dir().join(format!("keel-ui-scratch-{}", uuid::Uuid::new_v4()));
+        let mut app = test_app(&temp, "dev1");
+        let now = 100_000;
+        let scratch_path = temp.join("scratch").to_string_lossy().into_owned();
+        let legacy_path = temp.join("No project").to_string_lossy().into_owned();
+        app.spaces.insert(
+            "real".into(),
+            SpaceItem::test("real", "App", "/work/app", "dev1"),
+        );
+        app.spaces.insert(
+            "scratch-user".into(),
+            SpaceItem::test("scratch-user", "scratch", "/home/me/scratch", "dev1"),
+        );
+        app.spaces.insert(
+            "s-new".into(),
+            SpaceItem::test("s-new", "No project", &scratch_path, "dev1"),
+        );
+        app.spaces.insert(
+            "s-old".into(),
+            SpaceItem::test("s-old", "No project", &legacy_path, "dev1"),
+        );
+        app.spaces.insert(
+            "s-remote".into(),
+            SpaceItem::test("s-remote", "No project", "/other/host/scratch", "dev2"),
+        );
+
+        assert!(!app.is_scratch_space(&app.spaces["real"]));
+        assert!(!app.is_scratch_space(&app.spaces["scratch-user"]));
+        assert!(app.is_scratch_space(&app.spaces["s-new"]));
+        assert!(app.is_scratch_space(&app.spaces["s-old"]));
+        assert!(app.is_scratch_space(&app.spaces["s-remote"]));
+
+        let mut c_new = ChatItem::test("c-new", "s-new", "New", ChatStatus::Idle, 20, now);
+        c_new.cwd = temp.join("scratch/c-new").to_string_lossy().into_owned();
+        let c_old = ChatItem::test("c-old", "s-old", "Old", ChatStatus::Idle, 10, now);
+        let c_real = ChatItem::test("c-real", "real", "Real", ChatStatus::Idle, 15, now);
+        assert!(app.is_scratch_chat(&c_new));
+        assert!(app.is_scratch_chat(&c_old));
+        assert!(!app.is_scratch_chat(&c_real));
+        app.chats.insert("c-new".into(), c_new);
+        app.chats.insert("c-old".into(), c_old);
+        app.chats.insert("c-real".into(), c_real);
+
+        let sections = app.sidebar_sections_skipping(now, &HashSet::new());
+        let loose: Vec<_> = sections.iter().filter(|s| s.loose).collect();
+        assert_eq!(loose.len(), 1, "legacy and scratch loose sections must merge");
+        assert!(sections.last().unwrap().loose);
+        let loose_ids: Vec<_> = loose[0].rows.iter().map(|(c, _)| c.id.as_str()).collect();
+        assert_eq!(loose_ids, ["c-new", "c-old"]);
+
+        // Scratch spaces are excluded from the default fallback, and explicit
+        // `new_chat_no_project` overrides fallback.
+        app.spaces.get_mut("s-new").unwrap().created_at = 9_999;
+        app.spaces.get_mut("real").unwrap().created_at = 1_000;
+        assert_eq!(app.target_space_for_new_session().unwrap().id, "real");
+        app.new_chat_no_project = true;
+        assert!(app.target_space_for_new_session().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

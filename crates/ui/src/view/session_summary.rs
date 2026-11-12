@@ -155,7 +155,8 @@ impl ChatSummary {
             git,
             touched_files: Vec::new(),
             checks: None,
-            model: model_display.or_else(|| (!chat.model.is_empty()).then(|| chat.model.clone())),
+            model: model_display
+                .or_else(|| (!chat.model.is_empty()).then(|| crate::model_menu::format_name(&chat.model))),
             token_usage,
             context_percent,
             updated_at: if chat.last_message_at > 0 {
@@ -889,7 +890,8 @@ impl super::KeelWindow {
             git,
             touched_files,
             checks,
-            model: model_display.or_else(|| (!chat.model.is_empty()).then(|| chat.model.clone())),
+            model: model_display
+                .or_else(|| (!chat.model.is_empty()).then(|| crate::model_menu::format_name(&chat.model))),
             token_usage,
             context_percent,
             updated_at: if chat.last_message_at > 0 {
@@ -1105,6 +1107,7 @@ mod tests {
             tombstoned: false,
             branch: "develop".into(),
             checkout_id: "chk-1".into(),
+            cwd: String::new(),
             harness: "grok".into(),
             model: "grok-4.5".into(),
             reasoning: "".into(),
@@ -1166,6 +1169,7 @@ mod tests {
             tombstoned: false,
             branch: "main".into(),
             checkout_id: "".into(),
+            cwd: String::new(),
             harness: "".into(),
             model: "".into(),
             reasoning: "".into(),

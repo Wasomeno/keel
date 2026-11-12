@@ -419,8 +419,41 @@ impl Engine {
             cwd: cwd.to_string(),
             use_worktree,
             branch: branch.map(str::to_string),
+            scratch: false,
         };
-        self.create_chat_impl(&params).map(|(chat_id, _)| chat_id)
+        self.create_chat_impl(&params)
+            .map(|(chat_id, _, _)| chat_id)
+    }
+
+    /// Create a chat in an isolated per-chat scratch directory under
+    /// `{data_dir}/scratch/{chat_id}`.
+    pub fn create_scratch_chat(&self, harness: &str, model: &str) -> Result<String, EngineError> {
+        let params = CreateParams {
+            space_id: String::new(),
+            title: String::new(),
+            harness: harness.to_string(),
+            model: model.to_string(),
+            reasoning: String::new(),
+            permission: String::new(),
+            plan_mode: false,
+            cwd: String::new(),
+            use_worktree: false,
+            branch: None,
+            scratch: true,
+        };
+        self.create_chat_impl(&params)
+            .map(|(chat_id, _, _)| chat_id)
+    }
+
+    /// Ensure Keel's synthetic `"No project"` container space exists on this
+    /// device (`{data_dir}/scratch`) and return its `space_id`.
+    pub fn ensure_scratch_space(&self) -> Result<String, EngineError> {
+        let data_dir = compute_data_dir(&self.inner.profile);
+        let dir = repo::scratch_root(&data_dir);
+        std::fs::create_dir_all(&dir).map_err(|err| {
+            EngineError::BadParams(format!("cannot create scratch folder: {err}"))
+        })?;
+        self.create_space(&dir.to_string_lossy(), Some("No project"))
     }
 
     /// A space for an existing absolute folder on this device. The same
@@ -438,7 +471,13 @@ impl Engine {
         if let Some(id) = self.find_space(&canon) {
             return Ok(id);
         }
-        let git = repo::scan_git_repo_sync(&self.inner.device_id, &canon);
+        let data_dir = compute_data_dir(&self.inner.profile);
+        let is_scratch = repo::is_scratch_space_path(&data_dir, &canon);
+        let git = if is_scratch {
+            repo::GitRepoStatus::default()
+        } else {
+            repo::scan_git_repo_sync(&self.inner.device_id, &canon)
+        };
         let now = self.now();
         let mut state = self.lock();
         if let Some(id) = self.find_space_locked(&state, &canon) {
@@ -448,7 +487,13 @@ impl Engine {
         let name = name
             .filter(|name| !name.trim().is_empty())
             .map(str::to_string)
-            .or_else(|| canon.file_name().map(|n| n.to_string_lossy().to_string()))
+            .or_else(|| {
+                if is_scratch {
+                    Some("No project".to_string())
+                } else {
+                    canon.file_name().map(|n| n.to_string_lossy().to_string())
+                }
+            })
             .unwrap_or_else(|| "Folder".to_string());
         let row = SpaceRow {
             id: space_id.clone(),
@@ -472,7 +517,8 @@ impl Engine {
             space_json(&row),
         );
         drop(state);
-        if let Ok(mut lock) = self.inner.repo_watcher.lock()
+        if !is_scratch
+            && let Ok(mut lock) = self.inner.repo_watcher.lock()
             && let Some(ref mut watcher) = *lock
         {
             watcher.watch_folder(&canon, &space_id);
@@ -502,12 +548,27 @@ impl Engine {
 
     /// Validates harness, model, space and cwd; runs git (and `git worktree
     /// add`) without the state lock; then writes the rows in one locked pass.
-    fn create_chat_impl(&self, params: &CreateParams) -> Result<(String, String), EngineError> {
+    fn create_chat_impl(
+        &self,
+        params: &CreateParams,
+    ) -> Result<(String, String, String), EngineError> {
         let harness_id = parse_harness(&params.harness)
             .filter(|id| self.inner.harnesses.iter().any(|h| h.id() == *id))
             .ok_or_else(|| EngineError::BadParams(format!("unknown harness {}", params.harness)))?;
         self.check_model(&params.harness, &params.model)?;
-        let space_id = if params.space_id.is_empty() {
+        let data_dir = compute_data_dir(&self.inner.profile);
+        let space_id = if params.scratch {
+            if params.use_worktree {
+                return Err(EngineError::BadParams(
+                    "scratch chats cannot use a worktree".into(),
+                ));
+            }
+            if params.space_id.is_empty() {
+                self.ensure_scratch_space()?
+            } else {
+                params.space_id.clone()
+            }
+        } else if params.space_id.is_empty() {
             if params.cwd.is_empty() {
                 return Err(EngineError::BadParams("space_id or cwd is required".into()));
             }
@@ -532,49 +593,71 @@ impl Engine {
         let root = Path::new(&space.path)
             .canonicalize()
             .map_err(|_| EngineError::BadParams("space folder is missing".into()))?;
-        let cwd = if params.cwd.is_empty() {
-            root
-        } else {
-            Path::new(&params.cwd)
-                .canonicalize()
-                .ok()
-                .filter(|cwd| cwd.is_dir() && cwd.starts_with(&root))
-                .ok_or_else(|| {
-                    EngineError::BadParams("cwd must be a folder inside the space".into())
-                })?
-        };
+        let space_is_scratch = repo::is_scratch_space_path(&data_dir, &root);
+        if params.scratch && !space_is_scratch {
+            return Err(EngineError::BadParams(
+                "scratch chat cannot target a project folder space".into(),
+            ));
+        }
+        let is_scratch = params.scratch || space_is_scratch;
+        if is_scratch && params.use_worktree {
+            return Err(EngineError::BadParams(
+                "scratch chats cannot use a worktree".into(),
+            ));
+        }
         let device_id = self.inner.device_id.clone();
         let chat_id = Uuid::new_v4().to_string();
-        let git = repo::scan_git_repo_sync(&device_id, &cwd);
-        let (chat_cwd, chat_git) = if params.use_worktree {
-            if !git.is_repo {
-                return Err(EngineError::BadParams(
-                    "a worktree needs a git repository".into(),
-                ));
-            }
-            let dir = compute_data_dir(&self.inner.profile)
-                .join("worktrees")
-                .join(short_hash(&git.repository_id))
-                .join(&chat_id);
-            repo::add_worktree_sync(&cwd, &dir, params.branch.as_deref())
-                .map_err(|err| EngineError::Harness(format!("git worktree add failed: {err}")))?;
-            let wt = repo::scan_git_repo_sync(&device_id, &dir);
-            (dir, wt)
+        let (chat_cwd, chat_git) = if is_scratch {
+            let scratch_dir = repo::scratch_root(&data_dir).join(file_safe(&chat_id));
+            std::fs::create_dir_all(&scratch_dir).map_err(|err| {
+                EngineError::BadParams(format!("cannot create scratch folder: {err}"))
+            })?;
+            let canon_scratch = scratch_dir.canonicalize().unwrap_or(scratch_dir);
+            (canon_scratch, repo::GitRepoStatus::default())
         } else {
-            match params
-                .branch
-                .as_deref()
-                .map(str::trim)
-                .filter(|b| !b.is_empty())
-            {
-                // Run on another branch in place: switch the checkout first.
-                // A dirty tree refuses, and no chat is created.
-                Some(branch) if git.is_repo && git.branch != branch => {
-                    repo::checkout_branch_sync(&cwd, branch).map_err(EngineError::BadParams)?;
-                    let switched = repo::scan_git_repo_sync(&device_id, &cwd);
-                    (cwd, switched)
+            let cwd = if params.cwd.is_empty() {
+                root
+            } else {
+                Path::new(&params.cwd)
+                    .canonicalize()
+                    .ok()
+                    .filter(|cwd| cwd.is_dir() && cwd.starts_with(&root))
+                    .ok_or_else(|| {
+                        EngineError::BadParams("cwd must be a folder inside the space".into())
+                    })?
+            };
+            let git = repo::scan_git_repo_sync(&device_id, &cwd);
+            if params.use_worktree {
+                if !git.is_repo {
+                    return Err(EngineError::BadParams(
+                        "a worktree needs a git repository".into(),
+                    ));
                 }
-                _ => (cwd, git),
+                let dir = data_dir
+                    .join("worktrees")
+                    .join(short_hash(&git.repository_id))
+                    .join(&chat_id);
+                repo::add_worktree_sync(&cwd, &dir, params.branch.as_deref()).map_err(|err| {
+                    EngineError::Harness(format!("git worktree add failed: {err}"))
+                })?;
+                let wt = repo::scan_git_repo_sync(&device_id, &dir);
+                (dir, wt)
+            } else {
+                match params
+                    .branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                {
+                    // Run on another branch in place: switch the checkout first.
+                    // A dirty tree refuses, and no chat is created.
+                    Some(branch) if git.is_repo && git.branch != branch => {
+                        repo::checkout_branch_sync(&cwd, branch).map_err(EngineError::BadParams)?;
+                        let switched = repo::scan_git_repo_sync(&device_id, &cwd);
+                        (cwd, switched)
+                    }
+                    _ => (cwd, git),
+                }
             }
         };
         let chat_cwd_str = chat_cwd.to_string_lossy().to_string();
@@ -614,7 +697,7 @@ impl Engine {
             host_device: device_id,
             space_id: space_id.clone(),
             harness: harness_id,
-            cwd: chat_cwd_str,
+            cwd: chat_cwd_str.clone(),
             model: params.model.clone(),
             reasoning: params.reasoning.clone(),
             native_session: String::new(),
@@ -643,7 +726,7 @@ impl Engine {
         {
             watcher.watch_folder(&chat_cwd, &format!("{CHAT_KEY}{chat_id}"));
         }
-        Ok((chat_id, space_id))
+        Ok((chat_id, space_id, chat_cwd_str))
     }
 
     /// Rejects a model the harness did not list. Only checked once the list is
@@ -987,10 +1070,12 @@ impl Engine {
                 .collect();
             if !gone.is_empty() {
                 let removals = self.worktree_removals(&state, |chat| gone.contains(&chat.id));
+                let scratch_removals = self.scratch_removals(&state, |chat| gone.contains(&chat.id));
                 if state.store.registry().delete_chats(&gone).is_ok() {
                     tracing::info!(target: "keel_engine", count = gone.len(), "dropped chats of removed harnesses");
                     state.dirty = true;
                     remove_worktrees(removals);
+                    remove_scratch_dirs(scratch_removals);
                 }
             }
             let chats = state.store.registry().view().chats;
@@ -1031,12 +1116,14 @@ impl Engine {
                 status_tx,
             );
             let view = state.store.registry().view();
+            let data_dir = compute_data_dir(&self.inner.profile);
             for space in &view.spaces {
-                if space.device_id == self.inner.device_id {
+                if space.device_id == self.inner.device_id
+                    && !repo::is_scratch_space_path(&data_dir, Path::new(&space.path))
+                {
                     watcher.watch_folder(Path::new(&space.path), &space.id);
                 }
             }
-            let data_dir = compute_data_dir(&self.inner.profile);
             for chat in &view.chats {
                 if chat.device_id == self.inner.device_id
                     && repo::is_engine_worktree(&data_dir, Path::new(&chat.cwd))
@@ -2629,9 +2716,27 @@ impl Engine {
                     Some(NativeSessionId(value))
                 }
             });
+        let data_dir = compute_data_dir(&self.inner.profile);
+        let scratch_parent = repo::scratch_root(&data_dir);
+        let canon_parent = scratch_parent
+            .canonicalize()
+            .unwrap_or_else(|_| scratch_parent.clone());
+        let expected_scratch = canon_parent.join(file_safe(chat_id));
+        let meta_cwd_path = Path::new(&meta.cwd);
+        if !meta_cwd_path.is_dir()
+            && (meta_cwd_path == expected_scratch
+                || meta_cwd_path == scratch_parent.join(file_safe(chat_id)))
+        {
+            let _ = std::fs::create_dir_all(meta_cwd_path);
+        }
+        let is_scratch = repo::is_no_project_cwd(&data_dir, meta_cwd_path);
         // The chat's project: its folders in scope reach the agent as named
         // roots, the first being where it runs (its checkout, when it has one).
-        let project = self.project_roots(chat_id, &meta.cwd);
+        let project = if is_scratch {
+            None
+        } else {
+            self.project_roots(chat_id, &meta.cwd)
+        };
         if let Some(p) = &project {
             let roots: Vec<String> = p
                 .roots
@@ -2648,7 +2753,8 @@ impl Engine {
             None => command.text.clone(),
         };
         let initial_text = if let Some(agent) = keel_harness::pi_agent_dir() {
-            commands::translate_skill_for_harness(&initial_text, Some(Path::new(&meta.cwd)), agent)
+            let skill_cwd = (!is_scratch).then(|| Path::new(&meta.cwd));
+            commands::translate_skill_for_harness(&initial_text, skill_cwd, agent)
         } else {
             initial_text
         };
@@ -2682,7 +2788,6 @@ impl Engine {
                 state.dirty = true;
                 engine_for_usage.push_registry_chat(&mut state, &reported_chat_for_usage);
             }));
-        let data_dir = compute_data_dir(&self.inner.profile);
         // Token-optimal prompt cache configuration:
         // - keep_cache_warm: true (Pi cacheWarming: "idle" maintains KV cache during idle gaps)
         // - longer_cache: false (Standard retention avoids Anthropic's +25% write penalty while idle warming keeps cache hot)
@@ -2727,6 +2832,7 @@ impl Engine {
                 chat_id: Some(chat_id.to_string()),
                 permission,
                 plan_mode,
+                scratch: is_scratch,
                 project,
                 longer_cache,
                 keep_cache_warm,
@@ -3188,7 +3294,7 @@ impl Engine {
             return failure(id, RpcErrorCode::BadParams, "bad params");
         };
         match self.create_chat_impl(&params) {
-            Ok((chat_id, space_id)) => success(id, CreateResult { chat_id, space_id }),
+            Ok((chat_id, space_id, cwd)) => success(id, CreateResult { chat_id, space_id, cwd }),
             Err(err) => engine_failure(id, err),
         }
     }
@@ -3958,6 +4064,8 @@ impl Engine {
             .map(|c| c.id)
             .collect();
         let removals = self.worktree_removals(&state, |chat| chat.space_id == params.space_id);
+        let scratch_removals =
+            self.scratch_removals(&state, |chat| chat.space_id == params.space_id);
         if let Err(err) = state.store.registry().delete_space(&params.space_id) {
             return failure(id, RpcErrorCode::BadParams, &err.to_string());
         }
@@ -3982,13 +4090,15 @@ impl Engine {
         }
         drop(state);
         remove_worktrees(removals);
+        remove_scratch_dirs(scratch_removals);
         for chat_id in &chat_ids {
             self.evict_chat(chat_id);
         }
         success(id, serde_json::json!({}))
     }
 
-    /// Tombstone chats everywhere (single or bulk) and drop their worktrees.
+    /// Tombstone chats everywhere (single or bulk) and drop their worktrees
+    /// and isolated scratch folders.
     fn rpc_delete_chats(&self, id: &str, params: &Value) -> String {
         #[derive(serde::Deserialize)]
         struct DeleteChatsParams {
@@ -3999,6 +4109,8 @@ impl Engine {
         };
         let mut state = self.lock();
         let removals = self.worktree_removals(&state, |chat| params.chat_ids.contains(&chat.id));
+        let scratch_removals =
+            self.scratch_removals(&state, |chat| params.chat_ids.contains(&chat.id));
         if let Err(err) = state.store.registry().delete_chats(&params.chat_ids) {
             return failure(id, RpcErrorCode::BadParams, &err.to_string());
         }
@@ -4016,6 +4128,7 @@ impl Engine {
         }
         drop(state);
         remove_worktrees(removals);
+        remove_scratch_dirs(scratch_removals);
         for chat_id in &params.chat_ids {
             self.evict_chat(chat_id);
         }
@@ -4041,6 +4154,20 @@ impl Engine {
                     && repo::is_engine_worktree(&data_dir, Path::new(&chat.cwd)))
                 .then(|| (PathBuf::from(&space.path), PathBuf::from(&chat.cwd)))
             })
+            .collect()
+    }
+
+    /// Per-chat scratch directories strictly inside `{data_dir}/scratch/` to
+    /// remove after the lock is released. Legacy `{data_dir}/No project` is
+    /// never included.
+    fn scratch_removals(&self, state: &State, pick: impl Fn(&ChatRow) -> bool) -> Vec<PathBuf> {
+        let view = state.store.registry().view();
+        let data_dir = compute_data_dir(&self.inner.profile);
+        view.chats
+            .iter()
+            .filter(|chat| pick(chat) && chat.device_id == self.inner.device_id)
+            .map(|chat| PathBuf::from(&chat.cwd))
+            .filter(|cwd| repo::is_engine_scratch(&data_dir, cwd))
             .collect()
     }
 
@@ -4238,6 +4365,10 @@ impl Engine {
                 "this chat's files are on another device",
             );
         }
+        let data_dir = compute_data_dir(&self.inner.profile);
+        if chat.cwd.is_empty() || repo::is_no_project_cwd(&data_dir, Path::new(&chat.cwd)) {
+            return success(id, serde_json::json!({ "repo": false }));
+        }
         let (id, outbound, cwd) = (id.to_string(), outbound.clone(), PathBuf::from(&chat.cwd));
         std::thread::spawn(move || {
             let body = match (cwd.as_os_str().is_empty(), files::changes(&cwd)) {
@@ -4284,7 +4415,8 @@ impl Engine {
                 "this chat's files are on another device",
             ));
         }
-        if chat.cwd.is_empty() {
+        let data_dir = compute_data_dir(&self.inner.profile);
+        if chat.cwd.is_empty() || repo::is_no_project_cwd(&data_dir, Path::new(&chat.cwd)) {
             return Err(failure(
                 id,
                 RpcErrorCode::BadParams,
@@ -4506,13 +4638,20 @@ impl Engine {
         }
     }
 
+    fn non_scratch_cwd(&self, cwd: Option<PathBuf>) -> Option<PathBuf> {
+        let data_dir = compute_data_dir(&self.inner.profile);
+        cwd.filter(|path| !repo::is_no_project_cwd(&data_dir, path))
+    }
+
     /// Slash commands and skills the harness picks up in a chat's folder, for
     /// the composer's `/` menu. No folder: the user's own only.
     fn rpc_list_commands(&self, id: &str, params: &Value) -> String {
-        let cwd = params["cwd"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.is_dir());
+        let cwd = self.non_scratch_cwd(
+            params["cwd"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute() && p.is_dir()),
+        );
         let Some(agent) = keel_harness::pi_agent_dir() else {
             return success(id, serde_json::json!({ "commands": [] }));
         };
@@ -4522,7 +4661,7 @@ impl Engine {
 
     /// Skills Pi would load for this chat, including ones switched off.
     fn rpc_list_skills(&self, id: &str, params: &Value) -> String {
-        let cwd = absolute_dir(params.get("cwd"));
+        let cwd = self.non_scratch_cwd(absolute_dir(params.get("cwd")));
         let Some(agent) = keel_harness::pi_agent_dir() else {
             return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
         };
@@ -4537,15 +4676,33 @@ impl Engine {
         keel_harness::KeelProfile::home(&compute_data_dir(&self.inner.profile))
     }
 
+    /// Memory's `cwd`: missing, empty, non-directory, or scratch/no-project is
+    /// no project; a relative path is a caller bug.
+    fn memory_cwd(&self, params: &Value) -> Result<Option<PathBuf>, &'static str> {
+        match params.get("cwd") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(raw)) if raw.is_empty() => Ok(None),
+            Some(Value::String(raw)) => {
+                let path = PathBuf::from(raw);
+                if !path.is_absolute() {
+                    Err("cwd must be an absolute path")
+                } else {
+                    Ok(self.non_scratch_cwd(Some(path).filter(|p| p.is_dir())))
+                }
+            }
+            Some(_) => Err("cwd must be a string"),
+        }
+    }
+
     fn rpc_memory_prompt(&self, id: &str, params: &Value) -> String {
-        match memory_cwd(params) {
+        match self.memory_cwd(params) {
             Ok(cwd) => success(id, serde_json::json!({ "text": memory::prompt(&self.memory_home(), cwd.as_deref()) })),
             Err(msg) => failure(id, RpcErrorCode::BadParams, msg),
         }
     }
 
     fn rpc_memory_list(&self, id: &str, params: &Value) -> String {
-        let cwd = match memory_cwd(params) {
+        let cwd = match self.memory_cwd(params) {
             Ok(cwd) => cwd,
             Err(msg) => return failure(id, RpcErrorCode::BadParams, msg),
         };
@@ -4590,7 +4747,7 @@ impl Engine {
 
     fn memory_scope(&self, params: &Value) -> Result<memory::ScopeDir, memory::MemoryError> {
         let kind = memory::ScopeKind::parse(params.get("scope").and_then(Value::as_str).unwrap_or_default())?;
-        let cwd = memory_cwd(params).map_err(|m| memory::MemoryError::BadParams(m.to_string()))?;
+        let cwd = self.memory_cwd(params).map_err(|m| memory::MemoryError::BadParams(m.to_string()))?;
         memory::resolve(&self.memory_home(), kind, cwd.as_deref())
     }
 
@@ -4601,7 +4758,7 @@ impl Engine {
         let Some(enabled) = params.get("enabled").and_then(Value::as_bool) else {
             return failure(id, RpcErrorCode::BadParams, "bad params");
         };
-        let cwd = absolute_dir(params.get("cwd"));
+        let cwd = self.non_scratch_cwd(absolute_dir(params.get("cwd")));
         let Some(agent) = keel_harness::pi_agent_dir() else {
             return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
         };
@@ -4618,7 +4775,7 @@ impl Engine {
         ) else {
             return failure(id, RpcErrorCode::BadParams, "bad params");
         };
-        let cwd = absolute_dir(params.get("cwd"));
+        let cwd = self.non_scratch_cwd(absolute_dir(params.get("cwd")));
         let replace = params
             .get("replace")
             .and_then(Value::as_bool)
@@ -4636,7 +4793,7 @@ impl Engine {
         let Some(path) = params.get("path").and_then(Value::as_str) else {
             return failure(id, RpcErrorCode::BadParams, "bad params");
         };
-        let cwd = absolute_dir(params.get("cwd"));
+        let cwd = self.non_scratch_cwd(absolute_dir(params.get("cwd")));
         let Some(agent) = keel_harness::pi_agent_dir() else {
             return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
         };
@@ -4644,6 +4801,150 @@ impl Engine {
             Ok(()) => success(id, serde_json::json!({})),
             Err(err) => failure(id, RpcErrorCode::BadParams, &err),
         }
+    }
+
+    /// Promote a hosted scratch / no-project chat into a real folder space.
+    /// When the chat owns an isolated `{data_dir}/scratch/{chat_id}` workspace,
+    /// its files are copied (without overwriting existing files or following
+    /// symlinks) into `path` before removing the old scratch folder.
+    fn rpc_move_chat_to_folder(&self, id: &str, params: &Value) -> String {
+        #[derive(serde::Deserialize)]
+        struct MoveChatParams {
+            chat_id: String,
+            path: String,
+        }
+        let Ok(params) = serde_json::from_value::<MoveChatParams>(params.clone()) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let target_raw = PathBuf::from(&params.path);
+        if !target_raw.is_absolute() {
+            return failure(
+                id,
+                RpcErrorCode::BadParams,
+                "path must be an absolute folder path",
+            );
+        }
+        let Ok(target) = target_raw.canonicalize() else {
+            return failure(id, RpcErrorCode::BadParams, "folder does not exist");
+        };
+        if !target.is_dir() {
+            return failure(id, RpcErrorCode::BadParams, "path is not a directory");
+        }
+        let data_dir = compute_data_dir(&self.inner.profile);
+        if repo::is_scratch_space_path(&data_dir, &target)
+            || repo::is_engine_scratch(&data_dir, &target)
+            || repo::is_engine_worktree(&data_dir, &target)
+        {
+            return failure(id, RpcErrorCode::BadParams, "choose a real project folder");
+        }
+
+        let old_cwd = {
+            let state = self.lock();
+            let Some(chat) = state
+                .store
+                .registry()
+                .view()
+                .chats
+                .into_iter()
+                .find(|c| c.id == params.chat_id)
+            else {
+                return failure(id, RpcErrorCode::UnknownChat, "unknown chat");
+            };
+            if chat.device_id != self.inner.device_id {
+                return failure(id, RpcErrorCode::NotHost, "this chat is on another device");
+            }
+            if state.live.contains_key(&params.chat_id) {
+                return failure(
+                    id,
+                    RpcErrorCode::BadParams,
+                    "stop the running turn before moving this chat",
+                );
+            }
+            let cwd = PathBuf::from(&chat.cwd);
+            if !chat.cwd.is_empty() && !repo::is_no_project_cwd(&data_dir, &cwd) {
+                return failure(
+                    id,
+                    RpcErrorCode::BadParams,
+                    "only scratch chats can be moved to a folder",
+                );
+            }
+            cwd
+        };
+
+        let is_isolated = repo::is_engine_scratch(&data_dir, &old_cwd);
+        let plan = if is_isolated {
+            match plan_scratch_copy(&old_cwd, &target) {
+                Ok(plan) => Some(plan),
+                Err(err) => return failure(id, RpcErrorCode::BadParams, &err),
+            }
+        } else {
+            None
+        };
+
+        let space_id = match self.create_space(&target.to_string_lossy(), None) {
+            Ok(space_id) => space_id,
+            Err(err) => return engine_failure(id, err),
+        };
+        let git = repo::scan_git_repo_sync(&self.inner.device_id, &target);
+
+        if let Some(plan) = plan
+            && let Err(err) = execute_scratch_copy(&plan, &target)
+        {
+            return failure(id, RpcErrorCode::BadParams, &err);
+        }
+
+        let cwd_str = target.to_string_lossy().to_string();
+        let mut state = self.lock();
+        let view = state.store.registry().view();
+        let Some(chat) = view.chats.into_iter().find(|c| c.id == params.chat_id) else {
+            return failure(id, RpcErrorCode::UnknownChat, "unknown chat");
+        };
+        if state.live.contains_key(&params.chat_id) {
+            return failure(
+                id,
+                RpcErrorCode::BadParams,
+                "stop the running turn before moving this chat",
+            );
+        }
+        if Path::new(&chat.cwd) != old_cwd {
+            return failure(
+                id,
+                RpcErrorCode::BadParams,
+                "chat workspace changed concurrently",
+            );
+        }
+        if let Err(err) = state.store.registry().set_chat_workspace(
+            &self.inner.device_id,
+            &params.chat_id,
+            &space_id,
+            &cwd_str,
+            &git.branch,
+            &git.checkout_id,
+        ) {
+            return failure(id, RpcErrorCode::BadParams, &err.to_string());
+        }
+        if let Ok(Some(session)) = state.store.load_session(&params.chat_id) {
+            let _ = session.set_workspace(&space_id, &cwd_str);
+        }
+        state.dirty = true;
+        let now = self.now();
+        let _ = save(&mut state, now, false, self.inner.compaction_bytes);
+        self.push_registry_chat(&state, &params.chat_id);
+        drop(state);
+
+        self.evict_chat(&params.chat_id);
+        if is_isolated {
+            remove_scratch_dirs(vec![old_cwd]);
+        }
+        success(
+            id,
+            serde_json::json!({
+                "chat_id": params.chat_id,
+                "space_id": space_id,
+                "cwd": cwd_str,
+                "branch": git.branch,
+            }),
+        )
     }
 
     fn rpc_rename_space(&self, id: &str, params: &Value) -> String {
@@ -4967,6 +5268,7 @@ impl EngineHost for Engine {
             "delete_chats" => self.rpc_delete_chats(&request.id, &request.params),
             "rename_space" => self.rpc_rename_space(&request.id, &request.params),
             "rename_chat" => self.rpc_rename_chat(&request.id, &request.params),
+            "move_chat_to_folder" => self.rpc_move_chat_to_folder(&request.id, &request.params),
             "read_workspace_file" => self.rpc_read_workspace_file(&request.id, &request.params),
             "write_workspace_file" => self.rpc_write_workspace_file(&request.id, &request.params),
             "subscribe_browser" => self.rpc_subscribe_browser(&request.id, outbound),
@@ -5201,6 +5503,142 @@ fn remove_worktrees(removals: Vec<(PathBuf, PathBuf)>) {
             tracing::warn!(target: "keel_engine", path = %worktree.display(), error = %err, "worktree kept");
         }
     }
+}
+
+/// Runs off the state lock. Removes isolated `{data_dir}/scratch/{chat_id}`
+/// folders after chat deletion or migration.
+fn remove_scratch_dirs(dirs: Vec<PathBuf>) {
+    for dir in dirs {
+        if let Err(err) = std::fs::remove_dir_all(&dir)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(target: "keel_engine", path = %dir.display(), error = %err, "scratch dir kept");
+        }
+    }
+}
+
+struct ScratchCopyPlan {
+    dirs: Vec<PathBuf>,
+    files: Vec<(PathBuf, PathBuf)>,
+}
+
+fn plan_scratch_copy(src: &Path, dst: &Path) -> Result<ScratchCopyPlan, String> {
+    let mut plan = ScratchCopyPlan {
+        dirs: Vec::new(),
+        files: Vec::new(),
+    };
+    let mut stack = vec![(src.to_path_buf(), PathBuf::new())];
+    while let Some((cur_src, rel_base)) = stack.pop() {
+        let entries = std::fs::read_dir(&cur_src)
+            .map_err(|err| format!("cannot read scratch folder: {err}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("cannot read scratch entry: {err}"))?;
+            let ft = entry
+                .file_type()
+                .map_err(|err| format!("cannot inspect scratch entry: {err}"))?;
+            let name = entry.file_name();
+            let rel = rel_base.join(&name);
+            if ft.is_symlink() {
+                return Err(format!(
+                    "refusing to move symbolic link '{}'",
+                    rel.display()
+                ));
+            }
+            let dst_entry = dst.join(&rel);
+            match std::fs::symlink_metadata(&dst_entry) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return Err(format!(
+                            "target contains a symbolic link at '{}'",
+                            rel.display()
+                        ));
+                    }
+                    if !ft.is_dir() || !meta.is_dir() {
+                        return Err(format!("target already contains '{}'", rel.display()));
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(format!("cannot check target '{}': {err}", rel.display()));
+                }
+            }
+            if ft.is_dir() {
+                plan.dirs.push(rel.clone());
+                stack.push((entry.path(), rel));
+            } else if ft.is_file() {
+                plan.files.push((entry.path(), rel));
+            } else {
+                return Err(format!(
+                    "refusing to move unsupported entry '{}'",
+                    rel.display()
+                ));
+            }
+        }
+    }
+    Ok(plan)
+}
+
+fn execute_scratch_copy(plan: &ScratchCopyPlan, dst: &Path) -> Result<(), String> {
+    let mut created_files: Vec<PathBuf> = Vec::new();
+    let mut created_dirs: Vec<PathBuf> = Vec::new();
+    let rollback = |files: &[PathBuf], dirs: &[PathBuf]| {
+        for file in files {
+            let _ = std::fs::remove_file(file);
+        }
+        for dir in dirs.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    };
+
+    for rel in &plan.dirs {
+        let target_dir = dst.join(rel);
+        match std::fs::symlink_metadata(&target_dir) {
+            Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {}
+            Ok(_) => {
+                rollback(&created_files, &created_dirs);
+                return Err(format!("target already contains '{}'", rel.display()));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(err) = std::fs::create_dir(&target_dir) {
+                    rollback(&created_files, &created_dirs);
+                    return Err(format!("cannot create '{}': {err}", rel.display()));
+                }
+                created_dirs.push(target_dir);
+            }
+            Err(err) => {
+                rollback(&created_files, &created_dirs);
+                return Err(format!("cannot check '{}': {err}", rel.display()));
+            }
+        }
+    }
+
+    for (src_path, rel) in &plan.files {
+        let target_file = dst.join(rel);
+        let mut src_file = match std::fs::File::open(src_path) {
+            Ok(f) => f,
+            Err(err) => {
+                rollback(&created_files, &created_dirs);
+                return Err(format!("cannot read '{}': {err}", rel.display()));
+            }
+        };
+        let mut out_file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target_file)
+        {
+            Ok(f) => f,
+            Err(err) => {
+                rollback(&created_files, &created_dirs);
+                return Err(format!("cannot copy '{}': {err}", rel.display()));
+            }
+        };
+        created_files.push(target_file);
+        if let Err(err) = std::io::copy(&mut src_file, &mut out_file) {
+            rollback(&created_files, &created_dirs);
+            return Err(format!("cannot write '{}': {err}", rel.display()));
+        }
+    }
+    Ok(())
 }
 
 /// Runs `fut` to completion with a deadline.
@@ -5892,24 +6330,6 @@ fn fs_read_dirs(path: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Memory's `cwd`: missing, empty or not a folder is no project; a relative
-/// path is a caller bug.
-fn memory_cwd(params: &Value) -> Result<Option<PathBuf>, &'static str> {
-    match params.get("cwd") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(raw)) if raw.is_empty() => Ok(None),
-        Some(Value::String(raw)) => {
-            let path = PathBuf::from(raw);
-            if !path.is_absolute() {
-                Err("cwd must be an absolute path")
-            } else {
-                Ok(Some(path).filter(|p| p.is_dir()))
-            }
-        }
-        Some(_) => Err("cwd must be a string"),
-    }
-}
-
 fn memory_reply(id: &str, result: Result<Value, memory::MemoryError>) -> String {
     match result {
         Ok(value) => success(id, value),
@@ -5987,12 +6407,15 @@ struct CreateParams {
     use_worktree: bool,
     #[serde(default)]
     branch: Option<String>,
+    #[serde(default)]
+    scratch: bool,
 }
 
 #[derive(Serialize)]
 struct CreateResult {
     chat_id: String,
     space_id: String,
+    cwd: String,
 }
 
 #[derive(serde::Deserialize)]

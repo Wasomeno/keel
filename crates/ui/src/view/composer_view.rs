@@ -172,10 +172,15 @@ impl KeelWindow {
     /// branches right away (same frame); otherwise HEAD alone is asked for
     /// first, so the label lands before the full listing.
     fn load_branches(&mut self, cx: &mut Context<Self>) {
-        let (Some(space), Some(client)) = (
-            self.state.target_space_for_new_session(),
-            self.client.clone(),
-        ) else {
+        let Some(space) = self
+            .state
+            .target_space_for_new_session()
+            .filter(|s| !self.state.is_scratch_space(s))
+        else {
+            self.state.clear_branches_for_no_project();
+            return;
+        };
+        let Some(client) = self.client.clone() else {
             return;
         };
         let path = space.path;
@@ -266,7 +271,12 @@ impl KeelWindow {
     /// On the hero: fetch branches once per showing and whenever the target
     /// folder changes (a folder change also drops the user's pick).
     fn ensure_branches(&mut self, cx: &mut Context<Self>) {
-        let Some(space) = self.state.target_space_for_new_session() else {
+        let Some(space) = self
+            .state
+            .target_space_for_new_session()
+            .filter(|s| !self.state.is_scratch_space(s))
+        else {
+            self.state.clear_branches_for_no_project();
             return;
         };
         let same_folder = self.state.branch_folder.as_deref() == Some(space.path.as_str());
@@ -1172,13 +1182,6 @@ impl KeelWindow {
                 super::MentionItem::Command(command) => {
                     command_rows.push(cascade_in(
                         row(format!("mention-cmd-{}", command.insert), active)
-                            .child(div().flex_none().text_color(c(t.text_faint)).child(
-                                if command.skill {
-                                    Icon::Brain.el(zpx(13.))
-                                } else {
-                                    Icon::Tool.el(zpx(13.))
-                                },
-                            ))
                             .child(div().flex_none().text_color(c(t.text)).child(
                                 if command.skill {
                                     command
@@ -1391,7 +1394,13 @@ impl KeelWindow {
             .state
             .target_space_for_new_session()
             .map(|s| (s.name.clone(), s.path.clone()))
-            .unwrap_or_else(|| ("Choose folder".into(), String::new()));
+            .unwrap_or_else(|| {
+                if self.state.new_chat_no_project {
+                    ("No project".into(), String::new())
+                } else {
+                    ("Choose folder".into(), String::new())
+                }
+            });
         let space = self.projects.folder_chip(
             (!space_path.is_empty()).then_some(space_path.as_str()),
             space_name,
@@ -2363,10 +2372,9 @@ impl KeelWindow {
                 items.push(self.picker_search_box(Icon::Folder, t));
                 items.extend(self.project_picker_rows(t, cx));
                 let current = self.state.target_space_for_new_session();
-                let no_project = self.state.data_dir.join("No project");
-                let is_no_project =
-                    |s: &crate::state::SpaceItem| std::path::Path::new(&s.path) == no_project;
-                let none_current = current.as_ref().is_some_and(&is_no_project);
+                let is_no_project = |s: &crate::state::SpaceItem| self.state.is_scratch_space(s);
+                let none_current =
+                    self.state.new_chat_no_project || current.as_ref().is_some_and(&is_no_project);
                 let current = current.map(|s| s.id);
                 let mut spaces: Vec<_> = self
                     .state
@@ -2433,6 +2441,7 @@ impl KeelWindow {
                     .child(faint_path(space.path.clone(), t))
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
+                            this.state.new_chat_no_project = false;
                             this.state.new_chat_space = Some(id.clone());
                             this.projects.picked = None;
                             this.state.reset_branch_for_folder();

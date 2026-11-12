@@ -906,6 +906,88 @@ pub fn unit(x: f32) -> f32 {
     if x.is_finite() { x.clamp(0., 1.) } else { 0. }
 }
 
+/// Duration of the Copy → Check spring enter and smooth return.
+pub const COPY_SWAP_IN_MS: f32 = 280.;
+pub const COPY_SWAP_OUT_MS: f32 = 180.;
+
+/// Opacity and centered scale for the stacked Copy / Check icon swap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CopySwapLook {
+    pub copy_opacity: f32,
+    pub copy_scale: f32,
+    pub check_opacity: f32,
+    pub check_scale: f32,
+    pub animating: bool,
+}
+
+/// Sleek physical crossfade + subtle spring pop between Copy and Check driven by
+/// `copied_at` so rapid clicks stay continuous and reduced motion cuts cleanly.
+pub fn copy_swap_look(
+    copied: bool,
+    copied_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+    reduced: bool,
+) -> CopySwapLook {
+    let rest = CopySwapLook {
+        copy_opacity: 1.,
+        copy_scale: 1.,
+        check_opacity: 0.,
+        check_scale: 0.82,
+        animating: false,
+    };
+    if !copied {
+        return rest;
+    }
+    let hold = crate::code_block::COPIED_HOLD_MS;
+    let done = hold + COPY_SWAP_OUT_MS;
+    let Some(at) = copied_at else {
+        return CopySwapLook {
+            copy_opacity: 0.,
+            copy_scale: 0.82,
+            check_opacity: 1.,
+            check_scale: 1.,
+            animating: false,
+        };
+    };
+    let ms = now.saturating_duration_since(at).as_secs_f32() * 1000.;
+    if reduced {
+        let on = ms < done;
+        return CopySwapLook {
+            copy_opacity: if on { 0. } else { 1. },
+            copy_scale: 1.,
+            check_opacity: if on { 1. } else { 0. },
+            check_scale: 1.,
+            animating: false,
+        };
+    }
+    if ms < COPY_SWAP_IN_MS {
+        let s = spring((ms / COPY_SWAP_IN_MS).clamp(0., 1.));
+        let fade = ease_out_strong((ms / 140.).min(1.));
+        let overshoot = (s - 1.).max(0.);
+        return CopySwapLook {
+            copy_opacity: (1. - fade * 1.25).clamp(0., 1.),
+            copy_scale: 1. - 0.18 * fade,
+            check_opacity: ((fade - 0.12) / 0.88).clamp(0., 1.),
+            check_scale: 0.72 + 0.28 * s + 0.50 * overshoot,
+            animating: true,
+        };
+    }
+    let (t, animating) = if ms < hold {
+        (1., false)
+    } else if ms < done {
+        (1. - ease_out((ms - hold) / COPY_SWAP_OUT_MS), true)
+    } else {
+        (0., false)
+    };
+    CopySwapLook {
+        copy_opacity: (1. - t * 1.25).clamp(0., 1.),
+        copy_scale: 1. - 0.18 * t,
+        check_opacity: ((t - 0.12) / 0.88).clamp(0., 1.),
+        check_scale: 0.82 + 0.18 * t,
+        animating,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1163,5 +1245,46 @@ mod tests {
             "reduced motion just swaps"
         );
         assert_eq!(l.now, "e");
+    }
+
+    #[test]
+    fn copy_swap_crossfades_with_scale_and_cuts_for_reduced_motion() {
+        let t0 = std::time::Instant::now();
+        let at = |ms| copy_swap_look(true, Some(t0), t0 + Duration::from_millis(ms), false);
+        let rest = copy_swap_look(false, Some(t0), t0, false);
+        assert_eq!(rest.copy_opacity, 1.);
+        assert_eq!(rest.check_opacity, 0.);
+        assert!(!rest.animating);
+
+        let mid = at(40);
+        assert!(mid.animating);
+        assert!(mid.check_opacity > 0. && mid.check_opacity < 1.);
+        assert!(mid.copy_scale < 1. && mid.copy_scale > 0.82);
+
+        let peak = (0..=COPY_SWAP_IN_MS as u64)
+            .step_by(10)
+            .map(|ms| at(ms).check_scale)
+            .fold(0.0, f32::max);
+        assert!(peak > 1.03 && peak < 1.07, "subtle spring overshoot: {peak}");
+
+        let held = at(320);
+        assert_eq!(held.copy_opacity, 0.);
+        assert_eq!(held.check_opacity, 1.);
+        assert_eq!(held.check_scale, 1.);
+        assert!(!held.animating);
+
+        let out = at(crate::code_block::COPIED_HOLD_MS as u64 + 60);
+        assert!(out.animating);
+        assert!(out.copy_opacity > 0. && out.check_opacity < 1.);
+
+        let done = at(crate::code_block::COPIED_HOLD_MS as u64 + 200);
+        assert!(!done.animating);
+        assert_eq!(done.copy_opacity, 1.);
+        assert_eq!(done.check_opacity, 0.);
+
+        let reduced = copy_swap_look(true, Some(t0), t0 + Duration::from_millis(40), true);
+        assert!(!reduced.animating);
+        assert_eq!((reduced.copy_scale, reduced.check_scale), (1., 1.));
+        assert_eq!((reduced.copy_opacity, reduced.check_opacity), (0., 1.));
     }
 }

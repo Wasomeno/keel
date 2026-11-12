@@ -340,6 +340,38 @@ impl RegistryDoc {
         Ok(())
     }
 
+    /// Move a chat to another space and working folder on its host device.
+    pub fn set_chat_workspace(
+        &self,
+        actor: &str,
+        id: &str,
+        space_id: &str,
+        cwd: &str,
+        branch: &str,
+        checkout_id: &str,
+    ) -> Result<(), DocError> {
+        let doc = &self.inner.doc;
+        if let Some(space) = doc.get_map("spaces").get(space_id).and_then(as_map)
+            && map_bool(&space, "tombstoned")
+        {
+            return Err(DocError::Tombstoned(space_id.to_string()));
+        }
+        let chat = require_chat(doc, id)?;
+        let host = map_str(&chat, "device_id");
+        if actor != host {
+            return Err(DocError::NotChatHost {
+                actor: actor.to_string(),
+                host,
+            });
+        }
+        chat.insert("space_id", space_id)?;
+        chat.insert("cwd", cwd)?;
+        chat.insert("branch", branch)?;
+        chat.insert("checkout_id", checkout_id)?;
+        doc.commit();
+        Ok(())
+    }
+
     /// Model and thinking effort of a chat, shown in the composer. Any device
     /// may write them. The harness is not a field here: a chat keeps its own.
     pub fn set_chat_model(&self, id: &str, model: &str, reasoning: &str) -> Result<(), DocError> {

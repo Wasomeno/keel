@@ -3708,3 +3708,197 @@ fn memory_rpcs_write_list_prompt_and_refuse_bad_params() {
     assert!(deleted.get("result").is_some(), "{deleted}");
     assert_eq!(call("memory_list", json!({}))["result"]["user"]["notes"], json!([]));
 }
+
+#[test]
+fn scratch_chats_get_isolated_dirs_and_delete_cleans_them_up() {
+    let tmp = Tmp::new("scratch-iso");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::silent());
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let (outbound, _rx) = Outbound::pair();
+    let call = |method: &str, params: Value| -> Value {
+        let request = RpcRequest { id: method.into(), method: method.into(), params };
+        serde_json::from_str(&engine.handle(&request, &outbound).expect("sync reply")).unwrap()
+    };
+
+    let bad = call(
+        "create_chat",
+        json!({ "harness": "mock", "model": "mock", "scratch": true, "use_worktree": true }),
+    );
+    assert_eq!(bad["error"]["code"], json!("bad_params"), "{bad}");
+
+    let a = call("create_chat", json!({ "harness": "mock", "model": "mock", "scratch": true }));
+    let b = call("create_chat", json!({ "harness": "mock", "model": "mock", "scratch": true }));
+    let chat_a = a["result"]["chat_id"].as_str().unwrap().to_string();
+    let chat_b = b["result"]["chat_id"].as_str().unwrap().to_string();
+    let space_a = a["result"]["space_id"].as_str().unwrap().to_string();
+    let space_b = b["result"]["space_id"].as_str().unwrap().to_string();
+    let cwd_a = PathBuf::from(a["result"]["cwd"].as_str().unwrap());
+    let cwd_b = PathBuf::from(b["result"]["cwd"].as_str().unwrap());
+
+    assert_ne!(chat_a, chat_b);
+    assert_eq!(space_a, space_b);
+    assert_ne!(cwd_a, cwd_b);
+    assert!(cwd_a.is_dir() && cwd_b.is_dir());
+    let data_dir = super::compute_data_dir(&tmp.path().join("profile"));
+    assert!(repo::is_engine_scratch(&data_dir, &cwd_a));
+    assert!(repo::is_engine_scratch(&data_dir, &cwd_b));
+
+    let view = engine.lock().store.registry().view();
+    assert_eq!(view.spaces.len(), 1);
+    assert_eq!(view.spaces[0].name, "No project");
+    assert!(!view.spaces[0].git_detected);
+
+    fs::write(cwd_a.join("note.md"), "alpha").unwrap();
+    fs::write(cwd_b.join("other.md"), "beta").unwrap();
+    assert!(!cwd_b.join("note.md").exists());
+
+    let summary = call("chat_git_summary", json!({ "chat_id": chat_a }));
+    assert_eq!(summary["result"]["repo"], json!(false), "{summary}");
+    let branches = call("chat_branches", json!({ "chat_id": chat_a }));
+    assert_eq!(branches["error"]["code"], json!("bad_params"), "{branches}");
+
+    let deleted = call("delete_chats", json!({ "chat_ids": [chat_a] }));
+    assert!(deleted.get("result").is_some(), "{deleted}");
+    assert!(!cwd_a.exists(), "deleted chat's scratch folder should be removed");
+    assert!(cwd_b.join("other.md").is_file(), "sibling scratch folder must remain");
+}
+
+#[test]
+fn scratch_and_legacy_no_project_dirs_have_no_project_memory_or_skills() {
+    let tmp = Tmp::new("scratch-guards");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::silent());
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let (outbound, _rx) = Outbound::pair();
+    let call = |method: &str, params: Value| -> Value {
+        let request = RpcRequest { id: method.into(), method: method.into(), params };
+        serde_json::from_str(&engine.handle(&request, &outbound).expect("sync reply")).unwrap()
+    };
+
+    let chat_id = engine.create_scratch_chat("mock", "mock").unwrap();
+    let scratch_cwd = PathBuf::from(
+        engine
+            .lock()
+            .store
+            .registry()
+            .view()
+            .chats
+            .into_iter()
+            .find(|c| c.id == chat_id)
+            .unwrap()
+            .cwd,
+    );
+    let data_dir = super::compute_data_dir(&tmp.path().join("profile"));
+    let legacy = data_dir.join("No project");
+    fs::create_dir_all(&legacy).unwrap();
+
+    for dir in [&scratch_cwd, &legacy] {
+        assert!(engine.non_scratch_cwd(Some(dir.clone())).is_none());
+        let list = call("memory_list", json!({ "cwd": dir }));
+        assert_eq!(list["result"]["project"], Value::Null, "{list}");
+        let prompt = call("memory_prompt", json!({ "cwd": dir }));
+        assert!(prompt["result"]["text"].as_str().unwrap().contains("This chat has no folder."), "{prompt}");
+        let write = call(
+            "memory_write",
+            json!({ "scope": "project", "cwd": dir, "action": "upsert", "slug": "x", "type": "project", "description": "d", "body": "b" }),
+        );
+        assert_eq!(write["error"]["code"], json!("bad_params"), "{write}");
+    }
+}
+
+#[test]
+fn move_chat_to_folder_promotes_scratch_and_checks_collisions() {
+    let tmp = Tmp::new("scratch-move");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::silent());
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let (outbound, _rx) = Outbound::pair();
+    let call = |method: &str, params: Value| -> Value {
+        let request = RpcRequest { id: method.into(), method: method.into(), params };
+        serde_json::from_str(&engine.handle(&request, &outbound).expect("sync reply")).unwrap()
+    };
+
+    let created = call("create_chat", json!({ "harness": "mock", "model": "mock", "scratch": true }));
+    let chat_id = created["result"]["chat_id"].as_str().unwrap().to_string();
+    let scratch_space_id = created["result"]["space_id"].as_str().unwrap().to_string();
+    let old_cwd = PathBuf::from(created["result"]["cwd"].as_str().unwrap());
+    fs::create_dir_all(old_cwd.join("notes")).unwrap();
+    fs::write(old_cwd.join("notes/plan.md"), "draft plan").unwrap();
+
+    let busy = tmp.path().join("busy_target");
+    fs::create_dir_all(busy.join("notes")).unwrap();
+    fs::write(busy.join("notes/plan.md"), "existing file").unwrap();
+    let conflict = call(
+        "move_chat_to_folder",
+        json!({ "chat_id": chat_id, "path": busy }),
+    );
+    assert_eq!(conflict["error"]["code"], json!("bad_params"), "{conflict}");
+    assert!(old_cwd.join("notes/plan.md").is_file());
+    assert_eq!(
+        fs::read_to_string(busy.join("notes/plan.md")).unwrap(),
+        "existing file"
+    );
+
+    let data_dir = super::compute_data_dir(&tmp.path().join("profile"));
+    let bad_scratch = call(
+        "move_chat_to_folder",
+        json!({ "chat_id": chat_id, "path": repo::scratch_root(&data_dir) }),
+    );
+    assert_eq!(bad_scratch["error"]["code"], json!("bad_params"), "{bad_scratch}");
+
+    let clean = tmp.path().join("clean_target");
+    fs::create_dir_all(&clean).unwrap();
+    let canon_clean = clean.canonicalize().unwrap();
+    let moved = call(
+        "move_chat_to_folder",
+        json!({ "chat_id": chat_id, "path": clean }),
+    );
+    let new_space_id = moved["result"]["space_id"].as_str().unwrap().to_string();
+    assert_ne!(new_space_id, scratch_space_id);
+    assert_eq!(moved["result"]["cwd"], json!(canon_clean.to_string_lossy()));
+    assert_eq!(fs::read_to_string(clean.join("notes/plan.md")).unwrap(), "draft plan");
+    assert!(!old_cwd.exists());
+
+    let view = engine.lock().store.registry().view();
+    let row = view.chats.into_iter().find(|c| c.id == chat_id).unwrap();
+    assert_eq!(row.space_id, new_space_id);
+    assert_eq!(row.cwd, canon_clean.to_string_lossy());
+
+    let again = call(
+        "move_chat_to_folder",
+        json!({ "chat_id": chat_id, "path": busy }),
+    );
+    assert_eq!(again["error"]["code"], json!("bad_params"), "{again}");
+}
+
+#[tokio::test]
+async fn prepare_start_marks_scratch_and_recreates_missing_dir() {
+    let tmp = Tmp::new("scratch-start");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::echo());
+    let engine = open_engine(&tmp, &clock, &harness, COMPACTION_BYTES);
+    let chat_id = engine.create_scratch_chat("mock", "mock").unwrap();
+    let cwd = PathBuf::from(
+        engine
+            .lock()
+            .store
+            .registry()
+            .view()
+            .chats
+            .into_iter()
+            .find(|c| c.id == chat_id)
+            .unwrap()
+            .cwd,
+    );
+    fs::remove_dir_all(&cwd).unwrap();
+    assert!(!cwd.exists());
+
+    assert_eq!(
+        engine.queue_command(&chat_id, send("hello scratch")).unwrap(),
+        QueueStatus::Processed
+    );
+    until(&engine, || harness.runs() > 0).await;
+    assert!(harness.scratch());
+    assert!(cwd.is_dir());
+}

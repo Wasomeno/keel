@@ -272,6 +272,28 @@ fn register_packages(exe: &Path, agent: &Path, antigravity: bool) {
             serde_json::to_string_pretty(&settings).unwrap_or_default(),
         );
     }
+    ensure_web_search_defaults(agent);
+}
+
+/// Default cap for inline `pi-web-access` tool outputs so fetched/searched pages
+/// do not flood the context window with uncached tokens on every step; agents
+/// can still page or query stored results via `get_search_content`.
+pub const DEFAULT_MAX_INLINE_WEB_CONTENT_CHARS: u64 = 8_000;
+
+/// Seeds `maxInlineContentChars` in `{agent}/web-search.json` when unset.
+/// Leaves any existing user configuration value untouched.
+pub fn ensure_web_search_defaults(agent: &Path) {
+    let path = agent.join("web-search.json");
+    let mut cfg: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    if cfg.get("maxInlineContentChars").is_none() {
+        cfg["maxInlineContentChars"] = serde_json::json!(DEFAULT_MAX_INLINE_WEB_CONTENT_CHARS);
+        let _ = std::fs::create_dir_all(agent);
+        let _ = std::fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap_or_default());
+    }
 }
 
 /// Write Pi's `cacheWarming` global setting into `{agent}/settings.json`.
@@ -319,36 +341,7 @@ impl PiProfile {
 }
 
 /// Default system prompt additions for Keel's agent.
-pub const KEEL_SYSTEM_PROMPT: &str = "\
-You are a problem-solving companion. Be plain and concise: use clear, simple words, \
-short direct sentences, active voice, and avoid unnecessary filler. When a skill matches \
-the task, read it before you reply.\n\n\
-Language: reply in the language of the user's latest message, judged only by the words the user \
-typed. This prompt, project files, code, paths, file names, tool output and earlier turns do not \
-set the language. When the message has no clear language (a greeting, slang, an emoji, a single \
-word, a name, code or a command, such as \"Yooooo\", \"hey\" or \"ok\"), reply in English. \
-The user's location, timezone, locale or company does not imply a language. Use Bahasa Indonesia \
-only when the user's latest message is clearly written in it or asks for Indonesian text, and \
-switch back as soon as they write in another language.\n\n\
-Only when the user writes in Bahasa Indonesia (or asks for Indonesian text), follow this style:\n\
-- Reply in natural, casual Bahasa Indonesia, sounding like a sharp coworker in chat: \
-santai tapi jelas, ramah tapi tidak lebay.\n\
-- Mirror the user's register in Indonesian:\n\
-  - Casual or unclear register: aku / kamu with informal verbs (udah, nggak, aja, bikin, pakai).\n\
-  - User says gue / lo (or gw/lu): answer with gue / lo.\n\
-  - User is formal (saya, mohon, Bapak/Ibu): use saya, standard verbs, and drop the \"you\" pronoun where possible. Polite, never bureaucratic.\n\
-  - Never default to \"Anda\" unless the user uses it first.\n\
-- Short, varied sentences in active voice. Say who does what directly.\n\
-- Everyday verbs: \"ngecek\" / \"mengecek\" (not \"melakukan pengecekan terhadap\"), \"benerin\" / \"memperbaiki\" (not \"melakukan perbaikan pada\"), \"bisa\" (not \"dapat\"), \"pakai\" (not \"memanfaatkan\").\n\
-- Eliminate calques and bureaucratic filler: no \"yang mana\" or \"dimana\" as relative pronouns, no \"merupakan\" as the default \"is\", no stacked di- passives, no \"tersebut\" in every sentence.\n\
-- Technical terms stay in standard developer forms the way Indonesian devs say them (commit, push, deploy, branch, merge, build, bug, PR, test, error, log, config, repo). Attach affixes with a hyphen (di-push, error-nya, nge-build). Never touch code, identifiers, paths, commands, or quoted output.\n\
-- No cosplay slang (no wkwk, anjay, sob, mantul, gaskeun) and no boilerplate pleasantries (\"Semoga membantu!\", \"Di era digital ini\"). Start directly with the answer.\n\
-- Match length: short questions get short answers.\n\n\
-Every tool call requires a `label` argument (never omit it): 3-6 words, present participle, sentence case, naming the concept you are working on (not the file, tool, or raw command). Match the language of the user's latest message, with the same rule as replies.\n\
-- Reads/Inspects: \"Reading the on/off cycle logic\" (id: \"Nge-cek konfigurasi database\"), not \"Reading file\" or \"cat session.rs\".\n\
-- Edits/Writes: \"Updating session state transition\" (id: \"Benerin bug memory leak\"), not \"Editing session.rs\" or \"Modifying code\".\n\
-- Commands/Builds: \"Compiling workspace binaries\" (id: \"Nge-build binary workspace\"), not \"Running cargo build\" or \"bash command\".\n\
-- Searches: \"Locating theme token definitions\" (id: \"Nyari deklarasi handler route\"), not \"Searching theme\" or \"rg oncycle\".";
+pub const KEEL_SYSTEM_PROMPT: &str = include_str!("../../../prompts/system.md").trim_ascii_end();
 
 /// Keel's system prompt, extensions and tools on top of Pi.
 #[derive(Debug, Clone)]
@@ -486,15 +479,11 @@ mod tests {
             "{p}"
         );
         assert!(p.contains("\"Yooooo\""), "{p}");
-        assert!(p.contains("does not imply a language"), "{p}");
-        // The language rule comes before the Indonesian style guide, and the
-        // guide only applies when the user writes Indonesian.
-        let rule = p.find("Language:").expect("language rule");
-        let guide = p
-            .find("Only when the user writes in Bahasa Indonesia")
-            .expect("gated guide");
-        assert!(rule < guide, "{p}");
-        // Nothing may read as "default to Indonesian".
+        assert!(p.contains("do not set the language"), "{p}");
+        // The Indonesian style guide lives in the on-demand indonesian-natural
+        // skill, keeping the always-on system prompt lean and language-neutral.
+        assert!(p.contains("indonesian-natural"), "{p}");
+        assert!(!p.contains("aku` / `kamu"), "{p}");
         assert!(!p.contains("Default (casual or unclear)"), "{p}");
     }
 
@@ -702,5 +691,34 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn web_search_defaults_seed_without_overwriting_user_override() {
+        let agent = tmp("web-search-defaults");
+        std::fs::create_dir_all(&agent).unwrap();
+
+        ensure_web_search_defaults(&agent);
+        let seeded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent.join("web-search.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            seeded["maxInlineContentChars"].as_u64(),
+            Some(DEFAULT_MAX_INLINE_WEB_CONTENT_CHARS)
+        );
+
+        std::fs::write(
+            agent.join("web-search.json"),
+            r#"{"maxInlineContentChars":15000,"provider":"auto"}"#,
+        )
+        .unwrap();
+        ensure_web_search_defaults(&agent);
+        let preserved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent.join("web-search.json")).unwrap())
+                .unwrap();
+        assert_eq!(preserved["maxInlineContentChars"].as_u64(), Some(15_000));
+        assert_eq!(preserved["provider"].as_str(), Some("auto"));
+
+        let _ = std::fs::remove_dir_all(&agent);
     }
 }

@@ -24,6 +24,7 @@ actions!(
         StopRun,
         ToggleTerminal,
         ToggleBrowser,
+        ToggleRightPanel,
         BrowserAddress,
         BrowserReload,
         BrowserBack,
@@ -54,9 +55,11 @@ actions!(
 
 /// The window's key context; bindings below only fire inside it.
 pub const CONTEXT: &str = "KeelWindow";
-/// The browser pane's key context, inside the window's.
+/// The unified right side panel's key context, inside the window's.
+pub const RIGHT_PANEL: &str = "RightPanel";
+/// The browser pane's key context, inside `RIGHT_PANEL`.
 pub const BROWSER: &str = "Browser";
-/// The files pane's.
+/// The files pane's, inside `RIGHT_PANEL`.
 pub const FILES: &str = "Files";
 
 pub fn bindings() -> Vec<KeyBinding> {
@@ -84,6 +87,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-.", StopRun, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
         KeyBinding::new("secondary-shift-b", ToggleBrowser, ctx),
+        KeyBinding::new("secondary-alt-b", ToggleRightPanel, ctx),
         KeyBinding::new("secondary-shift-e", ToggleFiles, ctx),
         KeyBinding::new("secondary-s", FilesSave, Some(FILES)),
         KeyBinding::new("secondary-shift-f", BrowserExpand, ctx),
@@ -94,9 +98,9 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-[", BrowserBack, Some(BROWSER)),
         KeyBinding::new("secondary-]", BrowserForward, Some(BROWSER)),
         KeyBinding::new("secondary-shift-w", BrowserEndSession, Some(BROWSER)),
-        // In the pane, ⌘T and ⌘W are its tabs, not the chat's.
-        KeyBinding::new("secondary-t", BrowserNewTab, Some(BROWSER)),
-        KeyBinding::new("secondary-w", BrowserCloseTab, Some(BROWSER)),
+        // Inside the right side panel, ⌘T and ⌘W manage panel tabs, not chats.
+        KeyBinding::new("secondary-t", BrowserNewTab, Some(RIGHT_PANEL)),
+        KeyBinding::new("secondary-w", BrowserCloseTab, Some(RIGHT_PANEL)),
         KeyBinding::new("escape", Dismiss, ctx),
         KeyBinding::new("secondary-1", JumpTab1, ctx),
         KeyBinding::new("secondary-2", JumpTab2, ctx),
@@ -153,11 +157,12 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Zoom Out", ZoomOut),
                 MenuItem::action("Actual Size", ZoomReset),
                 MenuItem::separator(),
+                MenuItem::action("Toggle Side Panel", ToggleRightPanel),
                 MenuItem::action("Toggle Terminal", ToggleTerminal),
                 MenuItem::action("Toggle Browser", ToggleBrowser),
                 MenuItem::action("Toggle Files", ToggleFiles),
-                MenuItem::action("Browser Full Window", BrowserExpand),
-                MenuItem::action("New Browser Tab", BrowserNewTab),
+                MenuItem::action("Expand Side Panel", BrowserExpand),
+                MenuItem::action("New Side Panel Tab", BrowserNewTab),
                 MenuItem::action("End Browser Session", BrowserEndSession),
                 MenuItem::separator(),
                 MenuItem::action("Start / Pause Timer", TimerStartPause),
@@ -198,7 +203,7 @@ mod tests {
 
     #[test]
     fn every_binding_parses() {
-        assert_eq!(bindings().len(), 42);
+        assert_eq!(bindings().len(), 43);
     }
 
     #[test]

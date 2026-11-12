@@ -270,12 +270,14 @@ impl ModelList {
                 arr.iter()
                     .filter_map(|m| {
                         let id = m.get("id")?.as_str()?.to_string();
+                        let raw_name = m
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .map(str::trim)
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or(&id);
                         Some(ModelOption {
-                            name: m
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or(&id)
-                                .to_string(),
+                            name: crate::model_menu::format_name(raw_name),
                             reasoning_levels: m
                                 .get("reasoning_levels")
                                 .and_then(|r| r.as_array())
@@ -482,12 +484,16 @@ mod tests {
         let res = serde_json::json!({
             "models": [
                 {"id": "a", "name": "Model A", "reasoning_levels": ["low", "high"]},
-                {"id": "b", "name": "Model B", "reasoning_levels": []}
+                {"id": "b", "name": "Model B", "reasoning_levels": []},
+                {"id": "antigravity/gemini-3-8-flash", "name": "gemini-3.8-flash"},
+                {"id": "minimax/MiniMax-M3.1-Flash", "name": ""}
             ],
             "default_model": "b"
         });
         let list = ModelList::parse(&res);
-        assert_eq!(list.models.len(), 2);
+        assert_eq!(list.models.len(), 4);
+        assert_eq!(list.models[2].name, "Gemini 3.8 Flash");
+        assert_eq!(list.models[3].name, "MiniMax M3.1 Flash");
         assert_eq!(list.initial_model(), "b");
         assert_eq!(list.levels("a"), ["low".to_string(), "high".to_string()]);
         assert!(list.levels("b").is_empty());

@@ -15,6 +15,7 @@ mod mr_chip;
 mod projects;
 mod prompt_suggestion;
 mod question;
+mod right_panel;
 mod session_card;
 mod session_summary;
 mod settings;
@@ -551,10 +552,11 @@ pub struct KeelWindow {
     pub diagram_menu: Option<String>,
     pub diagram_menu_ix: usize,
     pub diagram_menu_keyboard: bool,
-    /// Shells under the transcript.
+    /// Shells and right-side workspace tabs.
     terminal: terminal_panel::TerminalPanel,
     browser: browser_panel::BrowserPanel,
     files: files_panel::FilesPanel,
+    right_panel: right_panel::RightPanel,
     /// The always-open card over the chat's top right.
     session_card: session_card::SessionCard,
     /// The docked composer's slot width last frame.
@@ -1338,6 +1340,7 @@ impl KeelWindow {
             terminal: terminal_panel::TerminalPanel::new(cx.focus_handle()),
             browser,
             files,
+            right_panel: right_panel::RightPanel::new(cx.focus_handle()),
             session_card: Default::default(),
             composer_slot: Default::default(),
             composer_max: Default::default(),
@@ -1624,9 +1627,9 @@ impl KeelWindow {
         p
     }
 
-    /// Whether any right side panel (browser, files, terminal) is currently open and allowed.
+    /// Whether the unified right side panel is currently open and allowed.
     pub(super) fn right_panel_open(&self) -> bool {
-        self.browser_allowed() && (self.browser.open || self.files.open || self.terminal.open)
+        self.browser_allowed() && self.right_panel.open
     }
 
     /// Target open fraction for the right side panel (0.0 or 1.0).
@@ -1688,8 +1691,7 @@ impl KeelWindow {
 
     /// Trigger right panel entrance or exit animation on session/hero transition.
     pub(super) fn sync_right_panel_hero_transition(&mut self, hero: bool) {
-        let any_open = self.browser.open || self.files.open || self.terminal.open;
-        if !any_open || self.reduced() {
+        if !self.right_panel.open || self.reduced() {
             return;
         }
         let from = if hero {
@@ -1707,19 +1709,11 @@ impl KeelWindow {
                 0.0
             }
         };
+        self.right_panel.animate_launcher = false;
         self.right_panel_from = from;
         let now = std::time::Instant::now();
         let next = self.right_panel_anim.map_or(1, |(_, n)| n + 1);
         self.right_panel_anim = Some((now, next));
-        if self.browser.open {
-            self.browser.anim = Some((now, next));
-        }
-        if self.files.open {
-            self.files.anim = Some((now, next));
-        }
-        if self.terminal.open {
-            self.terminal.anim = Some((now, next));
-        }
     }
 
     /// The reading column's max width. Constant: a slide holds the column's
@@ -2838,6 +2832,14 @@ impl KeelWindow {
 
     /// Trigger git stats refresh if not already cached for the workspace root.
     pub(super) fn ensure_git_stats(&mut self, cx: &mut Context<Self>) {
+        if self
+            .current_chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))
+            .is_some_and(|c| self.state.is_scratch_chat(c))
+        {
+            return;
+        }
         let Some(root) = self.mention_root().filter(|r| !r.is_empty()) else {
             return;
         };
@@ -2856,6 +2858,14 @@ impl KeelWindow {
 
     /// Fetch git numstats and status asynchronously off the UI thread and update turn chips on completion.
     pub(super) fn refresh_git_stats(&mut self, cx: &mut Context<Self>) {
+        if self
+            .current_chat
+            .as_ref()
+            .and_then(|id| self.state.chats.get(id))
+            .is_some_and(|c| self.state.is_scratch_chat(c))
+        {
+            return;
+        }
         let Some(root) = self.mention_root().filter(|r| !r.is_empty()) else {
             return;
         };
@@ -3526,20 +3536,31 @@ impl KeelWindow {
         }
     }
 
-    /// The folder `@` paths are relative to: the open chat's, or the folder
-    /// the next chat will run in.
+    /// The folder `@` paths are relative to: the open chat's working folder, or
+    /// the real folder the next chat will run in.
     pub(super) fn mention_root(&self) -> Option<String> {
         match self
             .current_chat
             .as_ref()
             .and_then(|id| self.state.chats.get(id))
         {
-            Some(chat) => self
+            Some(chat) => {
+                if !chat.cwd.is_empty() {
+                    Some(chat.cwd.clone())
+                } else if self.state.is_scratch_chat(chat) {
+                    None
+                } else {
+                    self.state
+                        .spaces
+                        .get(&chat.space_id)
+                        .map(|s| s.path.clone())
+                }
+            }
+            None => self
                 .state
-                .spaces
-                .get(&chat.space_id)
-                .map(|s| s.path.clone()),
-            None => self.state.target_space_for_new_session().map(|s| s.path),
+                .target_space_for_new_session()
+                .filter(|s| !self.state.is_scratch_space(s))
+                .map(|s| s.path),
         }
     }
 
@@ -4713,12 +4734,14 @@ impl KeelWindow {
 
     /// "+" / ⌘N: the new-chat screen. The chat itself is created on the
     /// first send, in the folder picked there (or the filtered / newest
-    /// space); with no space at all, in "No project".
+    /// space); with no folder, in an isolated per-chat scratch directory.
     pub fn create_new_session(&mut self, first_message: Option<String>, cx: &mut Context<Self>) {
         self.close_menus(cx);
         match (self.state.target_space_for_new_session(), first_message) {
-            (Some(space), Some(text)) => self.create_chat_in(space.id, space.path, Some(text), cx),
-            (None, Some(text)) => self.create_no_project_chat(text, cx),
+            (Some(space), Some(text)) if !self.state.is_scratch_space(&space) => {
+                self.create_chat_in(space.id, space.path, Some(text), cx);
+            }
+            (Some(_), Some(text)) | (None, Some(text)) => self.create_no_project_chat(text, cx),
             (_, None) => {
                 self.close_pages();
                 self.finish_settings_exit(cx);
@@ -4796,15 +4819,15 @@ impl KeelWindow {
         .detach();
     }
 
-    /// "No project": an empty folder of Keel's own, named so its space reads
-    /// "No project".
+    /// "No project": each chat starts in its own ephemeral scratch directory
+    /// owned by the engine (`{data_dir}/scratch/{chat_id}`).
     pub(super) fn use_no_project_for_new_chat(&mut self, cx: &mut Context<Self>) {
-        let dir = self.state.data_dir.join("No project");
-        if let Err(err) = std::fs::create_dir_all(&dir) {
-            self.report("No project folder", err.to_string());
-            return;
-        }
-        self.use_folder_for_new_chat(dir.to_string_lossy().into_owned(), cx);
+        self.state.new_chat_no_project = true;
+        self.state.new_chat_space = None;
+        self.projects.picked = None;
+        self.state.clear_branches_for_no_project();
+        self.create_error = None;
+        cx.notify();
     }
 
     /// Make `path` (a space, created or reused) the next chat's folder.
@@ -4826,6 +4849,7 @@ impl KeelWindow {
                 {
                     Some(space_id) => {
                         this.state.record_created_space(space_id, &path);
+                        this.state.new_chat_no_project = false;
                         this.state.new_chat_space = Some(space_id.to_string());
                         this.state.reset_branch_for_folder();
                         this.create_error = None;
@@ -4841,46 +4865,25 @@ impl KeelWindow {
         .detach();
     }
 
-    /// First send with no folder yet: creates (or reuses) the "No project"
-    /// space and starts the chat there.
+    /// First send with no folder yet: starts an isolated per-chat scratch
+    /// workspace directly on the engine.
     fn create_no_project_chat(&mut self, first_message: String, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            self.report("no engine", "not connected");
-            return;
-        };
-        let dir = self.state.data_dir.join("No project");
-        if let Err(err) = std::fs::create_dir_all(&dir) {
-            self.report("No project folder", err.to_string());
-            return;
-        }
-        let path = dir.to_string_lossy().into_owned();
-        cx.spawn(async move |this, cx| {
-            let res = client
-                .call("create_space", serde_json::json!({ "path": path }))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match res.and_then(|v| {
-                    v.get("space_id")
-                        .and_then(|s| s.as_str())
-                        .map(String::from)
-                        .ok_or_else(|| "create_space returned no space_id".to_string())
-                }) {
-                    Ok(space_id) => {
-                        this.state.record_created_space(&space_id, &path);
-                        this.create_chat_in(space_id, path, Some(first_message), cx);
-                    }
-                    Err(err) => this.report("create_space failed", err),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.start_create_chat_rpc(None, Some(first_message), cx);
     }
 
     fn create_chat_in(
         &mut self,
         space_id: String,
         cwd: String,
+        first_message: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_create_chat_rpc(Some((space_id, cwd)), first_message, cx);
+    }
+
+    fn start_create_chat_rpc(
+        &mut self,
+        target: Option<(String, String)>,
         first_message: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -4891,35 +4894,70 @@ impl KeelWindow {
         let model = self.selected_model.clone();
         let effort = self.selected_effort.clone();
         let permission = self.effective_permission().as_str();
+        let plan_mode = self.plan_on_value();
         self.creating_chat = first_message.is_some();
         self.create_error = None;
-        // Link the chat to its project before the first message can start a run.
-        let link = self.projects.link_plan(&cwd);
-        let params = serde_json::json!({
-            "space_id": space_id,
-            "cwd": cwd,
-            "title": "New Chat",
-            "harness": harness,
-            "model": model,
-            "reasoning": effort,
-            "permission": permission,
-            "plan_mode": self.plan_on_value(),
-            "branch": self.state.selected_branch,
-        });
+        let scratch = target.is_none();
+        let (fallback_space, fallback_cwd, link, params) = match target {
+            Some((space_id, cwd)) => {
+                // Link the chat to its project before the first message can start a run.
+                let link = self.projects.link_plan(&cwd);
+                let params = serde_json::json!({
+                    "space_id": space_id,
+                    "cwd": cwd,
+                    "title": "New Chat",
+                    "harness": harness,
+                    "model": model,
+                    "reasoning": effort,
+                    "permission": permission,
+                    "plan_mode": plan_mode,
+                    "branch": self.state.selected_branch,
+                });
+                (space_id, cwd, link, params)
+            }
+            None => {
+                let params = serde_json::json!({
+                    "title": "New Chat",
+                    "harness": harness,
+                    "model": model,
+                    "reasoning": effort,
+                    "permission": permission,
+                    "plan_mode": plan_mode,
+                    "scratch": true,
+                });
+                (String::new(), String::new(), None, params)
+            }
+        };
         cx.spawn(async move |this, cx| {
             let res = client.call("create_chat", params).await;
             let _ = this.update(cx, |this, cx| {
                 this.creating_chat = false;
-                let chat_id = res.and_then(|v| {
-                    v.get("chat_id")
+                let parsed = res.and_then(|v| {
+                    let chat_id = v
+                        .get("chat_id")
                         .and_then(|s| s.as_str())
                         .map(String::from)
-                        .ok_or_else(|| "create_chat returned no chat_id".to_string())
+                        .ok_or_else(|| "create_chat returned no chat_id".to_string())?;
+                    let space_id = v
+                        .get("space_id")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| fallback_space.clone());
+                    let cwd = v
+                        .get("cwd")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| fallback_cwd.clone());
+                    Ok((chat_id, space_id, cwd))
                 });
-                match chat_id {
-                    Ok(chat_id) => {
+                match parsed {
+                    Ok((chat_id, space_id, cwd)) => {
                         let now = AppState::now_ms();
-                        let plan_mode = this.plan_on_value();
+                        if scratch && !space_id.is_empty() {
+                            this.state.record_created_scratch_space(&space_id);
+                        }
                         let chat = this.state.chats.entry(chat_id.clone()).or_insert_with(|| {
                             ChatItem::test(
                                 &chat_id,
@@ -4930,6 +4968,8 @@ impl KeelWindow {
                                 now,
                             )
                         });
+                        chat.space_id = space_id;
+                        chat.cwd = cwd;
                         chat.harness = harness;
                         chat.model = model;
                         chat.reasoning = effort;
@@ -4951,6 +4991,76 @@ impl KeelWindow {
                         tracing::warn!("create_chat failed: {err}");
                         this.create_error = Some(err);
                         this.restore_draft = first_message;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Promote a scratch chat on this device into a chosen real folder,
+    /// copying its isolated scratch files without overwriting existing files.
+    pub(super) fn move_chat_to_folder(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            self.report("no engine", "not connected");
+            return;
+        };
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Move scratch chat to folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let path_str = path.to_string_lossy().into_owned();
+            let res = client
+                .call(
+                    "move_chat_to_folder",
+                    serde_json::json!({ "chat_id": chat_id, "path": path_str }),
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(v) => {
+                        let space_id = v
+                            .get("space_id")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let cwd = v
+                            .get("cwd")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or(&path_str)
+                            .to_string();
+                        let branch = v
+                            .get("branch")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if !space_id.is_empty() {
+                            this.state.record_created_space(&space_id, &cwd);
+                        }
+                        if let Some(chat) = this.state.chats.get_mut(&chat_id) {
+                            if !space_id.is_empty() {
+                                chat.space_id = space_id;
+                            }
+                            chat.cwd = cwd;
+                            chat.branch = branch;
+                        }
+                        this.invalidate_git_stats();
+                        this.card_sync_chat(cx);
+                        this.ensure_git_stats(cx);
+                        this.ensure_commands(true, cx);
+                    }
+                    Err(err) => {
+                        this.report("Move to folder failed", err);
                     }
                 }
                 cx.notify();
@@ -5594,7 +5704,7 @@ impl KeelWindow {
                 .harness_prefs
                 .get(harness)
                 .filter(|p| p.model == model && !p.model_name.is_empty())
-                .map(|p| p.model_name.clone()),
+                .map(|p| crate::model_menu::format_name(&p.model_name)),
         }
     }
 
@@ -5602,7 +5712,7 @@ impl KeelWindow {
         match self.model_name(&self.selected_harness, &self.selected_model) {
             Some(n) => n,
             None if self.selected_model.is_empty() => "default".into(),
-            None => self.selected_model.clone(),
+            None => crate::model_menu::format_name(&self.selected_model),
         }
     }
 
@@ -6983,6 +7093,8 @@ mod refs_tests {
 
 impl KeelWindow {
     fn open_lightbox(&mut self, lightbox: Lightbox, cx: &mut Context<Self>) {
+        self.diagram_menu = None;
+        self.diagram_menu_keyboard = false;
         self.lightbox = Some(lightbox);
         self.lightbox_fx
             .set(true, std::time::Instant::now(), self.reduced());
@@ -6994,6 +7106,8 @@ impl KeelWindow {
         if !self.lightbox_fx.shown() {
             return false;
         }
+        self.diagram_menu = None;
+        self.diagram_menu_keyboard = false;
         self.lightbox_fx
             .set(false, std::time::Instant::now(), self.reduced());
         cx.notify();
@@ -7005,6 +7119,8 @@ impl KeelWindow {
         if !self.lightbox_fx.shown() && self.lightbox.is_none() {
             return false;
         }
+        self.diagram_menu = None;
+        self.diagram_menu_keyboard = false;
         self.lightbox = None;
         self.lightbox_fx.cut();
         cx.notify();

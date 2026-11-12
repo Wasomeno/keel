@@ -1,40 +1,46 @@
-//! Terminal panel: tabs of engine-owned shells, in the right-hand side
-//! panel slot (with the browser and files panels; one at a time), sliding
-//! in and out like them. Hiding the panel detaches; the shells keep running.
+//! Terminal panel: engine-owned shells hosted inside the unified right side panel.
+//! Closing the right panel detaches the view; the shells keep running.
 
-use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
-use crate::style::zpx;
 use std::cell::Cell;
 use std::rc::Rc;
 
 use base64::Engine as _;
 use gpui::{
-    Bounds, ClickEvent, Context, ElementId, FocusHandle, IntoElement, KeyDownEvent, Pixels,
-    ScrollWheelEvent, Window, div, prelude::*, px,
+    Bounds, ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, Pixels, ScrollWheelEvent,
+    Window, div, prelude::*, px,
 };
 use keel_proto::{RpcStreamItem, SubscribeEvent};
 use keel_theme::Tokens;
 
-use super::{KeelWindow, icon_button};
-use crate::icons::Icon;
-use crate::style::{KeelStyled, MONO, RADIUS_MD, RADIUS_SM, c};
+use super::{KeelWindow, right_panel::RightTabKind};
+use crate::style::{MONO, c};
 use crate::terminal::{Emulator, Palette, encode_key, encode_paste};
 
 /// Monospace cell metrics for the panel.
 const FONT_SIZE: f32 = 12.5;
 const LINE_HEIGHT: f32 = 17.;
-/// Panel height, including its tab row.
+/// Panel height padding around the grid.
 const PAD: f32 = 12.;
 
 /// One shell in the panel.
 pub(super) struct TermTab {
-    id: String,
+    pub(super) id: String,
     /// The chat whose folder it started in.
-    chat: Option<String>,
+    pub(super) chat: Option<String>,
     /// The `subscribe_terminal` stream, once known.
     stream: Option<String>,
-    emu: Emulator,
-    exited: Option<Option<i32>>,
+    pub(super) emu: Emulator,
+    pub(super) exited: Option<Option<i32>>,
+    pub(super) busy: bool,
+}
+
+impl TermTab {
+    pub(super) fn label(&self, ix: usize) -> String {
+        self.emu
+            .title()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Terminal {}", ix + 1))
+    }
 }
 
 /// What a new shell does once attached.
@@ -51,19 +57,16 @@ const PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Panel state kept on the window.
 pub(super) struct TerminalPanel {
-    pub(super) open: bool,
-    tabs: Vec<TermTab>,
-    active: usize,
+    pub(super) tabs: Vec<TermTab>,
+    pub(super) active: usize,
     pub(super) focus: FocusHandle,
     /// Output that arrived before its stream id was known, by stream.
     early: std::collections::HashMap<String, Vec<SubscribeEvent>>,
     /// The grid's on-screen bounds from the last paint, to fit cols × rows.
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     cell_width: Option<f32>,
-    /// The last show or hide: when, and a count that names its animation.
-    pub(super) anim: Option<(std::time::Instant, u64)>,
     /// A command (not just the shell) is running in one of the tabs: the
-    /// header's terminal button carries a dot.
+    /// header's right-panel trigger carries an accent dot.
     pub(super) busy: bool,
     /// The busy poll is running.
     polling: bool,
@@ -72,75 +75,76 @@ pub(super) struct TerminalPanel {
 impl TerminalPanel {
     pub(super) fn new(focus: FocusHandle) -> Self {
         Self {
-            open: false,
             tabs: Vec::new(),
             active: 0,
             focus,
             early: Default::default(),
             bounds: Rc::new(Cell::new(None)),
             cell_width: None,
-            anim: None,
             busy: false,
             polling: false,
         }
     }
+
+    pub(super) fn tab_ix(&self, id: &str) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
 }
 
 impl KeelWindow {
-    /// ⌃` and the tab-strip button: show or hide; the first show starts a shell.
+    /// ⌃`: toggle/focus a terminal tab in the right panel; starts a shell on first use.
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let open = !self.terminal.open;
-        self.set_terminal_open(open, window, cx);
-        let panel = &mut self.terminal;
-        if panel.open {
-            if panel.tabs.is_empty() {
-                self.new_terminal(cx);
-            }
-            window.focus(&self.terminal.focus, cx);
+        if !self.browser_allowed() {
+            return;
+        }
+        if self.right_panel.open
+            && matches!(
+                self.right_panel_active_kind(),
+                Some(RightTabKind::Terminal(_))
+            )
+        {
+            self.close_right_panel(window, cx);
+            return;
+        }
+
+        let chat = self.current_chat.clone();
+        let existing_ix = pick_tab(&self.terminal.tabs, self.terminal.active, &chat).or_else(|| {
+            (!self.terminal.tabs.is_empty())
+                .then(|| self.terminal.active.min(self.terminal.tabs.len() - 1))
+        });
+
+        if let Some(ix) = existing_ix {
+            let tid = self.terminal.tabs[ix].id.clone();
+            self.open_right_tab(RightTabKind::Terminal(tid), window, cx);
         } else {
-            self.composer.update(cx, |s, cx| s.focus(window, cx));
+            if !self.right_panel.open {
+                self.open_right_panel(window, cx);
+            }
+            self.arm_pending_terminal_launcher();
+            self.new_terminal(cx);
+            window.focus(&self.terminal.focus, cx);
         }
         cx.notify();
     }
 
-    /// Show or hide the side panel, sliding like the browser and files
-    /// panels; showing it closes whichever of those is open.
-    pub(super) fn set_terminal_open(
-        &mut self,
-        open: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if open == self.terminal.open || (open && !self.browser_allowed()) {
+    fn arm_pending_terminal_launcher(&mut self) {
+        if self.right_panel.pending_terminal_launcher.is_some() {
             return;
         }
-        if open && self.browser.open {
-            self.toggle_browser(window, cx);
-        }
-        if open && self.files.open {
-            self.toggle_files(window, cx);
-        }
-        self.update_right_panel_anim();
-        let panel = &mut self.terminal;
-        panel.open = open;
-        let n = panel.anim.map_or(1, |(_, n)| n + 1);
-        panel.anim = Some((std::time::Instant::now(), n));
-        // One render after the slide ends drops the pane.
-        let settle = self.right_panel_duration();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(settle + std::time::Duration::from_millis(20))
-                .await;
-            let _ = this.update(cx, |_, cx| {
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        let active_launcher = self
+            .right_panel
+            .tabs
+            .get(self.right_panel.active)
+            .filter(|t| t.kind == RightTabKind::Launcher)
+            .map(|t| t.id);
+        let lone_launcher = (self.right_panel.tabs.len() == 1
+            && self.right_panel.tabs[0].kind == RightTabKind::Launcher)
+            .then(|| self.right_panel.tabs[0].id);
+        self.right_panel.pending_terminal_launcher = active_launcher.or(lone_launcher);
     }
 
     /// Ask the engine every 2 s whether a command is running in one of this
-    /// window's tabs (for the header dot), while any tab is open.
+    /// window's tabs (for the header dot and per-tab badge), while any tab is open.
     fn poll_terminals(&mut self, cx: &mut Context<Self>) {
         if self.terminal.polling {
             return;
@@ -159,17 +163,26 @@ impl KeelWindow {
                     .await
                     .unwrap_or_default();
                 let alive = this.update(cx, |this, cx| {
-                    let ours = |row: &&serde_json::Value| {
-                        this.terminal
-                            .tabs
-                            .iter()
-                            .any(|tab| row["terminal_id"] == tab.id.as_str())
-                    };
-                    let busy = rows["terminals"].as_array().is_some_and(|rows| {
-                        rows.iter().filter(ours).any(|row| row["busy"] == true)
-                    });
-                    if busy != this.terminal.busy {
-                        this.terminal.busy = busy;
+                    let list = rows["terminals"].as_array();
+                    let mut changed = false;
+                    let mut any_busy = false;
+                    for tab in &mut this.terminal.tabs {
+                        let tab_busy = list.is_some_and(|rows| {
+                            rows.iter().any(|row| {
+                                row["terminal_id"] == tab.id.as_str() && row["busy"] == true
+                            })
+                        });
+                        if tab.busy != tab_busy {
+                            tab.busy = tab_busy;
+                            changed = true;
+                        }
+                        any_busy |= tab_busy;
+                    }
+                    if any_busy != this.terminal.busy {
+                        this.terminal.busy = any_busy;
+                        changed = true;
+                    }
+                    if changed {
                         cx.notify();
                     }
                 });
@@ -182,8 +195,15 @@ impl KeelWindow {
             }
             let _ = this.update(cx, |this, cx| {
                 this.terminal.polling = false;
-                if this.terminal.busy {
-                    this.terminal.busy = false;
+                let mut changed = this.terminal.busy;
+                this.terminal.busy = false;
+                for tab in &mut this.terminal.tabs {
+                    if tab.busy {
+                        tab.busy = false;
+                        changed = true;
+                    }
+                }
+                if changed {
                     cx.notify();
                 }
             });
@@ -204,7 +224,13 @@ impl KeelWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_terminal_open(true, window, cx);
+        if !self.browser_allowed() {
+            return;
+        }
+        if !self.right_panel.open {
+            self.open_right_panel(window, cx);
+        }
+        self.arm_pending_terminal_launcher();
         window.focus(&self.terminal.focus, cx);
         self.new_terminal_running(Then::Run(command), cx);
     }
@@ -218,21 +244,30 @@ impl KeelWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_terminal_open(true, window, cx);
-        window.focus(&self.terminal.focus, cx);
+        if !self.browser_allowed() {
+            return;
+        }
         let chat = self.current_chat.clone();
-        let panel = &mut self.terminal;
-        match pick_tab(&panel.tabs, panel.active, &chat) {
+        match pick_tab(&self.terminal.tabs, self.terminal.active, &chat) {
             Some(ix) => {
-                panel.active = ix;
-                let tab = &mut panel.tabs[ix];
+                self.terminal.active = ix;
+                let tab = &mut self.terminal.tabs[ix];
                 let data = encode_paste(&text, bracketed(&tab.emu));
                 tab.emu.scroll_to_bottom();
                 let id = tab.id.clone();
-                self.terminal_send(id, data, cx);
+                self.terminal_send(id.clone(), data, cx);
+                self.open_right_tab(RightTabKind::Terminal(id), window, cx);
+                window.focus(&self.terminal.focus, cx);
                 cx.notify();
             }
-            None => self.new_terminal_running(Then::Insert(text), cx),
+            None => {
+                if !self.right_panel.open {
+                    self.open_right_panel(window, cx);
+                }
+                self.arm_pending_terminal_launcher();
+                window.focus(&self.terminal.focus, cx);
+                self.new_terminal_running(Then::Insert(text), cx);
+            }
         }
     }
 
@@ -242,6 +277,7 @@ impl KeelWindow {
         };
         let (cols, rows) = self.terminal_fit().unwrap_or((100, 15));
         let chat_id = self.current_chat.clone();
+        let expected_nav = self.right_panel.nav_seq;
         cx.spawn(async move |this, cx| {
             let opened = client
                 .call(
@@ -253,13 +289,14 @@ impl KeelWindow {
                 Some(id) => id.to_string(),
                 None => {
                     let _ = this.update(cx, |this, cx| {
+                        this.right_panel.pending_terminal_launcher = None;
                         this.report("can't open a terminal", opened.err().unwrap_or_default());
                         cx.notify();
                     });
                     return;
                 }
             };
-            let _ = this.update(cx, |this, cx| {
+            let focus_info = this.update(cx, |this, cx| {
                 let panel = &mut this.terminal;
                 panel.tabs.push(TermTab {
                     id: id.clone(),
@@ -267,11 +304,42 @@ impl KeelWindow {
                     stream: None,
                     emu: Emulator::new(cols, rows),
                     exited: None,
+                    busy: false,
                 });
-                panel.active = panel.tabs.len() - 1;
+                let user_stayed = this.right_panel.nav_seq == expected_nav;
+                if user_stayed {
+                    panel.active = panel.tabs.len() - 1;
+                }
+                let replace_id = this.right_panel.pending_terminal_launcher.take();
+                let kind = RightTabKind::Terminal(id.clone());
+                if user_stayed
+                    && let Some(lid) = replace_id
+                    && let Some(pos) = this
+                        .right_panel
+                        .tabs
+                        .iter()
+                        .position(|t| t.id == lid && t.kind == RightTabKind::Launcher)
+                {
+                    this.right_panel.tabs[pos].kind = kind;
+                    this.right_panel.active = pos;
+                    this.right_panel.nav_seq = this.right_panel.nav_seq.wrapping_add(1);
+                    this.normalize_right_tabs();
+                } else {
+                    this.right_ensure_kind(kind, user_stayed, user_stayed, None, cx);
+                }
                 this.poll_terminals(cx);
                 cx.notify();
+                (
+                    this.browser.handle,
+                    this.terminal.focus.clone(),
+                    this.right_panel.open && user_stayed,
+                )
             });
+            if let Ok((handle, focus, true)) = focus_info {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.focus(&focus, cx);
+                });
+            }
             let subscribed = client
                 .call(
                     "subscribe_terminal",
@@ -338,17 +406,14 @@ impl KeelWindow {
         .detach();
     }
 
-    fn close_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn teardown_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.terminal.tabs.len() {
             return;
         }
         let tab = self.terminal.tabs.remove(index);
         let panel = &mut self.terminal;
         panel.active = panel.active.min(panel.tabs.len().saturating_sub(1));
-        if panel.tabs.is_empty() {
-            self.set_terminal_open(false, window, cx);
-            self.composer.update(cx, |s, cx| s.focus(window, cx));
-        }
+        panel.busy = panel.tabs.iter().any(|t| t.busy);
         if let Some(client) = self.client.clone() {
             cx.spawn(async move |_, _| {
                 let _ = client
@@ -471,24 +536,17 @@ impl KeelWindow {
         Some((cols.max(10), rows.max(2)))
     }
 
-    /// The side panel: a spacer that makes room in the row and the pane over
-    /// it, both sliding (as the files panel). Empty when hidden and still.
-    pub(super) fn render_terminal_panel(
+    /// Inner terminal surface rendered inside `RightPanel` for `term_id`.
+    pub(super) fn render_terminal_content(
         &mut self,
+        term_id: &str,
         t: Tokens,
         dark: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let allowed = self.browser_allowed();
-        let open = self.terminal.open && allowed;
-        let toggling = !self.reduced()
-            && self
-                .terminal
-                .anim
-                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.right_panel_duration());
-        if !open && !toggling {
-            return Vec::new();
+    ) -> gpui::AnyElement {
+        if let Some(ix) = self.terminal.tab_ix(term_id) {
+            self.terminal.active = ix;
         }
         // Measure the monospace cell once.
         if self.terminal.cell_width.is_none() {
@@ -521,104 +579,10 @@ impl KeelWindow {
         let cell_width = self.terminal.cell_width.unwrap_or(7.5);
         let bounds_slot = self.terminal.bounds.clone();
 
-        let tabs =
-            div()
-                .h(crate::style::HEADER_HEIGHT)
-                .flex_none()
-                .pr_2()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .border_b_1()
-                .border_color(c(t.border))
-                .children(self.terminal.tabs.iter().enumerate().map(|(ix, tab)| {
-                    let active = ix == self.terminal.active;
-                    let label = tab
-                        .emu
-                        .title()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| format!("Terminal {}", ix + 1));
-                    let group = format!("term-tab-{ix}");
-                    div()
-                        .id(ElementId::Name(group.clone().into()))
-                        .hover_probe(group.clone())
-                        .group(group.clone())
-                        .h(zpx(24.))
-                        .max_w(zpx(220.))
-                        .pl_2()
-                        .pr_1()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .rounded(RADIUS_MD)
-                        .cursor_pointer()
-                        .t_small()
-                        .text_color(c(if active { t.text } else { t.text_muted }))
-                        .when(active, |s| s.bg(c(t.selected)))
-                        .when(!active, |s| s.hover_fade(c(t.hover), None))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.terminal.active = ix;
-                            window.focus(&this.terminal.focus, cx);
-                            cx.notify();
-                        }))
-                        .child(Icon::Tool.el(zpx(12.)))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(label),
-                        )
-                        .when(tab.exited.is_some(), |d| {
-                            d.child(
-                                div()
-                                    .t_caption()
-                                    .text_color(c(t.text_faint))
-                                    .child("exited"),
-                            )
-                        })
-                        .child(reveal_on_hover(
-                            "term-close-reveal",
-                            group.clone(),
-                            if active { 1. } else { 0. },
-                            1.,
-                            div()
-                                .id(ElementId::Name(format!("term-close-{ix}").into()))
-                                .size(zpx(16.))
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .justify_center()
-                                .rounded(RADIUS_SM)
-                                .text_color(c(t.text_faint))
-                                .hover(|s| s.text_color(c(t.text)))
-                                .hover_fade(c(t.hover), None)
-                                .child(Icon::Close.el(zpx(10.)))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    this.close_terminal(ix, window, cx);
-                                })),
-                        ))
-                }))
-                .child(
-                    icon_button("term-new-btn", Icon::Plus, t)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_terminal(cx))),
-                )
-                .child(div().flex_1())
-                .child(
-                    icon_button("term-close-btn", Icon::SidebarClose, t).on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| this.toggle_terminal(window, cx),
-                    )),
-                );
-
-        let active = self.terminal.active;
         let screen = self
             .terminal
-            .tabs
-            .get(active)
+            .tab_ix(term_id)
+            .and_then(|ix| self.terminal.tabs.get(ix))
             .map(|tab| tab.emu.screen(&palette));
         let grid = div()
             .id("terminal-grid")
@@ -697,17 +661,7 @@ impl KeelWindow {
                 }))
             });
 
-        let full = self.browser_width(window);
-        let body = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(gpui::rgb(palette.bg))
-            .border_l_1()
-            .border_color(c(t.border))
-            .child(tabs.pl(px(8.)))
-            .child(grid);
-        let pane = div()
+        div()
             .id("terminal-panel")
             .track_focus(&self.terminal.focus)
             .key_context("Terminal")
@@ -716,42 +670,13 @@ impl KeelWindow {
                 window.focus(&this.terminal.focus, cx);
                 cx.notify();
             }))
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(px(full))
-            .child(body)
-            .child(self.render_browser_edge(t, cx));
-
-        let anim = self.terminal.anim.filter(|_| toggling);
-        if let Some((_, n)) = anim {
-            use gpui::AnimationExt as _;
-            let (from, to) = (self.right_panel_from, self.right_panel_target());
-            let curve = gpui::Animation::new(self.right_panel_duration())
-                .with_easing(crate::motion::glide_curve);
-            let pane = pane
-                .with_animation(
-                    ("terminal-slide", n as usize),
-                    curve.clone(),
-                    move |el, delta| {
-                        let k = from + (to - from) * delta;
-                        el.right(px(crate::motion::panel_shift(full, k)))
-                    },
-                )
-                .into_any_element();
-            let spacer = div()
-                .h_full()
-                .flex_none()
-                .w(px(full * to))
-                .into_any_element();
-            vec![spacer, pane]
-        } else if open {
-            let pane = pane.right_0().into_any_element();
-            let spacer = div().h_full().flex_none().w(px(full)).into_any_element();
-            vec![spacer, pane]
-        } else {
-            Vec::new()
-        }
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(gpui::rgb(palette.bg))
+            .child(grid)
+            .into_any_element()
     }
 }
 
@@ -782,6 +707,7 @@ mod tests {
             stream: None,
             emu: Emulator::new(20, 5),
             exited: exited.then_some(Some(0)),
+            busy: false,
         }
     }
 

@@ -1068,9 +1068,15 @@ fn render_mermaid(
             item,
             &title,
             rc.copied.as_deref() == Some(item.row_id()),
+            if rc.copied.as_deref() == Some(item.row_id()) {
+                rc.copied_at
+            } else {
+                None
+            },
             menu_open,
             rc.diagram_menu_ix,
             rc.diagram_menu_keyboard,
+            rc.reduced,
             group,
             rc.on_action.clone(),
             row_id,
@@ -1178,6 +1184,8 @@ fn chart_bar(
     menu_ix: usize,
     keyboard_opened: bool,
     copied: Option<&str>,
+    copied_at: Option<std::time::Instant>,
+    reduced: bool,
     on_action: OnRowAction,
     t: Tokens,
 ) -> gpui::Div {
@@ -1186,6 +1194,7 @@ fn chart_bar(
     let is_copied = copied.is_some_and(|c| {
         c == id || c == format!("{id}#csv") || c == format!("{id}#image")
     });
+    let copied_at = if is_copied { copied_at } else { None };
 
     let icon = match chart.kind {
         crate::chart::Kind::Bar => Icon::ChartColumn,
@@ -1219,9 +1228,11 @@ fn chart_bar(
         row_id,
         chart.clone(),
         is_copied,
+        copied_at,
         menu_open,
         menu_ix,
         keyboard_opened,
+        reduced,
         t,
         on_action,
     );
@@ -1229,7 +1240,7 @@ fn chart_bar(
     let reveal = reveal_on_hover_curved(
         format!("chart-actions-{id}"),
         group,
-        if menu_open { 1. } else { 0. },
+        if menu_open || is_copied { 1. } else { 0. },
         1.,
         std::time::Duration::from_millis(150),
         std::time::Duration::from_millis(100),
@@ -1252,9 +1263,11 @@ fn chart_copy_dropdown(
     row_id: String,
     chart: crate::chart::Chart,
     copied: bool,
+    copied_at: Option<std::time::Instant>,
     menu_open: bool,
     menu_ix: usize,
     keyboard_opened: bool,
+    reduced: bool,
     t: Tokens,
     on_action: OnRowAction,
 ) -> impl IntoElement {
@@ -1275,7 +1288,7 @@ fn chart_copy_dropdown(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .text_color(if copied { c(t.accent) } else { c(t.text_muted) })
+        .text_color(c(t.text_muted))
         .hover_fade(c(t.hover), Some(c(t.selected)))
         .hover(move |s| s.text_color(c(t.text)))
         .active(|s| s.opacity(0.85))
@@ -1287,25 +1300,7 @@ fn chart_copy_dropdown(
             cx.new(|_| crate::view::Tip::new(tip, t)).into()
         })
         .tooltip_show_delay(crate::view::tooltip::delay())
-        .child(if copied {
-            div()
-                .with_animation(
-                    ElementId::Name(format!("chart-copy-check-{id}").into()),
-                    gpui::Animation::new(std::time::Duration::from_millis(150))
-                        .with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .child(Icon::Check.el(zpx(13.)))
-        } else {
-            div()
-                .with_animation(
-                    ElementId::Name(format!("chart-copy-icon-{id}").into()),
-                    gpui::Animation::new(std::time::Duration::from_millis(150))
-                        .with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .child(Icon::Copy.el(zpx(13.)))
-        });
+        .child(copy_swap_icon(copied, copied_at, zpx(13.), t, reduced));
 
     let selected_csv = keyboard_opened && menu_ix == 0;
     let selected_img = keyboard_opened && menu_ix == 1;
@@ -1333,6 +1328,7 @@ fn chart_copy_dropdown(
                 spread_radius: zpx(-2.),
                 inset: false,
             }])
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(move |_, _, cx| {
                 action_close(RowAction::CloseDiagramMenu, cx);
             })
@@ -1368,14 +1364,14 @@ fn chart_copy_dropdown(
                 ),
             );
 
-        Some(if keyboard_opened {
+        Some(if keyboard_opened || reduced {
             menu_el.into_any_element()
         } else {
             menu_el
                 .with_animation(
                     ElementId::Name(format!("copy-menu-in-{id}").into()),
                     gpui::Animation::new(std::time::Duration::from_millis(150))
-                        .with_easing(crate::motion::ease_out),
+                        .with_easing(crate::motion::ease_out_strong),
                     |el, delta| {
                         el.opacity(delta)
                             .top(zpx(32. - 3. * (1. - delta)))
@@ -1414,6 +1410,8 @@ fn render_chart(
         rc.diagram_menu_ix,
         rc.diagram_menu_keyboard,
         rc.copied.as_deref(),
+        rc.copied_at,
+        rc.reduced,
         rc.on_action.clone(),
         t,
     );
@@ -1471,10 +1469,12 @@ fn render_chart(
     let active_series: Vec<bool> = (0..chart.series.len())
         .map(|ix| !rc.open_lines.get(&format!("{row_id_str}~hide-series-{ix}")).copied().unwrap_or(false))
         .collect();
+    let active_count = active_series.iter().filter(|&&a| a).count();
 
     let legend = chart.series.iter().enumerate().map(|(ix, series)| {
         let hide_key = format!("{row_id_str}~hide-series-{ix}");
         let hidden = rc.open_lines.get(&hide_key).copied().unwrap_or(false);
+        let can_toggle = hidden || active_count > 1;
         let color = series_color(t, ix, series.highlight);
         let on_toggle = rc.on_action.clone();
         let toggle_key = if hidden {
@@ -1485,33 +1485,41 @@ fn render_chart(
 
         div()
             .id(ElementId::Name(format!("legend-{row_id_str}-{ix}").into()))
+            .px(zpx(6.))
+            .py(zpx(3.))
+            .rounded(RADIUS_SM)
             .flex()
             .items_center()
             .gap(zpx(6.))
-            .cursor_pointer()
             .text_color(c(t.text_muted))
-            .hover(|s| s.text_color(c(t.text)))
-            .active(|s| s.opacity(0.75))
-            .when(hidden, |s| s.opacity(0.35))
-            .on_click(move |_, _, cx| {
-                on_toggle(RowAction::Toggle { row_id: toggle_key.clone() }, cx);
+            .when(can_toggle, |d| {
+                d.cursor_pointer()
+                    .hover_fade_outset(c(t.hover), Some(c(t.selected)), zpx(2.), zpx(1.))
+                    .hover(|s| s.text_color(c(t.text)))
+                    .active(|s| s.opacity(0.8))
+                    .on_click(move |_, _, cx| {
+                        on_toggle(RowAction::Toggle { row_id: toggle_key.clone() }, cx);
+                    })
             })
             .child(
                 div()
                     .size(px(8.))
                     .rounded(px(2.))
-                    .bg(color),
+                    .bg(color)
+                    .when(hidden, |d| d.opacity(0.35)),
             )
             .child(
                 div()
                     .text_size(zpx(12.))
                     .font_weight(gpui::FontWeight::NORMAL)
+                    .when(hidden, |d| d.opacity(0.45))
                     .child(series.name.clone()),
             )
     });
 
     let chart_clone = chart.clone();
     let row_id_clone = row_id.clone();
+    let enter_at = item.enter;
     let reduced = rc.reduced;
     let content = div()
         .flex()
@@ -1519,19 +1527,19 @@ fn render_chart(
         .children(headline_row)
         .child(
             div()
-                .px_4()
+                .px(zpx(10.))
                 .pt_1()
                 .pb_2()
                 .flex()
                 .flex_wrap()
-                .gap_3()
+                .gap_2()
                 .children(legend),
         )
         .child(
             gpui::canvas(
                 |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
                 move |bounds, hitbox, window, cx| {
-                    paint_chart(&chart_clone, &row_id_clone, menu_open, bounds, &hitbox, &active_series, reduced, t, window, cx)
+                    paint_chart(&chart_clone, &row_id_clone, menu_open, enter_at, bounds, &hitbox, &active_series, reduced, t, window, cx)
                 },
             )
             .w_full()
@@ -1541,28 +1549,20 @@ fn render_chart(
     let card = div()
         .id(ElementId::Name(format!("chart-card-{row_id}").into()))
         .relative()
-        .hover_probe(group.clone())
-        .group(group.clone())
+        .hover_probe(group)
         .w_full()
         .my_2()
         .rounded(RADIUS_MD)
         .bg(c(t.code))
         .border_1()
         .border_color(c(t.border).opacity(0.18))
-        .group_hover(group, move |s| s.border_color(c(t.border).opacity(0.50)))
         .overflow_hidden()
         .flex()
         .flex_col()
         .child(header_bar)
         .child(content);
 
-    div().w_full().py_1().child(crate::motion::appear(
-        card,
-        format!("chart-in-{row_id}"),
-        crate::motion::BASE,
-        4.,
-        rc.reduced,
-    ))
+    div().w_full().py_1().child(card)
 }
 
 /// Choice buttons as a card: a header, then one row per option with its
@@ -2763,57 +2763,170 @@ fn series_color(t: Tokens, ix: usize, highlight: bool) -> Hsla {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ChartTween {
+    from: f32,
+    target: f32,
+    start: Instant,
+    dur_inc: f32,
+    dur_dec: f32,
+}
+
+impl ChartTween {
+    fn new(val: f32, now: Instant, dur_inc: f32, dur_dec: f32) -> Self {
+        Self {
+            from: val,
+            target: val,
+            start: now,
+            dur_inc,
+            dur_dec,
+        }
+    }
+
+    fn value(&self, now: Instant) -> (f32, bool) {
+        if (self.target - self.from).abs() <= 1e-4 {
+            return (self.target, false);
+        }
+        let dur = if self.target >= self.from {
+            self.dur_inc
+        } else {
+            self.dur_dec
+        };
+        if dur <= 0.0 {
+            return (self.target, false);
+        }
+        let t = (now.duration_since(self.start).as_secs_f32() / dur).clamp(0.0, 1.0);
+        let ease = crate::motion::ease_out_strong(t);
+        (self.from + (self.target - self.from) * ease, t < 1.0)
+    }
+
+    fn set(&mut self, target: f32, now: Instant, instant: bool) {
+        if instant {
+            self.from = target;
+            self.target = target;
+            self.start = now;
+            return;
+        }
+        if (self.target - target).abs() > 1e-4 {
+            let (cur, _) = self.value(now);
+            self.from = cur;
+            self.target = target;
+            self.start = now;
+        }
+    }
+
+    fn snap(&mut self, val: f32, now: Instant) {
+        self.from = val;
+        self.target = val;
+        self.start = now;
+    }
+}
+
 #[derive(Clone)]
 struct ChartState {
-    created_at: Instant,
-    prev_axis: (f64, f64, f64),
+    entry_origin: Option<Instant>,
+    prev_bounds: (f64, f64),
     target_axis: (f64, f64, f64),
     axis_start: Instant,
     hovered_group: Option<usize>,
     dev_hovered: Option<Option<usize>>,
     first_hover_at: Option<Instant>,
+    tip_last_hidden_at: Option<Instant>,
     tip_is_visible: bool,
-    tip_curr_x: f32,
-    tip_target_x: f32,
-    tip_start_x: f32,
-    tip_move_start: Instant,
-    tip_opacity: f32,
-    tip_opacity_target: f32,
-    tip_opacity_from: f32,
-    tip_opacity_start: Instant,
     tip_last_group: Option<usize>,
-    hover_dim: f32,
-    hover_dim_target: f32,
-    hover_dim_from: f32,
-    hover_dim_start: Instant,
+    tip_x: ChartTween,
+    tip_w: ChartTween,
+    tip_opacity: ChartTween,
+    guide_x: ChartTween,
+    hover_dim: ChartTween,
+    series_vis: Vec<ChartTween>,
+    group_focus: Vec<ChartTween>,
     keyboard_focused: bool,
+    last_pointer: Option<gpui::Point<Pixels>>,
 }
 
 impl ChartState {
-    fn new(now: Instant, axis: (f64, f64, f64)) -> Self {
+    fn new(
+        now: Instant,
+        axis: (f64, f64, f64),
+        enter_at: Option<Instant>,
+        active_series: &[bool],
+        n_groups: usize,
+    ) -> Self {
         Self {
-            created_at: now,
-            prev_axis: axis,
+            entry_origin: enter_at,
+            prev_bounds: (axis.0, axis.1),
             target_axis: axis,
             axis_start: now,
             hovered_group: None,
             dev_hovered: None,
             first_hover_at: None,
+            tip_last_hidden_at: None,
             tip_is_visible: false,
-            tip_curr_x: 0.,
-            tip_target_x: 0.,
-            tip_start_x: 0.,
-            tip_move_start: now,
-            tip_opacity: 0.0,
-            tip_opacity_target: 0.0,
-            tip_opacity_from: 0.0,
-            tip_opacity_start: now,
             tip_last_group: None,
-            hover_dim: 1.0,
-            hover_dim_target: 1.0,
-            hover_dim_from: 1.0,
-            hover_dim_start: now,
+            tip_x: ChartTween::new(0.0, now, 0.12, 0.12),
+            tip_w: ChartTween::new(0.0, now, 0.12, 0.12),
+            tip_opacity: ChartTween::new(0.0, now, 0.15, 0.10),
+            guide_x: ChartTween::new(0.0, now, 0.12, 0.12),
+            hover_dim: ChartTween::new(1.0, now, 0.10, 0.12),
+            series_vis: active_series
+                .iter()
+                .map(|&a| ChartTween::new(if a { 1.0 } else { 0.0 }, now, 0.20, 0.20))
+                .collect(),
+            group_focus: (0..n_groups)
+                .map(|_| ChartTween::new(0.0, now, 0.12, 0.10))
+                .collect(),
             keyboard_focused: false,
+            last_pointer: None,
+        }
+    }
+
+    fn axis_at(&self, now: Instant, reduced: bool) -> (f64, f64, f64, f32, bool) {
+        if reduced {
+            return (
+                self.target_axis.0,
+                self.target_axis.1,
+                self.target_axis.2,
+                1.0,
+                false,
+            );
+        }
+        let t = (now.duration_since(self.axis_start).as_secs_f32() / 0.20).clamp(0.0, 1.0);
+        let ease = crate::motion::ease_out_strong(t);
+        let lo = self.prev_bounds.0 + (self.target_axis.0 - self.prev_bounds.0) * ease as f64;
+        let hi = self.prev_bounds.1 + (self.target_axis.1 - self.prev_bounds.1) * ease as f64;
+        (lo, hi, self.target_axis.2, ease, t < 1.0)
+    }
+
+    fn set_axis_target(&mut self, next: (f64, f64, f64), now: Instant, reduced: bool) {
+        if self.target_axis == next {
+            return;
+        }
+        if reduced {
+            self.prev_bounds = (next.0, next.1);
+        } else {
+            let (cur_lo, cur_hi, _, _, _) = self.axis_at(now, false);
+            self.prev_bounds = (cur_lo, cur_hi);
+        }
+        self.target_axis = next;
+        self.axis_start = now;
+    }
+
+    fn sync_dimensions(&mut self, active_series: &[bool], n_groups: usize, now: Instant, instant: bool) {
+        if self.series_vis.len() != active_series.len() {
+            self.series_vis = active_series
+                .iter()
+                .map(|&a| ChartTween::new(if a { 1.0 } else { 0.0 }, now, 0.20, 0.20))
+                .collect();
+        } else {
+            for (tween, &active) in self.series_vis.iter_mut().zip(active_series) {
+                tween.set(if active { 1.0 } else { 0.0 }, now, instant);
+            }
+        }
+        if self.group_focus.len() != n_groups {
+            self.group_focus = (0..n_groups)
+                .map(|_| ChartTween::new(0.0, now, 0.12, 0.10))
+                .collect();
         }
     }
 }
@@ -2823,65 +2936,49 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
+fn apply_dev_hover(state: &mut ChartState, group: Option<Option<usize>>, now: Instant) {
+    state.dev_hovered = group;
+    match group {
+        Some(Some(ix)) => {
+            state.tip_is_visible = true;
+            state.tip_last_group = Some(ix);
+            state.tip_opacity.snap(1.0, now);
+            state.hover_dim.snap(0.50, now);
+            for (g, f) in state.group_focus.iter_mut().enumerate() {
+                f.snap(if g == ix { 1.0 } else { 0.0 }, now);
+            }
+        }
+        Some(None) => {
+            state.tip_is_visible = false;
+            state.hovered_group = None;
+            state.tip_last_group = None;
+            state.tip_opacity.snap(0.0, now);
+            state.hover_dim.snap(1.0, now);
+            state.tip_x.snap(0.0, now);
+            state.tip_w.snap(0.0, now);
+            state.guide_x.snap(0.0, now);
+            for f in &mut state.group_focus {
+                f.snap(0.0, now);
+            }
+        }
+        None => {}
+    }
+}
+
 pub(crate) fn dev_set_chart_hover(row_id: &str, group: Option<Option<usize>>) {
+    let now = Instant::now();
     CHART_STATES.with(|states| {
         let mut map = states.borrow_mut();
         let mut matched = false;
         for (k, state) in map.iter_mut() {
             if row_id.is_empty() || k == row_id || k.contains(row_id) || row_id.contains(k.as_str()) {
                 matched = true;
-                state.dev_hovered = group;
-                if let Some(Some(ix)) = group {
-                    state.tip_is_visible = true;
-                    state.tip_last_group = Some(ix);
-                    state.tip_opacity = 1.0;
-                    state.tip_opacity_target = 1.0;
-                    state.tip_opacity_from = 1.0;
-                    state.tip_opacity_start = Instant::now();
-                    state.hover_dim = 0.55;
-                    state.hover_dim_target = 0.55;
-                    state.hover_dim_from = 0.55;
-                    state.hover_dim_start = Instant::now();
-                } else if let Some(None) = group {
-                    state.tip_is_visible = false;
-                    state.hovered_group = None;
-                    state.tip_last_group = None;
-                    state.tip_opacity = 0.0;
-                    state.tip_opacity_target = 0.0;
-                    state.tip_opacity_from = 0.0;
-                    state.hover_dim = 1.0;
-                    state.hover_dim_target = 1.0;
-                    state.hover_dim_from = 1.0;
-                } else {
-                    state.dev_hovered = None;
-                }
+                apply_dev_hover(state, group, now);
             }
         }
         if !matched {
-            let mut state = ChartState::new(Instant::now(), (0., 1., 0.25));
-            state.dev_hovered = group;
-            if let Some(Some(ix)) = group {
-                state.tip_is_visible = true;
-                state.tip_last_group = Some(ix);
-                state.tip_opacity = 1.0;
-                state.tip_opacity_target = 1.0;
-                state.tip_opacity_from = 1.0;
-                state.tip_opacity_start = Instant::now();
-                state.hover_dim = 0.55;
-                state.hover_dim_target = 0.55;
-                state.hover_dim_from = 0.55;
-                state.hover_dim_start = Instant::now();
-            } else if let Some(None) = group {
-                state.tip_is_visible = false;
-                state.hovered_group = None;
-                state.tip_last_group = None;
-                state.tip_opacity = 0.0;
-                state.tip_opacity_target = 0.0;
-                state.tip_opacity_from = 0.0;
-                state.hover_dim = 1.0;
-                state.hover_dim_target = 1.0;
-                state.hover_dim_from = 1.0;
-            }
+            let mut state = ChartState::new(now, (0., 1., 0.25), None, &[], 0);
+            apply_dev_hover(&mut state, group, now);
             map.insert(row_id.to_string(), state);
         }
     });
@@ -2921,10 +3018,54 @@ fn paint_chart_tick(
     let _ = line.paint(shift(origin, draw_x, y), px(14.), TextAlign::Left, None, window, cx);
 }
 
+/// Compute continuous `(x_offset_from_slot_center, width)` pairs for each series in a bar group.
+/// Driven directly by `series_alphas` so toggling a series smoothly collapses or expands its slot
+/// and glides neighboring bars into place without discrete threshold snaps.
+fn bar_group_spans(slot: f32, series_alphas: &[f32]) -> Vec<(f32, f32)> {
+    let eff_k: f32 = series_alphas.iter().map(|a| a.clamp(0.0, 1.0)).sum();
+    if eff_k <= 0.001 || series_alphas.is_empty() {
+        return vec![(0.0, 0.0); series_alphas.len()];
+    }
+    let gw = slot * 0.60;
+    let gap = 2.0_f32;
+    let denom = eff_k.max(1.0);
+    let base_bar_w = ((gw - (denom - 1.0) * gap) / denom).clamp(3.0, 36.0);
+
+    let mut prev_alpha = 0.0_f32;
+    let mut gaps = Vec::with_capacity(series_alphas.len());
+    let mut widths = Vec::with_capacity(series_alphas.len());
+    let mut total_w = 0.0_f32;
+
+    for (i, &raw_alpha) in series_alphas.iter().enumerate() {
+        let a = raw_alpha.clamp(0.0, 1.0);
+        let g = if i == 0 {
+            0.0
+        } else {
+            gap * prev_alpha.min(1.0) * a
+        };
+        let w = base_bar_w * a;
+        total_w += g + w;
+        gaps.push(g);
+        widths.push(w);
+        prev_alpha += a;
+    }
+
+    let mut cursor = -total_w * 0.5;
+    let mut out = Vec::with_capacity(series_alphas.len());
+    for (g, w) in gaps.into_iter().zip(widths) {
+        cursor += g;
+        out.push((cursor, w));
+        cursor += w;
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint_chart(
     chart: &crate::chart::Chart,
     row_id: &str,
     menu_open: bool,
+    enter_at: Option<Instant>,
     bounds: gpui::Bounds<Pixels>,
     hitbox: &gpui::Hitbox,
     active_series: &[bool],
@@ -2937,37 +3078,50 @@ fn paint_chart(
     let origin = bounds.origin;
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let (left, top, plot_w, plot_h) = crate::chart::plot_box(w, h);
+    let any_active = active_series.iter().any(|&a| a);
     let (target_lo, target_hi, target_step) = chart.axis_for(active_series);
+    let n = chart.labels.len();
 
     let mut state = CHART_STATES.with(|states| {
         states
             .borrow_mut()
             .entry(row_id.to_string())
-            .or_insert_with(|| ChartState::new(now, (target_lo, target_hi, target_step)))
+            .or_insert_with(|| {
+                ChartState::new(
+                    now,
+                    (target_lo, target_hi, target_step),
+                    if reduced { None } else { enter_at },
+                    active_series,
+                    n,
+                )
+            })
             .clone()
     });
 
     let mut needs_refresh = false;
 
-    // Rescale axis smoothly if target changed
-    if state.target_axis != (target_lo, target_hi, target_step) {
-        state.prev_axis = state.target_axis;
-        state.target_axis = (target_lo, target_hi, target_step);
-        state.axis_start = now;
+    state.sync_dimensions(active_series, n, now, reduced);
+    let series_alphas: Vec<f32> = state
+        .series_vis
+        .iter()
+        .map(|tw| {
+            let (v, moving) = tw.value(now);
+            if moving {
+                needs_refresh = true;
+            }
+            v
+        })
+        .collect();
+    let any_series_visible = any_active || series_alphas.iter().any(|&a| a > 0.005);
+
+    // Keep last real axis while hidden series fade out; only update axis when at least one series is active.
+    if any_active {
+        state.set_axis_target((target_lo, target_hi, target_step), now, reduced);
     }
-    let (lo, hi, step) = if reduced {
-        (target_lo, target_hi, target_step)
-    } else {
-        let t_axis = (now.duration_since(state.axis_start).as_secs_f32() / 0.20).clamp(0.0, 1.0);
-        let ease = crate::motion::ease_out(t_axis);
-        let lo = state.prev_axis.0 + (target_lo - state.prev_axis.0) * ease as f64;
-        let hi = state.prev_axis.1 + (target_hi - state.prev_axis.1) * ease as f64;
-        let step = state.prev_axis.2 + (target_step - state.prev_axis.2) * ease as f64;
-        if t_axis < 1.0 {
-            needs_refresh = true;
-        }
-        (lo, hi, step)
-    };
+    let (lo, hi, step, axis_ease, axis_moving) = state.axis_at(now, reduced);
+    if axis_moving {
+        needs_refresh = true;
+    }
 
     let pointer = window.mouse_position();
     let is_hovered = !menu_open && hitbox.is_hovered(window);
@@ -2982,24 +3136,38 @@ fn paint_chart(
         window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
     }
 
+    let r_id_move = row_id.to_string();
     let hb = hitbox.clone();
-    window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, window, _| {
+    window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, _| {
         if phase == gpui::DispatchPhase::Bubble && hb.is_hovered(window) {
+            CHART_STATES.with(|states| {
+                if let Some(st) = states.borrow_mut().get_mut(&r_id_move) {
+                    let moved = st.last_pointer.is_none_or(|p| {
+                        f32::from(ev.position.x - p.x).abs() > 1.0
+                            || f32::from(ev.position.y - p.y).abs() > 1.0
+                    });
+                    st.last_pointer = Some(ev.position);
+                    if moved {
+                        st.keyboard_focused = false;
+                    }
+                }
+            });
             window.refresh();
         }
     });
 
-    // Track hover transitions and 100ms first-hover delay
-    let effective_hover = if menu_open {
+    let was_hovering = state.hovered_group.is_some();
+
+    // Track hover transitions, warm tooltip re-entry, and 100ms initial delay
+    let effective_hover = if menu_open || !any_series_visible {
         state.hovered_group = None;
         state.first_hover_at = None;
         state.tip_is_visible = false;
-        state.tip_opacity = 0.0;
-        state.tip_opacity_target = 0.0;
-        state.tip_opacity_from = 0.0;
-        state.hover_dim = 1.0;
-        state.hover_dim_target = 1.0;
-        state.hover_dim_from = 1.0;
+        state.tip_opacity.snap(0.0, now);
+        state.hover_dim.snap(1.0, now);
+        for f in &mut state.group_focus {
+            f.snap(0.0, now);
+        }
         None
     } else {
         match state.dev_hovered {
@@ -3018,6 +3186,9 @@ fn paint_chart(
                     }
                     state.hovered_group = pointer_hover;
                 } else if !state.keyboard_focused {
+                    if was_hovering {
+                        state.tip_last_hidden_at = Some(now);
+                    }
                     state.hovered_group = None;
                     state.first_hover_at = None;
                     state.tip_is_visible = false;
@@ -3031,32 +3202,47 @@ fn paint_chart(
         state.tip_last_group = Some(ix);
     }
 
-    // Hover dimming easing (120ms enter, 100ms exit)
-    let target_dim = if !menu_open && effective_hover.is_some() { 0.55 } else { 1.0 };
-    if (state.hover_dim_target - target_dim).abs() > 0.01 {
-        state.hover_dim_from = state.hover_dim;
-        state.hover_dim_target = target_dim;
-        state.hover_dim_start = now;
-    }
-    if !reduced {
-        let dim_dur = if target_dim < 0.9 { 0.12 } else { 0.10 };
-        let dim_t = (now.duration_since(state.hover_dim_start).as_secs_f32() / dim_dur).clamp(0.0, 1.0);
-        let ease = crate::motion::ease_out(dim_t);
-        state.hover_dim = state.hover_dim_from + (state.hover_dim_target - state.hover_dim_from) * ease;
-        if dim_t < 1.0 {
-            needs_refresh = true;
-        }
+    // Hover dimming (120ms enter, 100ms exit) and per-group slot focus
+    let target_dim = if !menu_open && effective_hover.is_some() {
+        0.50
     } else {
-        state.hover_dim = target_dim;
+        1.0
+    };
+    state.hover_dim.set(target_dim, now, reduced || state.keyboard_focused);
+    let (global_dim, dim_moving) = state.hover_dim.value(now);
+    if dim_moving {
+        needs_refresh = true;
     }
 
-    // Tooltip entrance (150ms) and exit (100ms) fade
-    let delay_passed = !menu_open && effective_hover.is_some() && (
-        state.tip_is_visible
+    let mut group_focus_vals = Vec::with_capacity(n);
+    for (ix, tween) in state.group_focus.iter_mut().enumerate() {
+        let target = if !menu_open && effective_hover == Some(ix) {
+            1.0
+        } else {
+            0.0
+        };
+        tween.set(target, now, reduced || state.keyboard_focused);
+        let (v, moving) = tween.value(now);
+        if moving {
+            needs_refresh = true;
+        }
+        group_focus_vals.push(v);
+    }
+
+    // Tooltip entrance (150ms) and exit (100ms), skipping delay when warm
+    let tip_warm = state.tip_is_visible
+        || state.tip_opacity.value(now).0 > 0.05
+        || state
+            .tip_last_hidden_at
+            .is_some_and(|at| now.saturating_duration_since(at) < Duration::from_millis(350));
+    let delay_passed = !menu_open
+        && effective_hover.is_some()
+        && (tip_warm
             || matches!(state.dev_hovered, Some(Some(_)))
             || state.keyboard_focused
-            || state.first_hover_at.map_or(false, |at| now.duration_since(at) >= Duration::from_millis(100))
-    );
+            || state
+                .first_hover_at
+                .is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_millis(100)));
     if delay_passed {
         state.tip_is_visible = true;
     }
@@ -3065,55 +3251,96 @@ fn paint_chart(
     } else {
         0.0
     };
-    if (state.tip_opacity_target - target_opacity).abs() > 0.01 {
-        state.tip_opacity_from = state.tip_opacity;
-        state.tip_opacity_target = target_opacity;
-        state.tip_opacity_start = now;
-    }
-    if !reduced && !state.keyboard_focused {
-        let op_dur = if state.tip_opacity_target > 0.5 { 0.15 } else { 0.10 };
-        let op_t = (now.duration_since(state.tip_opacity_start).as_secs_f32() / op_dur).clamp(0.0, 1.0);
-        let ease = crate::motion::ease_out(op_t);
-        state.tip_opacity = state.tip_opacity_from + (state.tip_opacity_target - state.tip_opacity_from) * ease;
-        if op_t < 1.0 {
-            needs_refresh = true;
-        }
-    } else {
-        state.tip_opacity = target_opacity;
-    }
-
-    // Check entry animation status
-    let entry_elapsed_ms = now.duration_since(state.created_at).as_secs_f32() * 1000.0;
-    let total_entry_ms = match chart.kind {
-        crate::chart::Kind::Bar => 240.0 + (chart.labels.len().saturating_sub(1) as f32 * 30.0).min(200.0),
-        crate::chart::Kind::Line => 280.0,
-    };
-    if !reduced && entry_elapsed_ms < total_entry_ms {
+    state.tip_opacity.set(target_opacity, now, reduced || state.keyboard_focused);
+    let (tip_alpha, tip_op_moving) = state.tip_opacity.value(now);
+    if tip_op_moving {
         needs_refresh = true;
     }
 
-    // Paint Gridlines and Y-axis Ticks
-    let y_of = |v: f64| top + plot_h * (1. - ((v - lo) / (hi - lo).max(1e-6)) as f32);
-    let mut tick = lo;
-    while tick <= hi + step * 0.1 {
-        let y = y_of(tick);
-        let is_zero = tick.abs() < 1e-5;
-        let grid_color = if is_zero {
-            c(t.text).opacity(0.18)
-        } else {
-            c(t.text).opacity(0.08)
+    if effective_hover.is_none() && tip_alpha <= 0.005 {
+        state.tip_last_group = None;
+        state.tip_x.snap(0.0, now);
+        state.tip_w.snap(0.0, now);
+        state.guide_x.snap(0.0, now);
+    }
+
+    // Entry animation (only when the row arrived live)
+    let total_entry_ms = match chart.kind {
+        crate::chart::Kind::Bar => 180.0 + (n.saturating_sub(1) as f32 * 20.0).min(100.0),
+        crate::chart::Kind::Line => 240.0,
+    };
+    let entry_elapsed_ms = state
+        .entry_origin
+        .map(|at| now.saturating_duration_since(at).as_secs_f32() * 1000.0);
+    if !reduced
+        && let Some(elapsed) = entry_elapsed_ms
+        && elapsed < total_entry_ms
+    {
+        needs_refresh = true;
+    }
+
+    // Empty state when all series are hidden
+    if !any_series_visible {
+        let mut font = gpui::font(crate::style::SANS);
+        let msg = "No series selected";
+        let run = TextRun {
+            len: msg.len(),
+            font: std::mem::replace(&mut font, gpui::font(crate::style::SANS)),
+            color: c(t.text_muted),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
         };
-        window.paint_quad(gpui::fill(
-            gpui::Bounds::new(shift(origin, left, y.round()), gpui::size(px(plot_w), px(1.))),
-            grid_color,
-        ));
-        let tick_str = chart.format_tick(tick);
-        paint_chart_tick(&tick_str, origin, left - 8., y - 6., true, c(t.text_muted), window, cx);
+        let line = window
+            .text_system()
+            .shape_line(SharedString::from(msg), px(12.), &[run], None);
+        let cx_pos = left + (plot_w - f32::from(line.width)) / 2.;
+        let cy_pos = top + (plot_h - 16.) / 2.;
+        let _ = line.paint(shift(origin, cx_pos, cy_pos), px(16.), TextAlign::Left, None, window, cx);
+        CHART_STATES.with(|states| {
+            states.borrow_mut().insert(row_id.to_string(), state);
+        });
+        if needs_refresh {
+            window.refresh();
+        }
+        return;
+    }
+
+    // Paint Gridlines and Y-axis Ticks against clean target_step multiples
+    let y_of = |v: f64| top + plot_h * (1. - ((v - lo) / (hi - lo).max(1e-6)) as f32);
+    let mut tick = state.target_axis.0;
+    let hi_bound = state.target_axis.1 + step * 0.1;
+    while tick <= hi_bound {
+        let y = y_of(tick);
+        if y >= top - 4. && y <= top + plot_h + 4. {
+            let edge_fade = if axis_moving {
+                let in_plot = (y >= top && y <= top + plot_h) as u8 as f32;
+                (0.25 + 0.75 * axis_ease) * (0.4 + 0.6 * in_plot)
+            } else {
+                1.0
+            };
+            let is_zero = tick.abs() < 1e-5;
+            let grid_alpha = if is_zero { 0.18 } else { 0.08 } * edge_fade;
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(shift(origin, left, y.round()), gpui::size(px(plot_w), px(1.))),
+                c(t.text).opacity(grid_alpha),
+            ));
+            let tick_str = chart.format_tick(tick);
+            paint_chart_tick(
+                &tick_str,
+                origin,
+                left - 8.,
+                y - 6.,
+                true,
+                c(t.text_muted).opacity(edge_fade),
+                window,
+                cx,
+            );
+        }
         tick += step;
     }
 
     // Paint X-axis Category Labels
-    let n = chart.labels.len();
     let slot = plot_w / n as f32;
     let every = (60. / slot).ceil().max(1.) as usize;
     for (ix, name) in chart.labels.iter().enumerate().step_by(every) {
@@ -3146,61 +3373,63 @@ fn paint_chart(
 
     match chart.kind {
         crate::chart::Kind::Bar => {
-            let active_indices: Vec<usize> = active_series
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| **a)
-                .map(|(i, _)| i)
-                .collect();
-            let k = active_indices.len() as f32;
-            if k > 0. {
-                let gw = slot * 0.60;
-                let bar_w = ((gw - (k - 1.) * 2.0) / k).clamp(3.0, 36.0);
-                let total_gw = k * bar_w + (k - 1.) * 2.0;
-
+            let spans = bar_group_spans(slot, &series_alphas);
+            if spans.iter().any(|(_, w)| *w > 0.25) {
                 for (ix, _) in chart.labels.iter().enumerate() {
-                    let entry_progress = if reduced {
-                        1.0
-                    } else {
-                        let stagger = (ix as f32 * 30.0).min(200.0);
-                        let t = ((entry_elapsed_ms - stagger) / 240.0).clamp(0.0, 1.0);
-                        crate::motion::ease_out(t)
-                    };
-                    if entry_progress <= 0.0 {
-                        continue;
+                    let focus = group_focus_vals.get(ix).copied().unwrap_or(0.0);
+                    if focus > 0.005 {
+                        let slot_x = left + slot * ix as f32 + 2.0;
+                        let slot_w = (slot - 4.0).max(4.0);
+                        window.paint_quad(
+                            gpui::fill(
+                                gpui::Bounds::new(shift(origin, slot_x, top), gpui::size(px(slot_w), px(plot_h))),
+                                c(t.text).opacity(0.035 * focus),
+                            )
+                            .corner_radii(px(4.)),
+                        );
                     }
 
-                    let is_target = effective_hover == Some(ix);
-                    let dim = if effective_hover.is_some() && !is_target {
-                        state.hover_dim
-                    } else {
-                        1.0
-                    };
-                    let lift = if is_target && !reduced {
-                        ((1.0 - state.hover_dim) / 0.45).clamp(0.0, 1.0) * 1.5
-                    } else {
-                        0.0
+                    let (entry_h, entry_op) = match entry_elapsed_ms {
+                        Some(elapsed) if !reduced => {
+                            let stagger = (ix as f32 * 20.0).min(100.0);
+                            if elapsed < stagger {
+                                continue;
+                            }
+                            let p = crate::motion::ease_out_strong(
+                                ((elapsed - stagger) / 180.0).clamp(0.0, 1.0),
+                            );
+                            (0.08 + 0.92 * p, 0.12 + 0.88 * p)
+                        }
+                        _ => (1.0, 1.0),
                     };
 
-                    for (pos, &si) in active_indices.iter().enumerate() {
+                    let dim = 1.0 - (1.0 - global_dim) * (1.0 - focus);
+                    let slot_center = left + slot * (ix as f32 + 0.5);
+
+                    for (si, &(rel_x, bar_w)) in spans.iter().enumerate() {
+                        let series_alpha = series_alphas[si];
+                        if series_alpha <= 0.005 || bar_w <= 0.25 {
+                            continue;
+                        }
                         let series = &chart.series[si];
                         let Some(Some(v)) = series.values.get(ix) else { continue };
                         let base_color = series_color(t, si, series.highlight);
-                        let color = base_color.opacity(base_color.a * dim * entry_progress);
-                        let bar_x = left + slot * (ix as f32 + 0.5) - total_gw / 2.0 + pos as f32 * (bar_w + 2.0);
+                        let color = base_color.opacity(base_color.a * dim * entry_op * series_alpha);
+                        let bar_x = slot_center + rel_x;
                         let val_y = y_of(*v);
-                        let (mut top_y, bottom_y) = (val_y.min(zero_y), val_y.max(zero_y));
-                        let full_h = (bottom_y - top_y).max(1.0);
-                        let h = (full_h * (0.08 + 0.92 * entry_progress)).max(1.0) + lift;
-                        if *v >= 0. {
-                            top_y = bottom_y - h;
+                        let (raw_top, raw_bot) = (val_y.min(zero_y), val_y.max(zero_y));
+                        let full_h = if *v >= 0. {
+                            (raw_bot - raw_top.max(top)).max(1.0)
                         } else {
-                            top_y = zero_y;
-                        }
+                            (raw_bot.min(top + plot_h) - raw_top).max(1.0)
+                        };
+                        let h = (full_h * entry_h * (0.80 + 0.20 * series_alpha)).max(1.0);
+                        let top_y = if *v >= 0. { raw_bot - h } else { zero_y };
+                        let r = (bar_w * 0.5).min(h * 0.5).min(4.0);
                         let corners = if *v >= 0. {
                             gpui::Corners {
-                                top_left: px(4.),
-                                top_right: px(4.),
+                                top_left: px(r),
+                                top_right: px(r),
                                 bottom_left: px(0.),
                                 bottom_right: px(0.),
                             }
@@ -3208,8 +3437,8 @@ fn paint_chart(
                             gpui::Corners {
                                 top_left: px(0.),
                                 top_right: px(0.),
-                                bottom_left: px(4.),
-                                bottom_right: px(4.),
+                                bottom_left: px(r),
+                                bottom_right: px(r),
                             }
                         };
                         window.paint_quad(
@@ -3224,18 +3453,22 @@ fn paint_chart(
             }
         }
         crate::chart::Kind::Line => {
-            let line_reveal_progress = if reduced {
-                1.0
-            } else {
-                crate::motion::ease_out((entry_elapsed_ms / 280.0).clamp(0.0, 1.0))
+            let line_reveal_progress = match entry_elapsed_ms {
+                Some(elapsed) if !reduced => {
+                    crate::motion::ease_out_strong((elapsed / 240.0).clamp(0.0, 1.0))
+                }
+                _ => 1.0,
             };
             let max_reveal_x = left + plot_w * line_reveal_progress;
 
+            let mut series_splines: Vec<(usize, Vec<Vec<(f32, f32)>>)> = Vec::new();
             for (si, series) in chart.series.iter().enumerate() {
-                if !active_series.get(si).copied().unwrap_or(true) {
+                let series_alpha = series_alphas.get(si).copied().unwrap_or(0.0);
+                if series_alpha <= 0.005 {
                     continue;
                 }
-                let color = series_color(t, si, series.highlight);
+                let base_color = series_color(t, si, series.highlight);
+                let color = base_color.opacity(base_color.a * series_alpha);
                 let points: Vec<Option<(f32, f32)>> = series
                     .values
                     .iter()
@@ -3243,60 +3476,69 @@ fn paint_chart(
                     .map(|(ix, v)| v.map(|v| (left + slot * (ix as f32 + 0.5), y_of(v))))
                     .collect();
 
+                let mut runs = Vec::new();
                 for run in points.split(Option::is_none) {
                     let pts: Vec<(f32, f32)> = run.iter().flatten().copied().collect();
                     if pts.len() < 2 {
                         continue;
                     }
                     let curve_pts = crate::chart::monotone_spline(&pts);
+                    let clipped = crate::chart::clip_polyline_at_x(&curve_pts, max_reveal_x);
 
-                    // Optional faint area fill for series 0 at ~6% opacity
-                    if si == 0 && curve_pts[0].0 <= max_reveal_x {
-                        let mut area = gpui::PathBuilder::fill();
-                        area.move_to(shift(origin, curve_pts[0].0, zero_y));
-                        let mut last_x = curve_pts[0].0;
-                        for &(x, y) in &curve_pts {
-                            if x > max_reveal_x {
-                                break;
+                    if clipped.len() >= 2 {
+                        // Faint area fill for primary series
+                        if si == 0 {
+                            let mut area = gpui::PathBuilder::fill();
+                            area.move_to(shift(origin, clipped[0].0, zero_y));
+                            for &(x, y) in &clipped {
+                                area.line_to(shift(origin, x, y));
                             }
-                            area.line_to(shift(origin, x, y));
-                            last_x = x;
+                            area.line_to(shift(origin, clipped.last().unwrap().0, zero_y));
+                            area.close();
+                            if let Ok(p) = area.build() {
+                                window.paint_path(p, base_color.opacity(0.06 * series_alpha));
+                            }
                         }
-                        area.line_to(shift(origin, last_x, zero_y));
-                        area.close();
-                        if let Ok(p) = area.build() {
-                            window.paint_path(p, color.opacity(0.06));
-                        }
-                    }
 
-                    // Stroke curve
-                    if curve_pts[0].0 <= max_reveal_x {
+                        // Stroke curve
                         let mut stroke = gpui::PathBuilder::stroke(px(1.75));
-                        stroke.move_to(shift(origin, curve_pts[0].0, curve_pts[0].1));
-                        for &(x, y) in &curve_pts[1..] {
-                            if x > max_reveal_x {
-                                break;
-                            }
+                        stroke.move_to(shift(origin, clipped[0].0, clipped[0].1));
+                        for &(x, y) in &clipped[1..] {
                             stroke.line_to(shift(origin, x, y));
                         }
                         if let Ok(p) = stroke.build() {
                             window.paint_path(p, color);
                         }
                     }
+                    runs.push(curve_pts);
                 }
+                series_splines.push((si, runs));
             }
 
-            // Hover guide and dot with smooth fade and scaling
+            // Hover guide and dot synced with tooltip horizontal glide
             let guide_alpha = if menu_open {
                 0.0
             } else if reduced {
                 if effective_hover.is_some() { 1.0 } else { 0.0 }
             } else {
-                ((1.0 - state.hover_dim) / 0.45).clamp(0.0, 1.0)
+                ((1.0 - global_dim) / 0.50).clamp(0.0, 1.0)
             };
 
-            if !menu_open && guide_alpha > 0.01 && let Some(ix) = effective_hover.or(state.tip_last_group) {
-                let gx = left + slot * (ix as f32 + 0.5);
+            if !menu_open
+                && guide_alpha > 0.01
+                && let Some(ix) = effective_hover.or(state.tip_last_group)
+            {
+                let target_gx = left + slot * (ix as f32 + 0.5);
+                if state.guide_x.target <= 0.0 || reduced || state.keyboard_focused {
+                    state.guide_x.snap(target_gx, now);
+                } else {
+                    state.guide_x.set(target_gx, now, false);
+                }
+                let (gx, gx_moving) = state.guide_x.value(now);
+                if gx_moving {
+                    needs_refresh = true;
+                }
+
                 window.paint_quad(gpui::fill(
                     gpui::Bounds::new(
                         shift(origin, gx - 0.5, top),
@@ -3305,13 +3547,24 @@ fn paint_chart(
                     c(t.text).opacity(0.20 * guide_alpha),
                 ));
 
-                for (si, series) in chart.series.iter().enumerate() {
-                    if !active_series.get(si).copied().unwrap_or(true) {
+                for (si, runs) in &series_splines {
+                    let series_alpha = series_alphas.get(*si).copied().unwrap_or(0.0);
+                    if series_alpha <= 0.005 {
                         continue;
                     }
-                    if let Some(Some(v)) = series.values.get(ix) {
-                        let gy = y_of(*v);
-                        let dot_color = series_color(t, si, series.highlight);
+                    let gy = runs
+                        .iter()
+                        .find_map(|run| crate::chart::sample_polyline_y_at_x(run, gx))
+                        .or_else(|| {
+                            chart.series[*si]
+                                .values
+                                .get(ix)
+                                .copied()
+                                .flatten()
+                                .map(&y_of)
+                        });
+                    if let Some(gy) = gy {
+                        let dot_color = series_color(t, *si, chart.series[*si].highlight);
                         let r = 2.0 + 1.0 * guide_alpha;
                         window.paint_quad(
                             gpui::fill(
@@ -3319,7 +3572,7 @@ fn paint_chart(
                                     shift(origin, gx - r, gy - r),
                                     gpui::size(px(r * 2.), px(r * 2.)),
                                 ),
-                                dot_color.opacity(guide_alpha),
+                                dot_color.opacity(guide_alpha * series_alpha),
                             )
                             .corner_radii(px(r)),
                         );
@@ -3329,9 +3582,8 @@ fn paint_chart(
         }
     }
 
-    // Keyboard support: Left/Right to step between groups
+    // Keyboard support: Left/Right to step between groups (instant, no animation)
     let r_id = row_id.to_string();
-    let n_groups = chart.labels.len();
     window.on_key_event(move |event: &gpui::KeyDownEvent, phase, window, _| {
         if phase != gpui::DispatchPhase::Bubble {
             return;
@@ -3341,22 +3593,26 @@ fn paint_chart(
             CHART_STATES.with(|states| {
                 let mut map = states.borrow_mut();
                 if let Some(state) = map.get_mut(&r_id) {
-                    let has_focus_or_hover = state.keyboard_focused || state.hovered_group.is_some() || state.dev_hovered.is_some();
-                    if has_focus_or_hover {
+                    let has_focus_or_hover = state.keyboard_focused
+                        || state.hovered_group.is_some()
+                        || state.dev_hovered.is_some();
+                    if has_focus_or_hover && n > 0 {
+                        let now = Instant::now();
                         let cur = state.hovered_group.unwrap_or(0);
                         let next = if key == "left" || key == "arrowleft" {
-                            (cur + n_groups - 1) % n_groups
+                            (cur + n - 1) % n
                         } else {
-                            (cur + 1) % n_groups
+                            (cur + 1) % n
                         };
                         state.keyboard_focused = true;
                         state.hovered_group = Some(next);
                         state.dev_hovered = None;
                         state.tip_is_visible = true;
                         state.tip_last_group = Some(next);
-                        state.tip_opacity = 1.0;
-                        state.tip_opacity_target = 1.0;
-                        state.tip_curr_x = state.tip_target_x; // instant jump, no animation per Emil rule
+                        state.tip_opacity.snap(1.0, now);
+                        state.tip_x.snap(state.tip_x.target, now);
+                        state.tip_w.snap(state.tip_w.target, now);
+                        state.guide_x.snap(state.guide_x.target, now);
                         window.refresh();
                     }
                 }
@@ -3367,26 +3623,37 @@ fn paint_chart(
     let r_id_mouse = row_id.to_string();
     let hb_mouse = hitbox.clone();
     window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, window, _| {
-        if phase == gpui::DispatchPhase::Bubble && hb_mouse.is_hovered(window) {
-            CHART_STATES.with(|states| {
-                if let Some(state) = states.borrow_mut().get_mut(&r_id_mouse) {
-                    state.keyboard_focused = true;
-                }
-            });
-            window.refresh();
+        if phase != gpui::DispatchPhase::Bubble {
+            return;
         }
+        let inside = hb_mouse.is_hovered(window);
+        CHART_STATES.with(|states| {
+            if let Some(state) = states.borrow_mut().get_mut(&r_id_mouse) {
+                if inside {
+                    state.keyboard_focused = true;
+                    window.refresh();
+                } else if state.keyboard_focused {
+                    state.keyboard_focused = false;
+                    state.hovered_group = None;
+                    window.refresh();
+                }
+            }
+        });
     });
 
     // Tooltip handling
     if !menu_open
-        && state.tip_opacity > 0.005
+        && tip_alpha > 0.005
         && let Some(ix) = effective_hover.or(state.tip_last_group)
         && let Some((name, rows)) = crate::chart::hover_rows(chart, ix)
     {
-        // Filter rows by active series
-        let active_rows: Vec<_> = rows
+        let active_rows: Vec<(usize, String, String, bool)> = rows
             .into_iter()
             .filter(|(si, _, _)| active_series.get(*si).copied().unwrap_or(true))
+            .map(|(si, s_name, val)| {
+                let hi = chart.series.get(si).is_some_and(|s| s.highlight);
+                (si, s_name, val, hi)
+            })
             .collect();
 
         if !active_rows.is_empty() {
@@ -3394,6 +3661,7 @@ fn paint_chart(
                 &name,
                 &active_rows,
                 &mut state,
+                tip_alpha,
                 origin,
                 left,
                 top,
@@ -3423,8 +3691,9 @@ fn paint_chart(
 #[allow(clippy::too_many_arguments)]
 fn paint_chart_tip(
     name: &str,
-    rows: &[(usize, String, String)],
+    rows: &[(usize, String, String, bool)],
     state: &mut ChartState,
+    tip_alpha: f32,
     origin: gpui::Point<Pixels>,
     left: f32,
     top: f32,
@@ -3438,11 +3707,9 @@ fn paint_chart_tip(
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) {
-    let tip_alpha = state.tip_opacity;
     if tip_alpha <= 0.005 {
         return;
     }
-    let dy = if reduced || state.keyboard_focused { 0. } else { (1.0 - tip_alpha) * 3.0 };
 
     const PAD_Y: f32 = 8.;
     const PAD_X: f32 = 10.;
@@ -3475,7 +3742,7 @@ fn paint_chart_tip(
     let max_w = (plot_w - 16.).max(130.);
     let value_w = rows
         .iter()
-        .map(|(_, _, v)| f32::from(shape(v, 11.5, c(t.text), true, window).width))
+        .map(|(_, _, v, _)| f32::from(shape(v, 11.5, c(t.text), true, window).width))
         .fold(0., f32::max);
     let name_room = max_w - 2. * PAD_X - SWATCH - 6. - GAP - value_w;
 
@@ -3494,47 +3761,47 @@ fn paint_chart_tip(
         "…".to_string()
     };
 
-    let names: Vec<String> = rows.iter().map(|(_, n, _)| fit(n, window)).collect();
+    let names: Vec<String> = rows.iter().map(|(_, n, _, _)| fit(n, window)).collect();
     let name_w = names
         .iter()
         .map(|n| f32::from(shape(n, 11.5, c(t.text_muted), false, window).width))
         .fold(0., f32::max);
     let head_w = f32::from(shape(name, 12., c(t.text), true, window).width);
     let body_w = SWATCH + 6. + name_w + GAP + value_w;
-    let wide = (head_w.max(body_w) + 2. * PAD_X).clamp(130., max_w);
+    let target_wide = (head_w.max(body_w) + 2. * PAD_X).clamp(130., max_w);
     let high = PAD_Y * 2. + ROW * (rows.len() + 1) as f32;
 
     let at = left + slot * (ix as f32 + 0.5);
     let mut target_x = at + 12.;
-    if target_x + wide > left + plot_w {
-        target_x = (at - wide - 12.).max(left);
+    if target_x + target_wide > left + plot_w {
+        target_x = (at - target_wide - 12.).max(left);
     }
 
-    if (state.tip_target_x - target_x).abs() > 0.5 {
-        if state.tip_start_x <= 0. || state.tip_curr_x <= 0. || state.keyboard_focused || reduced {
-            state.tip_start_x = target_x;
-            state.tip_curr_x = target_x;
-            state.tip_target_x = target_x;
-            state.tip_move_start = now;
-        } else {
-            state.tip_start_x = state.tip_curr_x;
-            state.tip_target_x = target_x;
-            state.tip_move_start = now;
-        }
-    }
-
-    let x = if reduced || state.keyboard_focused {
-        target_x
+    let instant_move = reduced || state.keyboard_focused;
+    if state.tip_x.target <= 0.0 || instant_move {
+        state.tip_x.snap(target_x, now);
     } else {
-        let t_move = (now.duration_since(state.tip_move_start).as_secs_f32() / 0.12).clamp(0.0, 1.0);
-        let ease = crate::motion::ease_out(t_move);
-        let cur = state.tip_start_x + (state.tip_target_x - state.tip_start_x) * ease;
-        state.tip_curr_x = cur;
-        if t_move < 1.0 {
-            *needs_refresh = true;
-        }
-        cur
+        state.tip_x.set(target_x, now, false);
+    }
+    if state.tip_w.target <= 0.0 || instant_move {
+        state.tip_w.snap(target_wide, now);
+    } else {
+        state.tip_w.set(target_wide, now, false);
+    }
+
+    let (base_x, x_moving) = state.tip_x.value(now);
+    let (wide, w_moving) = state.tip_w.value(now);
+    if x_moving || w_moving {
+        *needs_refresh = true;
+    }
+
+    let (dx, dy) = if instant_move {
+        (0., 0.)
+    } else {
+        let dir = if target_x >= at { -4.0 } else { 4.0 };
+        (dir * (1.0 - tip_alpha), (1.0 - tip_alpha) * 2.5)
     };
+    let x = base_x + dx;
     let y = top + 4. + dy;
 
     // Minimal shadow
@@ -3565,7 +3832,7 @@ fn paint_chart_tip(
         cx,
     );
 
-    for (row, ((si, _, value), label)) in rows.iter().zip(&names).enumerate() {
+    for (row, ((si, _, value, highlight), label)) in rows.iter().zip(&names).enumerate() {
         let ly = line_y(row + 1);
         window.paint_quad(
             gpui::fill(
@@ -3573,7 +3840,7 @@ fn paint_chart_tip(
                     shift(origin, x + PAD_X, ly + (ROW - SWATCH) / 2.),
                     gpui::size(px(SWATCH), px(SWATCH)),
                 ),
-                series_color(t, *si, false).opacity(tip_alpha),
+                series_color(t, *si, *highlight).opacity(tip_alpha),
             )
             .corner_radii(px(2.)),
         );
@@ -3824,13 +4091,65 @@ pub fn image_copy_key(row_id: &str) -> String {
     format!("{row_id}#image")
 }
 
+/// Stacked Copy / Check icon that crossfades with a centered micro-scale when
+/// entering and exiting the copied state, driving animation frames only while moving.
+pub fn copy_swap_icon(
+    copied: bool,
+    copied_at: Option<std::time::Instant>,
+    size: Pixels,
+    t: Tokens,
+    reduced: bool,
+) -> AnyElement {
+    let look = crate::motion::copy_swap_look(
+        copied,
+        copied_at,
+        std::time::Instant::now(),
+        reduced,
+    );
+    let layer = |icon: Icon, opacity: f32, scale: f32| {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(opacity)
+            .child(
+                icon.el(size)
+                    .with_transformation(gpui::Transformation::scale(gpui::size(scale, scale))),
+            )
+    };
+    let mut stack = div().relative().flex_none().size(size);
+    if look.copy_opacity > 0. {
+        stack = stack.child(layer(Icon::Copy, look.copy_opacity, look.copy_scale));
+    }
+    if look.check_opacity > 0. {
+        stack = stack.child(
+            layer(Icon::Check, look.check_opacity, look.check_scale).text_color(c(t.accent)),
+        );
+    }
+    if look.animating {
+        stack = stack.child(
+            gpui::canvas(
+                |_, _, _| (),
+                |_, _, window, _| window.request_animation_frame(),
+            )
+            .absolute()
+            .inset_0(),
+        );
+    }
+    stack.into_any_element()
+}
+
 fn diagram_header(
     item: &TranscriptRowItem,
     title: &str,
     copied: bool,
+    copied_at: Option<std::time::Instant>,
     menu_open: bool,
     menu_ix: usize,
     keyboard_opened: bool,
+    reduced: bool,
     group: gpui::SharedString,
     on_action: OnRowAction,
     row_id: String,
@@ -3892,9 +4211,11 @@ fn diagram_header(
         row_id,
         source,
         copied,
+        copied_at,
         menu_open,
         menu_ix,
         keyboard_opened,
+        reduced,
         t,
         on_action,
     );
@@ -3910,7 +4231,7 @@ fn diagram_header(
     let reveal = reveal_on_hover_curved(
         format!("diagram-actions-{}", id),
         group,
-        if menu_open { 1. } else { 0. },
+        if menu_open || copied { 1. } else { 0. },
         1.,
         std::time::Duration::from_millis(150),
         std::time::Duration::from_millis(100),
@@ -3933,9 +4254,11 @@ fn copy_dropdown(
     row_id: String,
     source: String,
     copied: bool,
+    copied_at: Option<std::time::Instant>,
     menu_open: bool,
     menu_ix: usize,
     keyboard_opened: bool,
+    reduced: bool,
     t: Tokens,
     on_action: OnRowAction,
 ) -> impl IntoElement {
@@ -3956,7 +4279,7 @@ fn copy_dropdown(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .text_color(if copied { c(t.accent) } else { c(t.text_muted) })
+        .text_color(c(t.text_muted))
         .hover_fade(c(t.hover), Some(c(t.selected)))
         .hover(move |s| s.text_color(c(t.text)))
         .active(|s| s.opacity(0.85))
@@ -3968,25 +4291,7 @@ fn copy_dropdown(
             cx.new(|_| crate::view::Tip::new(tip, t)).into()
         })
         .tooltip_show_delay(crate::view::tooltip::delay())
-        .child(if copied {
-            div()
-                .with_animation(
-                    ElementId::Name(format!("inline-copy-check-{id}").into()),
-                    gpui::Animation::new(std::time::Duration::from_millis(150))
-                        .with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .child(Icon::Check.el(zpx(13.)))
-        } else {
-            div()
-                .with_animation(
-                    ElementId::Name(format!("inline-copy-icon-{id}").into()),
-                    gpui::Animation::new(std::time::Duration::from_millis(150))
-                        .with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .child(Icon::Copy.el(zpx(13.)))
-        });
+        .child(copy_swap_icon(copied, copied_at, zpx(13.), t, reduced));
 
     let selected_code = keyboard_opened && menu_ix == 0;
     let selected_img = keyboard_opened && menu_ix == 1;
@@ -4014,6 +4319,7 @@ fn copy_dropdown(
                 spread_radius: zpx(-2.),
                 inset: false,
             }])
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(move |_, _, cx| {
                 action_close(RowAction::CloseDiagramMenu, cx);
             })
@@ -7871,7 +8177,71 @@ mod tests {
         assert!(needs_inline_chips("here", &[linked]));
     }
 
+    #[test]
+    fn chart_tween_retargets_from_current_value_without_jump() {
+        let t0 = Instant::now();
+        let mut tw = ChartTween::new(0.0, t0, 0.20, 0.10);
+        tw.set(1.0, t0, false);
+        let t1 = t0 + Duration::from_millis(80);
+        let (mid, moving) = tw.value(t1);
+        assert!(moving && mid > 0.5 && mid < 1.0);
+        // Retarget mid-flight: starts from `mid`, not 1.0 or 0.0
+        tw.set(0.0, t1, false);
+        assert!((tw.from - mid).abs() < 1e-4);
+        assert_eq!(tw.value(t1 + Duration::from_millis(100)), (0.0, false));
+        // Reduced / instant snaps immediately
+        tw.set(1.0, t1, true);
+        assert_eq!(tw.value(t1), (1.0, false));
+    }
 
+    #[test]
+    fn chart_state_axis_rescale_is_interruptible() {
+        let t0 = Instant::now();
+        let mut st = ChartState::new(t0, (0., 100., 20.), None, &[true, true], 3);
+        st.set_axis_target((0., 40., 10.), t0, false);
+        let t1 = t0 + Duration::from_millis(60);
+        let (_, mid_hi, _, _, moving) = st.axis_at(t1, false);
+        assert!(moving && mid_hi > 40. && mid_hi < 100.);
+        // Reversing mid-flight starts from `mid_hi`, not the previous target (40)
+        st.set_axis_target((0., 100., 20.), t1, false);
+        assert!((st.prev_bounds.1 - mid_hi).abs() < 1e-4);
+        let (_, settled_hi, _, _, moving_after) = st.axis_at(t1 + Duration::from_millis(200), false);
+        assert!(!moving_after && (settled_hi - 100.).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bar_group_spans_reflow_continuously_without_snap() {
+        let slot = 100.0;
+        let two = bar_group_spans(slot, &[1.0, 1.0]);
+        assert!((two[0].1 - 29.0).abs() < 1e-4 && (two[1].1 - 29.0).abs() < 1e-4);
+        assert!((two[0].0 + 30.0).abs() < 1e-4 && (two[1].0 - 1.0).abs() < 1e-4);
+
+        // Sweeping alpha_0 from 1.0 -> 0.0 moves series 1 monotonically to center without a jump
+        let mut prev_center = two[1].0 + two[1].1 * 0.5;
+        let mut prev_w = two[1].1;
+        for step in 1..=200 {
+            let a0 = 1.0 - (step as f32 / 200.0);
+            let spans = bar_group_spans(slot, &[a0, 1.0]);
+            let c1 = spans[1].0 + spans[1].1 * 0.5;
+            let w1 = spans[1].1;
+            assert!(c1 <= prev_center + 1e-5, "series 1 center moved backward at a0={a0}");
+            assert!((prev_center - c1) < 0.25, "unexpected jump in center at a0={a0}");
+            assert!(w1 >= prev_w - 1e-5, "series 1 width shrank unexpectedly at a0={a0}");
+            prev_center = c1;
+            prev_w = w1;
+        }
+        let one_b = bar_group_spans(slot, &[0.0, 1.0]);
+        assert!((one_b[1].0 + one_b[1].1 * 0.5).abs() < 1e-4);
+        assert!((one_b[1].1 - 36.0).abs() < 1e-4);
+
+        let one_a = bar_group_spans(slot, &[1.0, 0.0]);
+        assert!((one_a[0].0 + one_a[0].1 * 0.5).abs() < 1e-4);
+        assert!((one_a[0].1 - 36.0).abs() < 1e-4);
+
+        // Hiding middle series out of 3 preserves a single centered 2-bar pair with a 2px gap
+        let mid_hidden = bar_group_spans(slot, &[1.0, 0.0, 1.0]);
+        assert!((mid_hidden[2].0 - (mid_hidden[0].0 + mid_hidden[0].1) - 2.0).abs() < 1e-4);
+    }
 }
 
 /// The markdown fence as a full [`crate::code_block`]: show-more lives in

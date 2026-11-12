@@ -1013,18 +1013,18 @@ impl KeelWindow {
         }
     }
 
-    /// The chat's folder, unless it's Keel's own "No project".
+    /// The chat's folder, unless it's a scratch / no-project chat.
     fn card_folder(&self) -> Option<(String, String)> {
         let chat = self
             .session_card
             .chat
             .as_ref()
             .and_then(|id| self.state.chats.get(id))?;
+        if self.state.is_scratch_chat(chat) {
+            return None;
+        }
         let space = self.state.spaces.get(&chat.space_id)?;
-        let no_project = std::path::Path::new(&space.path)
-            .file_name()
-            .is_some_and(|n| n == "No project");
-        (!no_project).then(|| (space.id.clone(), space.name.clone()))
+        (!self.state.is_scratch_space(space)).then(|| (space.id.clone(), space.name.clone()))
     }
 
     /// One request at a time; one asked for meanwhile runs when it lands.
@@ -2438,7 +2438,9 @@ impl KeelWindow {
         let model = self.state.chats.get(chat_id).and_then(|chat| {
             match self.model_name(&chat.harness, &chat.model) {
                 Some(name) => Some(name),
-                None => (!chat.model.is_empty()).then(|| chat.model.clone()),
+                None => {
+                    (!chat.model.is_empty()).then(|| crate::model_menu::format_name(&chat.model))
+                }
             }
         });
         let used = self.card_fade(
@@ -2528,8 +2530,85 @@ impl KeelWindow {
             .child(section_label("Project", None, t));
         match folder {
             None => {
-                project =
-                    project.child(div().t_small().text_color(muted).child("No project folder"))
+                let chat_row = self.state.chats.get(chat_id);
+                let hosted = chat_row
+                    .and_then(|c| self.state.spaces.get(&c.space_id))
+                    .is_some_and(|s| s.device_id == self.state.local_device_id);
+                let idle = chat_row.is_some_and(|c| {
+                    !matches!(
+                        c.status,
+                        keel_proto::ChatStatus::Running | keel_proto::ChatStatus::AwaitingInput
+                    )
+                });
+                let isolated = chat_row.is_some_and(|c| {
+                    !c.cwd.is_empty()
+                        && std::path::Path::new(&c.cwd)
+                            .starts_with(self.state.data_dir.join("scratch"))
+                });
+                project = project.child(
+                    div().t_small().text_color(muted).child(if isolated {
+                        "Scratch folder · Isolated per chat"
+                    } else {
+                        "No project folder"
+                    }),
+                );
+                if hosted {
+                    let move_id = chat_id.to_string();
+                    let btn = div()
+                        .id("card-move-to-folder")
+                        .mt(zpx(2.))
+                        .px(zpx(8.))
+                        .h(zpx(24.))
+                        .rounded(RADIUS_MD)
+                        .border_1()
+                        .border_color(c(t.border).opacity(0.5))
+                        .bg(alpha(c(t.hover), 0.3))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(zpx(6.))
+                        .t_small()
+                        .font_weight(medium)
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(Icon::Folder.el(zpx(12.))),
+                        )
+                        .child("Move to folder…")
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(Icon::MoveRight.el(zpx(11.))),
+                        );
+                    let btn = if idle {
+                        btn.text_color(text)
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(c(t.border)))
+                            .hover_fade(c(t.hover), None)
+                            .active(|s| s.opacity(0.82))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.move_chat_to_folder(move_id.clone(), cx);
+                            }))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| {
+                                    Tip::new("Promote scratch files into a project folder", t)
+                                })
+                                .into()
+                            })
+                            .tooltip_show_delay(crate::view::tooltip::delay())
+                    } else {
+                        btn.text_color(muted)
+                            .opacity(0.6)
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| Tip::new("Wait for the active turn to finish", t))
+                                    .into()
+                            })
+                            .tooltip_show_delay(crate::view::tooltip::delay())
+                    };
+                    project = project.child(btn);
+                }
             }
             Some((_, name)) => {
                 if let Some((project_name, lines)) = &project_branches {

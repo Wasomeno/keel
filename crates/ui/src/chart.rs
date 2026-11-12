@@ -339,58 +339,109 @@ impl Chart {
 
     /// Generate an SVG representation of the chart for image export.
     pub fn to_svg(&self, t: &Tokens) -> String {
+        const FONT: &str =
+            "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
         let title = self.display_title();
-        let unit_opt = self.effective_unit();
         let (lo, hi, step) = self.axis();
-        let (width, height) = (540., 280.);
-        let pad = 24.;
-        let plot_l = pad + 40.;
-        let plot_t = 64.;
+        let width = 540.0_f32;
+        let pad = 24.0_f32;
+        let plot_l = pad + 44.0;
         let plot_w = width - plot_l - pad;
-        let plot_h = height - plot_t - 36.;
+        let plot_h = 180.0_f32;
 
-        let bg_hex = format!("#{:06x}", t.code & 0x00FFFFFF);
-        let ink_hex = format!("#{:06x}", t.text & 0x00FFFFFF);
-        let muted_hex = format!("#{:06x}", t.text_muted & 0x00FFFFFF);
-        let faint_hex = format!("#{:06x}", t.text_faint & 0x00FFFFFF);
+        let bg_hex = token_rgb_hex(t.code);
+        let border_hex = token_rgb_hex(t.border);
+        let border_op = token_alpha(t.border) * 0.18;
+        let ink_hex = token_rgb_hex(t.text);
+        let muted_hex = token_rgb_hex(t.text_muted);
+        let faint_hex = token_rgb_hex(t.text_faint);
 
-        let mut svg = format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
-  <rect width="100%" height="100%" fill="{bg_hex}" rx="8"/>
-  <text x="{pad}" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="500" fill="{muted_hex}">{title}</text>
-"#
+        let mut body = format!(
+            r#"  <text x="{pad}" y="30" font-family="{FONT}" font-size="13" font-weight="500" fill="{muted_hex}">{}</text>
+"#,
+            escape_xml(&title)
         );
 
-        // Legend
+        let mut legend_y = 50.0_f32;
+        if let Some(h) = &self.headline {
+            let delta_hex = match h.better.as_deref() {
+                Some("higher") => {
+                    if h.delta.as_deref().unwrap_or("").starts_with('-') {
+                        token_rgb_hex(t.danger)
+                    } else {
+                        token_rgb_hex(t.success)
+                    }
+                }
+                Some("lower") => {
+                    if h.delta.as_deref().unwrap_or("").starts_with('-') {
+                        token_rgb_hex(t.success)
+                    } else {
+                        token_rgb_hex(t.danger)
+                    }
+                }
+                _ => muted_hex.clone(),
+            };
+            let mut spans = format!(
+                r#"<tspan font-size="18" font-weight="700" fill="{ink_hex}">{}</tspan>"#,
+                escape_xml(&h.value)
+            );
+            if let Some(d) = &h.delta {
+                spans.push_str(&format!(
+                    r#"<tspan dx="8" font-size="12" font-weight="500" fill="{delta_hex}">{}</tspan>"#,
+                    escape_xml(d)
+                ));
+            }
+            if let Some(lbl) = &h.label {
+                spans.push_str(&format!(
+                    r#"<tspan dx="8" font-size="12" font-weight="400" fill="{muted_hex}">{}</tspan>"#,
+                    escape_xml(lbl)
+                ));
+            }
+            body.push_str(&format!(
+                r#"  <text x="{pad}" y="54" font-family="{FONT}">{spans}</text>
+"#
+            ));
+            legend_y = 76.0;
+        }
+
+        // Legend (wraps cleanly if there are many series)
         let mut legend_x = pad;
-        let legend_y = 48.;
         for (si, s) in self.series.iter().enumerate() {
-            let color = series_svg_color(t, si, s.highlight);
-            svg.push_str(&format!(
-                r#"  <rect x="{legend_x}" y="{}" width="8" height="8" rx="2" fill="{color}"/>
-  <text x="{}" y="{legend_y}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="{muted_hex}">{}</text>
+            let item_w = 22.0 + s.name.chars().count() as f32 * 6.8;
+            if legend_x > pad && legend_x + item_w > width - pad {
+                legend_x = pad;
+                legend_y += 18.0;
+            }
+            let (color_hex, color_op) = series_svg_color(t, si, s.highlight);
+            body.push_str(&format!(
+                r#"  <rect x="{legend_x:.1}" y="{:.1}" width="8" height="8" rx="2" fill="{color_hex}" fill-opacity="{color_op:.3}"/>
+  <text x="{:.1}" y="{legend_y:.1}" font-family="{FONT}" font-size="11.5" fill="{muted_hex}">{}</text>
 "#,
-                legend_y - 7.,
-                legend_x + 12.,
+                legend_y - 7.5,
+                legend_x + 12.0,
                 escape_xml(&s.name)
             ));
-            legend_x += 20. + s.name.len() as f32 * 6.5;
+            legend_x += item_w;
         }
+
+        let plot_t = legend_y + 22.0;
+        let height = plot_t + plot_h + 34.0;
 
         // Y-axis grid and ticks
         let mut tick = lo;
         let y_of = |v: f64| plot_t + plot_h * (1. - ((v - lo) / (hi - lo).max(f64::EPSILON)) as f32);
         while tick <= hi + step * 0.1 {
             let y = y_of(tick);
-            let stroke_opacity = if tick == 0. { "0.20" } else { "0.08" };
-            svg.push_str(&format!(
-                r#"  <line x1="{plot_l}" y1="{y:.1}" x2="{}" y2="{y:.1}" stroke="{ink_hex}" stroke-opacity="{stroke_opacity}" stroke-width="1"/>
+            let is_zero = tick.abs() < 1e-5;
+            let stroke_opacity = if is_zero { "0.18" } else { "0.08" };
+            body.push_str(&format!(
+                r#"  <line x1="{plot_l:.1}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke="{ink_hex}" stroke-opacity="{stroke_opacity}" stroke-width="1"/>
 "#,
                 plot_l + plot_w
             ));
-            let tick_label = format_with_unit(&label(tick), unit_opt.as_deref().unwrap_or(""));
-            svg.push_str(&format!(
-                r#"  <text x="{}" y="{:.1}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10" fill="{faint_hex}">{tick_label}</text>
+            let tick_label = escape_xml(&self.format_tick(tick));
+            body.push_str(&format!(
+                r#"  <text x="{:.1}" y="{:.1}" text-anchor="end" font-family="{FONT}" font-size="10.5" fill="{faint_hex}">{tick_label}</text>
 "#,
                 plot_l - 8.,
                 y + 3.5
@@ -406,10 +457,10 @@ impl Chart {
         let every = (64. / slot).ceil().max(1.) as usize;
         for (ix, name) in self.labels.iter().enumerate().step_by(every) {
             let x = plot_l + slot * (ix as f32 + 0.5);
-            svg.push_str(&format!(
-                r#"  <text x="{x:.1}" y="{:.1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10" fill="{faint_hex}">{}</text>
+            body.push_str(&format!(
+                r#"  <text x="{x:.1}" y="{:.1}" text-anchor="middle" font-family="{FONT}" font-size="10.5" fill="{faint_hex}">{}</text>
 "#,
-                plot_t + plot_h + 16.,
+                plot_t + plot_h + 18.,
                 escape_xml(name)
             ));
         }
@@ -417,18 +468,23 @@ impl Chart {
         match self.kind {
             Kind::Bar => {
                 let k = self.series.len() as f32;
-                let group_w = (slot * 0.6).min(48.);
-                let bar_w = ((group_w - (k - 1.) * 2.) / k).max(2.);
+                let gw = slot * 0.60;
+                let bar_w = ((gw - (k - 1.) * 2.) / k).clamp(3., 36.);
+                let total_gw = k * bar_w + (k - 1.) * 2.;
                 for (si, series) in self.series.iter().enumerate() {
-                    let color = series_svg_color(t, si, series.highlight);
+                    let (color_hex, color_op) = series_svg_color(t, si, series.highlight);
                     for (ix, v) in series.values.iter().enumerate() {
                         let Some(v) = *v else { continue };
-                        let group_l = plot_l + slot * (ix as f32 + 0.5) - group_w / 2.;
+                        let group_l = plot_l + slot * (ix as f32 + 0.5) - total_gw / 2.;
                         let bx = group_l + si as f32 * (bar_w + 2.);
-                        let (top_y, bottom_y) = (y_of(v).min(zero_y), y_of(v).max(zero_y));
-                        let bh = (bottom_y - top_y).max(2.);
-                        svg.push_str(&format!(
-                            r#"  <rect x="{bx:.1}" y="{top_y:.1}" width="{bar_w:.1}" height="{bh:.1}" rx="4" ry="4" fill="{color}"/>
+                        let val_y = y_of(v);
+                        let (top_y, bottom_y) = (val_y.min(zero_y), val_y.max(zero_y));
+                        let bh = (bottom_y - top_y).max(1.5);
+                        let adj_top = if v >= 0. { bottom_y - bh } else { zero_y };
+                        let r = (bar_w * 0.5).min(bh * 0.5).min(4.0);
+                        let d = bar_svg_path(bx, adj_top, bar_w, bh, r, v >= 0.);
+                        body.push_str(&format!(
+                            r#"  <path d="{d}" fill="{color_hex}" fill-opacity="{color_op:.3}"/>
 "#
                         ));
                     }
@@ -436,7 +492,7 @@ impl Chart {
             }
             Kind::Line => {
                 for (si, series) in self.series.iter().enumerate() {
-                    let color = series_svg_color(t, si, series.highlight);
+                    let (color_hex, color_op) = series_svg_color(t, si, series.highlight);
                     let points: Vec<Option<(f32, f32)>> = series
                         .values
                         .iter()
@@ -453,7 +509,6 @@ impl Chart {
                         if spline.is_empty() {
                             continue;
                         }
-                        // Optional faint area fill for first series
                         if si == 0 {
                             let mut area_path = format!("M {:.1} {:.1}", spline[0].0, zero_y);
                             for &(px, py) in &spline {
@@ -464,17 +519,18 @@ impl Chart {
                                 spline.last().unwrap().0,
                                 zero_y
                             ));
-                            svg.push_str(&format!(
-                                r#"  <path d="{area_path}" fill="{color}" fill-opacity="0.06"/>
-"#
+                            body.push_str(&format!(
+                                r#"  <path d="{area_path}" fill="{color_hex}" fill-opacity="{:.3}"/>
+"#,
+                                color_op * 0.06
                             ));
                         }
                         let mut line_path = format!("M {:.1} {:.1}", spline[0].0, spline[0].1);
                         for &(px, py) in &spline[1..] {
                             line_path.push_str(&format!(" L {px:.1} {py:.1}"));
                         }
-                        svg.push_str(&format!(
-                            r#"  <path d="{line_path}" fill="none" stroke="{color}" stroke-width="1.75"/>
+                        body.push_str(&format!(
+                            r#"  <path d="{line_path}" fill="none" stroke="{color_hex}" stroke-opacity="{color_op:.3}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
 "#
                         ));
                     }
@@ -482,8 +538,13 @@ impl Chart {
             }
         }
 
-        svg.push_str("</svg>");
-        svg
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect x="0.5" y="0.5" width="{:.1}" height="{:.1}" rx="8" fill="{bg_hex}" stroke="{border_hex}" stroke-opacity="{border_op:.3}" stroke-width="1"/>
+{body}</svg>"#,
+            width - 1.0,
+            height - 1.0
+        )
     }
 
     /// Background PNG export job for "Copy as image" at 2x resolution.
@@ -506,7 +567,17 @@ impl Chart {
             let mut pixmap = resvg::tiny_skia::Pixmap::new(pw, ph)?;
             let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
             resvg::render(&tree, transform, &mut pixmap.as_mut());
-            let rgba = image::RgbaImage::from_raw(pw, ph, pixmap.take())?;
+            let mut raw = pixmap.take();
+            for px_bytes in raw.chunks_exact_mut(4) {
+                let a = px_bytes[3];
+                if a > 0 && a < 255 {
+                    let inv = 255.0 / a as f32;
+                    px_bytes[0] = (px_bytes[0] as f32 * inv).round().min(255.0) as u8;
+                    px_bytes[1] = (px_bytes[1] as f32 * inv).round().min(255.0) as u8;
+                    px_bytes[2] = (px_bytes[2] as f32 * inv).round().min(255.0) as u8;
+                }
+            }
+            let rgba = image::RgbaImage::from_raw(pw, ph, raw)?;
             let mut png = std::io::Cursor::new(Vec::new());
             rgba.write_to(&mut png, image::ImageFormat::Png).ok()?;
             Some(png.into_inner())
@@ -514,16 +585,54 @@ impl Chart {
     }
 }
 
-fn series_svg_color(t: &Tokens, ix: usize, highlight: bool) -> String {
+fn token_rgb_hex(rgba: u32) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (rgba >> 24) & 0xFF,
+        (rgba >> 16) & 0xFF,
+        (rgba >> 8) & 0xFF
+    )
+}
+
+fn token_alpha(rgba: u32) -> f32 {
+    (rgba & 0xFF) as f32 / 255.0
+}
+
+fn series_svg_color(t: &Tokens, ix: usize, highlight: bool) -> (String, f32) {
     if highlight {
-        return format!("#{:06x}", t.accent & 0x00FFFFFF);
+        return (token_rgb_hex(t.accent), token_alpha(t.accent));
     }
-    let ink = format!("#{:06x}", t.text & 0x00FFFFFF);
     match ix {
-        0 => ink,
-        1 => format!("rgba({}, {}, {}, 0.40)", (t.text >> 16) & 0xFF, (t.text >> 8) & 0xFF, t.text & 0xFF),
-        2 => format!("rgba({}, {}, {}, 0.24)", (t.text >> 16) & 0xFF, (t.text >> 8) & 0xFF, t.text & 0xFF),
-        _ => format!("rgba({}, {}, {}, 0.15)", (t.text >> 16) & 0xFF, (t.text >> 8) & 0xFF, t.text & 0xFF),
+        0 => (token_rgb_hex(t.text), token_alpha(t.text)),
+        1 => (token_rgb_hex(t.text), token_alpha(t.text) * 0.40),
+        2 => (token_rgb_hex(t.text_muted), token_alpha(t.text_muted)),
+        3 => (token_rgb_hex(t.text_faint), token_alpha(t.text_faint)),
+        _ => (token_rgb_hex(t.text), token_alpha(t.text) * 0.20),
+    }
+}
+
+fn bar_svg_path(x: f32, y: f32, w: f32, h: f32, r: f32, round_top: bool) -> String {
+    if r <= 0.1 {
+        return format!("M {x:.1} {y:.1} h {w:.1} v {h:.1} h -{w:.1} Z");
+    }
+    let xr = x + w;
+    let yb = y + h;
+    if round_top {
+        format!(
+            "M {x:.1} {yb:.1} L {x:.1} {:.1} Q {x:.1} {y:.1} {:.1} {y:.1} L {:.1} {y:.1} Q {xr:.1} {y:.1} {xr:.1} {:.1} L {xr:.1} {yb:.1} Z",
+            y + r,
+            x + r,
+            xr - r,
+            y + r
+        )
+    } else {
+        format!(
+            "M {x:.1} {y:.1} L {xr:.1} {y:.1} L {xr:.1} {:.1} Q {xr:.1} {yb:.1} {:.1} {yb:.1} L {:.1} {yb:.1} Q {x:.1} {yb:.1} {x:.1} {:.1} Z",
+            yb - r,
+            xr - r,
+            x + r,
+            yb - r
+        )
     }
 }
 
@@ -664,6 +773,55 @@ pub fn monotone_spline(pts: &[(f32, f32)]) -> Vec<(f32, f32)> {
         }
     }
     result
+}
+
+/// Clip an x-sorted polyline at `max_x`, linearly interpolating the exact crossing point.
+pub fn clip_polyline_at_x(pts: &[(f32, f32)], max_x: f32) -> Vec<(f32, f32)> {
+    if pts.is_empty() || max_x < pts[0].0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(pts.len());
+    out.push(pts[0]);
+    for w in pts.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if x1 <= max_x {
+            out.push((x1, y1));
+        } else {
+            let dx = x1 - x0;
+            if dx > 1e-5 && max_x > x0 {
+                let t = ((max_x - x0) / dx).clamp(0.0, 1.0);
+                out.push((max_x, y0 + (y1 - y0) * t));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Sample `y` along an x-sorted polyline at `x` (returns `None` outside its x span).
+pub fn sample_polyline_y_at_x(pts: &[(f32, f32)], x: f32) -> Option<f32> {
+    let first = *pts.first()?;
+    let last = *pts.last()?;
+    if x < first.0 - 1e-3 || x > last.0 + 1e-3 {
+        return None;
+    }
+    if x <= first.0 {
+        return Some(first.1);
+    }
+    for w in pts.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if x <= x1 {
+            let dx = x1 - x0;
+            if dx <= 1e-5 {
+                return Some(y1);
+            }
+            let t = ((x - x0) / dx).clamp(0.0, 1.0);
+            return Some(y0 + (y1 - y0) * t);
+        }
+    }
+    Some(last.1)
 }
 
 /// 1, 2 or 5 times a power of ten, at or above `raw`.
@@ -907,5 +1065,58 @@ mod tests {
         for i in 1..spline.len() {
             assert!(spline[i].1 >= spline[i - 1].1 - 1e-4);
         }
+    }
+
+    #[test]
+    fn polyline_clip_and_sample_interpolate_between_vertices() {
+        let pts = vec![(10., 100.), (30., 60.), (50., 20.)];
+        let clipped = clip_polyline_at_x(&pts, 20.);
+        assert_eq!(clipped, vec![(10., 100.), (20., 80.)]);
+        assert!(clip_polyline_at_x(&pts, 5.).is_empty());
+        assert_eq!(clip_polyline_at_x(&pts, 60.), pts);
+        assert_eq!(sample_polyline_y_at_x(&pts, 20.), Some(80.));
+        assert_eq!(sample_polyline_y_at_x(&pts, 40.), Some(40.));
+        assert_eq!(sample_polyline_y_at_x(&pts, 5.), None);
+    }
+
+    #[test]
+    fn to_svg_and_png_use_true_rgb_channels_and_headline() {
+        let mut chart = Chart::from_spec(&json!({
+            "component": "chart",
+            "kind": "bar",
+            "title": "Build & Lint Time",
+            "unit": "s",
+            "x": "package",
+            "labels": ["core", "ui", "cli", "docs"],
+            "series": [
+                { "name": "Before", "values": [41, 36, 29, 18] },
+                { "name": "After", "values": [28, 24, 21, 14] }
+            ],
+            "headline": {
+                "value": "28s",
+                "delta": "-13s",
+                "label": "Fastest package",
+                "better": "lower"
+            }
+        }))
+        .expect("chart");
+        let tokens = Tokens::dark();
+        let svg = chart.to_svg(&tokens);
+        assert!(svg.contains("#1b1b1e"), "expected dark card bg, got: {svg}");
+        assert!(!svg.contains("#1b1eff"), "must not shift alpha byte into RGB");
+        assert!(svg.contains("Build &amp; Lint Time"));
+        assert!(svg.contains("Fastest package"));
+
+        let png_bytes = chart.png_job(&tokens).expect("job")().expect("png");
+        let img = image::load_from_memory(&png_bytes).expect("decode png").to_rgba8();
+        // Top-center padding pixel is pure card background (#1b1b1e), not blue!
+        let px = img.get_pixel(img.width() / 2, 10);
+        assert_eq!(px.0, [0x1b, 0x1b, 0x1e, 0xff]);
+
+        // Also test negative bars + line chart rendering succeeds
+        chart.series[0].values[0] = Some(-10.0);
+        assert!(chart.png_job(&Tokens::light()).expect("light bar job")().is_some());
+        chart.kind = Kind::Line;
+        assert!(chart.png_job(&tokens).expect("line job")().is_some());
     }
 }

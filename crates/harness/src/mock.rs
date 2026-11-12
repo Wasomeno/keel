@@ -52,6 +52,7 @@ pub struct MockHarness {
     attached: Arc<Mutex<Vec<crate::AttachmentFile>>>,
     resume: Arc<Mutex<Option<String>>>,
     plan_mode: Arc<std::sync::atomic::AtomicBool>,
+    scratch: Arc<std::sync::atomic::AtomicBool>,
     processes: Arc<Mutex<HashMap<String, MockProcessInfo>>>,
     next_process_id: Arc<AtomicUsize>,
     process_spawns: Arc<AtomicUsize>,
@@ -100,6 +101,11 @@ impl MockHarness {
         self.plan_mode.load(Ordering::Relaxed)
     }
 
+    /// Scratch flag from the latest `run`.
+    pub fn scratch(&self) -> bool {
+        self.scratch.load(Ordering::Relaxed)
+    }
+
     pub fn process_spawns(&self) -> usize {
         self.process_spawns.load(Ordering::Relaxed)
     }
@@ -129,6 +135,7 @@ impl MockHarness {
             attached: Arc::new(Mutex::new(Vec::new())),
             resume: Arc::new(Mutex::new(None)),
             plan_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scratch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             processes: Arc::new(Mutex::new(HashMap::new())),
             next_process_id: Arc::new(AtomicUsize::new(1)),
             process_spawns: Arc::new(AtomicUsize::new(0)),
@@ -233,6 +240,7 @@ impl Harness for MockHarness {
         *self.attached.lock().expect("attached") = spec.attachments.clone();
         *self.initial.lock().expect("initial") = spec.initial_text;
         self.plan_mode.store(spec.plan_mode, Ordering::Relaxed);
+        self.scratch.store(spec.scratch, Ordering::Relaxed);
         self.runs.fetch_add(1, Ordering::Relaxed);
         let observed = Arc::clone(&self.observed);
         let plan_mode = spec.plan_mode;
@@ -381,6 +389,7 @@ mod tests {
             longer_cache: false,
             keep_cache_warm: true,
             idle_eviction_timeout_secs: None,
+            scratch: false,
         }
     }
 

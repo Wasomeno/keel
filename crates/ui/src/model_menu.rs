@@ -48,6 +48,234 @@ fn base(id: &str) -> &str {
     id.rsplit('/').next().unwrap_or(id)
 }
 
+fn is_short_version_part(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 2
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && !(s.len() == 2 && s.starts_with('0'))
+}
+
+fn is_letter_version_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    (2..=3).contains(&b.len())
+        && b[0].is_ascii_alphabetic()
+        && b[1..].iter().all(u8::is_ascii_digit)
+}
+
+fn is_year(s: &str) -> bool {
+    s.len() == 4
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && (s.starts_with("19") || s.starts_with("20"))
+}
+
+fn is_two_digits(s: &str) -> bool {
+    s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_eight_digit_date(s: &str) -> bool {
+    s.len() == 8
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && (s.starts_with("19") || s.starts_with("20"))
+}
+
+/// Splits a token like `"Qwen3.8"` into `("Qwen", "3.8")` when at least three
+/// ASCII letters precede a digit.
+fn split_word_version(tok: &str, out: &mut Vec<String>) {
+    if let Some(split_at) = tok.bytes().position(|b| b.is_ascii_digit())
+        && split_at >= 3
+        && tok[..split_at].bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        out.push(tok[..split_at].to_string());
+        out.push(tok[split_at..].to_string());
+        return;
+    }
+    out.push(tok.to_string());
+}
+
+fn format_token(tok: &str) -> String {
+    if tok.is_empty() {
+        return String::new();
+    }
+    match tok.to_ascii_lowercase().as_str() {
+        "gpt" => return "GPT".to_string(),
+        "glm" => return "GLM".to_string(),
+        "vl" => return "VL".to_string(),
+        "cc" => return "CC".to_string(),
+        "ai" => return "AI".to_string(),
+        "oss" => return "OSS".to_string(),
+        "xl" => return "XL".to_string(),
+        "xs" => return "XS".to_string(),
+        "minimax" => return "MiniMax".to_string(),
+        "deepseek" => return "DeepSeek".to_string(),
+        "mimo" => return "MiMo".to_string(),
+        "longcat" => return "LongCat".to_string(),
+        "openai" => return "OpenAI".to_string(),
+        "opencode" => return "OpenCode".to_string(),
+        "xai" => return "xAI".to_string(),
+        "chatgpt" => return "ChatGPT".to_string(),
+        "stepfun" => return "StepFun".to_string(),
+        _ => {}
+    }
+    let bytes = tok.as_bytes();
+    // Parameter sizes like "40b", "122b", "1.5b", "a55b" -> uppercase trailing B.
+    if bytes.len() >= 2
+        && bytes.last().is_some_and(|b| b.eq_ignore_ascii_case(&b'b'))
+        && bytes[bytes.len() - 2].is_ascii_digit()
+    {
+        let mut out = String::with_capacity(tok.len());
+        let mut chars = tok.chars();
+        if let Some(first) = chars.next() {
+            out.push(if first.is_ascii_alphabetic() {
+                first.to_ascii_uppercase()
+            } else {
+                first
+            });
+            out.extend(chars);
+        }
+        out.pop();
+        out.push('B');
+        return out;
+    }
+    // Single letter + version ("v4.1", "m2.7", "k3") or OpenAI reasoning ("o3", "o4").
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1].is_ascii_digit() {
+        let first = if bytes[0].eq_ignore_ascii_case(&b'o')
+            && bytes[1..].iter().all(u8::is_ascii_digit)
+        {
+            'o'
+        } else {
+            (bytes[0] as char).to_ascii_uppercase()
+        };
+        let mut out = String::with_capacity(tok.len());
+        out.push(first);
+        out.push_str(&tok[1..]);
+        return out;
+    }
+    if bytes[0].is_ascii_digit() {
+        return tok.to_string();
+    }
+    let has_upper = tok.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = tok.chars().any(|c| c.is_ascii_lowercase());
+    if has_upper && has_lower {
+        return tok.to_string();
+    }
+    let mut chars = tok.chars();
+    match chars.next() {
+        Some(first) => first
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
+        None => String::new(),
+    }
+}
+
+fn format_plain_segment(seg: &str, tokens: &mut Vec<String>, trailing_parens: &mut Vec<String>) {
+    for word in seg.split_whitespace() {
+        let mut parts: Vec<&str> = word
+            .split(['-', '_', ':', '@'])
+            .filter(|p| !p.is_empty())
+            .collect();
+        if parts.len() >= 4
+            && is_year(parts[parts.len() - 3])
+            && is_two_digits(parts[parts.len() - 2])
+            && is_two_digits(parts[parts.len() - 1])
+        {
+            let d = parts.pop().unwrap();
+            let m = parts.pop().unwrap();
+            let y = parts.pop().unwrap();
+            trailing_parens.push(format!("({y}-{m}-{d})"));
+        } else if parts.len() >= 2 && is_eight_digit_date(parts[parts.len() - 1]) {
+            let d = parts.pop().unwrap();
+            trailing_parens.push(format!("({}-{}-{})", &d[..4], &d[4..6], &d[6..8]));
+        }
+
+        let mut merged: Vec<String> = Vec::with_capacity(parts.len());
+        for part in parts {
+            let can_join = merged.last().is_some_and(|prev| {
+                is_short_version_part(part)
+                    && (is_short_version_part(prev) || is_letter_version_prefix(prev))
+            });
+            if can_join {
+                let prev = merged.last_mut().unwrap();
+                prev.push('.');
+                prev.push_str(part);
+            } else {
+                split_word_version(part, &mut merged);
+            }
+        }
+        for tok in merged {
+            let formatted = format_token(&tok);
+            if !formatted.is_empty() {
+                tokens.push(formatted);
+            }
+        }
+    }
+}
+
+/// Normalizes a model's display name (or raw ID fallback) into one consistent
+/// label format: slugs like `"gemini-3.8-flash"` or
+/// `"antigravity/gemini-3-8-flash"` become `"Gemini 3.8 Flash"`, hyphenated
+/// names like `"MiniMax-M3.1-Flash"` and `"GLM-5.3-Flash"` become
+/// `"MiniMax M3.1 Flash"` and `"GLM-5.3 Flash"`, while `"GPT-5.1"` / `"GLM-5.2"`
+/// keep their hyphen and parenthetical tags like `"(latest)"` and `"(CC)"`
+/// stay intact.
+pub fn format_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let s = if !trimmed.contains(char::is_whitespace) && trimmed.contains('/') {
+        base(trimmed)
+    } else {
+        trimmed
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut tokens: Vec<String> = Vec::new();
+    let mut trailing_parens: Vec<String> = Vec::new();
+    let flush_tokens = |tokens: &mut Vec<String>, out: &mut String| {
+        let mut prev: Option<String> = None;
+        for tok in tokens.drain(..) {
+            if !out.is_empty() {
+                let hyphen = prev.as_deref().is_some_and(|p| p == "GPT" || p == "GLM")
+                    && tok.as_bytes().first().is_some_and(u8::is_ascii_digit);
+                out.push(if hyphen { '-' } else { ' ' });
+            }
+            out.push_str(&tok);
+            prev = Some(tok);
+        }
+    };
+
+    let mut rest = s;
+    while let Some(open) = rest.find('(') {
+        let before = &rest[..open];
+        format_plain_segment(before, &mut tokens, &mut trailing_parens);
+        flush_tokens(&mut tokens, &mut out);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(')') else {
+            rest = &rest[open..];
+            break;
+        };
+        let inner = after_open[..close].trim();
+        if !inner.is_empty() {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push('(');
+            out.push_str(inner);
+            out.push(')');
+        }
+        rest = &after_open[close + 1..];
+    }
+    format_plain_segment(rest, &mut tokens, &mut trailing_parens);
+    flush_tokens(&mut tokens, &mut out);
+    for paren in trailing_parens {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&paren);
+    }
+    out
+}
+
 /// The family a model belongs to.
 pub fn family(id: &str, name: &str) -> &'static str {
     let hay = format!("{} {}", base(id).to_lowercase(), name.to_lowercase());
@@ -95,6 +323,22 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("openrouter", "OpenRouter"),
     ("github-copilot", "GitHub Copilot"),
     ("copilot", "GitHub Copilot"),
+    ("minimax", "MiniMax"),
+    ("minimaxai", "MiniMax"),
+    ("opencode", "OpenCode"),
+    ("opencode-go", "OpenCode Go"),
+    ("commandcode", "Command Code"),
+    ("command-code", "Command Code"),
+    ("antigravity", "Antigravity"),
+    ("zai-org", "Z.ai"),
+    ("xiaomi", "Xiaomi"),
+    ("stepfun", "StepFun"),
+    ("tencent", "Tencent"),
+    ("meituan", "Meituan"),
+    ("nvidia", "NVIDIA"),
+    ("sakana", "Sakana"),
+    ("thinkingmachines", "Thinking Machines"),
+    ("inclusionai", "InclusionAI"),
 ];
 
 /// Who makes each family, for IDs with no provider prefix.
@@ -697,5 +941,71 @@ mod tests {
             ["Anthropic", "OpenAI"]
         );
         assert!(search_by_provider(&models, "zzz").is_empty());
+    }
+
+    #[test]
+    fn provider_names_are_consistently_cased() {
+        assert_eq!(provider("minimax/MiniMax-M3", ""), "MiniMax");
+        assert_eq!(provider("opencode/beam-free", ""), "OpenCode");
+        assert_eq!(provider("opencode-go/hy4", ""), "OpenCode Go");
+        assert_eq!(provider("antigravity/gemini-3-8-flash", ""), "Antigravity");
+        assert_eq!(provider("commandcode/grok-4.5", ""), "Command Code");
+    }
+
+    #[test]
+    fn format_name_unifies_slugs_hyphens_and_casing() {
+        assert_eq!(format_name("gemini-3.8-flash"), "Gemini 3.8 Flash");
+        assert_eq!(
+            format_name("antigravity/gemini-3-8-flash"),
+            "Gemini 3.8 Flash"
+        );
+        assert_eq!(
+            format_name("antigravity/claude-sonnet-5-5"),
+            "Claude Sonnet 5.5"
+        );
+        assert_eq!(format_name("Grok 4.5"), "Grok 4.5");
+        assert_eq!(format_name("grok-build-0.1"), "Grok Build 0.1");
+        assert_eq!(format_name("MiniMax-M2.7"), "MiniMax M2.7");
+        assert_eq!(
+            format_name("MiniMax-M2.7-highspeed"),
+            "MiniMax M2.7 Highspeed"
+        );
+        assert_eq!(format_name("MiniMax-M3.1-Flash"), "MiniMax M3.1 Flash");
+        assert_eq!(format_name("GLM-5.2"), "GLM-5.2");
+        assert_eq!(format_name("GLM-5.3-Flash"), "GLM-5.3 Flash");
+        assert_eq!(format_name("GLM-5.3-Flash Free"), "GLM-5.3 Flash Free");
+        assert_eq!(format_name("MiMo-V2.6-Flash"), "MiMo V2.6 Flash");
+        assert_eq!(format_name("LongCat-2.0"), "LongCat 2.0");
+        assert_eq!(format_name("Hy4 preview"), "Hy4 Preview");
+        assert_eq!(format_name("Qwen3.8 Flash"), "Qwen 3.8 Flash");
+        assert_eq!(format_name("GPT-5.1 Codex"), "GPT-5.1 Codex");
+        assert_eq!(format_name("GPT-5 mini"), "GPT-5 Mini");
+        assert_eq!(format_name("gpt-4o-mini"), "GPT-4o Mini");
+        assert_eq!(format_name("o3-mini"), "o3 Mini");
+        assert_eq!(format_name("flint-40b-free"), "Flint 40B Free");
+        assert_eq!(
+            format_name("nemotron-3.5-super-vl-free"),
+            "Nemotron 3.5 Super VL Free"
+        );
+        assert_eq!(format_name("stealth/glyph-cluster:free"), "Glyph Cluster Free");
+        assert_eq!(
+            format_name("Claude Haiku 4.5 (latest)"),
+            "Claude Haiku 4.5 (latest)"
+        );
+        assert_eq!(
+            format_name("claude-haiku-4-5-20251001"),
+            "Claude Haiku 4.5 (2025-10-01)"
+        );
+        assert_eq!(
+            format_name("gpt-4o-2024-08-06"),
+            "GPT-4o (2024-08-06)"
+        );
+        assert_eq!(
+            format_name("DeepSeek V4 Flash Vision (exp) (CC)"),
+            "DeepSeek V4 Flash Vision (exp) (CC)"
+        );
+        assert_eq!(format_name("Kimi K2.7 Code HighSpeed (CC)"), "Kimi K2.7 Code HighSpeed (CC)");
+        assert_eq!(format_name("Model A"), "Model A");
+        assert_eq!(format_name(""), "");
     }
 }

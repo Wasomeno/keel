@@ -354,9 +354,6 @@ impl Render for KeelWindow {
                                 }
                             })
                             .children(page_timer)
-                            .children(self.render_subagent_menu(t, cx))
-                            .children(self.render_mr_prompt(t, cx))
-                            .children(self.render_lightbox(t, window, cx))
                             .when(!hero && !page && !self.projects.home_open(), |d| {
                                 if self.subagent_open.is_some() || show_question {
                                     self.dock_h.set(0.);
@@ -449,12 +446,13 @@ impl Render for KeelWindow {
                                         }),
                                 )
                                 .children(self.render_latest_pill(t, cx))
-                            }),
+                            })
+                            .children(self.render_subagent_menu(t, cx))
+                            .children(self.render_mr_prompt(t, cx))
+                            .children(self.render_lightbox(t, window, cx)),
                     ),
             )
-            .children(self.render_browser_panel(t, window, cx))
-            .children(self.render_files_panel(t, window, cx))
-            .children(self.render_terminal_panel(t, t == keel_theme::Tokens::dark(), window, cx))
+            .children(self.render_right_panel(t, t == keel_theme::Tokens::dark(), window, cx))
             // Last children: paint over the content.
             .children(self.render_sidebar_trigger(t, cx))
             .children(self.render_sidebar_peek(t, cx))
@@ -664,7 +662,7 @@ impl KeelWindow {
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if self.settings_open || self.browser.expanded {
+        if self.settings_open || (self.right_panel_expanded() && self.right_panel_open()) {
             return None;
         }
         let open = if self.sidebar_toggling() {
@@ -1097,13 +1095,20 @@ impl KeelWindow {
             .children(timer)
             .children(mr_chip.map(|chip| div().pl_2().child(chip)))
             .child(drag_region("header-drag"))
-            .when(!hero && !self.browser.open, |d| {
-                let background = self.browser_in_background();
+            .when(!hero && !self.right_panel_open(), |d| {
+                let activity = self.right_panel_activity(t);
+                let tip_text = activity
+                    .map(|(_, _, hint)| format!("Open side panel — {hint} (⌘⌥B)"))
+                    .unwrap_or_else(|| "Open side panel (⌘⌥B)".to_string());
                 d.child(
-                    icon_button("toggle-browser-btn", Icon::Globe, t)
+                    icon_button("toggle-right-panel-btn", Icon::PanelRight, t)
                         .relative()
-                        // An agent is using the page behind the closed pane.
-                        .when_some(background, |b, recent| {
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| super::dotify_ui::Tip::new(tip_text.clone(), t))
+                                .into()
+                        })
+                        .tooltip_show_delay(crate::view::tooltip::delay())
+                        .when_some(activity, |b, (col, bright, _)| {
                             b.child(
                                 div()
                                     .absolute()
@@ -1111,40 +1116,12 @@ impl KeelWindow {
                                     .right(zpx(5.))
                                     .size(zpx(6.))
                                     .rounded_full()
-                                    .bg(c(t.info))
-                                    .opacity(if recent { 1. } else { 0.7 }),
+                                    .bg(c(col))
+                                    .opacity(if bright { 1. } else { 0.7 }),
                             )
                         })
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_browser(window, cx)
-                        })),
-                )
-            })
-            .when(!hero && !self.files.open, |d| {
-                d.child(icon_button("toggle-files-btn", Icon::FileDiff, t).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_files(window, cx)),
-                ))
-            })
-            .when(!hero, |d| {
-                d.child(
-                    icon_button("toggle-terminal-btn", Icon::Tool, t)
-                        .when(self.terminal.open, |b| {
-                            b.bg(c(t.selected)).text_color(c(t.text))
-                        })
-                        // A dot while a command runs in one of the shells.
-                        .when(self.terminal.busy, |b| {
-                            b.relative().child(
-                                div()
-                                    .absolute()
-                                    .top(zpx(5.))
-                                    .right(zpx(5.))
-                                    .size(zpx(6.))
-                                    .rounded_full()
-                                    .bg(c(t.accent)),
-                            )
-                        })
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_terminal(window, cx)
+                            this.toggle_right_panel(window, cx)
                         })),
                 )
             })
@@ -1539,7 +1516,11 @@ impl KeelWindow {
                     tokens: t,
                     syntax,
                     reduced: self.reduced(),
-                    diagram_menu: self.diagram_menu.clone(),
+                    diagram_menu: if self.lightbox.is_some() {
+                        None
+                    } else {
+                        self.diagram_menu.clone()
+                    },
                     diagram_menu_ix: self.diagram_menu_ix,
                     diagram_menu_keyboard: self.diagram_menu_keyboard,
                     toggles: std::rc::Rc::new(self.fold_toggles.clone()),
@@ -1616,24 +1597,29 @@ impl KeelWindow {
                             RowAction::CopyImage { row_id, source, tokens } => {
                                 view.diagram_menu = None;
                                 view.copy_image(row_id, source, tokens, cx);
+                                cx.notify();
                             }
                             RowAction::CopyChartImage { row_id, chart, tokens } => {
                                 view.diagram_menu = None;
                                 view.copy_chart_image(row_id, *chart, tokens, cx);
+                                cx.notify();
                             }
                             RowAction::ToggleDiagramMenu { row_id } => {
-                                if view.diagram_menu.as_deref() == Some(&row_id) {
-                                    view.diagram_menu = None;
-                                } else {
-                                    view.diagram_menu_ix = 0;
-                                    view.diagram_menu_keyboard = false;
-                                    view.diagram_menu = Some(row_id);
+                                if !view.menu_just_dismissed("inline-diagram-menu") {
+                                    if view.diagram_menu.as_deref() == Some(&row_id) {
+                                        view.diagram_menu = None;
+                                    } else {
+                                        view.diagram_menu_ix = 0;
+                                        view.diagram_menu_keyboard = false;
+                                        view.diagram_menu = Some(row_id);
+                                    }
+                                    cx.notify();
                                 }
-                                cx.notify();
                             }
                             RowAction::CloseDiagramMenu => {
                                 if view.diagram_menu.is_some() {
                                     view.diagram_menu = None;
+                                    view.note_menu_dismissed("inline-diagram-menu");
                                     cx.notify();
                                 }
                             }
@@ -1807,16 +1793,21 @@ impl KeelWindow {
             .children(card)
     }
 
-    /// The "Latest" pill, painted over the composer. Inside the transcript
-    /// the page column clips it, so a scroll that lands it on that edge
-    /// covers it for a frame.
+    /// The "Latest" pill, painted over the composer inside the main pane so
+    /// the right side panel, settings, and overlays naturally cover it.
     fn render_latest_pill(
         &mut self,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let now = std::time::Instant::now();
-        if !self.latest_pill.mounted(now) || self.transcript.is_at_bottom() {
+        if self.settings_open
+            || (self.right_panel_open()
+                && self.right_panel_expanded()
+                && !self.right_panel_expanding())
+            || !self.latest_pill.mounted(now)
+            || self.transcript.is_at_bottom()
+        {
             return None;
         }
         let reduced = self.reduced();
@@ -1828,70 +1819,68 @@ impl KeelWindow {
         let live = !self.latest_pill.leaving(now);
         let rise = 4. - look.dy;
         let dock_h = self.dock_h.get();
-        // Deferred so the page column's clip and the composer's shadow
-        // cannot cover it. Priority 1 keeps it under menus.
+        // Painted after the transcript and composer (so neither clips or covers
+        // it), while remaining below deferred composer menus and sibling
+        // full-pane overlays like the expanded right side panel.
         Some(
-            gpui::deferred(
-                div()
-                    .absolute()
-                    .bottom(px(dock_h) + zpx(rise))
-                    .left_0()
-                    .right_0()
-                    .pl(px(self.card_column_room().0))
-                    .pr(px(self.card_column_room().1))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .id("jump-to-latest")
-                            .opacity(look.opacity)
-                            .h(zpx(28.))
-                            .px(zpx(12.))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(5.))
-                            .rounded_full()
-                            .bg(c(t.floating))
-                            .border_1()
-                            .border_color(c(t.border))
-                            .t_small()
-                            .text_size(zpx(crate::style::SMALL.size))
-                            .line_height(zpx(crate::style::SMALL.line))
-                            .text_color(c(t.text_muted))
-                            .when(live, |d| {
-                                d.cursor_pointer()
-                                    .hover(|s| s.text_color(c(t.text)).bg(c(t.hover)))
-                            })
-                            .map(|d| match running_since {
-                                // Run is live but out of view: the one small cue
-                                // (the inline loader is up there, not duplicated here).
-                                Some(since) => d
-                                    .gap(zpx(6.))
-                                    .child(crate::motion::dot_grid(
-                                        c(t.text),
-                                        "latest-running-dots",
-                                        reduced,
-                                    ))
-                                    .child(div().child("Running"))
-                                    .child(
-                                        div()
-                                            .text_color(c(t.text_muted))
-                                            .child(crate::motion::elapsed_label(since.elapsed())),
-                                    )
-                                    .child(Icon::ChevronDown.el(zpx(13.))),
-                                None => d.child(Icon::ChevronDown.el(zpx(13.))).child("Latest"),
-                            })
-                            .when(live, |d| {
-                                d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.transcript.glide_to_latest(std::time::Instant::now());
-                                    cx.notify();
-                                }))
-                            }),
-                    ),
-            )
-            .with_priority(1)
-            .into_any_element(),
+            div()
+                .absolute()
+                .bottom(px(dock_h) + zpx(rise))
+                .left_0()
+                .right_0()
+                .pl(px(self.card_column_room().0))
+                .pr(px(self.card_column_room().1))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("jump-to-latest")
+                        .opacity(look.opacity)
+                        .h(zpx(28.))
+                        .px(zpx(12.))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(zpx(5.))
+                        .rounded_full()
+                        .bg(c(t.floating))
+                        .border_1()
+                        .border_color(c(t.border))
+                        .t_small()
+                        .text_size(zpx(crate::style::SMALL.size))
+                        .line_height(zpx(crate::style::SMALL.line))
+                        .text_color(c(t.text_muted))
+                        .when(live, |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.text_color(c(t.text)).bg(c(t.hover)))
+                        })
+                        .map(|d| match running_since {
+                            // Run is live but out of view: the one small cue
+                            // (the inline loader is up there, not duplicated here).
+                            Some(since) => d
+                                .gap(zpx(6.))
+                                .child(crate::motion::dot_grid(
+                                    c(t.text),
+                                    "latest-running-dots",
+                                    reduced,
+                                ))
+                                .child(div().child("Running"))
+                                .child(
+                                    div()
+                                        .text_color(c(t.text_muted))
+                                        .child(crate::motion::elapsed_label(since.elapsed())),
+                                )
+                                .child(Icon::ChevronDown.el(zpx(13.))),
+                            None => d.child(Icon::ChevronDown.el(zpx(13.))).child("Latest"),
+                        })
+                        .when(live, |d| {
+                            d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.transcript.glide_to_latest(std::time::Instant::now());
+                                cx.notify();
+                            }))
+                        }),
+                )
+                .into_any_element(),
         )
     }
 
@@ -2319,6 +2308,11 @@ impl KeelWindow {
         let natural = crate::mermaid::size(&source).unwrap_or((1., 1.));
         let percent = (view.borrow().zoom * 100.).round() as i32;
         let copied = self.copied.as_ref().map(|(row, _)| row.as_str()) == Some(row_id.as_str());
+        let copied_at = self
+            .copied
+            .as_ref()
+            .filter(|(row, _)| row.as_str() == row_id.as_str())
+            .map(|(_, at)| *at);
         let reduced = self.reduced();
 
         // Plain solid pill bottom center for zoom controls
@@ -2350,6 +2344,7 @@ impl KeelWindow {
             div()
                 .id("viewer-fit")
                 .h(zpx(28.))
+                .min_w(zpx(48.))
                 .px_2p5()
                 .rounded_full()
                 .flex()
@@ -2401,6 +2396,8 @@ impl KeelWindow {
             .justify_center()
             .child(
                 div()
+                    .id("viewer-bottom-pill")
+                    .occlude()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -2408,7 +2405,17 @@ impl KeelWindow {
                     .p_1()
                     .rounded_full()
                     .bg(crate::style::c(t.floating))
+                    .border_1()
+                    .border_color(crate::style::c(t.border).opacity(0.20))
+                    .shadow(vec![gpui::BoxShadow {
+                        color: crate::style::c(t.shadow).opacity(0.28),
+                        offset: gpui::point(zpx(0.), zpx(4.)),
+                        blur_radius: zpx(10.),
+                        spread_radius: zpx(-2.),
+                        inset: false,
+                    }])
                     .t_caption()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(zoom_out)
                     .child(zoom_fit)
                     .child(zoom_in),
@@ -2419,19 +2426,21 @@ impl KeelWindow {
         let toggle_id = row_id.clone();
         let copy_trigger = div()
             .id("viewer-copy-trigger")
-            .h(zpx(28.))
-            .px_3()
+            .size(zpx(28.))
             .rounded_full()
             .flex()
-            .flex_row()
             .items_center()
-            .gap_1p5()
+            .justify_center()
             .cursor_pointer()
-            .text_color(if copied { crate::style::c(t.accent) } else { crate::style::c(t.text_muted) })
+            .text_color(crate::style::c(t.text_muted))
             .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
             .hover(move |s| s.text_color(crate::style::c(t.text)))
             .active(|s| s.opacity(0.85))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if this.menu_just_dismissed("viewer-diagram-menu") {
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.diagram_menu.as_deref() == Some(&toggle_id) {
                     this.diagram_menu = None;
                 } else {
@@ -2439,28 +2448,21 @@ impl KeelWindow {
                     this.diagram_menu_keyboard = false;
                     this.diagram_menu = Some(toggle_id.clone());
                 }
+                cx.stop_propagation();
                 cx.notify();
             }))
-            .child(if copied {
-                div()
-                    .with_animation(
-                        ElementId::Name(format!("viewer-copy-check-{row_id}").into()),
-                        gpui::Animation::new(std::time::Duration::from_millis(150))
-                            .with_easing(crate::motion::ease_out),
-                        |el, delta| el.opacity(delta),
-                    )
-                    .child(Icon::Check.el(zpx(13.)))
-            } else {
-                div()
-                    .with_animation(
-                        ElementId::Name(format!("viewer-copy-icon-{row_id}").into()),
-                        gpui::Animation::new(std::time::Duration::from_millis(150))
-                            .with_easing(crate::motion::ease_out),
-                        |el, delta| el.opacity(delta),
-                    )
-                    .child(Icon::Copy.el(zpx(13.)))
+            .tooltip(move |_, cx| {
+                let tip = if copied { "Copied" } else { "Copy" };
+                cx.new(|_| crate::view::Tip::new(tip, t)).into()
             })
-            .child(div().t_small().child(if copied { "Copied" } else { "Copy" }));
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(crate::transcript::copy_swap_icon(
+                copied,
+                copied_at,
+                zpx(13.),
+                t,
+                reduced,
+            ));
 
         let copy_menu = if menu_open {
             let (code_id, code_src) = (row_id.clone(), source.clone());
@@ -2470,7 +2472,7 @@ impl KeelWindow {
             let menu_el = div()
                 .id("viewer-copy-dropdown")
                 .absolute()
-                .top(zpx(34.))
+                .top(zpx(42.))
                 .right_0()
                 .w(zpx(156.))
                 .occlude()
@@ -2480,15 +2482,19 @@ impl KeelWindow {
                 .gap_0p5()
                 .bg(crate::style::c(t.floating))
                 .rounded(RADIUS_MD)
+                .border_1()
+                .border_color(crate::style::c(t.border).opacity(0.20))
                 .shadow(vec![gpui::BoxShadow {
-                    color: crate::style::c(t.shadow),
+                    color: crate::style::c(t.shadow).opacity(0.35),
                     offset: gpui::point(zpx(0.), zpx(4.)),
                     blur_radius: zpx(12.),
                     spread_radius: zpx(-2.),
                     inset: false,
                 }])
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.diagram_menu = None;
+                    this.note_menu_dismissed("viewer-diagram-menu");
                     cx.notify();
                 }))
                 .child(
@@ -2496,11 +2502,12 @@ impl KeelWindow {
                         "viewer-copy-code",
                         Icon::Code,
                         "Copy as code",
-                        selected_ix == 0,
+                        keyboard_opened && selected_ix == 0,
                         t,
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.diagram_menu = None;
                             this.copy_code(code_id.clone(), code_src.clone(), cx);
+                            cx.stop_propagation();
                         }),
                     )
                 )
@@ -2509,28 +2516,28 @@ impl KeelWindow {
                         "viewer-copy-image",
                         Icon::Image,
                         "Copy as image",
-                        selected_ix == 1,
+                        keyboard_opened && selected_ix == 1,
                         t,
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.diagram_menu = None;
                             this.copy_image(image_id.clone(), image_src.clone(), t, cx);
+                            cx.stop_propagation();
+                            cx.notify();
                         }),
                     )
                 );
 
-            Some(if keyboard_opened {
+            Some(if keyboard_opened || reduced {
                 menu_el.into_any_element()
             } else {
                 menu_el
                     .with_animation(
                         ElementId::Name(format!("viewer-copy-menu-in-{row_id}").into()),
                         gpui::Animation::new(std::time::Duration::from_millis(150))
-                            .with_easing(crate::motion::ease_out),
+                            .with_easing(crate::motion::ease_out_strong),
                         |el, delta| {
                             el.opacity(delta)
-                                .relative()
-                                .top(zpx(-3. * (1. - delta)))
-                                .right(zpx(-3. * (1. - delta)))
+                                .top(zpx(42. - 4. * (1. - delta)))
                         },
                     )
                     .into_any_element()
@@ -2538,12 +2545,6 @@ impl KeelWindow {
         } else {
             None
         };
-
-        let copy_wrapper = div()
-            .relative()
-            .flex_none()
-            .child(copy_trigger)
-            .children(copy_menu);
 
         let close_button = div()
             .id("viewer-close")
@@ -2559,15 +2560,15 @@ impl KeelWindow {
             .active(|s| s.opacity(0.85))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.close_lightbox(cx);
+                cx.stop_propagation();
             }))
             .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Close (Esc)", t)).into())
             .tooltip_show_delay(crate::view::tooltip::delay())
             .child(Icon::Close.el(zpx(13.)));
 
-        let top_right = div()
-            .absolute()
-            .top_4()
-            .right_4()
+        let top_right_pill = div()
+            .id("viewer-top-right-pill")
+            .occlude()
             .flex()
             .flex_row()
             .items_center()
@@ -2575,8 +2576,18 @@ impl KeelWindow {
             .p_1()
             .rounded_full()
             .bg(crate::style::c(t.floating))
+            .border_1()
+            .border_color(crate::style::c(t.border).opacity(0.20))
+            .shadow(vec![gpui::BoxShadow {
+                color: crate::style::c(t.shadow).opacity(0.28),
+                offset: gpui::point(zpx(0.), zpx(4.)),
+                blur_radius: zpx(10.),
+                spread_radius: zpx(-2.),
+                inset: false,
+            }])
             .t_caption()
-            .child(copy_wrapper)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(copy_trigger)
             .child(
                 div()
                     .h(zpx(14.))
@@ -2584,6 +2595,14 @@ impl KeelWindow {
                     .bg(crate::style::c(t.border)),
             )
             .child(close_button);
+
+        let top_right = div()
+            .id("viewer-top-right")
+            .absolute()
+            .top_4()
+            .right_4()
+            .child(top_right_pill)
+            .children(copy_menu);
 
         div()
             .absolute()

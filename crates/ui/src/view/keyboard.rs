@@ -46,6 +46,9 @@ impl KeelWindow {
             .on_action(
                 cx.listener(|this, _: &ToggleBrowser, window, cx| this.toggle_browser(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, window, cx| {
+                this.toggle_right_panel(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &BrowserAddress, window, cx| {
                 this.focus_browser_address(window, cx)
             }))
@@ -57,7 +60,7 @@ impl KeelWindow {
                 this.end_browser_session(window, cx)
             }))
             .on_action(
-                cx.listener(|this, _: &BrowserNewTab, window, cx| this.browser_new_tab(window, cx)),
+                cx.listener(|this, _: &BrowserNewTab, window, cx| this.right_new_tab(window, cx)),
             )
             .on_action(
                 cx.listener(|this, _: &ToggleFiles, window, cx| this.toggle_files(window, cx)),
@@ -105,8 +108,8 @@ impl KeelWindow {
                 // question panel and text fields.
                 this.menus_cut = true;
                 if !this.close_menus(cx) {
-                    if this.browser.expanded {
-                        this.toggle_browser_expand(cx);
+                    if this.right_panel_expanded() {
+                        this.toggle_right_panel_expand(cx);
                     } else if this.settings_open || this.gitlab_open {
                         this.close_pages();
                         this.finish_settings_exit(cx);

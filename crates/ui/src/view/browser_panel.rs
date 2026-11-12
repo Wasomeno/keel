@@ -12,7 +12,6 @@
 #[path = "browser_agent.rs"]
 mod agent;
 
-use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -26,8 +25,9 @@ use keel_theme::Tokens;
 use super::{KeelWindow, icon_button};
 use crate::browser::agent::ConsoleLog;
 use crate::browser::{PageState, normalize_address};
+use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::motion::{BASE, FAST, SLOW, SPATIAL, SPIN, ease_in, ease_out, ease_out_strong};
+use crate::motion::{BASE, FAST, SLOW, SPIN, ease_in, ease_out, ease_out_strong};
 use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_LG, RADIUS_MD, c, zpx};
 use agent::AgentTab;
 
@@ -40,16 +40,8 @@ const MIN_CHAT: f32 = 360.;
 const PAGE_INSET: f32 = 6.;
 /// Addresses the empty pane offers: the usual dev-server ports.
 const QUICK: [&str; 3] = ["localhost:3000", "localhost:5173", "localhost:8080"];
-/// The tab strip's height, and a tab's widest.
-const TAB_STRIP_H: f32 = 30.;
-const TAB_MAX_W: f32 = 200.;
 
 pub(super) struct BrowserPanel {
-    /// The toolbar's hover tooltips.
-    tips: super::tooltip::HoverTips,
-    pub(super) open: bool,
-    /// The last open/close: when, and a generation so its animation replays.
-    pub(super) anim: Option<(Instant, u64)>,
     /// Dragged width; `None` follows the window.
     width: Option<f32>,
     pub(super) resizing: bool,
@@ -59,20 +51,17 @@ pub(super) struct BrowserPanel {
     /// `width` when the edge was grabbed. A drag that ends there does not
     /// flash the settle line.
     resize_from: Option<f32>,
-    /// Grown over the whole window.
-    pub(super) expanded: bool,
-    pub(super) expand_from: f32,
-    expand_anim: Option<(Instant, u64)>,
     pub(super) address: Entity<InputState>,
-    focus: FocusHandle,
-    /// Never empty; `active` is the one shown.
+    pub(super) focus: FocusHandle,
+    /// Never empty; `active` is the one shown (and `tabs[0]` stays dormant
+    /// until the user or agent claims a Browser tab).
     pub(super) tabs: Vec<BrowserTab>,
     pub(super) active: usize,
     next_tab: u64,
     /// Ended sessions, so the start screen replays its entrance after one.
     sessions: u64,
     /// The window, so host requests run with one even when nothing renders.
-    handle: gpui::AnyWindowHandle,
+    pub(super) handle: gpui::AnyWindowHandle,
     /// Agent script sequence numbers (a reply is matched to its job).
     seq: u64,
     /// The chat the pane last followed, to show its tab after a switch.
@@ -148,8 +137,20 @@ impl BrowserTab {
         self.bar_done = false;
     }
 
+    /// True while this tab is still an unused empty placeholder.
+    pub(super) fn is_empty_scratch(&self) -> bool {
+        self.agent.is_none()
+            && self.page.url.is_none()
+            && self.preview.is_none()
+            && self.error.is_none()
+    }
+
+    pub(super) fn is_agent(&self) -> bool {
+        self.agent.is_some()
+    }
+
     /// What its tab says: the page title, else the host, else "New Tab".
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         if !self.page.title.trim().is_empty() {
             return self.page.title.trim().to_string();
         }
@@ -220,15 +221,10 @@ const PARK_AFTER: Duration = Duration::from_secs(10 * 60);
 impl BrowserPanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<KeelWindow>) -> Self {
         Self {
-            open: false,
-            anim: None,
             width: None,
             resizing: false,
             resize_grab: 0.,
             resize_from: None,
-            expanded: false,
-            expand_from: 0.,
-            expand_anim: None,
             address: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Search or enter address")),
             focus: cx.focus_handle(),
@@ -242,7 +238,6 @@ impl BrowserPanel {
             agent_at: None,
             idle_since: None,
             park_task: None,
-            tips: Default::default(),
         }
     }
 
@@ -258,26 +253,26 @@ impl BrowserPanel {
         &mut self.tabs[self.active]
     }
 
-    fn tab_ix(&self, id: u64) -> Option<usize> {
+    pub(super) fn tab_ix(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }
 
     /// Tabs the strip shows: the user's, and the open chat's agent tab.
-    fn visible_in_strip(&self, tab: &BrowserTab, chat: Option<&str>) -> bool {
+    pub(super) fn visible_in_strip(&self, tab: &BrowserTab, chat: Option<&str>) -> bool {
         tab.agent
             .as_ref()
             .is_none_or(|a| a.chat.is_empty() || Some(a.chat.as_str()) == chat)
     }
 
     /// A new empty tab after the others; its index.
-    fn push_tab(&mut self) -> usize {
+    pub(super) fn push_tab(&mut self) -> usize {
         self.tabs.push(BrowserTab::new(self.next_tab));
         self.next_tab += 1;
         self.tabs.len() - 1
     }
 
     /// Native focus back to gpui, so keys reach Keel's own fields.
-    fn release_focus(&self) {
+    pub(super) fn release_focus(&self) {
         if let Some(native) = &self.tab().native {
             native.focus_parent();
         }
@@ -295,8 +290,8 @@ impl KeelWindow {
             && self.state.confirming_delete_space.is_none()
     }
 
-    /// An agent's page is alive with the pane closed: the header's globe
-    /// carries a dot (bright while a request is recent).
+    /// An agent's page is alive with the right side panel closed: the
+    /// header's panel button carries a dot (bright while a request is recent).
     pub(super) fn browser_in_background(&self) -> Option<bool> {
         let b = &self.browser;
         let alive = b.tabs.iter().any(|tab| {
@@ -304,73 +299,42 @@ impl KeelWindow {
                 && tab.native.as_ref().is_some_and(|n| n.background())
                 && tab.page.url.is_some()
         });
-        (alive && !b.open).then(|| {
+        (alive && !self.right_panel_open()).then(|| {
             b.agent_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(20))
         })
     }
 
-    /// ⌘⇧B and the header button: slide the pane in or out.
+    /// ⌘⇧B: open/focus Browser tab in the right side panel, or close the panel
+    /// if Browser is already active.
     pub(super) fn toggle_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.browser_allowed() {
             return;
         }
-        if !self.browser.open && self.files.open {
-            self.toggle_files(window, cx);
-        }
-        if !self.browser.open {
-            self.set_terminal_open(false, window, cx);
-        }
-        self.update_right_panel_anim();
-        let b = &mut self.browser;
-        b.tips.clear();
-        b.open = !b.open;
-        let n = b.anim.map_or(1, |(_, n)| n + 1);
-        b.anim = Some((Instant::now(), n));
-        b.release_focus();
-        if b.open {
-            b.expanded = false;
-            b.expand_from = 0.;
-            b.expand_anim = None;
-            self.unpark_tab(self.browser.active, window, cx);
-            let b = &mut self.browser;
-            if b.tab().page.url.is_none() {
-                b.address.update(cx, |s, cx| s.focus(window, cx));
-            } else {
-                window.focus(&b.focus, cx);
-            }
+        if self.right_panel.open
+            && matches!(
+                self.right_panel_active_kind(),
+                Some(super::right_panel::RightTabKind::Browser(_))
+            )
+        {
+            self.close_right_panel(window, cx);
         } else {
-            b.expanded = false;
-            b.expand_from = 0.;
-            b.expand_anim = None;
-            for tab in &b.tabs {
-                if let Some(page) = &tab.native {
-                    page.set_resizing(false);
-                }
-            }
-            self.composer.update(cx, |s, cx| s.focus(window, cx));
-            self.schedule_browser_park(cx);
+            self.right_open_or_focus_browser(window, cx);
         }
-        let settle = self.right_panel_duration();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(settle + Duration::from_millis(20))
-                .await;
-            let _ = this.update(cx, |_, cx| {
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
-    /// ⌘L: the address field, opening the pane if needed.
+    /// ⌘L: the address field, opening or focusing a Browser tab if needed.
     pub(super) fn focus_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.browser_allowed() {
             return;
         }
-        if !self.browser.open {
-            self.toggle_browser(window, cx);
+        if !self.right_panel.open
+            || !matches!(
+                self.right_panel_active_kind(),
+                Some(super::right_panel::RightTabKind::Browser(_))
+            )
+        {
+            self.right_open_or_focus_browser(window, cx);
         }
         self.browser.release_focus();
         self.browser.address.update(cx, |s, cx| s.focus(window, cx));
@@ -386,7 +350,12 @@ impl KeelWindow {
     }
 
     /// Show tab `ix`: the address follows it, and a parked page comes back.
-    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn activate_tab(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ix >= self.browser.tabs.len() {
             return;
         }
@@ -394,7 +363,7 @@ impl KeelWindow {
             self.browser.release_focus();
             self.browser.active = ix;
         }
-        if self.browser.open {
+        if self.is_browser_tab_showing(ix) {
             self.unpark_tab(ix, window, cx);
         }
         let b = &self.browser;
@@ -408,21 +377,8 @@ impl KeelWindow {
         cx.notify();
     }
 
-    /// ⌘T and the toolbar's plus: a new tab on the start screen.
-    pub(super) fn browser_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.browser_allowed() {
-            return;
-        }
-        if !self.browser.open {
-            self.toggle_browser(window, cx);
-        }
-        let ix = self.browser.push_tab();
-        self.activate_tab(ix, window, cx);
-    }
-
-    /// ⌘W in the pane and a tab's ×: close it (its page and process go
-    /// with it). The last tab goes back to the start screen instead.
-    pub(super) fn browser_close_tab(
+    /// Release native view & agent state for browser tab index `ix`.
+    pub(super) fn teardown_browser_tab(
         &mut self,
         ix: usize,
         window: &mut Window,
@@ -434,26 +390,29 @@ impl KeelWindow {
         self.drop_agent_tab(ix, "the user closed this chat's browser tab", cx);
         let b = &mut self.browser;
         b.tabs[ix].agent = None;
-        if b.tabs.len() == 1 {
-            return self.end_browser_session(window, cx);
-        }
         b.release_focus();
-        b.tabs.remove(ix);
-        if ix < b.active || b.active >= b.tabs.len() {
-            b.active = b.active.saturating_sub(1);
+        if b.tabs.len() == 1 {
+            let next_id = b.next_tab;
+            b.next_tab += 1;
+            b.tabs[0] = BrowserTab::new(next_id);
+            b.active = 0;
+            b.sessions += 1;
+            b.address.update(cx, |s, cx| s.set_value("", window, cx));
+        } else {
+            b.tabs.remove(ix);
+            if ix < b.active || b.active >= b.tabs.len() {
+                b.active = b.active.saturating_sub(1);
+            }
         }
-        let active = b.active;
-        self.activate_tab(active, window, cx);
     }
 
     /// ⌘W with the pane focused.
     pub(super) fn browser_close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.browser.active;
-        self.browser_close_tab(ix, window, cx);
+        self.right_close_active_tab(window, cx);
     }
 
     /// Re-arms the idle timer that unloads pages (see [`PARK_AFTER`]).
-    fn schedule_browser_park(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_browser_park(&mut self, cx: &mut Context<Self>) {
         self.browser.idle_since = Some(Instant::now());
         self.browser.park_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -471,16 +430,19 @@ impl KeelWindow {
     /// one by one (their scroll position read first, and put back when the
     /// page returns); a tab whose chat is busy, or the one on screen, stays.
     fn park_browser_if_idle(&mut self, cx: &mut Context<Self>) {
-        let b = &self.browser;
-        let idle = b.idle_since.is_some_and(|at| at.elapsed() >= PARK_AFTER);
+        let idle = self
+            .browser
+            .idle_since
+            .is_some_and(|at| at.elapsed() >= PARK_AFTER);
         let mut park = Vec::new();
-        for (ix, tab) in b.tabs.iter().enumerate() {
-            if tab.native.is_none() || tab.web_url.is_none() || (b.open && ix == b.active) {
+        for (ix, tab) in self.browser.tabs.iter().enumerate() {
+            let showing = self.is_browser_tab_showing(ix);
+            if tab.native.is_none() || tab.web_url.is_none() || showing {
                 continue;
             }
             let ready = match &tab.agent {
                 Some(a) => !a.busy() && a.used.elapsed() >= PARK_AFTER,
-                None => idle && !b.open,
+                None => idle && !showing,
             };
             if ready {
                 park.push(ix);
@@ -503,7 +465,12 @@ impl KeelWindow {
 
     /// An unloaded tab comes back: a fresh native page on its `web_url`.
     /// True when a load started.
-    fn unpark_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn unpark_tab(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(tab) = self.browser.tabs.get_mut(ix).filter(|t| t.parked) else {
             return false;
         };
@@ -548,19 +515,26 @@ impl KeelWindow {
             return;
         }
         let b = &mut self.browser;
+        let active_is_empty = b.tabs.get(b.active).is_some_and(|t| t.is_empty_scratch());
         let ix = match b
             .tabs
             .iter()
             .position(|t| t.preview.as_ref() == Some(&path))
         {
             Some(ix) => ix,
-            // An empty tab that isn't the agent's is taken as is.
-            None if b.tab().page.url.is_none() && b.tab().agent.is_none() => b.active,
-            None => b.push_tab(),
+            None if active_is_empty => b.active,
+            None => {
+                if let Some(ix) = b.tabs.iter().position(|t| t.is_empty_scratch()) {
+                    ix
+                } else {
+                    b.push_tab()
+                }
+            }
         };
         if !self.ensure_native_page(ix, window, cx) {
             return;
         }
+        let bid = self.browser.tabs[ix].id;
         let tab = &mut self.browser.tabs[ix];
         if let Some(native) = &tab.native {
             native.load_html(&html);
@@ -570,10 +544,16 @@ impl KeelWindow {
             tab.preview.as_ref().expect("set above"),
         ));
         self.pump_load(ix, window, cx);
-        if !self.browser.open {
-            self.toggle_browser(window, cx);
+        self.right_ensure_kind(
+            super::right_panel::RightTabKind::Browser(bid),
+            true,
+            true,
+            Some(window),
+            cx,
+        );
+        if !self.right_panel.open {
+            self.open_right_panel(window, cx);
         }
-        self.activate_tab(ix, window, cx);
         cx.notify();
     }
 
@@ -668,6 +648,16 @@ impl KeelWindow {
             .update(cx, |s, cx| s.set_value(url.clone(), window, cx));
         self.browser.tab_mut().preview = None;
         let ix = self.browser.active;
+        let bid = self.browser.tabs[ix].id;
+        if !self.has_right_browser_tab(bid) {
+            self.right_ensure_kind(
+                super::right_panel::RightTabKind::Browser(bid),
+                true,
+                true,
+                Some(window),
+                cx,
+            );
+        }
         if !self.ensure_native_page(ix, window, cx) {
             return;
         }
@@ -788,13 +778,20 @@ impl KeelWindow {
                 if !self.ensure_native_page(ix, window, cx) {
                     return;
                 }
+                let bid = self.browser.tabs[ix].id;
                 let tab = &mut self.browser.tabs[ix];
                 if let Some(native) = &tab.native {
                     native.load(&url);
                 }
                 tab.loading(url);
                 self.pump_load(ix, window, cx);
-                self.activate_tab(ix, window, cx);
+                self.right_ensure_kind(
+                    super::right_panel::RightTabKind::Browser(bid),
+                    true,
+                    false,
+                    Some(window),
+                    cx,
+                );
             }
             NativeEvent::Key(key) => {
                 native.focus_parent();
@@ -885,7 +882,11 @@ impl KeelWindow {
                     native.finish_full_page(full.sx, full.sy);
                 }
                 let page = &self.browser.tabs[ix].page;
-                let (url, title, open) = (page.url.clone(), page.title.clone(), self.browser.open);
+                let (url, title, open) = (
+                    page.url.clone(),
+                    page.title.clone(),
+                    self.is_browser_tab_showing(ix),
+                );
                 let dir = self.state.data_dir.join("screenshots");
                 let frames = std::mem::take(&mut shot.frames);
                 let full = shot.full;
@@ -931,24 +932,36 @@ impl KeelWindow {
     }
 
     /// ⌘⇧W and the toolbar's power button: tear every tab down (pages,
-    /// processes, history, anything playing) and go back to one tab on the
-    /// start screen. The pane stays open. Cookies live in WebKit's store
-    /// and survive this.
+    /// processes, history, anything playing) and reset to one fresh Browser tab.
     pub(super) fn end_browser_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.browser.release_focus();
         for ix in 0..self.browser.tabs.len() {
             self.drop_agent_tab(ix, "the user ended the browser session", cx);
         }
+        self.right_panel
+            .tabs
+            .retain(|t| !matches!(t.kind, super::right_panel::RightTabKind::Browser(_)));
         let b = &mut self.browser;
         // Dropping a page removes its native view; the frame callbacks hold
         // it weakly, so nothing outlives this.
         b.tabs.clear();
         b.active = b.push_tab();
         b.sessions += 1;
+        let fresh_id = b.tabs[b.active].id;
         b.address.update(cx, |s, cx| {
             s.set_value("", window, cx);
-            s.focus(window, cx);
         });
+        if self.right_panel.open {
+            self.right_ensure_kind(
+                super::right_panel::RightTabKind::Browser(fresh_id),
+                true,
+                true,
+                Some(window),
+                cx,
+            );
+        } else {
+            self.normalize_right_tabs();
+        }
         cx.notify();
     }
 
@@ -1030,197 +1043,31 @@ impl KeelWindow {
         self.browser.width = Some(viewport - (x - self.browser.resize_grab));
     }
 
-    /// ⌘⇧F and the toolbar button: the pane grows over the whole window
-    /// (sidebar and chat stay laid out beneath it), or back to its side.
+    /// ⌘⇧F and the header expand button: grows/restores the active right panel.
     pub(super) fn toggle_browser_expand(&mut self, cx: &mut Context<Self>) {
-        if !self.browser_allowed() || !self.browser.open || self.right_panel_toggling() {
-            return;
-        }
-        let current = self.browser_expanded_fraction();
-        let reduced = self.reduced();
-        let b = &mut self.browser;
-        b.expanded = !b.expanded;
-        b.expand_from = current;
-        let n = b.expand_anim.map_or(1, |(_, n)| n + 1);
-        b.expand_anim = Some((Instant::now(), n));
-        if reduced {
-            b.expand_anim = None;
-            for tab in &b.tabs {
-                if let Some(page) = &tab.native {
-                    page.set_resizing(false);
-                    page.arm_layout();
-                }
-            }
-            cx.notify();
-            return;
-        }
-        for tab in &b.tabs {
-            if let Some(page) = &tab.native {
-                page.set_resizing(true);
-            }
-        }
-        let duration = self.browser_expand_duration();
-        let generation = n;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(duration).await;
-            let _ = this.update(cx, |this, cx| {
-                if this
-                    .browser
-                    .expand_anim
-                    .is_some_and(|(_, n)| n == generation)
-                {
-                    this.browser.expand_anim = None;
-                    for tab in &this.browser.tabs {
-                        if let Some(page) = &tab.native {
-                            page.set_resizing(false);
-                            page.arm_layout();
-                        }
-                    }
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
+        self.toggle_right_panel_expand(cx);
     }
 
-    /// How expanded the browser pane is right now (0.0 side panel, 1.0 fullscreen).
-    pub(super) fn browser_expanded_fraction(&self) -> f32 {
-        if self.reduced() {
-            return if self.browser.expanded { 1. } else { 0. };
-        }
-        let Some((at, _)) = self.browser.expand_anim else {
-            return if self.browser.expanded { 1. } else { 0. };
-        };
-        let target = if self.browser.expanded { 1. } else { 0. };
-        let dur = expand_duration(self.browser.expand_from, target);
-        let elapsed = self.slide_elapsed(at);
-        expand_progress(self.browser.expand_from, target, elapsed, dur)
-    }
-
-    /// The duration for the browser expand/restore animation, scaling with distance if reversed mid-flight.
-    pub(super) fn browser_expand_duration(&self) -> Duration {
-        let target = if self.browser.expanded { 1. } else { 0. };
-        expand_duration(self.browser.expand_from, target)
-    }
-
-    /// Whether the browser pane is currently animating between side panel and fullscreen.
     pub(super) fn browser_expanding(&self) -> bool {
-        !self.reduced()
-            && self
-                .browser
-                .expand_anim
-                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.browser_expand_duration())
+        self.right_panel_expanding()
     }
 
-    /// Two pieces: an in-flow spacer that makes room beside the chat, and the
-    /// pane itself, absolute over the window's right edge. Splitting them lets
-    /// the pane grow over everything without the chat reflowing underneath.
-    pub(super) fn render_browser_panel(
+    /// Browser sub-toolbar (back/forward/reload/address/external/close-session)
+    /// and page viewport rendered inside the unified right side panel.
+    pub(super) fn render_browser_content(
         &mut self,
         t: Tokens,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        self.follow_chat_tab(window, cx);
-        // Outside a chat session the pane and its native page stay hidden;
-        // `open` is kept, so returning to the chat brings it back.
-        let allowed = self.browser_allowed();
-        let open = self.browser.open && allowed;
-        let toggling = !self.reduced()
-            && self
-                .browser
-                .anim
-                .is_some_and(|(at, _)| self.slide_elapsed(at) < self.right_panel_duration());
-        for (ix, tab) in self.browser.tabs.iter().enumerate() {
-            if let Some(native) = &tab.native {
-                let shown = ix == self.browser.active
-                    && (open || toggling)
-                    && tab.page.url.is_some()
-                    && tab.error.is_none();
-                native.set_shown(shown);
-            }
-        }
-        if !open && !toggling {
-            return Vec::new();
-        }
-        // A grow runs only on its own; an open or close takes precedence.
-        let expanding = self.browser_expanding();
-        let fraction = self.browser_expanded_fraction();
-        let expanded = self.browser.expanded;
-        let viewport = f32::from(window.viewport_size().width);
-        let full = self.browser_width(window);
-        let current_w = (full + (viewport - full) * fraction).round();
-
-        // Expanded, the toolbar clears the traffic lights it now sits under.
-        let (pad_side, pad_full) = (10., f32::from(self.traffic_lights_inset()));
-        let pad_left = (pad_side + (pad_full - pad_side) * fraction).round();
-        let toolbar = self
-            .render_browser_toolbar(t, window, cx)
-            .pl(px(pad_left))
-            .into_any_element();
-
-        // Sliding, the body keeps its settled width and is clipped (nothing
-        // reflows); growing, it fills the pane so the page reflows with it.
-        let body = div()
-            .size_full()
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
-            .bg(c(t.window))
-            .border_l_1()
-            .border_color(if expanded && !expanding {
-                gpui::transparent_black()
-            } else {
-                c(t.border)
-            })
-            .child(toolbar)
-            .children(self.render_browser_tabs(t, cx))
-            .child(self.render_browser_page(t, cx));
-        let pane = div()
-            .id("browser-panel")
-            .track_focus(&self.browser.focus)
-            .key_context(crate::keys::BROWSER)
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right_0()
-            .w(px(current_w))
-            .child(body)
-            .when(!expanded && !expanding, |d| {
-                d.child(self.render_browser_edge(t, cx))
-            });
-
-        let anim = self.browser.anim.filter(|_| toggling);
-        let pane = if let Some((_, n)) = anim {
-            use gpui::AnimationExt as _;
-            let (from, to) = (self.right_panel_from, self.right_panel_target());
-            let curve = gpui::Animation::new(self.right_panel_duration())
-                .with_easing(crate::motion::glide_curve);
-            pane.with_animation(("browser-slide", n as usize), curve, move |el, delta| {
-                let k = from + (to - from) * delta;
-                el.right(px(crate::motion::panel_shift(full, k)))
-            })
+            .child(self.render_browser_toolbar(t, window, cx))
+            .child(self.render_browser_page(t, cx))
             .into_any_element()
-        } else if open {
-            pane.right_0().into_any_element()
-        } else {
-            return Vec::new();
-        };
-
-        let spacer = if anim.is_some() {
-            // Full width at once; the pane sliding over it is the motion.
-            div()
-                .h_full()
-                .flex_none()
-                .w(px(full * self.right_panel_target()))
-                .into_any_element()
-        } else if open {
-            div().h_full().flex_none().w(px(full)).into_any_element()
-        } else {
-            return Vec::new();
-        };
-
-        vec![spacer, pane]
     }
 
     /// The drag handle on the pane's left edge.
@@ -1296,7 +1143,7 @@ impl KeelWindow {
             .border_color(c(if address_focused { t.focus } else { t.border }))
             .t_small()
             .child(
-                self.tip_target(
+                self.right_tip_target(
                     div()
                         .id("browser-address-globe")
                         .flex_none()
@@ -1317,12 +1164,12 @@ impl KeelWindow {
             .relative()
             .h(HEADER_HEIGHT)
             .flex_none()
-            .pr_2()
+            .px(px(PAGE_INSET))
             .flex()
             .flex_row()
             .items_center()
             .gap_1()
-            .child(self.tip_target(
+            .child(self.right_tip_target(
                 nav("browser-back", Icon::Back, page.can_back).on_click(
                     cx.listener(|this, _: &ClickEvent, _, _| this.browser_history(false)),
                 ),
@@ -1330,7 +1177,7 @@ impl KeelWindow {
                 cx,
             ))
             .child(
-                self.tip_target(
+                self.right_tip_target(
                     nav("browser-forward", Icon::Forward, page.can_forward).on_click(
                         cx.listener(|this, _: &ClickEvent, _, _| this.browser_history(true)),
                     ),
@@ -1339,7 +1186,7 @@ impl KeelWindow {
                 ),
             )
             .child(
-                self.tip_target(
+                self.right_tip_target(
                     nav(
                         "browser-reload",
                         if page.loading {
@@ -1355,16 +1202,7 @@ impl KeelWindow {
                 ),
             )
             .child(address)
-            .child(self.tip_target(
-                icon_button("browser-new-tab", Icon::Plus, t).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.browser_new_tab(window, cx)
-                    }),
-                ),
-                "browser-new-tab",
-                cx,
-            ))
-            .child(self.tip_target(
+            .child(self.right_tip_target(
                 nav("browser-external", Icon::External, has_page).on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| {
                         if let Some(path) = this.browser.tab().preview.clone() {
@@ -1378,7 +1216,7 @@ impl KeelWindow {
                 cx,
             ))
             .child(
-                self.tip_target(
+                self.right_tip_target(
                     div()
                         .id("browser-end")
                         .size(zpx(26.))
@@ -1402,42 +1240,8 @@ impl KeelWindow {
                     cx,
                 ),
             )
-            .child(
-                div()
-                    .h(zpx(14.))
-                    .w(zpx(1.))
-                    .mx(zpx(2.))
-                    .flex_none()
-                    .bg(c(t.border)),
-            )
-            .child(
-                self.tip_target(
-                    icon_button(
-                        "browser-expand",
-                        if self.browser.expanded {
-                            Icon::Shrink
-                        } else {
-                            Icon::Expand
-                        },
-                        t,
-                    )
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_browser_expand(cx)),
-                    ),
-                    "browser-expand",
-                    cx,
-                ),
-            )
-            .child(self.tip_target(
-                icon_button("browser-close", Icon::SidebarClose, t).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_browser(window, cx)),
-                ),
-                "browser-close",
-                cx,
-            ))
             .children(self.render_browser_bar(t))
             .children(self.render_layout_line(t))
-            .children(self.render_browser_tip(t, window))
     }
 
     fn page_geometry_pending(&self) -> bool {
@@ -1544,9 +1348,9 @@ impl KeelWindow {
         )
     }
 
-    /// What each toolbar button does, as its tooltip says it (state-aware),
+    /// What each browser toolbar button does, as its tooltip says it (state-aware),
     /// with its shortcut where it has one.
-    fn browser_tip_label(&self, id: &str) -> Option<(String, Option<&'static str>)> {
+    pub(super) fn browser_tip_label(&self, id: &str) -> Option<(String, Option<&'static str>)> {
         use super::tooltip::keys;
         let tab = self.browser.tab();
         let (text, key) = match id {
@@ -1556,74 +1360,14 @@ impl KeelWindow {
             "browser-reload" if tab.page.loading => ("Stop loading", keys("⌘R")),
             "browser-reload" => ("Reload", keys("⌘R")),
             "browser-address-globe" => ("Search or enter address", keys("⌘L")),
-            "browser-new-tab" => ("New tab", keys("⌘T")),
             // A previewed file opens in its own app; a page in the default browser.
             "browser-external" if tab.preview.is_some() => ("Open in default app", None),
             "browser-external" => ("Open in browser", None),
-            // Closes every tab (and the agent's) for a fresh, empty one.
+            // Closes every browser tab (and the agent's) for a fresh, empty one.
             "browser-end" => ("Close session", keys("⌘⇧W")),
-            "browser-expand" if self.browser.expanded => ("Restore", keys("⌘⇧F")),
-            "browser-expand" => ("Expand", keys("⌘⇧F")),
-            "browser-close" => ("Hide browser", keys("⌘⇧B")),
             _ => return None,
         };
         Some((text.to_string(), key))
-    }
-
-    fn render_browser_tip(&mut self, t: Tokens, window: &Window) -> Option<AnyElement> {
-        let reduced = self.reduced();
-        let mut tips = std::mem::take(&mut self.browser.tips);
-        let el = tips.render(|id| self.browser_tip_label(id), t, window, reduced);
-        self.browser.tips = tips;
-        el
-    }
-
-    /// A toolbar button that shows a tooltip on hover: its bounds are
-    /// recorded for placing it, and hover and press feed [`HoverTips`].
-    /// Disabled buttons too: they still say what they'd do.
-    fn tip_target(
-        &self,
-        button: gpui::Stateful<gpui::Div>,
-        id: &'static str,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let bounds = self.browser.tips.bounds.clone();
-        button
-            .relative()
-            .child(
-                gpui::canvas(
-                    move |b, _, _| {
-                        bounds.borrow_mut().insert(id, b);
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-            )
-            .on_hover(cx.listener(move |this, on: &bool, _, cx| {
-                let now = Instant::now();
-                if let Some(delay) = this.browser.tips.hover(id, *on, now) {
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(delay).await;
-                        let _ = this.update(cx, |this, cx| {
-                            if this.browser.tips.ripen(id, now, Instant::now()) {
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
-                }
-                cx.notify();
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.browser.tips.press(id, Instant::now());
-                    cx.notify();
-                }),
-            )
     }
 
     /// A thin accent line under the toolbar: glides to each progress step,
@@ -1659,113 +1403,6 @@ impl KeelWindow {
                 },
             )
             .into_any_element(),
-        )
-    }
-
-    /// The tab strip, once there are two tabs: titles share the width (up
-    /// to [`TAB_MAX_W`] each), the shown tab raised, the agent's marked
-    /// with a dot. A tab's × shows on hover (always on the shown one); a
-    /// new tab fades in.
-    fn render_browser_tabs(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let reduced = self.reduced();
-        let b = &self.browser;
-        let chat = self.current_chat.as_deref();
-        if b.tabs
-            .iter()
-            .filter(|t| b.visible_in_strip(t, chat))
-            .count()
-            < 2
-        {
-            return None;
-        }
-        let tabs = b
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, tab)| b.visible_in_strip(tab, chat))
-            .map(|(ix, tab)| {
-                let (id, active) = (tab.id, ix == b.active);
-                let group = format!("browser-tab-{id}");
-                let close = reveal_on_hover(
-                    "close-reveal",
-                    group.clone(),
-                    if active { 1. } else { 0. },
-                    1.,
-                    div()
-                        .id(("browser-tab-close", id as usize))
-                        .flex_none()
-                        .size(zpx(16.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(zpx(4.))
-                        .text_color(c(t.text_faint))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(c(t.text)))
-                        .hover_fade(c(t.hover), None)
-                        .child(Icon::Close.el(zpx(10.)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            if let Some(ix) = this.browser.tab_ix(id) {
-                                this.browser_close_tab(ix, window, cx);
-                            }
-                        })),
-                );
-                let dot = tab
-                    .agent
-                    .is_some()
-                    .then(|| div().flex_none().size(zpx(6.)).rounded_full().bg(c(t.info)));
-                let el = div()
-                    .id(("browser-tab", id as usize))
-                    .hover_probe(group.clone())
-                    .group(group)
-                    .flex_1()
-                    .min_w_0()
-                    .max_w(zpx(TAB_MAX_W))
-                    .h(zpx(24.))
-                    .pl_2()
-                    .pr_1()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(6.))
-                    .rounded(RADIUS_MD)
-                    .border_1()
-                    .t_small()
-                    .map(|d| {
-                        if active {
-                            d.bg(c(t.surface))
-                                .border_color(c(t.border))
-                                .text_color(c(t.text))
-                        } else {
-                            d.border_color(gpui::transparent_black())
-                                .text_color(c(t.text_muted))
-                                .cursor_pointer()
-                                .hover_fade(c(t.hover), None)
-                        }
-                    })
-                    .children(dot)
-                    .child(div().flex_1().min_w_0().truncate().child(tab.label()))
-                    .child(close)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        if let Some(ix) = this.browser.tab_ix(id) {
-                            this.activate_tab(ix, window, cx);
-                        }
-                    }));
-                crate::motion::stagger_in(el, ("browser-tab-in", id as usize), 0, reduced)
-            });
-        Some(
-            div()
-                .flex_none()
-                .h(zpx(TAB_STRIP_H))
-                .px(px(PAGE_INSET))
-                .pb(zpx(4.))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .children(tabs)
-                .into_any_element(),
         )
     }
 
@@ -2020,7 +1657,7 @@ pub(super) fn expand_progress(from: f32, target: f32, elapsed: Duration, dur: Du
 /// Compute the duration for expanding/collapsing based on distance traveled.
 pub(super) fn expand_duration(from: f32, target: f32) -> Duration {
     let dist = (target - from).abs();
-    SPATIAL.mul_f32(0.4 + 0.6 * dist)
+    crate::motion::SPATIAL.mul_f32(0.4 + 0.6 * dist)
 }
 
 /// [`crate::browser::cef`]'s page-size JSON → the capture, its height
@@ -2251,6 +1888,7 @@ const MAX_SHOT_WIDTH: u32 = 1600;
 #[cfg(test)]
 mod host_tests {
     use super::*;
+    use crate::motion::SPATIAL;
 
     fn png(w: u32, h: u32, noisy: bool) -> Vec<u8> {
         let img = image::RgbImage::from_fn(w, h, |x, y| {

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{Context, Focusable as _, Window};
 
-use super::{BrowserTab, HostRequest, KeelWindow, ShotRequest};
+use super::{HostRequest, KeelWindow, ShotRequest};
+use crate::view::right_panel::RightTabKind;
 use crate::browser::agent::{
     DIALOG_DEFAULT_ACCEPT, DIALOG_TIMEOUT_SECS, DialogInfo, Fifo, Snap, SnapWant, parse_sites,
     site_allowed, snapshot_reply,
@@ -265,45 +266,58 @@ impl KeelWindow {
         self.browser.seq
     }
 
-    /// The open chat changed: the pane shows its tab (or, when it has
-    /// none, a tab of the user's), without moving focus.
-    pub(super) fn follow_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The open chat changed: when viewing a Browser tab (or while closed on an
+    /// untouched launcher), follow that chat's agent browser tab without moving focus.
+    pub(in crate::view) fn follow_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.browser.shown_chat == self.current_chat {
             return;
         }
         self.browser.shown_chat = self.current_chat.clone();
         let chat = self.current_chat.clone();
-        let target = match chat.as_deref().and_then(|c| self.agent_tab_ix(c)) {
+        let viewing_browser = matches!(
+            self.right_panel_active_kind(),
+            Some(RightTabKind::Browser(_))
+        );
+        let target_b_ix = match chat.as_deref().and_then(|c| self.agent_tab_ix(c)) {
             Some(ix) => Some(ix),
             None => {
-                let b = &mut self.browser;
+                let b = &self.browser;
                 if b.visible_in_strip(b.tab(), chat.as_deref()) {
                     None
                 } else {
-                    Some(
-                        b.tabs
-                            .iter()
-                            .position(|t| b.visible_in_strip(t, chat.as_deref()))
-                            .unwrap_or_else(|| b.push_tab()),
-                    )
+                    b.tabs
+                        .iter()
+                        .position(|t| b.visible_in_strip(t, chat.as_deref()) && self.has_right_browser_tab(t.id))
                 }
             }
         };
-        let Some(ix) = target.filter(|ix| *ix != self.browser.active) else {
-            return;
-        };
-        self.browser.release_focus();
-        self.browser.active = ix;
-        let url = self.browser.tabs[ix].page.url.clone().unwrap_or_default();
-        cx.defer_in(window, move |this, window, cx| {
-            this.browser
-                .address
-                .update(cx, |s, cx| s.set_value(url, window, cx));
-            if this.browser.open && this.browser.active == ix {
-                this.unpark_tab(ix, window, cx);
-            }
-            cx.notify();
-        });
+        if let Some(ix) = target_b_ix
+            && viewing_browser
+            && ix != self.browser.active
+        {
+            self.browser.release_focus();
+            self.browser.active = ix;
+            let bid = self.browser.tabs[ix].id;
+            self.right_ensure_kind(
+                RightTabKind::Browser(bid),
+                true,
+                false,
+                None,
+                cx,
+            );
+            let url = self.browser.tabs[ix].page.url.clone().unwrap_or_default();
+            cx.defer_in(window, move |this, window, cx| {
+                this.browser
+                    .address
+                    .update(cx, |s, cx| s.set_value(url, window, cx));
+                if this.is_browser_tab_showing(ix) {
+                    this.unpark_tab(ix, window, cx);
+                }
+                cx.notify();
+            });
+        } else {
+            self.normalize_right_tabs();
+        }
     }
 
     /// ACP/MCP host tool from the engine: queued on the chat's own tab.
@@ -380,20 +394,33 @@ impl KeelWindow {
         let ix = match self.agent_tab_ix(&req.chat) {
             Some(ix) => ix,
             None => {
-                let b = &mut self.browser;
-                // A lone empty tab nobody uses is taken as is.
-                let empty = |t: &BrowserTab| {
-                    t.agent.is_none() && t.page.url.is_none() && t.preview.is_none()
-                };
-                let ix = if b.tabs.len() == 1 && empty(&b.tabs[0]) {
-                    0
-                } else {
-                    b.push_tab()
-                };
-                b.tabs[ix].agent = Some(AgentTab::new(req.chat.clone()));
-                if self.current_chat.as_deref() == Some(req.chat.as_str()) || req.chat.is_empty() {
+                // Claim a dormant scratch tab if it isn't exposed in RightPanel yet.
+                let scratch_ix = self
+                    .browser
+                    .tabs
+                    .iter()
+                    .position(|t| t.is_empty_scratch() && !self.has_right_browser_tab(t.id));
+                let ix = scratch_ix.unwrap_or_else(|| self.browser.push_tab());
+                self.browser.tabs[ix].agent = Some(AgentTab::new(req.chat.clone()));
+                let bid = self.browser.tabs[ix].id;
+                let for_current_chat =
+                    self.current_chat.as_deref() == Some(req.chat.as_str()) || req.chat.is_empty();
+                let should_focus_browser = for_current_chat
+                    && (!self.right_panel.open
+                        || matches!(
+                            self.right_panel_active_kind(),
+                            Some(RightTabKind::Browser(_))
+                        ));
+                if should_focus_browser {
                     self.browser.active = ix;
                 }
+                self.right_ensure_kind(
+                    RightTabKind::Browser(bid),
+                    should_focus_browser,
+                    false,
+                    None,
+                    cx,
+                );
                 ix
             }
         };
@@ -728,7 +755,7 @@ impl KeelWindow {
             "url": tab.page.url,
             "title": tab.page.title,
             "text": text,
-            "open": self.browser.open && self.browser.active == ix,
+            "open": self.is_browser_tab_showing(ix),
         })
     }
 
@@ -1086,22 +1113,18 @@ impl KeelWindow {
     ) -> Result<serde_json::Value, String> {
         let here = chat.is_empty() || self.current_chat.as_deref() == Some(chat);
         let allowed = self.browser_allowed() && here;
-        if allowed && !self.browser.open {
-            if self.files.open {
-                self.toggle_files(window, cx);
-            }
-            if self.terminal.open {
-                self.set_terminal_open(false, window, cx);
-            }
-            self.update_right_panel_anim();
-            let b = &mut self.browser;
-            b.open = true;
-            let n = b.anim.map_or(1, |(_, n)| n + 1);
-            b.anim = Some((Instant::now(), n));
-            b.expanded = false;
-        }
         if allowed {
-            self.activate_tab(ix, window, cx);
+            let bid = self.browser.tabs[ix].id;
+            self.right_ensure_kind(
+                RightTabKind::Browser(bid),
+                true,
+                true,
+                Some(window),
+                cx,
+            );
+            if !self.right_panel.open {
+                self.open_right_panel(window, cx);
+            }
         }
         cx.notify();
         let page = self.browser.tabs[ix].page.clone();
@@ -1113,7 +1136,7 @@ impl KeelWindow {
             ""
         };
         Ok(
-            serde_json::json!({ "url": page.url, "title": page.title, "text": text, "open": self.browser.open && allowed }),
+            serde_json::json!({ "url": page.url, "title": page.title, "text": text, "open": self.is_browser_tab_showing(ix) }),
         )
     }
 
@@ -1417,10 +1440,11 @@ impl KeelWindow {
         let tab = &mut self.browser.tabs[ix];
         tab.park_seq = None;
         let busy = tab.agent.as_ref().is_some_and(AgentTab::busy);
-        let shown = self.browser.open && self.browser.active == ix;
-        if busy || shown || tab.native.is_none() {
+        let shown = self.is_browser_tab_showing(ix);
+        if busy || shown || self.browser.tabs[ix].native.is_none() {
             return;
         }
+        let tab = &mut self.browser.tabs[ix];
         let pos = raw
             .as_deref()
             .and_then(|b| parse_eval(b).ok())

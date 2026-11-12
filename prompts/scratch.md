@@ -1,0 +1,1 @@
+No project folder is attached. Your working directory is an isolated temporary scratch directory for this chat—write drafts, scripts, and generated files here (./) rather than modifying files in the user's home directory unless asked.

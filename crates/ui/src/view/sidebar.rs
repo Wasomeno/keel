@@ -503,6 +503,7 @@ impl KeelWindow {
                 .when(!focused, |d| d.child(menu_hint("⌥-click", t)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.state.space_menu = None;
+                    this.state.new_chat_no_project = false;
                     this.state.space_filter = if focused {
                         None
                     } else {
@@ -547,7 +548,17 @@ impl KeelWindow {
     /// The new-chat screen, set to start in `space_id`.
     fn new_chat_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.projects.picked = None;
-        self.state.new_chat_space = Some(space_id);
+        if self
+            .state
+            .spaces
+            .get(&space_id)
+            .is_some_and(|s| self.state.is_scratch_space(s))
+        {
+            self.use_no_project_for_new_chat(cx);
+        } else {
+            self.state.new_chat_no_project = false;
+            self.state.new_chat_space = Some(space_id);
+        }
         self.create_new_session(None, cx);
     }
 
@@ -1256,6 +1267,7 @@ impl KeelWindow {
                             return;
                         }
                         if event.modifiers().alt {
+                            this.state.new_chat_no_project = false;
                             this.state.space_filter = Some(toggle_id.clone());
                         } else {
                             this.glide_gen += 1;
@@ -1412,7 +1424,7 @@ impl KeelWindow {
             .filter(|c| !c.model.is_empty())
             .map(|c| {
                 self.model_name(&c.harness, &c.model)
-                    .unwrap_or_else(|| c.model.clone())
+                    .unwrap_or_else(|| crate::model_menu::format_name(&c.model))
             });
         let git = self.git_badge(&chat.id);
         let mr_badge = self.mr_badge(&chat.id, t);

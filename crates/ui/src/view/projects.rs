@@ -1093,9 +1093,7 @@ impl KeelWindow {
                     chat.last_message_at = 1;
                 }
                 self.files.tab = super::files_panel::FilesTab::Files;
-                if !self.files.open {
-                    self.toggle_files(window, cx);
-                }
+                self.open_right_tab(super::right_panel::RightTabKind::File, window, cx);
                 "ok".into()
             }
             _ => format!("error: unknown project command {cmd}"),

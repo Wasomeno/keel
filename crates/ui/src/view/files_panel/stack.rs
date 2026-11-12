@@ -431,6 +431,13 @@ struct Ctx {
 impl KeelWindow {
     /// Bring a changed file's section or detail up: open it and show diff.
     pub(super) fn files_goto_change(&mut self, path: String, cx: &mut Context<Self>) {
+        self.right_ensure_kind(
+            super::super::right_panel::RightTabKind::Changes,
+            true,
+            true,
+            None,
+            cx,
+        );
         if path.starts_with('@') && !path.contains('/') {
             self.files.selected = None;
             self.files.tab = FilesTab::Changes;
@@ -441,6 +448,13 @@ impl KeelWindow {
     }
 
     pub(super) fn files_open_change(&mut self, path: String, cx: &mut Context<Self>) {
+        self.right_ensure_kind(
+            super::super::right_panel::RightTabKind::Changes,
+            true,
+            true,
+            None,
+            cx,
+        );
         if let Some(Load::Ready(list)) = &self.files.changes {
             let s = &mut self.files.stack;
             if !Rc::ptr_eq(&s.files, list) && s.files.as_slice() != list.as_slice() {
@@ -723,7 +737,10 @@ impl KeelWindow {
                     .into_any_element();
             }
             Some(Load::Failed(err)) => {
-                return empty_state(Icon::Alert, "Couldn't read changes", err.clone(), t);
+                return render_changes_empty(
+                    empty_state(Icon::Alert, "Couldn't read changes", err.clone(), t),
+                    self.render_files_refresh_btn(t, cx),
+                );
             }
             Some(Load::Ready(list)) if list.is_empty() => {
                 let rooted = !self
@@ -735,7 +752,10 @@ impl KeelWindow {
                 } else {
                     "Files the agent edits in this folder show up here, ready to review."
                 };
-                return empty_state(Icon::FileDiff, "No changes yet", body, t);
+                return render_changes_empty(
+                    empty_state(Icon::FileDiff, "No changes yet", body, t),
+                    self.render_files_refresh_btn(t, cx),
+                );
             }
             Some(Load::Ready(list)) => list.clone(),
         };
@@ -842,7 +862,8 @@ impl KeelWindow {
                                 }
                             }),
                         )),
-                );
+                )
+                .child(self.render_files_refresh_btn(t, cx));
         let active = self.files.stack.active.clone();
         let weak = cx.entity().downgrade();
         let file_row = Rc::new(
@@ -1365,7 +1386,8 @@ impl KeelWindow {
                     change.as_ref().and_then(|c| c.removed),
                     t,
                 ))
-                .child(status_chip(change.as_ref().map_or('M', |c| c.status), t));
+                .child(status_chip(change.as_ref().map_or('M', |c| c.status), t))
+                .child(self.render_files_refresh_btn(t, cx));
 
         let banner =
             (tab == ChangeDetailTab::File && conflict).then(|| {
@@ -1997,6 +2019,24 @@ fn more_row(cx: &Ctx, f: usize, hidden: usize) -> AnyElement {
                     let path = path.clone();
                     let _ = weak.update(cx, |this, cx| this.files_show_more(path, cx));
                 }),
+        )
+        .into_any_element()
+}
+
+fn render_changes_empty(empty: AnyElement, refresh: impl IntoElement) -> AnyElement {
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(empty)
+        .child(
+            div()
+                .absolute()
+                .top(zpx(6.))
+                .right(zpx(6.))
+                .child(refresh),
         )
         .into_any_element()
 }

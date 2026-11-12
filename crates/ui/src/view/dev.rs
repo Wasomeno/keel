@@ -375,18 +375,36 @@ impl KeelWindow {
                 self.toggle_sidebar(cx);
                 "ok"
             }
+            "right_panel" => {
+                match arg {
+                    "" => self.toggle_right_panel(window, cx),
+                    "launcher" => self.right_new_tab(window, cx),
+                    "changes" => self.right_launch(super::right_panel::LauncherAction::Changes, window, cx),
+                    "file" | "files" => self.right_launch(super::right_panel::LauncherAction::File, window, cx),
+                    "browser" => self.right_launch(super::right_panel::LauncherAction::Browser, window, cx),
+                    "terminal" => self.right_launch(super::right_panel::LauncherAction::Terminal, window, cx),
+                    _ => return "err: unknown right_panel arg".into(),
+                }
+                "ok"
+            }
+            "right_new_tab" => {
+                self.right_new_tab(window, cx);
+                "ok"
+            }
+            "right_close_tab" => {
+                self.right_close_active_tab(window, cx);
+                "ok"
+            }
             "browser" => {
                 self.toggle_browser(window, cx);
                 "ok"
             }
             "expand" | "browser_expand" => {
-                self.toggle_browser_expand(cx);
+                self.toggle_right_panel_expand(cx);
                 "ok"
             }
             "nav" | "browser_nav" => {
-                if !self.browser.open {
-                    self.toggle_browser(window, cx);
-                }
+                self.right_open_or_focus_browser(window, cx);
                 let url = crate::browser::normalize_address(arg).unwrap_or_else(|| arg.to_string());
                 self.browser_load(url, window, cx);
                 "ok"
@@ -581,11 +599,11 @@ impl KeelWindow {
                     .map(|n| n.debug_info())
                     .unwrap_or(serde_json::Value::Null);
                 return json!({
-                    "open": b.open,
-                    "expanded": b.expanded,
-                    "expanding": self.browser_expanding(),
-                    "expand_from": b.expand_from,
-                    "expand_fraction": self.browser_expanded_fraction(),
+                    "open": self.is_browser_tab_showing(b.active),
+                    "expanded": self.right_panel.expanded,
+                    "expanding": self.right_panel_expanding(),
+                    "expand_from": self.right_panel.expand_from,
+                    "expand_fraction": self.right_panel_expanded_fraction(),
                     "active": b.active,
                     "tabs_count": b.tabs.len(),
                     "tab_id": tab.id,
@@ -646,10 +664,22 @@ impl KeelWindow {
                 return json!({
                     "sidebar_collapsed": collapsed,
                     "sidebar_open_now": open,
+                    "right_panel_open": self.right_panel_open(),
                     "right_panel_open_now": right_open,
-                    "browser_open": self.browser.open,
-                    "files_open": self.files.open,
-                    "terminal_open": self.terminal.open,
+                    "right_panel_tab": self.right_panel_active_kind().map(|k| match k {
+                        super::right_panel::RightTabKind::Launcher => "launcher",
+                        super::right_panel::RightTabKind::Changes => "changes",
+                        super::right_panel::RightTabKind::File => "file",
+                        super::right_panel::RightTabKind::Browser(_) => "browser",
+                        super::right_panel::RightTabKind::Terminal(_) => "terminal",
+                    }),
+                    "right_panel_tabs": self.right_panel.tabs.len(),
+                    "browser_open": self.right_panel_open()
+                        && matches!(self.right_panel_active_kind(), Some(super::right_panel::RightTabKind::Browser(_))),
+                    "files_open": self.right_panel_open()
+                        && matches!(self.right_panel_active_kind(), Some(super::right_panel::RightTabKind::Changes | super::right_panel::RightTabKind::File)),
+                    "terminal_open": self.right_panel_open()
+                        && matches!(self.right_panel_active_kind(), Some(super::right_panel::RightTabKind::Terminal(_))),
                     "browser_allowed": self.browser_allowed(),
                     "column_max": f32::from(col),
                     "room_l": room_l,

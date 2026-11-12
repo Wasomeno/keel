@@ -765,6 +765,17 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Host-only. Rebinds `meta.space_id` and `meta.cwd` (e.g. promoting a
+    /// scratch chat into a real project folder).
+    pub fn set_workspace(&self, space_id: &str, cwd: &str) -> Result<(), DocError> {
+        let doc = &self.inner.doc;
+        let meta = doc.get_map("meta");
+        meta.insert("space_id", space_id)?;
+        meta.insert("cwd", cwd)?;
+        doc.commit();
+        Ok(())
+    }
+
     /// Host-only. Sets `outcome` when the entry has none.
     pub fn set_outcome(
         &self,

@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 pub use keel::{KeelProfile, PI_VERSION, PiProfile, pi_agent_dir, set_pi_agent_dir};
 pub use mock::{MockHarness, Step};
-pub use pi::{MEMORY_PREAMBLE, MEMORY_PROTO, MEMORY_UNAVAILABLE, PiHarness};
+pub use pi::{LABEL_DESC, MEMORY_PREAMBLE, MEMORY_PROTO, MEMORY_UNAVAILABLE, PiHarness};
 
 /// Reports a CLI session id and, when the CLI has one, its session file.
 pub type SessionReport = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
@@ -208,6 +208,9 @@ pub struct SessionSpec {
     pub keep_cache_warm: bool,
     /// Idle eviction timeout in seconds (default: 15 min).
     pub idle_eviction_timeout_secs: Option<u32>,
+    /// True when the chat runs in Keel's isolated per-chat scratch directory
+    /// rather than a user project folder.
+    pub scratch: bool,
 }
 
 /// A project's folders as the agent sees them (see [`SessionSpec::project`]).
@@ -1016,22 +1019,15 @@ fn agy_request_is_read(text: &str) -> bool {
 }
 
 /// Told to the agent only while Plan mode is on.
-pub const PLAN_MODE_PROMPT: &str = "\
-Plan mode is on. Research with read-only tools first, then emit exactly one plan card with show_plan, and stop. Do not edit files, run commands, or call a tool that changes state.";
+pub const PLAN_MODE_PROMPT: &str = include_str!("../../../prompts/plan-mode.md").trim_ascii_end();
+
+/// Told to the agent only when the chat runs in a no-project scratch folder.
+pub const SCRATCH_PROMPT: &str = include_str!("../../../prompts/scratch.md").trim_ascii_end();
 
 /// The `keel_cards` prompt section, added on turns whose tools include the
 /// cards. The tools' own descriptions say how to call each one; this says
 /// when a card beats writing the same thing yourself.
-pub const UI_CARDS_PROMPT: &str = "\
-Keel draws native cards in the chat with the mcp__keel_ui__show_* tools. Prefer a card to drawing the same thing yourself in markdown:
-- A flow, architecture, sequence or data model: show_diagram with Mermaid source, not an ASCII drawing or a mermaid fence in your reply.
-- Main task execution steps in the right session panel: task_steps (or show_steps with kind: \"task\"). For how-to guides/tutorials in chat: show_steps with kind: \"guide\".
-- Options or a before/after, as claims: show_compare, not side-by-side prose.
-- A question with 2 to 6 answers: ask it in a sentence, then show_choices.
-- A test run you report: show_tests. Files you changed this turn: show_files. A merge request you opened or updated: show_mr.
-A card is the user's copy of what it shows. Never repeat its content in your reply; refer to it in a sentence instead.
-Three cards go with text you write: show_chart turns a markdown table of measured numbers into a chart (it replaces the table), show_stats adds before/after tiles for figures you wrote, and show_commands adds a Run button to a shell block you wrote.
-Skip cards when plain text is enough.";
+pub const UI_CARDS_PROMPT: &str = include_str!("../../../prompts/cards.md").trim_ascii_end();
 
 /// The stdio MCP server behind Keel's browser pane:
 /// `<keel exe> mcp-browser --socket <sock>`, registered with Pi by a per-run

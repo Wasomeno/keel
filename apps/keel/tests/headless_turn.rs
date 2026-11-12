@@ -415,7 +415,10 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
     assert!(!args.lines().any(|line| line.starts_with('@')), "{args}");
     let env_text = fs::read_to_string(stub_dir.join("env")).unwrap_or_default();
     assert!(
-        env_text.lines().all(|line| !line.starts_with("KEEL_")),
+        env_text
+            .lines()
+            .filter(|line| !line.starts_with("KEEL_PLAN_STATE="))
+            .all(|line| !line.starts_with("KEEL_")),
         "{env_text}"
     );
     let stdin = fs::read_to_string(stub_dir.join("stdin")).unwrap_or_default();

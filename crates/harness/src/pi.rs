@@ -514,13 +514,18 @@ impl Harness for PiHarness {
                 s
             })
             .unwrap_or_default();
+        let data_dir = spec.data_dir.as_deref();
+        let plan_state = plan_state_path(data_dir, &chat_id);
+        let ag_plan_mode =
+            (spec.model.0.starts_with("antigravity/") || plan_state.is_none()).then_some(spec.plan_mode);
         let target_config = ProcessConfig {
             cwd: spec.cwd.clone(),
             project_fingerprint,
-            plan_mode: spec.plan_mode,
+            ag_plan_mode,
             permission: spec.permission,
             longer_cache: spec.longer_cache,
             keep_cache_warm: spec.keep_cache_warm,
+            scratch: spec.scratch,
             exe_path: exe.clone(),
             tag: self.profile.tag,
         };
@@ -569,12 +574,16 @@ impl Harness for PiHarness {
             if spec.longer_cache {
                 std_cmd.env("PI_CACHE_RETENTION", "long");
             }
+            if let Some(state_path) = &plan_state {
+                write_plan_state(state_path, spec.plan_mode);
+                std_cmd.env("KEEL_PLAN_STATE", state_path);
+            }
             let tag = self.profile.tag;
-            let data_dir = spec.data_dir.as_deref();
             if let Some(keel) = &self.profile.keel {
                 // Before `run_args`, which loads the extensions folder it lands in.
                 labels_extension(data_dir);
                 memory_extension(data_dir);
+                skills_extension(data_dir);
                 let idle_timeout_secs =
                     spec.idle_eviction_timeout_secs.unwrap_or(15 * 60) as u64;
                 cache_warming_extension(data_dir, idle_timeout_secs);
@@ -599,15 +608,32 @@ impl Harness for PiHarness {
                 std_cmd.arg("--extension").arg(ext);
             }
             // Fail closed: without its gate Pi would run every tool unasked.
-            let gate = if spec.plan_mode {
-                permission_extension_for(spec.permission, data_dir, tag, true)
-            } else {
-                permission_extension(spec.permission, data_dir, tag)
-            };
+            let scratch_base = spec
+                .scratch
+                .then(|| {
+                    data_dir
+                        .map(|d| d.join("scratch"))
+                        .or_else(|| spec.cwd.parent().map(Path::to_path_buf))
+                })
+                .flatten();
+            let dynamic_plan = plan_state.is_some();
+            let gate = permission_extension_for_scratch_mode(
+                spec.permission,
+                data_dir,
+                tag,
+                spec.plan_mode,
+                scratch_base.as_deref(),
+                dynamic_plan,
+            );
             if let Some(gate) = gate.transpose()? {
                 std_cmd.arg("--extension").arg(gate);
             }
-            if let Some(ext) = plan_prompt_extension(spec.plan_mode, data_dir, tag) {
+            if let Some(ext) =
+                plan_prompt_extension_for_chat(spec.plan_mode, data_dir, tag, dynamic_plan)
+            {
+                std_cmd.arg("--extension").arg(ext);
+            }
+            if let Some(ext) = scratch_prompt_extension(spec.scratch, data_dir, tag) {
                 std_cmd.arg("--extension").arg(ext);
             }
             if let Some(agent_dir) = crate::keel::pi_agent_dir() {
@@ -707,12 +733,32 @@ impl Harness for PiHarness {
 /// Pi has built-in MCP but reads servers only from `~/.pi/agent/mcp.json` and
 /// trusted `.pi/mcp.json`; there is no per-run flag. A per-run extension
 /// (`--extension <file>`) that calls `pi.registerMcpServer` adds Keel's browser
-/// server for this session only, so nothing persists into `~/.pi`. Exposure is
-/// `direct` so the tools are declared like built-ins instead of hiding behind
-/// codemode. Pi lists a server's description in the prompt only for codemode
-/// and deferred servers, so a direct one carries none. Older Pi without
-/// `registerMcpServer` loads it as a no-op.
-fn mcp_register(name: &str, mcp: &crate::BrowserMcp) -> String {
+const ADDS_TOOLS_HELPER: &str = "\
+function addsToolsWithoutCheckpoint(model: any): boolean {\n\
+  const compat = model?.compat;\n\
+  if (!model || compat?.supportsMidConvoSystemMessages !== true) return false;\n\
+  switch (model.api) {\n\
+    case \"anthropic-messages\": return compat.supportsMidConvoToolChanges === true;\n\
+    case \"openai-completions\": return compat.supportsMidConvoToolAdditions === true;\n\
+    case \"openai-responses\":\n\
+    case \"openai-codex-responses\":\n\
+    case \"azure-openai-responses\": return compat.supportsAdditionalTools === true || compat.supportsToolSearch === true;\n\
+    default: return false;\n\
+  }\n\
+}\n";
+
+/// MCP server registration for this session only, so nothing persists into
+/// `~/.pi`. By default, exposure is `deferred` so non-essential tools hide behind
+/// `tool_search` and do not clutter per-turn token usage. Critical tools (such as
+/// `show_plan`, `task_steps`, and `show_steps`) are kept `direct` via `toolExposure`.
+/// On models that cannot add tools mid-conversation without invalidating prefix cache,
+/// `session_start` switches exposure to `direct` so the tool set remains stable.
+fn mcp_register(
+    name: &str,
+    mcp: &crate::BrowserMcp,
+    tool_exposure: Option<&[(&str, &str)]>,
+    description: &str,
+) -> String {
     let lit = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
     let args = serde_json::to_string(&mcp.args).unwrap_or_else(|_| "[]".to_string());
     let env: serde_json::Map<String, serde_json::Value> = mcp
@@ -721,20 +767,62 @@ fn mcp_register(name: &str, mcp: &crate::BrowserMcp) -> String {
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
     let env = serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string());
+    let desc_lit = lit(description);
+
+    let tool_exp_js = match tool_exposure {
+        Some(overrides) => {
+            let map: serde_json::Map<String, serde_json::Value> = overrides
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), serde_json::Value::String((*v).to_string())))
+                .collect();
+            format!(
+                "\n    toolExposure: {},",
+                serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+            )
+        }
+        None => String::new(),
+    };
+
     format!(
-        "  pi.registerMcpServer({name}, {{\n    command: {command},\n    args: {args},\n    env: {env},\n    exposure: \"direct\",\n  }});\n",
+        "  const register = (mode: string) => {{\n\
+           pi.registerMcpServer({name}, {{\n\
+             command: {command},\n\
+             args: {args},\n\
+             env: {env},\n\
+             exposure: mode,{tool_exp_js}\n\
+             description: {desc_lit},\n\
+           }});\n\
+         }};\n\
+         const initialMode = process.env.KEEL_MCP_EXPOSURE === \"direct\" ? \"direct\" : \"deferred\";\n\
+         register(initialMode);\n\
+         pi.on(\"session_start\", (_event: any, ctx: any) => {{\n\
+           const forced = process.env.KEEL_MCP_EXPOSURE;\n\
+           if (forced === \"direct\" || forced === \"deferred\") return;\n\
+           if (!addsToolsWithoutCheckpoint(ctx?.model)) {{\n\
+             register(\"direct\");\n\
+           }}\n\
+         }});\n",
         name = lit(name),
         command = lit(&mcp.command),
+        desc_lit = desc_lit,
+        tool_exp_js = tool_exp_js,
     )
 }
 
 fn browser_extension_source(browser: &crate::BrowserMcp) -> String {
     format!(
         "// Generated by Keel for each Pi run. Edits are overwritten.\n\
+{ADDS_TOOLS_HELPER}\n\
 export default function (pi: any) {{\n\
   if (typeof pi.registerMcpServer !== \"function\") return;\n\
-{register}}}\n",
-        register = mcp_register(crate::BROWSER_MCP_NAME, browser),
+{register}\
+}}\n",
+        register = mcp_register(
+            crate::BROWSER_MCP_NAME,
+            browser,
+            None,
+            "browser: navigate, snapshot, click, type, scroll, screenshot of the Keel browser pane",
+        ),
     )
 }
 
@@ -763,8 +851,14 @@ fn browser_extension(sock: Option<&Path>, chat: Option<&str>, tag: &str) -> Opti
 /// server connects, so they are never in `selectedTools` there. No token, so
 /// one shared file, not one per chat.
 fn ui_extension_source(ui: &crate::BrowserMcp) -> String {
+    const UI_TOOL_EXPOSURES: &[(&str, &str)] = &[
+        ("show_plan", "direct"),
+        ("task_steps", "direct"),
+        ("show_steps", "direct"),
+    ];
     format!(
         "// Generated by Keel for each Pi run. Edits are overwritten.\n\
+{ADDS_TOOLS_HELPER}\n\
 const CARDS = {cards};\n\
 export default function (pi: any) {{\n\
   if (typeof pi.registerMcpServer !== \"function\") return;\n\
@@ -776,7 +870,12 @@ export default function (pi: any) {{\n\
 }}\n",
         cards =
             serde_json::to_string(crate::UI_CARDS_PROMPT).unwrap_or_else(|_| "\"\"".to_string()),
-        register = mcp_register(crate::UI_MCP_NAME, ui),
+        register = mcp_register(
+            crate::UI_MCP_NAME,
+            ui,
+            Some(UI_TOOL_EXPOSURES),
+            "keel-ui: show interactive cards in chat (charts, choices, diagrams, comparisons, tests, PRs)",
+        ),
     )
 }
 
@@ -846,15 +945,7 @@ fn project_extension(
 /// The fixed top of the `keel_memory` prompt section. The engine's
 /// `memory_prompt` builds the rest; the extension falls back to this plus
 /// [`MEMORY_UNAVAILABLE`] when the engine cannot be reached.
-pub const MEMORY_PREAMBLE: &str =
-    "Keel memory is notes you write for a later session. It is not a transcript.
-
-Save a correction, a preference, or a decision that is not in the repo and not in AGENTS.md.
-Do not save file layout, architecture, or commands you could read from the code.
-Types: user, feedback, project, reference.
-User notes apply to every project. Project notes apply to this checkout.
-Read a topic with memory_read before you rely on it. Write with memory_write.
-If a write reports the index is over the cap, merge or archive lines until it fits.";
+pub const MEMORY_PREAMBLE: &str = include_str!("../../../prompts/memory.md").trim_ascii_end();
 
 pub const MEMORY_UNAVAILABLE: &str = "Memory is unavailable this turn.";
 
@@ -936,6 +1027,16 @@ const SCOPE = Type.Union([Type.Literal("user"), Type.Literal("project")], {{ des
 export default function (pi: any) {{
   let cwd: string | undefined;
   let lastMemory: string | undefined;
+  let pinnedMemory: string | undefined;
+  let pinnedCwd: string | undefined;
+  let lastSentUpdate: string | undefined;
+  pi.on("session_start", (event: any) => {{
+    if (event?.reason === "new" || event?.reason === "resume" || event?.reason === "fork") {{
+      pinnedMemory = undefined;
+      pinnedCwd = undefined;
+      lastSentUpdate = undefined;
+    }}
+  }});
   pi.on("before_agent_start", async (event: any, ctx: any) => {{
     const sections = event.systemPromptOptions?.sections;
     cwd = event.systemPromptOptions?.cwd ?? ctx?.cwd ?? cwd;
@@ -949,8 +1050,34 @@ export default function (pi: any) {{
       // Transient failure: keep last successful memory text if available
     }}
     const current = (lastMemory ?? `${{PREAMBLE}}\n\n${{UNAVAILABLE}}`).trimEnd();
-    if (sections.keel_memory !== current) {{
-      sections.keel_memory = current;
+    const unavailableSuffix = `${{PREAMBLE}}\n\n${{UNAVAILABLE}}`.trimEnd();
+    if (
+      pinnedMemory === undefined ||
+      pinnedCwd !== cwd ||
+      (pinnedMemory === unavailableSuffix && lastMemory !== undefined)
+    ) {{
+      pinnedMemory = current;
+      pinnedCwd = cwd;
+      lastSentUpdate = current;
+      if (sections.keel_memory !== pinnedMemory) {{
+        sections.keel_memory = pinnedMemory;
+      }}
+      return;
+    }}
+    // Keep the upstream system section invariant so mid-session memory_write
+    // calls do not invalidate the KV/prompt cache; deliver updates downstream.
+    if (sections.keel_memory !== pinnedMemory) {{
+      sections.keel_memory = pinnedMemory;
+    }}
+    if (current !== lastSentUpdate) {{
+      lastSentUpdate = current;
+      return {{
+        message: {{
+          customType: "keel-memory-update",
+          content: current,
+          display: false,
+        }},
+      }};
     }}
   }});
 
@@ -966,15 +1093,10 @@ export default function (pi: any) {{
     ],
     annotations: {{ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }},
     parameters: Type.Object({{
-      label: Type.String({{ description: "Required. Short progress label: 3-6 words, present participle, sentence case, name the concept. Match the user's language." }}),
+      label: Type.Optional(Type.String({{ description: "Short plain-language progress label in the user's language, no trailing dots." }})),
       scope: SCOPE,
       slug: Type.Optional(Type.String({{ description: "Topic slug. Omit for the index." }})),
     }}),
-    prepareArguments(args: any) {{
-      const next = {{ ...(args ?? {{}}) }};
-      if (typeof next.label !== "string" || !String(next.label).trim()) next.label = "Working";
-      return next;
-    }},
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {{
       try {{
         const {{ label: _label, ...rest }} = params ?? {{}};
@@ -992,7 +1114,7 @@ export default function (pi: any) {{
     description: "Save or retire one of Keel's notes. upsert writes the topic and its index line; archive retires the topic. type and description are required for upsert.",
     annotations: {{ readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }},
     parameters: Type.Object({{
-      label: Type.String({{ description: "Required. Short progress label: 3-6 words, present participle, sentence case, name the concept. Match the user's language." }}),
+      label: Type.Optional(Type.String({{ description: "Short plain-language progress label in the user's language, no trailing dots." }})),
       scope: SCOPE,
       action: Type.Union([Type.Literal("upsert"), Type.Literal("archive")]),
       slug: Type.String({{ description: "Lowercase letters, digits and dashes, up to 64 characters." }}),
@@ -1000,11 +1122,6 @@ export default function (pi: any) {{
       description: Type.Optional(Type.String({{ description: "One line, at most 200 characters. Shown in the index." }})),
       body: Type.Optional(Type.String({{ description: "Markdown, at most 32 KiB." }})),
     }}),
-    prepareArguments(args: any) {{
-      const next = {{ ...(args ?? {{}}) }};
-      if (typeof next.label !== "string" || !String(next.label).trim()) next.label = "Working";
-      return next;
-    }},
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {{
       try {{
         const {{ label: _label, ...rest }} = params ?? {{}};
@@ -1050,9 +1167,55 @@ fn memory_extension(data_dir: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-/// Writes `{data_dir}/harnesses/keel/extensions/keel-labels.ts`. Wraps the
-/// seven built-in tools so each requires a `label`, stripped in `execute`
-/// after schema validation. `folder_extensions` loads it with the rest.
+/// Bundled skill for natural Bahasa Indonesia prose, discovered on demand via
+/// `resources_discover` so non-Indonesian chats pay near-zero prompt tokens.
+pub const INDONESIAN_SKILL: &str = include_str!("../../../prompts/indonesian.md");
+
+/// Writes `{data_dir}/harnesses/keel/builtin-skills/indonesian-natural/SKILL.md`
+/// and `{data_dir}/harnesses/keel/extensions/keel-skills.ts`, registering the
+/// folder via Pi's `resources_discover` hook without polluting user skills.
+fn skills_extension(data_dir: Option<&Path>) -> Option<PathBuf> {
+    let data_dir = data_dir?;
+    let skills_root = crate::KeelProfile::home(data_dir).join("builtin-skills");
+    let skill_file = skills_root.join("indonesian-natural").join("SKILL.md");
+    if fs::read_to_string(&skill_file).ok().as_deref() != Some(INDONESIAN_SKILL) {
+        if let Some(parent) = skill_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(err) = crate::write_private(&skill_file, INDONESIAN_SKILL) {
+            tracing::warn!(target: "keel_harness::pi", error = %err, path = %skill_file.display(), "builtin skill write failed");
+            return None;
+        }
+    }
+    let root_lit = serde_json::to_string(&skills_root.to_string_lossy().as_ref())
+        .unwrap_or_else(|_| "\"\"".to_string());
+    let source = format!(
+        "// Generated by Keel. Edits are overwritten.\n\
+export default function (pi: any) {{\n\
+  pi.on(\"resources_discover\", async () => {{\n\
+    return {{\n\
+      skillPaths: [{root_lit}],\n\
+    }};\n\
+  }});\n\
+}}\n"
+    );
+    let path = crate::KeelProfile::extensions_dir(data_dir).join("keel-skills.ts");
+    if fs::read_to_string(&path).ok().as_deref() == Some(source.as_str()) {
+        return Some(path);
+    }
+    match crate::write_private(&path, &source) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            tracing::warn!(target: "keel_harness::pi", error = %err, path = %path.display(), "skills extension write failed");
+            None
+        }
+    }
+}
+
+/// Writes `{data_dir}/harnesses/keel/extensions/keel-labels.ts`. Adds an
+/// optional `label` property to opaque execution and delegation tools (`bash`,
+/// `shell`, `exec`, `subagent`, `task`, etc.), and strips `label` before
+/// `execute`. Structured tools keep their native schemas untouched.
 fn labels_extension(data_dir: Option<&Path>) -> Option<PathBuf> {
     let data_dir = data_dir?;
     let path = crate::KeelProfile::extensions_dir(data_dir).join("keel-labels.ts");
@@ -1070,16 +1233,53 @@ fn labels_extension(data_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// Writes `{data_dir}/harnesses/keel/extensions/keel-cache.ts`. Implements
-/// `cache_warming_decision` to halt cache warming once the session has been
-/// idle longer than the eviction limit.
+/// `cache_warming_decision` to halt cache warming once idle longer than the
+/// eviction limit, and stabilizes xAI prompt prefixes by keeping dynamic
+/// per-chat/project sections (`<cwd>`, `<keel_memory>`, `<keel_scratch>`,
+/// `<keel_project>`, `<keel_plan>`) out of the shared static system prefix
+/// with consistent routing keys.
 fn cache_warming_extension(data_dir: Option<&Path>, idle_timeout_secs: u64) -> Option<PathBuf> {
     let data_dir = data_dir?;
     let path = crate::KeelProfile::extensions_dir(data_dir).join("keel-cache.ts");
     let source = format!(
-        "// Generated by Keel for prompt cache warming management. Edits are overwritten.\n\
+        "// Generated by Keel for prompt cache management. Edits are overwritten.\n\
+import {{ createHash }} from \"node:crypto\";\n\
+\n\
+const DYNAMIC_SECTIONS = [\n\
+  /\\n\\n<cwd>\\n[\\s\\S]*?\\n<\\/cwd>/,\n\
+  /\\n\\n<keel_memory>\\n[\\s\\S]*?\\n<\\/keel_memory>/,\n\
+  /\\n\\n<keel_scratch>\\n[\\s\\S]*?\\n<\\/keel_scratch>/,\n\
+  /\\n\\n<keel_project>\\n[\\s\\S]*?\\n<\\/keel_project>/,\n\
+  /\\n\\n<keel_plan>\\n[\\s\\S]*?\\n<\\/keel_plan>/,\n\
+];\n\
+\n\
+function splitDynamicSections(text: string): {{ staticText: string; dynamicBlocks: string[] }} {{\n\
+  let staticText = text;\n\
+  const dynamicBlocks: string[] = [];\n\
+  for (const re of DYNAMIC_SECTIONS) {{\n\
+    const match = staticText.match(re);\n\
+    if (match) {{\n\
+      staticText = staticText.replace(match[0], \"\");\n\
+      dynamicBlocks.push(match[0].trim());\n\
+    }}\n\
+  }}\n\
+  return {{ staticText, dynamicBlocks }};\n\
+}}\n\
+\n\
+function computeXaiPrefixKey(modelId: string, staticSystem: string, toolNames: string[]): string {{\n\
+  const hash = createHash(\"sha256\")\n\
+    .update(JSON.stringify({{ model: modelId, sys: staticSystem, tools: toolNames }}))\n\
+    .digest(\"hex\")\n\
+    .slice(0, 32);\n\
+  return `keel-xai-${{hash}}`;\n\
+}}\n\
+\n\
 export default function (pi: any) {{\n\
   let lastActive = Date.now();\n\
   const maxIdleMs = {max_idle_ms};\n\
+\n\
+  const activeToolNames = (): string[] =>\n\
+    Array.isArray(pi.getActiveTools?.()) ? [...pi.getActiveTools()].map(String).sort() : [];\n\
 \n\
   pi.on(\"turn_end\", () => {{\n\
     lastActive = Date.now();\n\
@@ -1090,6 +1290,36 @@ export default function (pi: any) {{\n\
     if (idleMs > maxIdleMs) {{\n\
       return {{ action: \"stop\" }};\n\
     }}\n\
+  }});\n\
+\n\
+  pi.on(\"before_provider_headers\", (event: any, ctx: any) => {{\n\
+    if (ctx?.model?.provider !== \"xai\" || !event?.headers) return;\n\
+    const rawSys = typeof ctx?.getSystemPrompt === \"function\" ? String(ctx.getSystemPrompt() ?? \"\") : \"\";\n\
+    const {{ staticText }} = splitDynamicSections(rawSys);\n\
+    const key = computeXaiPrefixKey(String(ctx?.model?.id ?? \"\"), staticText, activeToolNames());\n\
+    event.headers[\"x-grok-conv-id\"] = key;\n\
+    event.headers[\"session_id\"] = key;\n\
+    event.headers[\"x-client-request-id\"] = key;\n\
+  }});\n\
+\n\
+  pi.on(\"before_provider_request\", (event: any, ctx: any) => {{\n\
+    if (ctx?.model?.provider !== \"xai\") return;\n\
+    const p = event?.payload;\n\
+    if (!p || typeof p !== \"object\" || !Array.isArray(p.input) || p.input.length === 0) return;\n\
+    const input = p.input.map((m: any) => (m && typeof m === \"object\" ? {{ ...m }} : m));\n\
+    const sys = input[0];\n\
+    let staticText = \"\";\n\
+    if (sys && sys.role === \"developer\" && typeof sys.content === \"string\") {{\n\
+      const split = splitDynamicSections(sys.content);\n\
+      staticText = split.staticText;\n\
+      sys.content = staticText;\n\
+      if (split.dynamicBlocks.length > 0) {{\n\
+        input.splice(1, 0, {{ role: \"developer\", content: split.dynamicBlocks.join(\"\\n\\n\") }});\n\
+      }}\n\
+    }}\n\
+    const modelId = String(ctx?.model?.id ?? p.model ?? \"\");\n\
+    const key = computeXaiPrefixKey(modelId, staticText, activeToolNames());\n\
+    return {{ ...p, input, prompt_cache_key: key }};\n\
   }});\n\
 }}\n",
         max_idle_ms = idle_timeout_secs * 1000
@@ -1106,54 +1336,62 @@ export default function (pi: any) {{\n\
     }
 }
 
-/// Pi extension: require `label` on every built-in and extension tool schema.
-/// Keep it through validation (so resumes without a label can synthesize one in
-/// `prepareArguments`), then strip in `execute`. Re-register on
-/// `before_agent_start` and `before_provider_request` so later package shadows
-/// and dynamic tools cannot drop the field.
+/// Concise one-line description injected into opaque tool schemas. The rule
+/// and examples live once in `KEEL_SYSTEM_PROMPT`.
+pub const LABEL_DESC: &str =
+    "Optional short plain-language progress label in the user's language, no trailing dots.";
+
+/// Pi extension: adds an optional `label` property to opaque execution and
+/// delegation tools (`bash`, `shell`, `exec`, `subagent`, `task`, etc.) while
+/// keeping structured tools (`read`, `edit`, `write`, `grep`, `find`, `ls`,
+/// MCP cards/browser) at their native schemas, and strips `label` before
+/// `execute`.
 const LABELS_EXTENSION: &str = r#"// Generated by Keel. Edits are overwritten.
-import { Type } from "typebox";
-import {
-  createBashToolDefinition,
-  createEditToolDefinition,
-  createFindToolDefinition,
-  createGrepToolDefinition,
-  createLsToolDefinition,
-  createReadToolDefinition,
-  createWriteToolDefinition,
-} from "@earendil-works/pi-coding-agent";
-
-const LABEL_DESC =
-  'Required. Short progress label for the UI: 3-6 words, present participle, sentence case, naming the concept not the file or command. Match the user\'s language. Good: "Reading the on/off cycle logic", "Updating session state transition", "Compiling workspace binaries", "Locating theme token definitions" (Indonesian: "Nge-cek konfigurasi database", "Benerin bug memory leak", "Nge-build binary workspace"). Bad: "Reading file", "Editing session.rs", "Running cargo build", "rg oncycle", raw shell commands.';
-
-const LABEL = Type.String({
-  description: LABEL_DESC,
-});
+const LABEL_DESC = "Optional short plain-language progress label in the user's language, no trailing dots.";
 
 const LABEL_PROP = {
   type: "string",
   description: LABEL_DESC,
 };
 
+const OPAQUE_LABEL_TOOLS = new Set([
+  "bash",
+  "shell",
+  "exec",
+  "run_command",
+  "subagent",
+  "task",
+  "agent",
+  "spawn_agent",
+]);
+
+function baseToolName(name: unknown): string {
+  const s = String(name ?? "").trim();
+  const afterMcp = s.split("__").pop() ?? s;
+  const afterSlash = afterMcp.split("/").pop() ?? afterMcp;
+  const afterColon = afterSlash.split(":").pop() ?? afterSlash;
+  return afterColon.toLowerCase().replace(/-/g, "_");
+}
+
+function isOpaqueLabelTool(name: unknown): boolean {
+  return OPAQUE_LABEL_TOOLS.has(baseToolName(name));
+}
+
 function injectLabelIntoSchema(params: any) {
   if (!params || typeof params !== "object") return;
   const existing = params.properties || {};
   const { label: _existing, ...rest } = existing;
   params.properties = { label: { ...LABEL_PROP }, ...rest };
-  if (Array.isArray(params.required)) {
-    if (!params.required.includes("label")) {
-      params.required.unshift("label");
-    }
-  } else {
-    params.required = ["label"];
-  }
 }
 
 function processToolSchema(tool: any) {
   if (!tool || typeof tool !== "object") return;
-  if (tool.parameters) injectLabelIntoSchema(tool.parameters);
-  if (tool.function?.parameters) injectLabelIntoSchema(tool.function.parameters);
-  if (tool.input_schema) injectLabelIntoSchema(tool.input_schema);
+  const name = tool.name ?? tool.function?.name;
+  if (name && isOpaqueLabelTool(name)) {
+    if (tool.parameters) injectLabelIntoSchema(tool.parameters);
+    if (tool.function?.parameters) injectLabelIntoSchema(tool.function.parameters);
+    if (tool.input_schema) injectLabelIntoSchema(tool.input_schema);
+  }
   if (Array.isArray(tool.functionDeclarations)) {
     for (const decl of tool.functionDeclarations) {
       processToolSchema(decl);
@@ -1180,17 +1418,9 @@ function ensureToolLabels(tools: any) {
 function wrapToolWithLabel(tool: any) {
   if (!tool || typeof tool !== "object" || tool.__keel_labeled) return tool;
   tool.__keel_labeled = true;
-  if (tool.parameters && typeof tool.parameters === "object") {
+  if (isOpaqueLabelTool(tool.name) && tool.parameters && typeof tool.parameters === "object") {
     injectLabelIntoSchema(tool.parameters);
   }
-  const prevPrep = tool.prepareArguments;
-  tool.prepareArguments = (args: any) => {
-    const next = { ...(args ?? {}) };
-    if (typeof next.label !== "string" || !String(next.label).trim()) {
-      next.label = "Working";
-    }
-    return prevPrep ? prevPrep(next) : next;
-  };
   const prevExec = tool.execute;
   if (typeof prevExec === "function") {
     tool.execute = async function (toolCallId: any, args: any, signal: any, onUpdate: any, ctx: any) {
@@ -1201,56 +1431,8 @@ function wrapToolWithLabel(tool: any) {
   return tool;
 }
 
-function withLabel(def: any) {
-  if (!def || typeof def !== "object") return def;
-  const props = def.parameters?.properties ?? {};
-  const { label: _existing, ...restProps } = props;
-  const parameters = Type.Object(
-    { label: LABEL, ...restProps },
-    { additionalProperties: false },
-  );
-  const prevPrep = def.prepareArguments;
-  const prevExec = def.execute;
-  const wrapped = {
-    ...def,
-    __keel_labeled: true,
-    parameters,
-    prepareArguments(args: any) {
-      const next = { ...(args ?? {}) };
-      // Resumed sessions may lack label; keep schema required for new calls.
-      if (typeof next.label !== "string" || !String(next.label).trim()) {
-        next.label = "Working";
-      }
-      return prevPrep ? prevPrep(next) : next;
-    },
-    async execute(toolCallId: any, args: any, signal: any, onUpdate: any, ctx: any) {
-      const { label: _label, ...rest } = args ?? {};
-      return prevExec.call(this, toolCallId, rest, signal, onUpdate, ctx);
-    },
-  };
-  return wrapped;
-}
-
-function registerLabeled(pi: any) {
-  const cwd = process.cwd();
-  for (const def of [
-    createReadToolDefinition(cwd),
-    createBashToolDefinition(cwd),
-    createEditToolDefinition(cwd),
-    createWriteToolDefinition(cwd),
-    createFindToolDefinition(cwd),
-    createGrepToolDefinition(cwd),
-    createLsToolDefinition(cwd),
-  ]) {
-    pi.registerTool(withLabel(def));
-  }
-}
-
 export default function (pi: any) {
-  registerLabeled(pi);
-
   const applyToAllTools = () => {
-    registerLabeled(pi);
     try {
       const all = pi.getAllTools?.() ?? [];
       for (const tool of all) {
@@ -1286,14 +1468,6 @@ export default function (pi: any) {
       ensureToolLabels(event.payload.function_declarations);
     }
   });
-
-  pi.on("tool_call", async (event: any) => {
-    if (event?.input && typeof event.input === "object") {
-      if (typeof event.input.label !== "string" || !String(event.input.label).trim()) {
-        event.input.label = "Working";
-      }
-    }
-  });
 }
 "#;
 
@@ -1311,11 +1485,47 @@ fn write_extension(path: &Path, source: &str) -> std::io::Result<()> {
 /// confirm question. Pi's read-only built-ins and `readOnlyHint` tools pass;
 /// Auto-edit also passes `edit` and `write`. A call nobody can confirm is
 /// blocked.
+#[cfg(test)]
 fn permission_extension_source(permission: PermissionMode) -> String {
     permission_gate_source(permission, false)
 }
 
+#[cfg(test)]
 fn permission_gate_source(permission: PermissionMode, plan_mode: bool) -> String {
+    permission_gate_source_with_scratch_mode(permission, plan_mode, None, false)
+}
+
+fn plan_state_path(data_dir: Option<&Path>, chat_id: &str) -> Option<PathBuf> {
+    Some(
+        data_dir?
+            .join("plan-state")
+            .join(format!("{}.json", crate::chat_file_stem(Some(chat_id)))),
+    )
+}
+
+fn write_plan_state(path: &Path, plan_mode: bool) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let body = if plan_mode {
+        "{\"planMode\":true}\n"
+    } else {
+        "{\"planMode\":false}\n"
+    };
+    if fs::read_to_string(path).ok().as_deref() == Some(body) {
+        return;
+    }
+    if let Err(err) = crate::write_private(path, body) {
+        tracing::warn!(target: "keel_harness::pi", error = %err, path = %path.display(), "plan state write failed");
+    }
+}
+
+fn permission_gate_source_with_scratch_mode(
+    permission: PermissionMode,
+    plan_mode: bool,
+    scratch_base: Option<&Path>,
+    dynamic_plan: bool,
+) -> String {
     let allow = crate::plan_readonly_tools()
         .iter()
         .map(|name| format!("\"{name}\""))
@@ -1326,36 +1536,111 @@ fn permission_gate_source(permission: PermissionMode, plan_mode: bool) -> String
         .map(|name| format!("\"{name}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let has_scratch = scratch_base.is_some() && (dynamic_plan || !plan_mode);
+    let mut imports = String::new();
+    if dynamic_plan || has_scratch {
+        imports.push_str("import * as fs from \"node:fs\";\n");
+    }
+    if has_scratch {
+        imports.push_str("import * as path from \"node:path\";\n");
+    }
+    let (scratch_const, scratch_helpers, scratch_check) = match scratch_base {
+        Some(base) if dynamic_plan || !plan_mode => {
+            let base_lit = serde_json::to_string(&base.to_string_lossy().as_ref())
+                .unwrap_or_else(|_| "\"\"".to_string());
+            (
+                format!("const SCRATCH_BASE = {base_lit};\n"),
+                "function realAncestor(target: string): string | null {\n\
+  let cur = path.resolve(target);\n\
+  const tail: string[] = [];\n\
+  while (true) {\n\
+    try {\n\
+      const real = fs.realpathSync(cur);\n\
+      return tail.length ? path.join(real, ...tail.reverse()) : real;\n\
+    } catch {\n\
+      const parent = path.dirname(cur);\n\
+      if (parent === cur) return null;\n\
+      tail.push(path.basename(cur));\n\
+      cur = parent;\n\
+    }\n\
+  }\n\
+}\n\
+function insideDir(parent: string, child: string): boolean {\n\
+  const rel = path.relative(parent, child);\n\
+  return rel !== \"\" && !rel.startsWith(\"..\") && !path.isAbsolute(rel);\n\
+}\n\
+function insideScratch(cwd: string, rawPath: string, base: string): boolean {\n\
+  try {\n\
+    const realBase = fs.realpathSync(base);\n\
+    const realCwd = fs.realpathSync(cwd);\n\
+    if (!insideDir(realBase, realCwd)) return false;\n\
+    const target = realAncestor(path.resolve(realCwd, rawPath));\n\
+    if (!target) return false;\n\
+    return target === realCwd || insideDir(realCwd, target);\n\
+  } catch {\n\
+    return false;\n\
+  }\n\
+}\n",
+                "    if (SCRATCH_BASE && EDITS.has(name)) {\n\
+      const raw = input.path ?? input.file_path;\n\
+      if (typeof raw === \"string\" && raw.trim() && ctx?.cwd && insideScratch(ctx.cwd, raw, SCRATCH_BASE)) return undefined;\n\
+    }\n",
+            )
+        }
+        _ => (String::new(), "", ""),
+    };
+    let plan_helper = if dynamic_plan {
+        "function isPlanMode(): boolean {\n\
+  const file = process.env.KEEL_PLAN_STATE;\n\
+  if (file) {\n\
+    try {\n\
+      const parsed = JSON.parse(fs.readFileSync(file, \"utf8\"));\n\
+      if (typeof parsed?.planMode === \"boolean\") return parsed.planMode;\n\
+    } catch {}\n\
+  }\n\
+  return PLAN;\n\
+}\n"
+    } else {
+        "function isPlanMode(): boolean { return PLAN; }\n"
+    };
     format!(
         "// Generated by Keel for each Pi run. Edits are overwritten.\n\
+{imports}\
 const READ_ONLY = new Set([\"read\", \"grep\", \"find\", \"ls\", \"memory_read\"]);\n\
 const EDITS = new Set([\"edit\", \"write\"]);\n\
 // memory_write takes no repo path: the engine refuses every path outside the\n\
 // two memory folders, so it is allowed in every mode. The gate guards the repo.\n\
 const ALWAYS = new Set([\"memory_write\"]);\n\
+const FULL_ACCESS = {full_access};\n\
 const AUTO_EDIT = {auto_edit};\n\
 const PLAN = {plan};\n\
 const PLAN_ALLOW = new Set([{allow}]);\n\
 const PLAN_UI = new Set([{ui}]);\n\
+{plan_helper}\
+{scratch_const}\
+{scratch_helpers}\
 export default function (pi: any) {{\n\
   pi.on(\"tool_call\", async (event: any, ctx: any) => {{\n\
     const name = event.toolName;\n\
-    if (PLAN) {{\n\
+    if (isPlanMode()) {{\n\
       const base = String(name ?? \"\").split(\"__\").pop().toLowerCase().replace(/-/g, \"_\");\n\
       if (!PLAN_ALLOW.has(base) && !PLAN_UI.has(base)) {{\n\
         return {{ block: true, reason: `${{name}} is off in plan mode` }};\n\
       }}\n\
       return undefined;\n\
     }}\n\
+    if (FULL_ACCESS) return undefined;\n\
     const hints = pi.getAllTools?.().find((tool: any) => tool.name === name)?.annotations;\n\
     if (READ_ONLY.has(name) || ALWAYS.has(name) || hints?.readOnlyHint === true) return undefined;\n\
     if (AUTO_EDIT && EDITS.has(name)) return undefined;\n\
     const input = event.input ?? {{}};\n\
+{scratch_check}\
     const detail = String(input.command ?? input.path ?? JSON.stringify(input)).slice(0, 400);\n\
     if (ctx.hasUI && (await ctx.ui.confirm(`Allow ${{name}}?`, detail))) return undefined;\n\
     return {{ block: true, reason: `${{name}} was not approved` }};\n\
   }});\n\
 }}\n",
+        full_access = permission == PermissionMode::FullAccess,
         auto_edit = permission == PermissionMode::AutoEdit,
         plan = if plan_mode { "true" } else { "false" },
         allow = allow,
@@ -1363,36 +1648,118 @@ export default function (pi: any) {{\n\
     )
 }
 
-/// System-prompt section only while Plan mode is on.
+/// Plan mode prompt injector. Emits mode instructions downstream via
+/// `before_agent_start` `message` on entry/exit rather than mutating system
+/// prompt sections, keeping the upstream KV/prompt cache intact across toggles.
+#[cfg(test)]
 fn plan_prompt_source() -> String {
+    plan_prompt_source_with_dynamic(true, false)
+}
+
+fn plan_prompt_source_with_dynamic(initial_plan: bool, dynamic_plan: bool) -> String {
     let trimmed = crate::PLAN_MODE_PROMPT.trim_end();
     let text = serde_json::to_string(trimmed).unwrap_or_else(|_| "\"\"".into());
+    let imports = if dynamic_plan {
+        "import * as fs from \"node:fs\";\n"
+    } else {
+        ""
+    };
+    let read_plan = if dynamic_plan {
+        "function isPlanMode(): boolean {\n\
+  const file = process.env.KEEL_PLAN_STATE;\n\
+  if (file) {\n\
+    try {\n\
+      const parsed = JSON.parse(fs.readFileSync(file, \"utf8\"));\n\
+      if (typeof parsed?.planMode === \"boolean\") return parsed.planMode;\n\
+    } catch {}\n\
+  }\n\
+  return INITIAL_PLAN;\n\
+}\n"
+    } else {
+        "function isPlanMode(): boolean { return INITIAL_PLAN; }\n"
+    };
     format!(
         "// Generated by Keel for a plan-mode run. Edits are overwritten.\n\
+{imports}\
+const INITIAL_PLAN = {initial_plan};\n\
 const PLAN = {text};\n\
+const PLAN_OFF = \"Plan mode is now off. Normal file editing and command execution are allowed again.\";\n\
+{read_plan}\
 export default function (pi: any) {{\n\
-  pi.on(\"before_agent_start\", (event: any) => {{\n\
-    const sections = event.systemPromptOptions?.sections;\n\
-    if (sections && sections.keel_plan !== PLAN) sections.keel_plan = PLAN;\n\
+  let lastInjectedPlan: boolean | undefined;\n\
+  pi.on(\"session_start\", (event: any) => {{\n\
+    if (event?.reason === \"new\" || event?.reason === \"resume\" || event?.reason === \"fork\") {{\n\
+      lastInjectedPlan = undefined;\n\
+    }}\n\
+  }});\n\
+  pi.on(\"before_agent_start\", () => {{\n\
+    const planOn = isPlanMode();\n\
+    if (planOn && lastInjectedPlan !== true) {{\n\
+      lastInjectedPlan = true;\n\
+      return {{ message: {{ customType: \"keel-plan-mode\", content: PLAN, display: false }} }};\n\
+    }}\n\
+    if (!planOn && lastInjectedPlan === true) {{\n\
+      lastInjectedPlan = false;\n\
+      return {{ message: {{ customType: \"keel-plan-mode\", content: PLAN_OFF, display: false }} }};\n\
+    }}\n\
   }});\n\
 }}\n"
     )
 }
 
+#[cfg(test)]
 fn plan_prompt_extension(plan_mode: bool, data_dir: Option<&Path>, tag: &str) -> Option<PathBuf> {
-    if !plan_mode {
+    plan_prompt_extension_for_chat(plan_mode, data_dir, tag, false)
+}
+
+fn plan_prompt_extension_for_chat(
+    plan_mode: bool,
+    data_dir: Option<&Path>,
+    tag: &str,
+    dynamic_plan: bool,
+) -> Option<PathBuf> {
+    if !plan_mode && !dynamic_plan {
         return None;
     }
     let dir = data_dir
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
     let path = dir.join(format!("keel-plan.{tag}.ts"));
-    write_extension(&path, &plan_prompt_source()).ok()?;
+    write_extension(&path, &plan_prompt_source_with_dynamic(plan_mode, dynamic_plan)).ok()?;
+    Some(path)
+}
+
+/// System-prompt section only for chats running in a scratch folder.
+fn scratch_prompt_source() -> String {
+    let trimmed = crate::SCRATCH_PROMPT.trim_end();
+    let text = serde_json::to_string(trimmed).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "// Generated by Keel for a scratch run. Edits are overwritten.\n\
+const SCRATCH = {text};\n\
+export default function (pi: any) {{\n\
+  pi.on(\"before_agent_start\", (event: any) => {{\n\
+    const sections = event.systemPromptOptions?.sections;\n\
+    if (sections && sections.keel_scratch !== SCRATCH) sections.keel_scratch = SCRATCH;\n\
+  }});\n\
+}}\n"
+    )
+}
+
+fn scratch_prompt_extension(scratch: bool, data_dir: Option<&Path>, tag: &str) -> Option<PathBuf> {
+    if !scratch {
+        return None;
+    }
+    let dir = data_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(format!("keel-scratch.{tag}.ts"));
+    write_extension(&path, &scratch_prompt_source()).ok()?;
     Some(path)
 }
 
 /// The gate's path, written in Keel's data dir (else in the temp dir).
 /// `None` under full access: Pi's own behaviour.
+#[cfg(test)]
 fn permission_extension(
     permission: PermissionMode,
     data_dir: Option<&Path>,
@@ -1401,39 +1768,67 @@ fn permission_extension(
     permission_extension_for(permission, data_dir, tag, false)
 }
 
+#[cfg(test)]
 fn permission_extension_for(
     permission: PermissionMode,
     data_dir: Option<&Path>,
     tag: &str,
     plan_mode: bool,
 ) -> Option<Result<PathBuf, HarnessError>> {
-    // Full access skips the ask gate. Plan mode still installs one: it
-    // blocks mutating tools instead of offering them.
-    if permission == PermissionMode::FullAccess && !plan_mode {
+    permission_extension_for_scratch(permission, data_dir, tag, plan_mode, None)
+}
+
+#[cfg(test)]
+fn permission_extension_for_scratch(
+    permission: PermissionMode,
+    data_dir: Option<&Path>,
+    tag: &str,
+    plan_mode: bool,
+    scratch_base: Option<&Path>,
+) -> Option<Result<PathBuf, HarnessError>> {
+    permission_extension_for_scratch_mode(permission, data_dir, tag, plan_mode, scratch_base, false)
+}
+
+fn permission_extension_for_scratch_mode(
+    permission: PermissionMode,
+    data_dir: Option<&Path>,
+    tag: &str,
+    plan_mode: bool,
+    scratch_base: Option<&Path>,
+    dynamic_plan: bool,
+) -> Option<Result<PathBuf, HarnessError>> {
+    // When dynamic_plan is off (unit tests without chat state), FullAccess
+    // without plan_mode skips the gate. With dynamic_plan, install the gate
+    // so toggling Plan Mode mid-session stays enforced without respawning Pi.
+    if permission == PermissionMode::FullAccess && !plan_mode && !dynamic_plan {
         return None;
     }
     let dir = data_dir
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
-    let path = if plan_mode {
-        dir.join(format!(
+    let path = match (plan_mode && !dynamic_plan, scratch_base.is_some()) {
+        (true, _) => dir.join(format!(
             "keel-permission-{}.plan.{tag}.ts",
             permission.as_str()
-        ))
-    } else {
-        dir.join(format!("keel-permission-{}.{tag}.ts", permission.as_str()))
+        )),
+        (false, true) => dir.join(format!(
+            "keel-permission-{}.scratch.{tag}.ts",
+            permission.as_str()
+        )),
+        (false, false) => dir.join(format!("keel-permission-{}.{tag}.ts", permission.as_str())),
     };
     Some(
         write_extension(
             &path,
-            &if plan_mode {
-                permission_gate_source(permission, true)
-            } else {
-                permission_extension_source(permission)
-            },
+            &permission_gate_source_with_scratch_mode(
+                permission,
+                plan_mode,
+                scratch_base,
+                dynamic_plan,
+            ),
         )
-            .map(|()| path)
-            .map_err(|err| HarnessError::Failed(format!("Pi permission gate: {err}"))),
+        .map(|()| path)
+        .map_err(|err| HarnessError::Failed(format!("Pi permission gate: {err}"))),
     )
 }
 
@@ -1455,10 +1850,11 @@ fn rpc_args(cmd: &mut std::process::Command, model: &str, cwd: &Path, probe: boo
 struct ProcessConfig {
     cwd: PathBuf,
     project_fingerprint: String,
-    plan_mode: bool,
+    ag_plan_mode: Option<bool>,
     permission: PermissionMode,
     longer_cache: bool,
     keep_cache_warm: bool,
+    scratch: bool,
     exe_path: PathBuf,
     tag: &'static str,
 }
@@ -1702,13 +2098,17 @@ impl ProcessActor {
         )
         .await;
 
+        if let Some(state_path) = plan_state_path(spec.data_dir.as_deref(), &self.chat_id) {
+            write_plan_state(&state_path, spec.plan_mode);
+        }
+
         {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             use std::hash::{Hash, Hasher};
             self.current_model.hash(&mut hasher);
             self.config.cwd.hash(&mut hasher);
             self.config.project_fingerprint.hash(&mut hasher);
-            self.config.plan_mode.hash(&mut hasher);
+            spec.plan_mode.hash(&mut hasher);
             let fingerprint = format!("{:016x}", hasher.finish());
             tracing::debug!(target: "keel_harness::pi::cache", fingerprint = %fingerprint, "prefix fingerprint");
         }
@@ -1807,11 +2207,8 @@ impl ProcessActor {
                                 if let AgentEvent::Text { message_id, .. } | AgentEvent::Reasoning { message_id, .. } = &mut event {
                                     *message_id = format!("pi-{run_tag}-{assistant_n}");
                                 }
-                                if let AgentEvent::Usage { usage } = &event {
-                                    if let Some(report) = &spec.report_usage {
-                                        report(usage.clone());
-                                    }
-                                }
+                                // Turn usage flows through `event_tx` into the engine; calling `spec.report_usage`
+                                // here would double-count every turn (it is only for idle background events).
                                 if event == completed() {
                                     let late = crate::proc::late_steers(&mut controls.inbound);
                                     if !late.is_empty() {
@@ -2850,6 +3247,7 @@ fn bundle_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(contents) = dir.parent() {
         dirs.push(contents.join("Resources/pi"));
+        dirs.push(contents.join("pi"));
     }
     dirs.push(dir.join("pi"));
     dirs
@@ -3075,10 +3473,58 @@ mod tests {
         assert!(crate::plan_mode_allows("show_plan"));
         let prompt = super::plan_prompt_extension(true, Some(&dir), "pi").expect("prompt");
         let prompt = fs::read_to_string(prompt).unwrap();
-        assert!(prompt.contains("keel_plan"), "{prompt}");
+        assert!(prompt.contains("keel-plan-mode"), "{prompt}");
+        assert!(!prompt.contains("sections.keel_plan"), "{prompt}");
         assert!(prompt.contains(crate::PLAN_MODE_PROMPT));
-        assert!(prompt.contains("Research") && prompt.contains("exactly one plan card") && prompt.contains("stop"));
+        assert!(
+            prompt.contains("Research")
+                && prompt.contains("exactly one plan card")
+                && prompt.contains("stop")
+        );
         assert!(!off.contains(crate::PLAN_MODE_PROMPT));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scratch_extension_and_permission_gate_allow_local_edits_only() {
+        use keel_proto::PermissionMode::*;
+        assert!(super::scratch_prompt_extension(false, None, "pi").is_none());
+        let dir = std::env::temp_dir().join(format!("keel-pi-scratch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let prompt = super::scratch_prompt_extension(true, Some(&dir), "pi").expect("prompt");
+        let prompt_src = fs::read_to_string(prompt).unwrap();
+        assert!(prompt_src.contains("sections.keel_scratch"), "{prompt_src}");
+        assert!(prompt_src.contains("isolated temporary scratch directory"));
+
+        let scratch_base = dir.join("scratch");
+        let gate = super::permission_extension_for_scratch(
+            Ask,
+            Some(&dir),
+            "pi",
+            false,
+            Some(&scratch_base),
+        )
+        .unwrap()
+        .expect("written");
+        let gate_src = fs::read_to_string(&gate).unwrap();
+        assert!(gate_src.contains("SCRATCH_BASE"), "{gate_src}");
+        assert!(gate_src.contains("insideScratch"), "{gate_src}");
+
+        // Plan mode still beats scratch edit auto-allow.
+        let plan_gate = super::permission_extension_for_scratch(
+            Ask,
+            Some(&dir),
+            "pi",
+            true,
+            Some(&scratch_base),
+        )
+        .unwrap()
+        .expect("plan written");
+        let plan_src = fs::read_to_string(&plan_gate).unwrap();
+        assert!(plan_src.contains("const PLAN = true;"));
+        assert!(!plan_src.contains("insideScratch"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -3142,11 +3588,13 @@ mod tests {
     fn stabilized_injected_sections_and_memory_fallback() {
         let sock = Path::new("/data/keel.sock");
         let mem = super::memory_extension_source(sock, "tok-test");
-        // Verify fallback to last successful memory
+        // Verify fallback to last successful memory and cache-preserving pinning
         assert!(mem.contains("let lastMemory: string | undefined;"));
+        assert!(mem.contains("let pinnedMemory: string | undefined;"));
         assert!(mem.contains("lastMemory = String(result.text).trimEnd();"));
         assert!(mem.contains("const current = (lastMemory ?? `${PREAMBLE}\\n\\n${UNAVAILABLE}`).trimEnd();"));
-        assert!(mem.contains("if (sections.keel_memory !== current)"));
+        assert!(mem.contains("if (sections.keel_memory !== pinnedMemory)"));
+        assert!(mem.contains("customType: \"keel-memory-update\""));
 
         // Verify project extension sorts roots deterministically and trims whitespace
         let roots = crate::ProjectRoots {
@@ -3164,9 +3612,10 @@ mod tests {
         let b_pos = proj.find("b: /root/b").unwrap();
         assert!(a_pos < b_pos, "secondary roots must be sorted deterministically");
 
-        // Verify plan prompt stabilizes section
+        // Verify plan prompt delivers mode transitions downstream without mutating system sections
         let plan = super::plan_prompt_source();
-        assert!(plan.contains("sections.keel_plan !== PLAN"));
+        assert!(plan.contains("customType: \"keel-plan-mode\""));
+        assert!(!plan.contains("sections.keel_plan"));
         assert!(plan.contains(crate::PLAN_MODE_PROMPT.trim_end()));
     }
 
@@ -3216,7 +3665,15 @@ mod tests {
             !source.contains("keel-ui"),
             "cards have their own extension: {source}"
         );
-        assert!(source.contains("exposure: \"direct\""), "{source}");
+        assert!(source.contains("exposure: mode"), "{source}");
+        assert!(
+            source.contains("initialMode = process.env.KEEL_MCP_EXPOSURE === \"direct\" ? \"direct\" : \"deferred\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("browser: navigate, snapshot, click"),
+            "{source}"
+        );
         assert!(source.contains("\"KEEL_BROWSER_CHAT\":\"c1\""), "{source}");
         let sock_lit = serde_json::to_string(&sock.to_string_lossy()).unwrap();
         assert!(
@@ -3253,8 +3710,232 @@ mod tests {
             source.contains("show_diagram"),
             "the section names the cards: {source}"
         );
+        assert!(source.contains("exposure: mode"), "{source}");
+        assert!(
+            source.contains("\"show_plan\": \"direct\"")
+                || source.contains("\"show_plan\":\"direct\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("\"task_steps\": \"direct\"")
+                || source.contains("\"task_steps\":\"direct\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("\"show_steps\": \"direct\"")
+                || source.contains("\"show_steps\":\"direct\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("keel-ui: show interactive cards"),
+            "{source}"
+        );
         assert!(!source.contains("keel-browser"), "{source}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tool_label_description_length_and_opaque_only() {
+        assert!(
+            super::LABEL_DESC.len() < 90,
+            "LABEL_DESC is {} chars, must be < 90",
+            super::LABEL_DESC.len()
+        );
+        assert!(
+            !super::LABELS_EXTENSION.contains("params.required"),
+            "label must stay optional so schemas remain compatible"
+        );
+        assert!(super::LABELS_EXTENSION.contains("OPAQUE_LABEL_TOOLS"));
+        assert!(super::LABELS_EXTENSION.contains("\"bash\""));
+        assert!(super::LABELS_EXTENSION.contains("\"subagent\""));
+        assert!(!super::LABELS_EXTENSION.contains("createReadToolDefinition"));
+        assert!(
+            super::LABELS_EXTENSION.contains("const LABEL_DESC = \"Optional short plain-language progress label in the user's language, no trailing dots.\";")
+        );
+    }
+
+    #[test]
+    fn base_prompt_contains_label_rule_and_indonesian_skill_pointer() {
+        let rule_needle = "Tool `label` (optional on shell/command and subagent calls)";
+        let count = crate::keel::KEEL_SYSTEM_PROMPT.matches(rule_needle).count();
+        assert_eq!(
+            count, 1,
+            "Base prompt must contain label rule exactly once, found {}",
+            count
+        );
+        assert!(crate::keel::KEEL_SYSTEM_PROMPT.contains("no trailing dots"));
+        assert!(crate::keel::KEEL_SYSTEM_PROMPT.contains("Compiling workspace binaries"));
+        assert!(super::INDONESIAN_SKILL.contains("name: indonesian-natural"));
+        assert!(super::INDONESIAN_SKILL.contains("Nge-cek konfigurasi database"));
+    }
+
+    #[test]
+    fn skills_extension_writes_indonesian_skill_outside_user_skills() {
+        let dir = std::env::temp_dir().join(format!("keel-pi-skills-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ext = super::skills_extension(Some(&dir)).expect("keel-skills.ts");
+        assert_eq!(ext, dir.join("harnesses/keel/extensions/keel-skills.ts"));
+        let ext_src = fs::read_to_string(&ext).unwrap();
+        assert!(ext_src.contains("resources_discover"), "{ext_src}");
+        assert!(ext_src.contains("builtin-skills"), "{ext_src}");
+        let skill = dir.join("harnesses/keel/builtin-skills/indonesian-natural/SKILL.md");
+        assert_eq!(fs::read_to_string(&skill).unwrap(), super::INDONESIAN_SKILL);
+        assert!(!dir.join("harnesses/keel/agent/skills/indonesian-natural").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exposure_direct_for_plan_and_progress_and_deferred_for_others() {
+        let dir = std::env::temp_dir().join(format!("keel-exp-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ui_ext = super::ui_extension(Some(&dir), "test").expect("ui ext");
+        let ui_src = fs::read_to_string(&ui_ext).unwrap();
+        assert!(ui_src.contains("initialMode = process.env.KEEL_MCP_EXPOSURE === \"direct\" ? \"direct\" : \"deferred\""));
+        assert!(
+            ui_src.contains("\"show_plan\": \"direct\"")
+                || ui_src.contains("\"show_plan\":\"direct\"")
+        );
+        assert!(
+            ui_src.contains("\"task_steps\": \"direct\"")
+                || ui_src.contains("\"task_steps\":\"direct\"")
+        );
+        assert!(
+            ui_src.contains("\"show_steps\": \"direct\"")
+                || ui_src.contains("\"show_steps\":\"direct\"")
+        );
+
+        let sock = dir.join("browser.sock");
+        let br_ext =
+            super::browser_extension(Some(&sock), Some("c1"), "test").expect("browser ext");
+        let br_src = fs::read_to_string(&br_ext).unwrap();
+        assert!(br_src.contains("initialMode = process.env.KEEL_MCP_EXPOSURE === \"direct\" ? \"direct\" : \"deferred\""));
+        assert!(!br_src.contains("toolExposure"), "all browser tools are deferred by default");
+
+        // Plan mode allowlist verification
+        assert!(crate::plan_mode_allows("show_plan"));
+        assert!(crate::plan_mode_allows("task_steps"));
+        assert!(crate::plan_mode_allows("show_steps"));
+        assert!(crate::plan_mode_allows("show_diagram"));
+        assert!(crate::plan_mode_allows("read"));
+        assert!(!crate::plan_mode_allows("edit"));
+        assert!(!crate::plan_mode_allows("write"));
+        assert!(!crate::plan_mode_allows("bash"));
+        assert!(!crate::plan_mode_allows("browser_click"));
+        assert!(!crate::plan_mode_allows("browser_type"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn deferred_tools_discoverable_and_callable() {
+        use crate::mock::{MockHarness, Step};
+        let tools = vec![
+            Step::Tool("tool_search".to_string()),
+            Step::Tool("browser_navigate".to_string()),
+            Step::Tool("show_chart".to_string()),
+        ];
+        let harness = MockHarness::script(tools);
+        let spec = SessionSpec {
+            cwd: PathBuf::from("/tmp"),
+            model: ModelId("mock".to_string()),
+            reasoning: None,
+            resume: None,
+            initial_text: "hi".to_string(),
+            attachments: Vec::new(),
+            report_session: None,
+            data_dir: None,
+            browser_sock: None,
+            browser_chat: None,
+            permission: Default::default(),
+            plan_mode: false,
+            project: None,
+            report_usage: None,
+            chat_id: None,
+            longer_cache: false,
+            keep_cache_warm: true,
+            idle_eviction_timeout_secs: None,
+            scratch: false,
+        };
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut stream = harness.run(spec, RunControls { inbound: rx }).await.unwrap();
+        let mut executed = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(AgentEvent::ToolFinished { summary, is_error, .. }) = item {
+                assert!(!is_error);
+                executed.push(summary);
+            }
+        }
+        assert_eq!(
+            executed,
+            vec![
+                "tool_search ok",
+                "browser_navigate ok",
+                "show_chart ok",
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_set_stable_across_turns() {
+        let dir = std::env::temp_dir().join(format!("keel-stable-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ui_ext = super::ui_extension(Some(&dir), "test").expect("ui ext");
+        let ui_src = fs::read_to_string(&ui_ext).unwrap();
+        // session_start sets exposure once; before_agent_start does not re-register MCP servers
+        assert!(ui_src.contains("pi.on(\"session_start\""));
+        assert!(!ui_src.contains("pi.on(\"before_agent_start\", (event: any) => {\n    register"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dump_turn_metadata_scenarios() {
+        struct Scenario {
+            name: &'static str,
+            tool_count: usize,
+            tool_schema_chars: usize,
+            prompt_chars: usize,
+        }
+
+        let scenarios = [
+            Scenario {
+                name: "normal chat",
+                tool_count: 15,
+                tool_schema_chars: 16082,
+                prompt_chars: 23722,
+            },
+            Scenario {
+                name: "chat with a project",
+                tool_count: 15,
+                tool_schema_chars: 16082,
+                prompt_chars: 23803,
+            },
+            Scenario {
+                name: "plan mode",
+                tool_count: 15,
+                tool_schema_chars: 16082,
+                prompt_chars: 23928,
+            },
+            Scenario {
+                name: "with browser available",
+                tool_count: 15,
+                tool_schema_chars: 16082,
+                prompt_chars: 23843,
+            },
+        ];
+
+        for s in &scenarios {
+            let total = s.tool_schema_chars + s.prompt_chars;
+            let est_tokens = total / 4;
+            if std::env::var("KEEL_DUMP_TURN_METADATA").is_ok() {
+                println!(
+                    "[{}] tools: {}, schema chars: {}, prompt chars: {}, total: {}, est tokens: {}",
+                    s.name, s.tool_count, s.tool_schema_chars, s.prompt_chars, total, est_tokens
+                );
+            }
+            assert!(s.tool_count <= 15);
+            assert!(s.tool_schema_chars < 17000);
+        }
     }
 
     fn gate() -> &'static tokio::sync::Mutex<()> {
@@ -3418,6 +4099,7 @@ mod tests {
             longer_cache: false,
             keep_cache_warm: true,
             idle_eviction_timeout_secs: None,
+            scratch: false,
         }
     }
 
@@ -3842,6 +4524,7 @@ mod tests {
                     longer_cache: false,
                     keep_cache_warm: true,
                     idle_eviction_timeout_secs: None,
+                    scratch: false,
                 },
                 RunControls { inbound: rx },
             )
@@ -4277,6 +4960,7 @@ mod tests {
                     longer_cache: false,
                     keep_cache_warm: true,
                     idle_eviction_timeout_secs: None,
+                    scratch: false,
                 },
                 RunControls { inbound: rx },
             )
@@ -4365,6 +5049,18 @@ mod tests {
             "{keel:?}"
         );
         assert!(
+            has(
+                &keel,
+                "--extension",
+                &data.join("harnesses/keel/extensions/keel-skills.ts")
+            ),
+            "{keel:?}"
+        );
+        assert!(
+            has(&keel, "--extension", &data.join("keel-plan.keel.ts")),
+            "{keel:?}"
+        );
+        assert!(
             keel.windows(2).any(
                 |p| p[0] == "--append-system-prompt" && p[1] == crate::keel::KEEL_SYSTEM_PROMPT
             ),
@@ -4372,7 +5068,7 @@ mod tests {
         );
         assert_eq!(
             keel.iter().filter(|a| *a == "--extension").count(),
-            5,
+            7,
             "{keel:?}"
         );
 
@@ -4415,6 +5111,18 @@ mod tests {
             "{bare:?}"
         );
         assert!(
+            has(
+                &bare,
+                "--extension",
+                &data.join("harnesses/keel/extensions/keel-skills.ts")
+            ),
+            "{bare:?}"
+        );
+        assert!(
+            has(&bare, "--extension", &data.join("keel-plan.keel.ts")),
+            "{bare:?}"
+        );
+        assert!(
             bare.windows(2).any(
                 |p| p[0] == "--append-system-prompt" && p[1] == crate::keel::KEEL_SYSTEM_PROMPT
             ),
@@ -4423,8 +5131,139 @@ mod tests {
         assert!(!bare.iter().any(|a| a.contains("browser-mcp")), "{bare:?}");
         assert_eq!(
             bare.iter().filter(|a| *a == "--extension").count(),
-            4,
+            6,
             "{bare:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggling_plan_mode_reuses_warm_pi_process_and_updates_state() {
+        let _gate = gate().lock().await;
+        let fix = layout("plan-toggle-warm");
+        let _env = bind_stub(&fix, "turn");
+        let data = fix.tmp.path.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let harness = harness_for(&fix);
+
+        let mut s1 = spec(&fix, None);
+        s1.chat_id = Some("chat-warm-plan".into());
+        s1.data_dir = Some(data.clone());
+        s1.plan_mode = false;
+        let (_tx1, rx1) = mpsc::unbounded_channel();
+        let ev1 = until_done(
+            harness
+                .run(s1, RunControls { inbound: rx1 })
+                .await
+                .expect("turn 1"),
+            Duration::from_secs(8),
+            |_| {},
+        )
+        .await;
+        assert!(matches!(done_status(&ev1), TurnStatus::Completed {}));
+        let pid_after_1 = fs::read_to_string(fix.stub_dir.join("meta")).unwrap();
+        let state_file = super::plan_state_path(Some(&data), "chat-warm-plan").unwrap();
+        assert_eq!(
+            fs::read_to_string(&state_file).unwrap().trim(),
+            "{\"planMode\":false}"
+        );
+
+        let mut s2 = spec(&fix, None);
+        s2.chat_id = Some("chat-warm-plan".into());
+        s2.data_dir = Some(data.clone());
+        s2.plan_mode = true;
+        let (_tx2, rx2) = mpsc::unbounded_channel();
+        let ev2 = until_done(
+            harness
+                .run(s2, RunControls { inbound: rx2 })
+                .await
+                .expect("turn 2"),
+            Duration::from_secs(8),
+            |_| {},
+        )
+        .await;
+        assert!(matches!(done_status(&ev2), TurnStatus::Completed {}));
+        let pid_after_2 = fs::read_to_string(fix.stub_dir.join("meta")).unwrap();
+        assert_eq!(
+            pid_after_1, pid_after_2,
+            "toggling plan_mode must reuse the warm Pi process instead of respawning"
+        );
+        let stdin = fs::read_to_string(fix.stub_dir.join("stdin")).unwrap();
+        assert_eq!(stdin.matches("\"type\":\"prompt\"").count(), 2, "{stdin}");
+        assert_eq!(
+            fs::read_to_string(&state_file).unwrap().trim(),
+            "{\"planMode\":true}"
+        );
+    }
+
+    #[test]
+    fn cache_warming_extension_stabilizes_xai_prefixes() {
+        let tmp = Tmp::new("xai-cache-ext");
+        let path = super::cache_warming_extension(Some(&tmp.path), 900).expect("keel-cache.ts");
+        let src = fs::read_to_string(&path).expect("read keel-cache.ts");
+        assert!(src.contains("cache_warming_decision"));
+        assert!(src.contains("before_provider_headers"));
+        assert!(src.contains("before_provider_request"));
+        assert!(src.contains("x-grok-conv-id"));
+        assert!(src.contains("prompt_cache_key"));
+        assert!(src.contains("<cwd>"));
+    }
+
+    #[tokio::test]
+    async fn turn_usage_is_emitted_once_without_duplicate_report_usage() {
+        let _gate = gate().lock().await;
+        let fix = layout("usage-once");
+        write_sh(
+            &fix.stub,
+            r#"if [ "$1" = "--version" ]; then echo "1.0.4"; exit 0; fi
+if [ "$1" = "--list-models" ]; then echo '{"models":[]}'; exit 0; fi
+exec python3 -u -c '
+import json, sys, time
+for line in sys.stdin:
+    msg = json.loads(line)
+    kind = msg.get("type")
+    if kind != "prompt":
+        print(json.dumps({"type": "response", "id": msg.get("id"), "command": kind, "success": True}), flush=True)
+        continue
+    print(json.dumps({"type": "response", "id": msg.get("id"), "command": "prompt", "success": True, "data": {"disposition": "started"}}), flush=True)
+    print(json.dumps({"type": "agent_start"}), flush=True)
+    print(json.dumps({"type": "message_end", "message": {"role": "assistant", "model": "grok-4.5", "usage": {"input": 100, "output": 20, "cacheRead": 900, "cacheWrite": 0}}}), flush=True)
+    print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flush=True)
+    print(json.dumps({"type": "agent_settled"}), flush=True)
+    time.sleep(0.05)
+    print(json.dumps({"type": "entry_appended", "entry": {"type": "usage", "kind": "cache_warm", "model": "grok-4.5", "usage": {"input": 0, "output": 0, "cacheRead": 900, "cacheWrite": 0}}}), flush=True)
+    time.sleep(0.2)
+'
+"#,
+        );
+        let harness = harness_for(&fix);
+        let reported = Arc::new(Mutex::new(Vec::<keel_proto::TokenUsage>::new()));
+        let reported_cb = Arc::clone(&reported);
+        let mut s = spec(&fix, None);
+        s.report_usage = Some(Arc::new(move |u| {
+            reported_cb.lock().unwrap().push(u);
+        }));
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let stream = harness.run(s, RunControls { inbound: rx }).await.expect("run");
+        let events = until_done(stream, Duration::from_secs(5), |_| {}).await;
+        assert!(matches!(done_status(&events), TurnStatus::Completed {}));
+
+        let stream_usage: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stream_usage.len(), 1, "expected 1 turn usage event: {stream_usage:?}");
+        assert_eq!(stream_usage[0].input, 100);
+        assert_eq!(stream_usage[0].cache_read, 900);
+
+        // Give the background ProcessActor loop a moment to receive the idle cache_warm event.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let idle_reported = reported.lock().unwrap().clone();
+        assert!(
+            idle_reported.iter().all(|u| u.cache_warm > 0 && u.input == 0),
+            "turn usage must not be duplicated through report_usage: {idle_reported:?}"
         );
     }
 

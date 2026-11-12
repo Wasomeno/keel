@@ -185,13 +185,12 @@ pub fn resolve_mentions(text: &str, roots: &[(String, String)]) -> String {
     out
 }
 
+const PROJECT_ROOTS_HEADER: &str = include_str!("../../../prompts/project-roots.md").trim_ascii_end();
+
 /// What the agent is told about the project, out of sight of the chat.
 pub fn roots_prompt(project: &str, roots: &[(String, String)]) -> String {
-    let mut s = format!(
-        "# Project folders\n\nThis chat belongs to the project \"{project}\", which spans several folders. \
-         You start in the first one; the others are just as much part of the work. \
-         Refer to them by absolute path. When the user writes `@alias/path`, they mean the path inside that folder.\n\n"
-    );
+    let mut s = PROJECT_ROOTS_HEADER.replace("{project}", project);
+    s.push_str("\n\n");
     for (i, (alias, path)) in roots.iter().enumerate() {
         let tag = if i == 0 { " (working folder)" } else { "" };
         s.push_str(&format!("- {alias}: {path}{tag}\n"));

@@ -27,7 +27,7 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(600);
 pub const DIFF_CAP: usize = 3 * 1024 * 1024; // 3 MiB
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NumstatSummary {
     pub additions: i64,
     pub deletions: i64,
@@ -35,7 +35,7 @@ pub struct NumstatSummary {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GitRepoStatus {
     pub is_repo: bool,
     pub repository_id: String,
@@ -852,13 +852,48 @@ pub fn remove_worktree_sync(repo_path: &Path, worktree_path: &Path) -> Result<()
 /// True when `cwd` is strictly inside `{data_dir}/worktrees/`, compared on
 /// canonical paths component-wise.
 pub fn is_engine_worktree(data_dir: &Path, cwd: &Path) -> bool {
-    let (Ok(root), Ok(cwd)) = (
-        data_dir.join("worktrees").canonicalize(),
-        cwd.canonicalize(),
-    ) else {
+    is_strictly_inside(&data_dir.join("worktrees"), cwd)
+}
+
+/// Container folder holding per-chat scratch workspaces (`{data_dir}/scratch`).
+pub fn scratch_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("scratch")
+}
+
+/// True when `cwd` is strictly inside `{data_dir}/scratch/`, compared on
+/// canonical paths component-wise.
+pub fn is_engine_scratch(data_dir: &Path, cwd: &Path) -> bool {
+    is_strictly_inside(&scratch_root(data_dir), cwd)
+}
+
+/// True when `path` is Keel's synthetic scratch root (`{data_dir}/scratch`) or
+/// legacy shared `"No project"` folder (`{data_dir}/No project`).
+pub fn is_scratch_space_path(data_dir: &Path, path: &Path) -> bool {
+    same_path(&scratch_root(data_dir), path) || same_path(&data_dir.join("No project"), path)
+}
+
+/// True when `cwd` belongs to a scratch / no-project chat rather than a user
+/// folder.
+pub fn is_no_project_cwd(data_dir: &Path, cwd: &Path) -> bool {
+    !cwd.as_os_str().is_empty()
+        && (is_engine_scratch(data_dir, cwd) || is_scratch_space_path(data_dir, cwd))
+}
+
+fn is_strictly_inside(base: &Path, candidate: &Path) -> bool {
+    let (Ok(root), Ok(cwd)) = (base.canonicalize(), candidate.canonicalize()) else {
         return false;
     };
     cwd != root && cwd.starts_with(&root)
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1195,6 +1230,35 @@ mod tests {
         run_git_cmd_sync(&dir, &["add", "a.txt"]).unwrap();
         assert!(checkout_branch_sync(&dir, "feat").is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scratch_path_guards_enforce_containment() {
+        let root = std::env::temp_dir().join(format!("keel-scratch-guard-{}", uuid::Uuid::new_v4()));
+        let scratch = scratch_root(&root);
+        let chat = scratch.join("chat-1");
+        let sibling = root.join("scratch-evil").join("chat-1");
+        let legacy = root.join("No project");
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        assert!(!is_engine_scratch(&root, &scratch));
+        assert!(is_engine_scratch(&root, &chat));
+        assert!(!is_engine_scratch(&root, &sibling));
+        assert!(!is_engine_scratch(&root, &legacy));
+
+        assert!(is_scratch_space_path(&root, &scratch));
+        assert!(is_scratch_space_path(&root, &legacy));
+        assert!(!is_scratch_space_path(&root, &chat));
+
+        assert!(is_no_project_cwd(&root, &chat));
+        assert!(is_no_project_cwd(&root, &scratch));
+        assert!(is_no_project_cwd(&root, &legacy));
+        assert!(!is_no_project_cwd(&root, &sibling));
+        assert!(!is_no_project_cwd(&root, Path::new("")));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
