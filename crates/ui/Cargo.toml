@@ -7,7 +7,6 @@ publish.workspace = true
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
-gpui_tokio.workspace = true
 gpui-base.workspace = true
 keel-proto.workspace = true
 keel-rpc.workspace = true

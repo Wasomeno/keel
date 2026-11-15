@@ -164,32 +164,6 @@ impl KeelWindow {
             .position(|t| t.agent.as_ref().is_some_and(|a| a.chat == chat))
     }
 
-    /// What chat `chat`'s agent is doing in the browser right now: the
-    /// running request's op and the page's host. `None` when idle.
-    pub(in crate::view) fn browser_activity(&self, chat: &str) -> Option<String> {
-        let tab = &self.browser.tabs[self.agent_tab_ix(chat)?];
-        let a = tab.agent.as_ref()?;
-        if !a.busy() {
-            return None;
-        }
-        let op = a
-            .job
-            .as_ref()
-            .map(|j| j.req.op.replace('_', " "))
-            .unwrap_or_else(|| "queued".into());
-        let host = tab
-            .page
-            .url
-            .as_deref()
-            .and_then(|u| u.split("://").nth(1))
-            .and_then(|rest| rest.split('/').next())
-            .filter(|h| !h.is_empty());
-        Some(match host {
-            Some(host) => format!("{op} · {host}"),
-            None => op,
-        })
-    }
-
     /// Settings → Browser → Save.
     pub(in crate::view) fn save_browser_sites(&mut self, cx: &mut Context<Self>) {
         let text = self.browser_sites.read(cx).value().to_string();

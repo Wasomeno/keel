@@ -1,5 +1,6 @@
 //! The Keel window.
 
+mod gpui_tokio;
 pub mod approval;
 pub mod background;
 pub mod browser;

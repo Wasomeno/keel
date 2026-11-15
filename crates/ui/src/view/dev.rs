@@ -19,16 +19,8 @@ pub(super) struct GeoTrace {
     /// Painted (x, width) of the transcript's list and the composer's box.
     pub list: std::cell::Cell<(f32, f32, f32)>,
     pub dock: std::cell::Cell<(f32, f32, f32)>,
-    /// Session card: painted (x, width) of the full card and the pill, and
-    /// this frame's (k, full opacity, pill opacity).
-    pub card: std::cell::Cell<(f32, f32, f32)>,
-    pub pill: std::cell::Cell<(f32, f32, f32)>,
-    pub card_look: std::cell::Cell<(f32, f32, f32)>,
-    /// Painted height of the todo/plan card under the session card (0 if absent).
-    pub todo: std::cell::Cell<(f32, f32, f32)>,
-    /// (steps_pending as 0/1, has_held_steps as 0/1, git_kind: 0 Unknown / 1 NoRepo / 2 Repo).
-    pub card_meta: std::cell::Cell<(f32, f32, f32)>,
-    /// Painted (x, width, height) of the composer panel and its send button.
+    /// Painted (x, width) of the outline (points) pill, the docked composer's
+    /// panel and its send button.
     pub panel: std::cell::Cell<(f32, f32, f32)>,
     pub send: std::cell::Cell<(f32, f32, f32)>,
     /// Painted box of the outline (points) pill, and the last code block and
@@ -76,20 +68,11 @@ impl GeoTrace {
             .map_or(0., |at| at.elapsed().as_secs_f32() * 1e3);
         let (lx, lw, lh) = self.list.get();
         let (dx, dw, dh) = self.dock.get();
-        let (cx, cw, ch) = self.card.get();
-        let (px, pw, _) = self.pill.get();
-        let (k, fo, po) = self.card_look.get();
-        let (_, _, todo_h) = self.todo.get();
-        let (pending, held, git_k) = self.card_meta.get();
         let (pnx, pnw, pnh) = self.panel.get();
         let (sx, sw, _) = self.send.get();
         let (ox, ow, _) = self.points.get();
         let (cdx, cdw, cdh) = self.code.get();
         let (tx, tw, th) = self.tool.get();
-        // Reset so a layer that isn't drawn reads as absent next frame.
-        self.card.set((0., 0., 0.));
-        self.pill.set((0., 0., 0.));
-        self.todo.set((0., 0., 0.));
         let mut frames = self.frames.borrow_mut();
         if frames.len() < 2000 {
             frames.push(json!({
@@ -98,18 +81,11 @@ impl GeoTrace {
                 "painted": {
                     "list_x": lx, "list_w": lw, "dock_x": dx, "dock_w": dw,
                     "list_h": lh, "dock_h": dh,
-                    "card_x": cx, "card_w": cw, "card_h": ch,
-                    "pill_x": px, "pill_w": pw,
-                    "todo_h": todo_h,
                     "panel_x": pnx, "panel_w": pnw, "panel_h": pnh,
                     "send_x": sx, "send_w": sw,
                     "points_x": ox, "points_w": ow,
                     "code_x": cdx, "code_w": cdw, "code_h": cdh,
                     "tool_x": tx, "tool_w": tw, "tool_h": th,
-                },
-                "card": {
-                    "k": k, "full_op": fo, "pill_op": po,
-                    "steps_pending": pending, "held_steps": held, "git_k": git_k,
                 },
             }));
         }
@@ -195,10 +171,6 @@ impl KeelWindow {
                 "ok"
             }
             "picker" => {
-                if arg == "card_branch" {
-                    self.card_open_branches(window, cx);
-                    return "ok".into();
-                }
                 let picker = match arg {
                     "model" => Some(Picker::Model),
                     "branch" => Some(Picker::Branch),
@@ -655,12 +627,10 @@ impl KeelWindow {
                 "ok"
             }
             "layout" => {
-                let (room_l, room_r) = self.card_column_room();
                 let col = self.column_max();
                 let open = self.sidebar_open_now();
                 let right_open = self.right_panel_open_now();
                 let collapsed = self.state.ui_settings.sidebar_collapsed;
-                let (w, _) = self.session_card.size.get();
                 return json!({
                     "sidebar_collapsed": collapsed,
                     "sidebar_open_now": open,
@@ -682,27 +652,6 @@ impl KeelWindow {
                         && matches!(self.right_panel_active_kind(), Some(super::right_panel::RightTabKind::Terminal(_))),
                     "browser_allowed": self.browser_allowed(),
                     "column_max": f32::from(col),
-                    "room_l": room_l,
-                    "room_r": room_r,
-                    "transcript_w": w,
-                })
-                .to_string();
-            }
-            "branch_bounds" => {
-                let b = self.card_branch_bounds.get();
-                return json!({
-                    "bounds": b.map(|b| {
-                        json!({
-                            "left": f32::from(b.left()),
-                            "top": f32::from(b.top()),
-                            "right": f32::from(b.right()),
-                            "bottom": f32::from(b.bottom()),
-                            "width": f32::from(b.size.width),
-                            "height": f32::from(b.size.height),
-                        })
-                    }),
-                    "picking": self.session_card.picking,
-                    "compact": self.session_card.compact,
                 })
                 .to_string();
             }
@@ -1018,8 +967,6 @@ impl KeelWindow {
             leaving: None,
         };
         self.dev_plan_lock = true;
-        self.session_card.held_steps = None;
-        self.session_card.held_steps_chat = None;
         self.transcript.set_rows(vec![item]);
         self.transcript.scroll_to_row(0);
         self.transcript.set_stick(false);

@@ -1,5 +1,7 @@
 //! Keyboard: every action and its key in one table, plus the macOS menu bar
-//! that shows them. `secondary` is Cmd on macOS and Ctrl elsewhere.
+//! that shows them. `secondary` is Cmd on macOS and Ctrl elsewhere; it is
+//! expanded at compile time because gpui-fast's static binding parser only
+//! resolves the alias through `KeyBinding::load`.
 
 use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 
@@ -62,55 +64,69 @@ pub const BROWSER: &str = "Browser";
 /// The files pane's, inside `RIGHT_PANEL`.
 pub const FILES: &str = "Files";
 
+#[cfg(target_os = "macos")]
+macro_rules! secondary {
+    ($key:literal) => {
+        concat!("cmd-", $key)
+    };
+}
+
+#[cfg(not(target_os = "macos"))]
+macro_rules! secondary {
+    ($key:literal) => {
+        concat!("ctrl-", $key)
+    };
+}
+
 pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(CONTEXT);
     vec![
-        KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-shift-r", Reload, None),
+        KeyBinding::new(secondary!("q"), Quit, None),
+        KeyBinding::new(secondary!("shift-r"), Reload, None),
         // Copies selected transcript text when no input has focus.
-        KeyBinding::new("secondary-c", gpui_base::input::Copy, ctx),
-        KeyBinding::new("secondary-n", NewChat, ctx),
-        KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new(secondary!("c"), gpui_base::input::Copy, ctx),
+        KeyBinding::new(secondary!("n"), NewChat, ctx),
+        KeyBinding::new(secondary!(","), OpenSettings, None),
         // ⌘= is ⌘+ without Shift; both zoom in, like a browser.
-        KeyBinding::new("secondary-=", ZoomIn, ctx),
-        KeyBinding::new("secondary-+", ZoomIn, ctx),
-        KeyBinding::new("secondary--", ZoomOut, ctx),
-        KeyBinding::new("secondary-0", ZoomReset, ctx),
-        KeyBinding::new("secondary-k", FocusComposer, ctx),
-        KeyBinding::new("secondary-shift-space", AcceptPromptSuggestion, ctx),
-        KeyBinding::new("secondary-b", ToggleSidebar, ctx),
-        KeyBinding::new("secondary-alt-e", ExpandSteps, ctx),
+        KeyBinding::new(secondary!("="), ZoomIn, ctx),
+        KeyBinding::new(secondary!("+"), ZoomIn, ctx),
+        KeyBinding::new(secondary!("-"), ZoomOut, ctx),
+        KeyBinding::new(secondary!("0"), ZoomReset, ctx),
+        KeyBinding::new(secondary!("k"), FocusComposer, ctx),
+        KeyBinding::new(secondary!("shift-space"), AcceptPromptSuggestion, ctx),
+        KeyBinding::new(secondary!("b"), ToggleSidebar, ctx),
+        KeyBinding::new(secondary!("alt-e"), ExpandSteps, ctx),
         KeyBinding::new("ctrl-tab", NextChat, ctx),
         KeyBinding::new("ctrl-shift-tab", PrevChat, ctx),
-        KeyBinding::new("secondary-w", CloseTab, ctx),
-        KeyBinding::new("secondary-shift-a", ArchiveChat, ctx),
-        KeyBinding::new("secondary-.", StopRun, ctx),
+        KeyBinding::new(secondary!("w"), CloseTab, ctx),
+        KeyBinding::new(secondary!("shift-a"), ArchiveChat, ctx),
+        KeyBinding::new(secondary!("."), StopRun, ctx),
         KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
-        KeyBinding::new("secondary-shift-b", ToggleBrowser, ctx),
-        KeyBinding::new("secondary-alt-b", ToggleRightPanel, ctx),
-        KeyBinding::new("secondary-shift-e", ToggleFiles, ctx),
-        KeyBinding::new("secondary-s", FilesSave, Some(FILES)),
-        KeyBinding::new("secondary-shift-f", BrowserExpand, ctx),
-        KeyBinding::new("secondary-shift-t", TimerStartPause, ctx),
-        KeyBinding::new("secondary-enter", ApprovePlan, ctx),
-        KeyBinding::new("secondary-l", BrowserAddress, Some(BROWSER)),
-        KeyBinding::new("secondary-r", BrowserReload, Some(BROWSER)),
-        KeyBinding::new("secondary-[", BrowserBack, Some(BROWSER)),
-        KeyBinding::new("secondary-]", BrowserForward, Some(BROWSER)),
-        KeyBinding::new("secondary-shift-w", BrowserEndSession, Some(BROWSER)),
+        KeyBinding::new(secondary!("shift-b"), ToggleBrowser, ctx),
+        KeyBinding::new(secondary!("alt-b"), ToggleRightPanel, ctx),
+        KeyBinding::new(secondary!("shift-e"), ToggleFiles, ctx),
+        KeyBinding::new(secondary!("s"), FilesSave, Some(FILES)),
+        KeyBinding::new(secondary!("shift-f"), BrowserExpand, ctx),
+        KeyBinding::new(secondary!("shift-t"), TimerStartPause, ctx),
+        KeyBinding::new(secondary!("enter"), ApprovePlan, ctx),
+        KeyBinding::new(secondary!("l"), BrowserAddress, Some(BROWSER)),
+        KeyBinding::new(secondary!("r"), BrowserReload, Some(BROWSER)),
+        KeyBinding::new(secondary!("["), BrowserBack, Some(BROWSER)),
+        KeyBinding::new(secondary!("]"), BrowserForward, Some(BROWSER)),
+        KeyBinding::new(secondary!("shift-w"), BrowserEndSession, Some(BROWSER)),
         // Inside the right side panel, ⌘T and ⌘W manage panel tabs, not chats.
-        KeyBinding::new("secondary-t", BrowserNewTab, Some(RIGHT_PANEL)),
-        KeyBinding::new("secondary-w", BrowserCloseTab, Some(RIGHT_PANEL)),
+        KeyBinding::new(secondary!("t"), BrowserNewTab, Some(RIGHT_PANEL)),
+        KeyBinding::new(secondary!("w"), BrowserCloseTab, Some(RIGHT_PANEL)),
         KeyBinding::new("escape", Dismiss, ctx),
-        KeyBinding::new("secondary-1", JumpTab1, ctx),
-        KeyBinding::new("secondary-2", JumpTab2, ctx),
-        KeyBinding::new("secondary-3", JumpTab3, ctx),
-        KeyBinding::new("secondary-4", JumpTab4, ctx),
-        KeyBinding::new("secondary-5", JumpTab5, ctx),
-        KeyBinding::new("secondary-6", JumpTab6, ctx),
-        KeyBinding::new("secondary-7", JumpTab7, ctx),
-        KeyBinding::new("secondary-8", JumpTab8, ctx),
-        KeyBinding::new("secondary-9", JumpTab9, ctx),
+        KeyBinding::new(secondary!("1"), JumpTab1, ctx),
+        KeyBinding::new(secondary!("2"), JumpTab2, ctx),
+        KeyBinding::new(secondary!("3"), JumpTab3, ctx),
+        KeyBinding::new(secondary!("4"), JumpTab4, ctx),
+        KeyBinding::new(secondary!("5"), JumpTab5, ctx),
+        KeyBinding::new(secondary!("6"), JumpTab6, ctx),
+        KeyBinding::new(secondary!("7"), JumpTab7, ctx),
+        KeyBinding::new(secondary!("8"), JumpTab8, ctx),
+        KeyBinding::new(secondary!("9"), JumpTab9, ctx),
     ]
 }
 

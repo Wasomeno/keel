@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use base64::Engine as _;
 use gpui::{
-    Bounds, ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, Pixels, ScrollWheelEvent,
+    Bounds, ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, Pixels, ScrollEvent,
     Window, div, prelude::*, px,
 };
 use keel_proto::{RpcStreamItem, SubscribeEvent};
@@ -610,7 +610,7 @@ impl KeelWindow {
                 .absolute()
                 .size_full(),
             )
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
                 let lines = (dy / LINE_HEIGHT).round() as i32;
                 let active = this.terminal.active;
