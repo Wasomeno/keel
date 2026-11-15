@@ -1115,7 +1115,7 @@ impl KeelWindow {
             .id("chat-list")
             .flex_1()
             .overflow_y_scroll()
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+            .on_scroll(cx.listener(|this, _, _, cx| {
                 this.summary_hover.clear();
                 this.projects.folder_card = None;
                 cx.notify();
@@ -1458,7 +1458,7 @@ impl KeelWindow {
                 this.chat_summary_press(&open_id, cx);
                 let m = event.modifiers();
                 let click = Click {
-                    toggle: m.secondary(),
+                    toggle: m.secondary(cx),
                     range: m.shift,
                 };
                 let in_select = this.select_mode || !this.selected_chats.is_empty();

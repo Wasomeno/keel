@@ -139,7 +139,7 @@ pub fn viewer(source: String, t: Tokens, vp: SharedViewport) -> impl IntoElement
         .size_full()
         .overflow_hidden()
         .cursor_grab()
-        .on_scroll_wheel(move |e, window, _| {
+        .on_scroll(move |e, window, _| {
             let mut vp = wheel.borrow_mut();
             let delta = match e.delta {
                 ScrollDelta::Pixels(p) => p,
@@ -218,7 +218,7 @@ fn paint(source: &str, t: &Tokens, vp: &Viewport, natural: (f32, f32), window: &
             rect.origin + point(px(region.x * s), px(region.y * s)),
             size(px(region.w * s), px(region.h * s)),
         );
-        let _ = window.paint_image(at, Default::default(), image, 0, false);
+        let _ = window.paint_image(at, at, Default::default(), image, 0, false);
         Some(region)
     };
 

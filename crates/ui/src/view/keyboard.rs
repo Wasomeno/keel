@@ -136,7 +136,7 @@ impl KeelWindow {
                     cx.stop_propagation();
                 } else if let Some(super::Lightbox::Diagram { source, view, .. }) =
                     this.lightbox.as_ref().filter(|_| this.lightbox_fx.shown())
-                    && !m.secondary()
+                    && !m.secondary(cx)
                     && matches!(key, "=" | "+" | "-" | "0")
                 {
                     let natural = crate::mermaid::size(source).unwrap_or((1., 1.));
@@ -198,7 +198,7 @@ impl KeelWindow {
                     this.close_menus(cx)
                 } {
                     cx.stop_propagation();
-                } else if key == "v" && m.secondary() && !m.shift && !m.alt && this.paste_images(cx)
+                } else if key == "v" && m.secondary(cx) && !m.shift && !m.alt && this.paste_images(cx)
                 {
                     // An image paste attaches; text pastes reach the field as usual.
                     cx.stop_propagation();
@@ -281,7 +281,6 @@ impl KeelWindow {
             || self.show_subagent_menu
             || self.show_points_menu
             || self.show_sound_menu
-            || self.session_card.picking
             || self.state.show_branch_picker
             || self.confirming_delete_chats.is_some()
             || self.delete_confirm_leaving.is_some()
@@ -320,7 +319,6 @@ impl KeelWindow {
         self.show_points_menu = false;
         self.show_sound_menu = false;
         self.state.show_branch_picker = false;
-        self.card_end_picking();
         if self.menus_cut {
             // Escape: modals go at once, without their leave fade.
             self.delete_confirm_leaving = None;

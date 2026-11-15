@@ -200,8 +200,8 @@ pub fn apply_base_theme(t: Tokens, cx: &mut App) {
     theme.tokens.typography.sans = SANS.into();
     theme.tokens.typography.mono = MONO.into();
     theme.tokens.shadow = gpui_base::theme_tokens::ShadowTokens::elevations(c(t.shadow));
-    theme.resizable.handle = c(t.border);
-    theme.resizable.active_handle = c(t.accent);
+    theme.resizable.handle = Some(c(t.border));
+    theme.resizable.active_handle = Some(c(t.accent));
 }
 
 #[cfg(test)]

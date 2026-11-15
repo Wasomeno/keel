@@ -89,11 +89,6 @@ pub(super) struct SheetRow {
 struct FolderStatus {
     branch: String,
     changes: Option<u32>,
-    /// A few changed paths, in git's order. The count is `changes`.
-    files: Vec<String>,
-    file_details: Vec<crate::view::session_card::GitFileChange>,
-    total_additions: u64,
-    total_deletions: u64,
     repo: bool,
     exists: bool,
 }
@@ -485,62 +480,6 @@ impl Projects {
         folder_changes_text(status.changes, status.repo, status.exists)
     }
 
-    /// Project name and one line per folder this chat works in.
-    pub(super) fn card_branches(&self, chat: &str) -> Option<(String, Vec<CardBranch>)> {
-        let id = self.chat_project_id(chat)?;
-        let project = self.store.project(&id)?;
-        let scope = self
-            .store
-            .chats
-            .get(chat)
-            .map(|l| l.scope.clone())
-            .unwrap_or_default();
-        let name = project.name.clone();
-        let lines = projects::in_scope(project, &scope)
-            .into_iter()
-            .map(|folder| {
-                let key = norm_path(&folder.path);
-                let status = self
-                    .status
-                    .get(&key)
-                    .or_else(|| self.status.get(&folder.path));
-                let note = match status {
-                    Some(s) if !s.exists => "missing".into(),
-                    Some(s) if !s.repo => "not a repo".into(),
-                    _ => String::new(),
-                };
-                CardBranch {
-                    alias: folder.alias.clone(),
-                    branch: status.map(|s| s.branch.clone()).unwrap_or_default(),
-                    files: status.map(|s| s.files.clone()).unwrap_or_default(),
-                    file_details: status.map(|s| s.file_details.clone()).unwrap_or_default(),
-                    total_additions: status.map(|s| s.total_additions).unwrap_or(0),
-                    total_deletions: status.map(|s| s.total_deletions).unwrap_or(0),
-                    file_count: status.and_then(|s| s.changes),
-                    note,
-                }
-            })
-            .collect();
-        Some((name, lines))
-    }
-}
-
-/// One folder on the session card when the chat belongs to a project.
-/// Every folder is the same shape: its name, the branch it is on, and the
-/// files that changed there. Nothing on it checks a branch out.
-#[derive(Clone)]
-pub(super) struct CardBranch {
-    pub alias: String,
-    pub branch: String,
-    /// Changed paths, capped by `folder_status`.
-    pub files: Vec<String>,
-    pub file_details: Vec<crate::view::session_card::GitFileChange>,
-    pub total_additions: u64,
-    pub total_deletions: u64,
-    /// Uncommitted files in this folder. `None` until the status arrives.
-    pub file_count: Option<u32>,
-    /// "missing" or "not a repo". Empty when the folder is a checkout.
-    pub note: String,
 }
 
 fn folder_changes_text(changes: Option<u32>, repo: bool, exists: bool) -> String {
@@ -3221,10 +3160,6 @@ fn status_from(res: Result<serde_json::Value, String>) -> FolderStatus {
         return FolderStatus {
             branch: String::new(),
             changes: None,
-            files: Vec::new(),
-            file_details: Vec::new(),
-            total_additions: 0,
-            total_deletions: 0,
             repo: false,
             exists: false,
         };
@@ -3241,41 +3176,6 @@ fn status_from(res: Result<serde_json::Value, String>) -> FolderStatus {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let changes = v.get("changes").and_then(|s| s.as_u64()).map(|n| n as u32);
-    let files = v
-        .get("files")
-        .and_then(|s| s.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let file_details = v
-        .get("file_details")
-        .and_then(|d| {
-            serde_json::from_value::<Vec<crate::view::session_card::GitFileChange>>(d.clone()).ok()
-        })
-        .unwrap_or_default();
-    let total_additions = v
-        .get("total_additions")
-        .and_then(|n| n.as_u64())
-        .unwrap_or_else(|| {
-            file_details
-                .iter()
-                .filter_map(|f| f.added)
-                .map(u64::from)
-                .sum()
-        });
-    let total_deletions = v
-        .get("total_deletions")
-        .and_then(|n| n.as_u64())
-        .unwrap_or_else(|| {
-            file_details
-                .iter()
-                .filter_map(|f| f.removed)
-                .map(u64::from)
-                .sum()
-        });
     let repo = changes.is_some() || !branch.is_empty() || detached.is_some();
     let branch = if branch.is_empty() {
         detached.unwrap_or_default()
@@ -3285,10 +3185,6 @@ fn status_from(res: Result<serde_json::Value, String>) -> FolderStatus {
     FolderStatus {
         branch,
         changes,
-        files,
-        file_details,
-        total_additions,
-        total_deletions,
         repo,
         exists,
     }

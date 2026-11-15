@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle,
     Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Window, div, prelude::*, px, relative,
+    MouseMoveEvent, MouseUpEvent, ScrollEvent, Window, div, prelude::*, px, relative,
 };
 use gpui_base::input::InputState;
 use keel_theme::Tokens;
@@ -1526,8 +1526,8 @@ impl KeelWindow {
                                 native.handle_mouse_move(event.position);
                             }
                         }))
-                        .on_scroll_wheel(cx.listener(
-                            |this, event: &ScrollWheelEvent, _window, _cx| {
+                        .on_scroll(cx.listener(
+                            |this, event: &ScrollEvent, _window, _cx| {
                                 if let Some(tab) = this.browser.tabs.get(this.browser.active)
                                     && let Some(native) = &tab.native
                                 {
@@ -1551,6 +1551,7 @@ impl KeelWindow {
                                         }
                                         if let Some(img) = page.render_frame() {
                                             let _ = window.paint_image(
+                                                bounds,
                                                 bounds,
                                                 Default::default(),
                                                 img,

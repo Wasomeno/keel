@@ -595,24 +595,6 @@ impl KeelWindow {
         self.timer_ui.menu = false;
     }
 
-    /// When the pill rests in the transcript's top-right corner: how far
-    /// down it reaches (its inset plus its height), so the session card can
-    /// sit under it instead of on it.
-    pub(super) fn timer_top_right_reach(&self) -> Option<f32> {
-        let rests = self.dotify_visible()
-            && !self.timer.hidden
-            && self.timer.dock == TimerDock::TopRight
-            && self.timer_ui.drag.is_none();
-        rests.then(|| {
-            let h = self
-                .timer_ui
-                .rest
-                .get()
-                .map_or(f32::from(zpx(28.)), |b| f32::from(b.size.height));
-            f32::from(zpx(EDGE)) + h
-        })
-    }
-
     pub(super) fn timer_ui_painted(&self) -> Option<Bounds<Pixels>> {
         self.timer_ui.painted.get()
     }

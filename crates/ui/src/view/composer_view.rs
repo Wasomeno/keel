@@ -96,9 +96,6 @@ impl KeelWindow {
         }
         self.show_effort_menu = false;
         self.show_permission_menu = false;
-        if picker != Some(Picker::Branch) || !self.session_card.picking {
-            self.card_end_picking();
-        }
         if picker == Some(Picker::Model) && !self.show_model_picker {
             self.model_menu_opened();
         }
@@ -718,11 +715,8 @@ impl KeelWindow {
                 let panel_w = self.composer_panel_w.clone();
                 d.child(
                     gpui::canvas(
-                        // Measured every frame, slides included: mid-slide the
-                        // dock already has its landing width (`column_slide`),
-                        // so this is the width the settled frame decides from.
-                        // (Skipping slides left a stale width that flipped the
-                        // layout and back just after landing.)
+                        // Measured every frame: this is the width the docked
+                        // layout decides its control row from.
                         move |bounds, window, _| {
                             let w = f32::from(bounds.size.width);
                             if (panel_w.replace(w) - w).abs() >= 0.5 {
@@ -859,8 +853,6 @@ impl KeelWindow {
             None => panel.into_any_element(),
         };
 
-        // The context meter that hung past the docked panel's right edge
-        // now lives in the session card (see `session_card`).
         // Docked, the panel spans the reading column's text (the column less
         // the rows' own px_4), so its edges sit on the transcript's.
         let max = if hero {
@@ -1783,9 +1775,11 @@ impl KeelWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_open = open == Some(picker);
+        // These chips ride the hero panel's top edge, so their menus open
+        // downward, into the panel rather than off the top of the window.
         let menu = self
             .menu_phase(picker.menu_id(), is_open, cx)
-            .map(|leaving| self.render_picker_menu(picker, leaving, true, t, cx));
+            .map(|leaving| self.render_picker_menu(picker, leaving, false, t, cx));
         div().relative().children(menu).child(
             chip(id, t, is_open)
                 .when_some(icon, |d, icon| d.child(icon.el(zpx(13.))))
@@ -2354,8 +2348,8 @@ impl KeelWindow {
     }
 
     /// A picker's menu; `leaving` renders its exit.
-    /// `up`: opens above its anchor (the composer's pickers); the session
-    /// card's branch picker opens below.
+    /// `up`: opens above its anchor (the composer's bottom-row chips); the
+    /// hero's folder / branch / repo chips open below.
     pub(super) fn render_picker_menu(
         &mut self,
         picker: Picker,
@@ -2612,26 +2606,13 @@ impl KeelWindow {
             }
             Picker::Branch => {
                 let (reduced, query) = (self.reduced(), self.picker_query.clone());
-                // Opened from the session card: this chat's own checkout,
-                // and a pick switches it. Otherwise the new-chat folder's.
-                let card = self.card_branch_menu();
-                let from_card = card.is_some();
-                let (selected, current, branches, loading, detached) = match card {
-                    Some(list) => (
-                        list.current.clone(),
-                        list.current,
-                        list.branches,
-                        list.loading,
-                        list.detached,
-                    ),
-                    None => (
-                        self.state.selected_branch.clone(),
-                        self.state.current_branch.clone(),
-                        self.state.available_branches.clone(),
-                        self.branches_loading,
-                        self.state.detached_head.clone(),
-                    ),
-                };
+                let (selected, current, branches, loading, detached) = (
+                    self.state.selected_branch.clone(),
+                    self.state.current_branch.clone(),
+                    self.state.available_branches.clone(),
+                    self.branches_loading,
+                    self.state.detached_head.clone(),
+                );
                 items.push(self.picker_search_box(Icon::Branch, t));
                 if loading && branches.is_empty() {
                     items.extend(skeleton_rows("branch", 4, t, reduced));
@@ -2695,10 +2676,6 @@ impl KeelWindow {
                         })
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
-                                if from_card {
-                                    this.card_pick_branch(pick.clone(), cx);
-                                    return;
-                                }
                                 this.state.set_branch(Some(pick.clone()));
                                 this.create_error = None;
                                 this.set_picker(None, cx);
@@ -2745,43 +2722,17 @@ impl KeelWindow {
                 items,
             );
         }
-        if picker == Picker::Branch && self.session_card.picking && self.current_chat.is_some() {
-            let compact = self.session_card.compact;
-            let (anchor, at, w) = match self.card_branch_bounds.get() {
-                Some(b) => {
-                    let w = if compact {
-                        260.
-                    } else {
-                        (f32::from(b.size.width) / crate::style::zoom()).max(240.)
-                    };
-                    let anchor = if compact {
-                        gpui::Anchor::TopRight
-                    } else {
-                        gpui::Anchor::TopLeft
-                    };
-                    let at = if compact {
-                        gpui::point(b.right(), b.bottom())
-                    } else {
-                        gpui::point(b.left(), b.bottom())
-                    };
-                    (anchor, Some(at), w)
-                }
-                None => (gpui::Anchor::TopLeft, None, 252.),
-            };
-            return super::floating_menu_positioned(
-                id,
-                t,
-                w,
-                anchor,
-                at,
-                false,
-                leaving,
-                self.reduced(),
-                dismiss,
-                items,
-            );
-        }
-        floating_menu_at(id, t, width, up, leaving, self.reduced(), dismiss, items)
+        // Anchored to its own chip wrapper, which is the relative parent.
+        super::floating_menu_at(
+            id,
+            t,
+            width,
+            up,
+            leaving,
+            self.reduced(),
+            dismiss,
+            items,
+        )
     }
 }
 
@@ -3367,15 +3318,7 @@ impl KeelWindow {
         // flips nor glides during the handoff.
         let dropping = self.hero_exiting();
         let (slot, max) = (self.composer_slot.get(), self.composer_max.get());
-        // Mid-slide the dock already has its landing width (`column_slide`):
-        // decide from that, not last frame's box, so it doesn't lag a frame.
-        let landing = self
-            .column_slide
-            .map(|s| s.to.w)
-            .filter(|_| !dropping && max > 0.);
-        let panel = if let Some(w) = landing {
-            max.min(w - z(32.))
-        } else if dropping && slot > 0. && max > 0. {
+        let panel = if dropping && slot > 0. && max > 0. {
             max.min(slot - z(32.))
         } else {
             self.composer_panel_w.get()
@@ -3404,12 +3347,11 @@ impl KeelWindow {
             z(FIT_MIN_TEXT),
             z(FIT_HYST),
         );
-        // Mid-slide the text reflows once, at the start; so does this, with
-        // no glide racing the slide (it would blank the controls mid-move).
+        // The control row's shape changes on a resize; it eases between the
+        // two shapes rather than switching in one frame.
         if next.stacked != self.composer_fit.stacked
             && self.composer_fit_known
             && !dropping
-            && landing.is_none()
             && !self.reduced()
         {
             self.composer_fit_at = Some(std::time::Instant::now());
@@ -3464,15 +3406,6 @@ impl KeelWindow {
             return chat.plan_mode;
         }
         self.plan_mode_draft
-    }
-
-    fn plan_toggle(&mut self, t: Tokens, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let on = self.plan_on();
-        chip("plan-mode-btn", t, on)
-            .child("Plan")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.toggle_plan_mode(cx);
-            }))
     }
 }
 

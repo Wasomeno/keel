@@ -973,7 +973,7 @@ impl KeelWindow {
             .id("settings-scroll")
             .track_scroll(&self.dotify.settings_scroll)
             .when(self.show_sound_menu, |d| {
-                d.on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                d.on_scroll(cx.listener(|this, _, _, cx| {
                     if this.show_sound_menu {
                         this.show_sound_menu = false;
                         this.sound_menu_scroll_y = None;

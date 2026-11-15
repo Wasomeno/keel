@@ -3,7 +3,7 @@
 use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use gpui::{
-    AnimationExt as _, ClickEvent, Context, ElementId, IntoElement, Render, ScrollWheelEvent, Window,
+    AnimationExt as _, ClickEvent, Context, ElementId, IntoElement, Render, ScrollEvent, Window,
     WindowAppearance, div, list, prelude::*, px,
 };
 use keel_proto::ChatStatus;
@@ -376,15 +376,6 @@ impl Render for KeelWindow {
                                 // the hero drop morphs it.
                                 let dock_h = self.dock_h.clone();
                                 let cur_dock_h = self.dock_h.get();
-                                // The session card's gutter, as the transcript keeps it
-                                // (gliding with it), so the composer shares its column.
-                                let (room_l, room_r) = self.target_card_column_room(window);
-                                // Mid-slide the composer shares the transcript's left
-                                // edge, but its width glides to the landing one on the
-                                // same clock (`ColumnGeo::dock_w`): snapping it to the
-                                // landing width made the right edge jump one way, then
-                                // travel back the other.
-                                let dock_w = self.column_slide.map(|_| self.column_last.dock_w);
                                 d.when(cur_dock_h > 0., |d| {
                                     d.child(
                                         div()
@@ -419,10 +410,8 @@ impl Render for KeelWindow {
                                     div()
                                         .absolute()
                                         .bottom_0()
-                                        .when_some(dock_w, |d, w| d.left(px(room_l)).w(px(w)))
-                                        .when(dock_w.is_none(), |d| {
-                                            d.left_0().right_0().pl(px(room_l)).pr(px(room_r))
-                                        })
+                                        .left_0()
+                                        .right_0()
                                         .child(composer)
                                         .children(super::dev::GeoTrace::probe(
                                             &self.geo_trace,
@@ -905,10 +894,8 @@ impl KeelWindow {
             let dy = f32::from(from.bottom()) - rest_bottom;
 
             // Horizontal transition: the hero composer was centered in the full pane,
-            // while the docked composer is centered in the reading column (shifted left
-            // to leave room for the session card). We track both centers so the 2D path
-            // glides continuously with zero horizontal snap.
-            let (room_l, room_r) = self.target_card_column_room(window);
+            // while the docked composer is centered in the reading column. We track
+            // both centers so the 2D path glides continuously with zero horizontal snap.
             let sidebar_w = self.state.sidebar_width() * self.sidebar_open_now();
             let viewport_w = f32::from(window.viewport_size().width);
             let browser_w = if self.browser_allowed() && self.right_panel_open() {
@@ -916,11 +903,8 @@ impl KeelWindow {
             } else {
                 0.
             };
-            let col_left = self.column_slide.map_or(sidebar_w + room_l, |s| s.to.x);
-            let col_w = self.column_slide.map_or(
-                (viewport_w - sidebar_w - browser_w - room_l - room_r).max(0.),
-                |s| s.to.w,
-            );
+            let col_left = sidebar_w;
+            let col_w = (viewport_w - sidebar_w - browser_w).max(0.);
             let fallback_center_x = col_left + col_w / 2.;
             let rest_center_x = rest.map_or(fallback_center_x, |r| {
                 f32::from(r.origin.x) + f32::from(r.size.width) / 2.
@@ -1051,8 +1035,7 @@ impl KeelWindow {
 
     /// The top bar, no tabs: a floating pill with the sidebar toggle; in a
     /// chat, its merge request and the pane toggles. Everything else drags
-    /// the window. The chat's context, folder and branch live in the session
-    /// card (`session_card`), not here. `bare` is the Settings header: no
+    /// the window. `bare` is the Settings header: no
     /// clock in / clock out. That stays off through the exit, when
     /// `settings_open` is already false.
     fn render_header(
@@ -1446,44 +1429,29 @@ impl KeelWindow {
         // MR offers, Undo and notes ride under their turn's last row.
         let mr_rows = self.mr_inline_rows();
         let on_mr = self.mr_on_action(cx);
-        // The session card's room: a right gutter, or a strip under its pill.
-        let card_room = self.card_room(window, cx);
         if self.geo_trace.on.get() {
             let top = self.transcript.list_state.logical_scroll_top();
             self.geo_trace.push(serde_json::json!({
-                "pin": self.column_slide.map(|s| s.to.w),
-                "room": [card_room.0, card_room.1, card_room.2],
-                "dock_room": self.target_card_column_room(window),
-                "dock_pin": self.column_slide.map(|s| s.to.w),
                 "pane_w": self.pane_width(window),
                 "side": self.sidebar_open_now(),
                 "right": self.right_panel_open_now(),
-                "compact": self.session_card.compact,
                 "top": [top.item_ix, f32::from(top.offset_in_item)],
                 "stacked": self.composer_fit.stacked,
                 "fit_anim": self.composer_fit_at.is_some(),
                 "panel_w": self.composer_panel_w.get(),
                 "dock_cell_h": self.dock_h.get(),
-                "slide": self.column_slide.is_some(),
             }));
         }
-        let card = self.render_session_card(t, window, cx);
-        let card_measure = self.card_measure();
         div()
             .id("transcript-container")
             .relative()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 // Wheel-up unsticks the follow; only wheel-down that reaches the bottom re-engages it.
                 let dy = event.delta.pixel_delta(window.line_height()).y;
                 this.transcript.on_wheel(dy);
-                // Beside the reading region (the card's centring margins) the
-                // list isn't under the pointer: scroll it from here.
-                if this.card_wheel_outside_column(f32::from(event.position.x)) {
-                    this.transcript.list_state.scroll_by(-dy);
-                }
                 cx.notify();
             }))
             .when(self.current_chat.is_some() && self.transcript.items.is_empty(), |d| {
@@ -1496,21 +1464,10 @@ impl KeelWindow {
                 let weak = cx.entity().downgrade();
                 let hover_cell = self.hovered_row.clone();
                 let handle = window.window_handle();
-                // Wrap width for prose/bubbles: during a panel slide hold the
-                // narrower end; otherwise use the column's current dock width
-                // so inline file chips get a real pixel cap (not only relative).
+                // Wrap width for prose/bubbles: the reading column's width, so
+                // inline file chips get a real pixel cap (not only relative).
                 let rem = 2. * f32::from(window.rem_size());
-                let wrap_hold = self
-                    .column_slide
-                    .map(|s| s.wrap_w() - rem)
-                    .or_else(|| {
-                        let w = if self.column_last.dock_w > 0. {
-                            self.column_last.dock_w
-                        } else {
-                            self.column_last.w
-                        };
-                        (w > 0.).then_some((w - rem).max(200.))
-                    });
+                let wrap_hold = Some((f32::from(self.column_max()) - rem).max(200.));
                 self.measure_step_line(window);
                 let rc = RowContext {
                     tokens: t,
@@ -1675,11 +1632,6 @@ impl KeelWindow {
                     }),
                 };
                 let column = self.column_max();
-                // While a panel slides, the list's box glides with the
-                // composer's (`ColumnGeo::dock_w`, left edge from `card_room`),
-                // so card edges and right-aligned icons move with it every
-                // frame. Text inside holds one wrap (`wrap_hold` above).
-                let held = self.column_slide.map(|_| px(self.column_last.dock_w));
                 d.flex().flex_row().overflow_hidden().child(
                     // Match empty-chat `pt_6`: keep ListAlignment::Top, but leave
                     // comfortable room under the header so the first bubble isn't flush.
@@ -1689,13 +1641,10 @@ impl KeelWindow {
                         .h_full()
                         .w_full()
                         .pt_6()
-                        .pl(px(card_room.0))
-                        .pr(px(card_room.1))
                         .opacity(reveal_opacity)
                         .flex()
                         .flex_col()
-                        .child(div().flex_none().h(px(card_room.2)))
-                        .child(div().relative().flex_1().min_h_0().when_some(held, |d, w| d.w(w)).when(held.is_none(), |d| d.w_full()).children(super::dev::GeoTrace::probe(&self.geo_trace, |g| &g.list)).child(
+                        .child(div().relative().flex_1().min_h_0().w_full().children(super::dev::GeoTrace::probe(&self.geo_trace, |g| &g.list)).child(
                         list(self.transcript.list_state.clone(), move |ix, _, _| {
                             let row = match items.get(ix) {
                                 Some(item) => {
@@ -1788,9 +1737,7 @@ impl KeelWindow {
                     )),
                 )
             })
-            .child(card_measure)
             .children(timer)
-            .children(card)
     }
 
     /// The "Latest" pill, painted over the composer inside the main pane so
@@ -1828,8 +1775,6 @@ impl KeelWindow {
                 .bottom(px(dock_h) + zpx(rise))
                 .left_0()
                 .right_0()
-                .pl(px(self.card_column_room().0))
-                .pr(px(self.card_column_room().1))
                 .flex()
                 .justify_center()
                 .child(
@@ -3379,8 +3324,10 @@ impl InlineLoader {
 /// The window color over the pane picture. `u` is 0 on the hero (clean landscape
 /// with no veil) and smoothly closes the solid window color down over the picture
 /// as the user enters a chat, ending with the subtle [`CHAT_GLOW`] foot glow.
-/// A settled chat also blurs that foot. gpui gradients take two stops, so
-/// the curve is short bands with edges snapped to a device pixel.
+/// gpui gradients take two stops, so the curve is short bands with edges
+/// snapped to a device pixel. The settled chat's foot glow stays; the blur
+/// that used to sit under it was zui-only and has no gpui-fast equivalent
+/// (see docs/gpui-fast-migration.md).
 fn paint_backdrop_veil(
     bounds: gpui::Bounds<gpui::Pixels>,
     window: &mut Window,
@@ -3389,14 +3336,6 @@ fn paint_backdrop_veil(
 ) {
     if u <= 0. {
         return;
-    }
-    if u >= 1. {
-        let foot_top = bounds.origin.y + bounds.size.height * (1. - CHAT_GLOW_HEIGHT);
-        let foot = gpui::Bounds::from_corners(
-            gpui::point(bounds.origin.x, foot_top),
-            bounds.bottom_right(),
-        );
-        window.paint_backdrop_blur(foot, gpui::Corners::default(), zpx(48.));
     }
     let cover = |y: f32| {
         let glow_line = 1. - CHAT_GLOW_HEIGHT;
@@ -3451,13 +3390,6 @@ fn subagent_status(status: &str, t: Tokens) -> (u32, String) {
         "interrupted" => (t.text_muted, "stopped".to_string()),
         other => (t.text_muted, other.to_string()),
     }
-}
-
-/// `base` moved `amount` of the way toward `toward` (RGBA, alpha kept).
-fn lift(base: u32, toward: u32, amount: f32) -> u32 {
-    let ch = |v: u32, s: u32| ((v >> s) & 0xFF) as f32;
-    let mix = |s: u32| ((ch(base, s) + (ch(toward, s) - ch(base, s)) * amount).round() as u32) << s;
-    mix(24) | mix(16) | mix(8) | (base & 0xFF)
 }
 
 #[cfg(test)]

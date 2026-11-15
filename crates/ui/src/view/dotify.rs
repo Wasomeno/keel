@@ -1652,7 +1652,7 @@ impl KeelWindow {
                 }
                 true
             }
-            "d" if picking && m.secondary() => {
+            "d" if picking && m.secondary(cx) => {
                 let rows = self.dotify_rows();
                 let target = self
                     .dotify

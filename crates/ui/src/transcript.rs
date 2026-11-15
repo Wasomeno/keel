@@ -3935,7 +3935,7 @@ pub fn mermaid_canvas(
                 window.request_animation_frame();
             }
             if let Some((_, image)) = raster.image {
-                let _ = window.paint_image(at, Default::default(), image, 0, false);
+                let _ = window.paint_image(at, at, Default::default(), image, 0, false);
             }
         },
     )

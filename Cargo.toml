@@ -31,16 +31,17 @@ keel-update = { path = "crates/update" }
 
 async-trait = "0.1"
 
-# Pinned pair from DESIGN.md. Do not bump these revs in the scaffold.
-gpui = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d", features = [
+# gpui-fast is a retained-mode fork of upstream GPUI. Exact pins: 0.1.x is
+# still experimental, and gpui-base 0.9.1 is the release built against this
+# line. See docs/gpui-fast-migration.md.
+gpui = { package = "gpui-fast", version = "=0.1.15" }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.15", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "4764fd002ab5894ec9413511d01d37481b2129ab" }
+gpui-base = { version = "=0.9.1", features = ["gpui-fast"] }
 
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
@@ -86,6 +87,9 @@ opt-level = 2
 # gigabytes of rlibs and object files and slowed every link.
 debug = "line-tables-only"
 
-[patch."https://github.com/zed-industries/font-kit"]
+# gpui-fast resolves zed-font-kit from crates.io (the zui fork resolved the
+# zed-industries git source). The local patch is byte-identical to the crate
+# source; keep it applied to preserve the pinned build input.
+[patch.crates-io]
 zed-font-kit = { path = "patches/font-kit" }
 

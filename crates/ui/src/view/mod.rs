@@ -16,7 +16,6 @@ mod projects;
 mod prompt_suggestion;
 mod question;
 mod right_panel;
-mod session_card;
 mod session_summary;
 mod settings;
 mod sidebar;
@@ -320,11 +319,6 @@ pub struct KeelWindow {
     right_panel_anim: Option<(std::time::Instant, u64)>,
     /// How open the right sidepanel was when the current toggle began (0 shut, 1 open).
     right_panel_from: f32,
-    /// The sidebar or right panel slide in progress: the reading column's
-    /// start and landing geometry. The transcript and composer both read it.
-    column_slide: Option<session_card::ColumnSlide>,
-    /// The reading column as last rendered, where the next slide starts.
-    column_last: session_card::ColumnGeo,
     /// Debug: the per-frame layout trace `ui-dev.sock`'s `trace` reads.
     geo_trace: std::rc::Rc<dev::GeoTrace>,
     /// Named groups of folders (`{data_dir}/projects.json`).
@@ -347,7 +341,6 @@ pub struct KeelWindow {
     model_chip_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     effort_chip_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     permission_chip_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
-    card_branch_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// The docked composer's height: it floats over the transcript's foot.
     dock_h: std::rc::Rc<std::cell::Cell<f32>>,
     /// `dock_h` as the newest row was last measured with.
@@ -557,8 +550,6 @@ pub struct KeelWindow {
     browser: browser_panel::BrowserPanel,
     files: files_panel::FilesPanel,
     right_panel: right_panel::RightPanel,
-    /// The always-open card over the chat's top right.
-    session_card: session_card::SessionCard,
     /// The docked composer's slot width last frame.
     composer_slot: std::rc::Rc<std::cell::Cell<f32>>,
     /// The docked panel's width cap, as last laid out: where the hero drop
@@ -878,8 +869,6 @@ impl KeelWindow {
                 this.window_active = window.is_window_active();
                 if this.window_active {
                     this.mark_current_read(cx);
-                    // The tree may have changed while away.
-                    this.card_poke(cx);
                 }
                 this.dotify_on_activation(cx);
             }),
@@ -893,7 +882,7 @@ impl KeelWindow {
             let Some(this) = weak.upgrade() else { return };
             let ks = &event.keystroke;
             if ks.key == ","
-                && ks.modifiers.secondary()
+                && ks.modifiers.secondary(cx)
                 && !ks.modifiers.shift
                 && !ks.modifiers.alt
                 && !ks.modifiers.control
@@ -1206,8 +1195,6 @@ impl KeelWindow {
             tail_len: 0,
             sidebar_anim: None,
             frame_now: Default::default(),
-            column_slide: None,
-            column_last: Default::default(),
             geo_trace: Default::default(),
             projects,
             sidebar_from: 0.,
@@ -1222,7 +1209,6 @@ impl KeelWindow {
             model_chip_bounds: Default::default(),
             effort_chip_bounds: Default::default(),
             permission_chip_bounds: Default::default(),
-            card_branch_bounds: Default::default(),
             dock_h: Default::default(),
             tail_dock_h: 0.,
             hero_title: Default::default(),
@@ -1341,7 +1327,6 @@ impl KeelWindow {
             browser,
             files,
             right_panel: right_panel::RightPanel::new(cx.focus_handle()),
-            session_card: Default::default(),
             composer_slot: Default::default(),
             composer_max: Default::default(),
             status_message: None,
@@ -1604,29 +1589,6 @@ impl KeelWindow {
         crate::motion::glide_curve(t)
     }
 
-    /// The current right panel slide's eased progress (0 start, 1 landed).
-    fn right_panel_progress(&self) -> f32 {
-        let Some((at, _)) = self.right_panel_anim.filter(|_| !self.reduced()) else {
-            return 1.;
-        };
-        let t = (self.slide_elapsed(at).as_secs_f32() / self.right_panel_duration().as_secs_f32())
-            .min(1.);
-        crate::motion::glide_curve(t)
-    }
-
-    /// How far the reading column is through its slide: the slower of the
-    /// two when the sidebar and a right panel move at once.
-    pub(super) fn slide_progress(&self) -> f32 {
-        let mut p: f32 = 1.;
-        if self.sidebar_toggling() {
-            p = p.min(self.sidebar_progress());
-        }
-        if self.right_panel_toggling() {
-            p = p.min(self.right_panel_progress());
-        }
-        p
-    }
-
     /// Whether the unified right side panel is currently open and allowed.
     pub(super) fn right_panel_open(&self) -> bool {
         self.browser_allowed() && self.right_panel.open
@@ -1716,8 +1678,7 @@ impl KeelWindow {
         self.right_panel_anim = Some((now, next));
     }
 
-    /// The reading column's max width. Constant: a slide holds the column's
-    /// actual width through `column_slide` instead.
+    /// The reading column's max width.
     pub(super) fn column_max(&self) -> gpui::Pixels {
         crate::style::TRANSCRIPT_MAX_WIDTH
     }
@@ -2248,7 +2209,6 @@ impl KeelWindow {
                             }
                             if before == ChatStatus::Running && after != ChatStatus::Running {
                                 self.files_on_turn_end(id, cx);
-                                self.card_on_turn_end(id, cx);
                                 self.invalidate_git_stats();
                                 self.refresh_git_stats(cx);
                                 self.record_chat_summary_on_turn_end(id);
@@ -2273,7 +2233,6 @@ impl KeelWindow {
                 if let Some(id) = path.strip_prefix("diffs.") {
                     self.state.update_diff_from_view(id, view);
                     self.files_on_checkout_changed(id, cx);
-                    self.card_on_checkout(id, cx);
                     cx.notify();
                     return;
                 }
@@ -3151,40 +3110,6 @@ impl KeelWindow {
         }
         self.kick_motion(cx);
         cx.notify();
-    }
-
-    /// The newest task steps in the conversation, shown under the session card.
-    pub(super) fn current_task_steps(&self) -> Option<crate::steps::Steps> {
-        for item in self.transcript.items.iter().rev() {
-            if let crate::markdown::TranscriptBlock::PlanCard { plan, .. } = &item.block {
-                let items: Vec<String> = plan.steps.iter().map(|s| s.title.clone()).collect();
-                return Some(crate::steps::Steps {
-                    items,
-                    current: Some(0),
-                    kind: crate::steps::StepKind::Task,
-                });
-            }
-        }
-        for msg_id in self.msg_order.iter().rev() {
-            if let Some(entry) = self.messages.get(msg_id) {
-                for step in entry.steps.iter().rev() {
-                    if let crate::turn::Step::PlanCard { plan, .. } = step {
-                        let items: Vec<String> = plan.steps.iter().map(|s| s.title.clone()).collect();
-                        return Some(crate::steps::Steps {
-                            items,
-                            current: Some(0),
-                            kind: crate::steps::StepKind::Task,
-                        });
-                    }
-                    if let crate::turn::Step::Steps { steps, .. } = step {
-                        if steps.kind == crate::steps::StepKind::Task {
-                            return Some(steps.clone());
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// Trace lines the user opened or closed, by line id.
@@ -4746,7 +4671,6 @@ impl KeelWindow {
                 self.close_pages();
                 self.finish_settings_exit(cx);
                 self.state.active_tab = None;
-                self.card_sync_chat(cx);
                 cx.notify();
             }
         }
@@ -4991,76 +4915,6 @@ impl KeelWindow {
                         tracing::warn!("create_chat failed: {err}");
                         this.create_error = Some(err);
                         this.restore_draft = first_message;
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Promote a scratch chat on this device into a chosen real folder,
-    /// copying its isolated scratch files without overwriting existing files.
-    pub(super) fn move_chat_to_folder(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            self.report("no engine", "not connected");
-            return;
-        };
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Move scratch chat to folder".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let path_str = path.to_string_lossy().into_owned();
-            let res = client
-                .call(
-                    "move_chat_to_folder",
-                    serde_json::json!({ "chat_id": chat_id, "path": path_str }),
-                )
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match res {
-                    Ok(v) => {
-                        let space_id = v
-                            .get("space_id")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-                        let cwd = v
-                            .get("cwd")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or(&path_str)
-                            .to_string();
-                        let branch = v
-                            .get("branch")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-                        if !space_id.is_empty() {
-                            this.state.record_created_space(&space_id, &cwd);
-                        }
-                        if let Some(chat) = this.state.chats.get_mut(&chat_id) {
-                            if !space_id.is_empty() {
-                                chat.space_id = space_id;
-                            }
-                            chat.cwd = cwd;
-                            chat.branch = branch;
-                        }
-                        this.invalidate_git_stats();
-                        this.card_sync_chat(cx);
-                        this.ensure_git_stats(cx);
-                        this.ensure_commands(true, cx);
-                    }
-                    Err(err) => {
-                        this.report("Move to folder failed", err);
                     }
                 }
                 cx.notify();
@@ -6063,7 +5917,7 @@ fn menu_panel_with_max_h(
         .occlude()
         .max_h(zpx(max_h))
         .overflow_y_scroll()
-        .on_scroll_wheel(|_, _, cx| {
+        .on_scroll(|_, _, cx| {
             cx.stop_propagation();
         })
         .p_1()
