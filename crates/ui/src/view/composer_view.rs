@@ -9,7 +9,7 @@ use keel_theme::Tokens;
 use super::{KeelWindow, floating_menu_at, menu_item, menu_label, menu_separator};
 use crate::composer::{PrimaryButtonAction, compute_button_action};
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_LG, RADIUS_MD, RADIUS_XL, c};
+use crate::style::{KeelStyled, RADIUS_MD, c};
 
 /// Send button disc and icon ink: the same dark disc whether or not it can
 /// send; disabled only dims the whole button. Swaps at once (it follows
@@ -36,6 +36,16 @@ pub(super) enum Picker {
 }
 
 impl Picker {
+    /// This picker's slot in the composer's per-chip chevron animation state.
+    fn slot(self) -> usize {
+        match self {
+            Picker::Model => 0,
+            Picker::Branch => 1,
+            Picker::Folder => 2,
+            Picker::Repo => 3,
+        }
+    }
+
     pub(super) fn menu_id(self) -> &'static str {
         match self {
             Picker::Model => "model-picker-panel",
@@ -86,7 +96,18 @@ impl KeelWindow {
         cx.notify();
     }
 
+    /// Which chip is showing its menu, in `Picker::slot` order.
+    fn picker_chevrons(&self) -> [bool; 4] {
+        [
+            self.show_model_picker,
+            self.state.show_branch_picker,
+            self.show_harness_picker,
+            self.show_effort_picker,
+        ]
+    }
+
     pub(super) fn set_picker(&mut self, picker: Option<Picker>, cx: &mut Context<Self>) {
+        let was = self.picker_chevrons();
         self.projects.close_scope();
         // Opening a picker leaves the create sheet behind, except when the
         // folder picker is already up and the sheet is what it is showing.
@@ -110,6 +131,17 @@ impl KeelWindow {
             Some(Picker::Branch) => self.load_branches(cx),
             Some(Picker::Repo) => self.load_issue_repos(cx),
             _ => {}
+        }
+        // Only the chip that changed flips; the others hold their angle.
+        let now = self.picker_chevrons();
+        for (n, (was, now)) in self
+            .picker_chevron_gen
+            .iter_mut()
+            .zip(was.into_iter().zip(now))
+        {
+            if was != now {
+                *n += 1;
+            }
         }
         cx.notify();
     }
@@ -671,26 +703,6 @@ impl KeelWindow {
             .bg(c(t.floating))
             .border_1()
             .border_color(c(t.border))
-            .map(|d| {
-                // Multi-tier ambient shadow (tight contact rim, mid elevation, and wide soft diffusion)
-                // lifting the stone card off the background smoothly without pops during transitions.
-                let shadow = c(t.shadow);
-                let layer = |y: f32, blur: f32, spread: f32, alpha: f32| gpui::BoxShadow {
-                    color: gpui::Hsla {
-                        a: shadow.a * alpha,
-                        ..shadow
-                    },
-                    offset: gpui::point(zpx(0.), zpx(y)),
-                    blur_radius: zpx(blur),
-                    spread_radius: zpx(spread),
-                    inset: false,
-                };
-                d.shadow(vec![
-                    layer(1., 3., 0., 0.6),
-                    layer(6., 18., -1., 0.4),
-                    layer(20., 48., -3., 0.3),
-                ])
-            })
             .flex()
             .flex_col()
             // Drop images anywhere on the composer.
@@ -829,6 +841,9 @@ impl KeelWindow {
         let leaving = (!hero)
             .then(|| self.hero_exit.is_some().then_some(self.hero_from).flatten())
             .flatten();
+        // Leaving the hero, the outgoing hero tab fades out cleanly inside the
+        // shrinking panel; active chats show their context in the top bar instead.
+        let mut chat_tab: Option<AnyElement> = None;
         let panel = match leaving.filter(|_| !reduced) {
             Some(from) => {
                 let natural = f32::from(zpx(32.)) + f32::from(zpx(30.)) + 28.;
@@ -838,13 +853,20 @@ impl KeelWindow {
                 );
                 let e = morph_extra(extra, elapsed, crate::motion::SPATIAL);
                 window.request_animation_frame();
-                let tab = self.render_hero_targets(None, window, t, cx);
+                let tab = match chat_tab.take() {
+                    Some(tab) => div().absolute().inset_0().child(tab).into_any_element(),
+                    None => {
+                        let tab = self.render_hero_targets(None, window, t, cx);
+                        crate::motion::vanish(
+                            div().absolute().inset_0().child(tab),
+                            ("hero-tab-out", self.hero_gen as usize),
+                            reduced,
+                        )
+                        .into_any_element()
+                    }
+                };
                 panel
-                    .child(crate::motion::vanish(
-                        div().absolute().inset_0().child(tab),
-                        ("hero-tab-out", self.hero_gen as usize),
-                        reduced,
-                    ))
+                    .child(tab)
                     .when(e > 0., |el| {
                         el.justify_end().min_h(px(natural + e)).mt(px(-e))
                     })
@@ -854,11 +876,32 @@ impl KeelWindow {
         };
 
         // Docked, the panel spans the reading column's text (the column less
-        // the rows' own px_4), so its edges sit on the transcript's.
+        // the rows' own px_4), interpolating smoothly across right-pane slides
+        // so the composer never hits the left gutter and squeezes only its right
+        // edge near the end of the motion.
+        let dropping = !hero && self.hero_exiting();
+        let cap = f32::from(self.column_max() - zpx(32.));
         let max = if hero {
             HERO_COMPOSER_WIDTH
+        } else if dropping {
+            px(cap)
         } else {
-            self.column_max() - zpx(32.)
+            let viewport = f32::from(window.viewport_size().width);
+            let sidebar = self.state.sidebar_width() * self.sidebar_open_now();
+            let right_full = if self.browser_allowed() {
+                self.browser_width(window)
+            } else {
+                0.
+            };
+            let gutters = f32::from(zpx(32.));
+            let closed_avail = viewport - sidebar - gutters;
+            let open_avail = viewport - sidebar - right_full - gutters;
+            px(crate::motion::composer_slide_max_w(
+                closed_avail,
+                open_avail,
+                cap,
+                self.right_panel_open_now(),
+            ))
         };
         if !hero {
             self.composer_max.set(f32::from(max));
@@ -866,11 +909,15 @@ impl KeelWindow {
         let width = div().w_full().max_w(max);
         // Mid-drop this box is squeezed by the drop's widening; the drop
         // measures the real slot instead (else the panel landed narrow, then jumped).
-        let dropping = !hero && self.hero_exiting();
         let record = self.composer_slot.clone();
-        // On the hero, folder / branch / machine ride in a tab on the panel's
-        // top edge. Drawn after the panel so it covers that stretch of border.
-        let tab = hero.then(|| self.render_hero_targets(open, window, t, cx));
+        // Folder / branch / repo ride in a tab on the panel's top edge: the
+        // hero's pickers, or a chat's read-only targets. Drawn after the
+        // panel so it covers that stretch of border. Mid-drop the tab is
+        // inside the panel above, and only its height is reserved here.
+        let tab = hero
+            .then(|| self.render_hero_targets(open, window, t, cx))
+            .or(chat_tab);
+        let reserve_tab = hero || tab.is_some() || dropping;
         div()
             .flex_none()
             .w_full()
@@ -884,10 +931,9 @@ impl KeelWindow {
                     div()
                         .relative()
                         .w_full()
-                        .when(hero, |d| d.mt(zpx(TAB_HEIGHT)))
+                        .when(reserve_tab, |d| d.mt(zpx(TAB_HEIGHT)))
                         .child(panel)
                         .children(tab)
-                        .children((!hero).then(|| self.render_points(t, cx)))
                         .children(self.render_create_error(t, cx)),
                 ),
             )
@@ -972,93 +1018,6 @@ impl KeelWindow {
                 .child(pill)
                 .into_any_element(),
         )
-    }
-
-    /// The session's points. Sits on the
-    /// composer's top-right; hidden on the hero, which has no transcript.
-    fn render_points(&mut self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
-        let open = self.show_points_menu;
-        let points = self.transcript.user_points();
-        let menu = self.menu_phase("points-menu", open, cx).map(|leaving| {
-            let rows: Vec<AnyElement> = points
-                .iter()
-                .rev()
-                .map(|(index, text)| {
-                    let index = *index;
-                    // The shared menu row (no check column: these rows are
-                    // jumps, not settings), in secondary text that rises to
-                    // primary on hover, one line.
-                    menu_item(format!("point-{index}"), t, true, false)
-                        .text_color(c(t.text_muted))
-                        .child(div().flex_1().min_w_0().truncate().child(text.clone()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.show_points_menu = false;
-                            this.transcript.scroll_to_row(index);
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                })
-                .collect();
-            let rows = if rows.is_empty() {
-                vec![menu_label("No messages yet", t).into_any_element()]
-            } else {
-                rows
-            };
-            // Right edges line up with the pill's, so the menu opens over the
-            // composer instead of hanging off past it.
-            let dismiss = cx.listener(|this, _, _, cx| {
-                this.show_points_menu = false;
-                this.note_menu_dismissed("points-menu");
-                cx.notify();
-            });
-            // A clear gap above the pill so the menu reads as its own layer.
-            let panel = super::menu_panel("points-menu", t, POINTS_MENU_W, true, rows)
-                .mb(zpx(POINTS_MENU_GAP))
-                .when(leaving.is_none(), |d| d.on_mouse_down_out(dismiss));
-            gpui::deferred(
-                gpui::anchored()
-                    .anchor(gpui::Anchor::BottomRight)
-                    .snap_to_window_with_margin(zpx(8.))
-                    .child(super::menu_motion(
-                        panel,
-                        "points-menu",
-                        true,
-                        leaving,
-                        self.reduced(),
-                    )),
-            )
-            .with_priority(1)
-            .into_any_element()
-        });
-        div()
-            .absolute()
-            .top(zpx(-POINTS_PILL_H - 6.))
-            .right_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .px(zpx(POINTS_PILL_PAD))
-            .h(zpx(POINTS_PILL_H))
-            .floating_surface(t)
-            // After the surface, which sets its own radius: the input's
-            // softness, not a capsule.
-            .rounded(RADIUS_XL)
-            // Out past the pill's 1px border, so the menu's right edge sits
-            // flush with the pill's outer edge.
-            .child(div().absolute().top(px(-1.)).right(px(-1.)).children(menu))
-            .children(super::dev::GeoTrace::probe(&self.geo_trace, |g| &g.points))
-            .child(div().child(
-                points_chip("points-menu-btn", Icon::List, open, t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        if this.menu_just_dismissed("points-menu") {
-                            return;
-                        }
-                        this.show_points_menu = !this.show_points_menu;
-                        cx.notify();
-                    },
-                )),
-            ))
-            .into_any_element()
     }
 
     /// The `@` / `/` menu for this frame. The menu closes from many places
@@ -1413,24 +1372,7 @@ impl KeelWindow {
             .map(|(_, p)| p.name.clone())
             .unwrap_or_else(|| "Issue repo".into());
         let divider = || div().w(zpx(1.)).h(zpx(14.)).flex_none().bg(c(t.border));
-        div()
-            .absolute()
-            .bottom(gpui::relative(1.))
-            .right(zpx(18.))
-            // One pixel into the panel, over its top border, so they read as one piece.
-            .mb(zpx(-1.))
-            .h(zpx(TAB_HEIGHT + 1.))
-            .px_1()
-            .pb(zpx(1.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_0p5()
-            .rounded_t(zpx(12.))
-            .bg(c(t.floating))
-            .border_1()
-            .border_b_0()
-            .border_color(c(t.border))
+        target_tab(t)
             .child(self.picker_chip(
                 Picker::Folder,
                 "folder-picker-btn",
@@ -1776,10 +1718,44 @@ impl KeelWindow {
     ) -> impl IntoElement {
         let is_open = open == Some(picker);
         // These chips ride the hero panel's top edge, so their menus open
-        // downward, into the panel rather than off the top of the window.
-        let menu = self
-            .menu_phase(picker.menu_id(), is_open, cx)
-            .map(|leaving| self.render_picker_menu(picker, leaving, false, t, cx));
+        // upward, clear of the composer instead of down over it.
+        let phase = self.menu_phase(picker.menu_id(), is_open, cx);
+        let closing = phase.flatten().is_some();
+        let menu = phase.map(|leaving| self.render_picker_menu(picker, leaving, true, t, cx));
+        // The chevron flips up while its menu shows: 180° on the entrance
+        // curve opening, the quicker exit curve on close. Only the chip that
+        // toggled animates, and never on plain load.
+        let turn = std::f32::consts::PI;
+        let chevron = Icon::ChevronDown.el(zpx(12.));
+        let n = self.picker_chevron_gen[picker.slot()];
+        let chevron: AnyElement = if self.reduced() || n == 0 || !(is_open || closing) {
+            chevron
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(if is_open {
+                    turn
+                } else {
+                    0.
+                })))
+                .into_any_element()
+        } else {
+            use gpui::AnimationExt as _;
+            let (from, to) = if is_open { (0., turn) } else { (turn, 0.) };
+            let duration = if is_open {
+                crate::motion::BASE
+            } else {
+                crate::motion::FAST
+            };
+            chevron
+                .with_animation(
+                    gpui::ElementId::Name(format!("{}-chevron-{n}", picker.menu_id()).into()),
+                    gpui::Animation::new(duration).with_easing(crate::motion::ease_out_strong),
+                    move |icon, delta| {
+                        icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            from + (to - from) * delta,
+                        )))
+                    },
+                )
+                .into_any_element()
+        };
         div().relative().children(menu).child(
             chip(id, t, is_open)
                 .when_some(icon, |d, icon| d.child(icon.el(zpx(13.))))
@@ -1791,11 +1767,7 @@ impl KeelWindow {
                         .text_ellipsis()
                         .child(label),
                 )
-                .child(
-                    div()
-                        .text_color(c(t.text_faint))
-                        .child(Icon::ChevronDown.el(zpx(12.))),
-                )
+                .child(div().text_color(c(t.text_faint)).child(chevron))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.open_picker_with_search(picker, window, cx)
                 })),
@@ -2722,11 +2694,28 @@ impl KeelWindow {
                 items,
             );
         }
-        // Anchored to its own chip wrapper, which is the relative parent.
-        super::floating_menu_at(
+        // The hero tab rides the panel's top edge, so its chips' menus open
+        // from the tab's top corner, above it and clear of the chips. The tab
+        // sits `TAB_HEIGHT - 1` above the panel, 18 px in from its left.
+        let at = self
+            .hero_panel
+            .get()
+            .map(|b| gpui::point(b.left() + zpx(18.), b.top() - zpx(TAB_HEIGHT - 1.)));
+        let anchor = if up {
+            gpui::Anchor::BottomLeft
+        } else {
+            gpui::Anchor::TopLeft
+        };
+        // Fit the menu to the room above the tab: a taller one would snap
+        // back down and cover the chips it belongs to.
+        let max_h = at.map_or(360., |p| (f32::from(p.y) - 8.).clamp(160., 360.));
+        super::floating_menu_positioned_with_max_h(
             id,
             t,
             width,
+            max_h,
+            anchor,
+            at,
             up,
             leaving,
             self.reduced(),
@@ -2813,12 +2802,6 @@ impl ChipWidth {
     }
 }
 
-/// The points pill: chips plus a pad on each side, minus the 1 px border.
-const POINTS_PILL_PAD: f32 = 3.;
-const POINTS_MENU_GAP: f32 = 8.;
-/// The jump list's width: room for most of a prompt's first line.
-const POINTS_MENU_W: f32 = 340.;
-const POINTS_CHIP: f32 = 28.;
 /// The suggestion pill's height, inside the reading line (22 px).
 const SUGGESTION_PILL_H: f32 = 18.;
 /// The pill's fill: the composer surface nudged a few percent toward the
@@ -2892,25 +2875,6 @@ impl PillMotion {
     fn animating(&self) -> bool {
         self.enter.is_some() || self.leave.is_some()
     }
-}
-
-const POINTS_PILL_H: f32 = POINTS_CHIP + 2. * POINTS_PILL_PAD + 2.;
-
-/// One half of the points pill.
-fn points_chip(id: &'static str, icon: Icon, active: bool, t: Tokens) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .size(zpx(POINTS_CHIP))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(RADIUS_LG)
-        .text_color(c(if active { t.text } else { t.text_muted }))
-        .cursor_pointer()
-        .when(active, |s| s.bg(c(t.selected)))
-        .hover(|s| s.text_color(c(t.text)))
-        .hover_fade(c(t.hover), None)
-        .child(icon.el(zpx(15.)))
 }
 
 fn permission_label(mode: PermissionMode) -> &'static str {
@@ -3427,6 +3391,29 @@ fn chip(id: &'static str, t: Tokens, active: bool) -> gpui::Stateful<gpui::Div> 
         .hover_fade(c(t.hover), None)
 }
 
+/// The tab on the composer panel's top edge, top-left. The hero's pickers
+/// and a chat's read-only targets share it, so the two cannot drift.
+fn target_tab(t: Tokens) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom(gpui::relative(1.))
+        .left(zpx(18.))
+        // One pixel into the panel, over its top border, so they read as one piece.
+        .mb(zpx(-1.))
+        .h(zpx(TAB_HEIGHT + 1.))
+        .px_1()
+        .pb(zpx(1.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_0p5()
+        .rounded_t(zpx(12.))
+        .bg(c(t.floating))
+        .border_1()
+        .border_b_0()
+        .border_color(c(t.border))
+}
+
 #[cfg(test)]
 mod slider_tests {
     use super::*;
@@ -3572,6 +3559,20 @@ mod slider_tests {
             .map(|i| morph_extra(120., Duration::from_millis(i * 10), d))
             .collect();
         assert!(steps.windows(2).all(|w| w[1] <= w[0]));
+    }
+
+    #[test]
+    fn each_picker_has_its_own_chevron_slot() {
+        // One slot per picker, so opening one menu does not flip the others.
+        assert_eq!(
+            [
+                Picker::Model.slot(),
+                Picker::Branch.slot(),
+                Picker::Folder.slot(),
+                Picker::Repo.slot(),
+            ],
+            [0, 1, 2, 3]
+        );
     }
 
     #[test]

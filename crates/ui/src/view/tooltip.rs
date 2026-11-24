@@ -308,6 +308,53 @@ fn capsule_width(window: &gpui::Window, text: &str, keys: Option<&str>) -> f32 {
     measure(text, TEXT) + key + z(18.) + 2.
 }
 
+/// A wrapped explanatory tooltip for settings info badges: same floating
+/// surface, rim, shadow, and warm-up entrance as [`capsule`], but wraps
+/// gracefully at 260 px so concise help text never stretches across the window.
+pub(crate) struct InfoTip {
+    text: gpui::SharedString,
+    t: Tokens,
+    entrance: Entrance,
+}
+
+impl InfoTip {
+    pub(crate) fn new(text: impl Into<gpui::SharedString>, t: Tokens) -> Self {
+        Self {
+            text: text.into(),
+            t,
+            entrance: Entrance::new(),
+        }
+    }
+}
+
+impl gpui::Render for InfoTip {
+    fn render(&mut self, window: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        let (opacity, dy, moving) = self.entrance.look(Instant::now());
+        if moving {
+            window.request_animation_frame();
+        }
+        div()
+            .relative()
+            .top(zpx(dy))
+            .opacity(opacity)
+            .max_w(zpx(260.))
+            .px(zpx(10.))
+            .py(zpx(7.))
+            .floating_surface(self.t)
+            .shadow(vec![gpui::BoxShadow {
+                color: c(self.t.shadow),
+                offset: point(px(0.), zpx(4.)),
+                blur_radius: zpx(14.),
+                spread_radius: zpx(-2.),
+                inset: false,
+            }])
+            .text_size(zpx(TEXT))
+            .line_height(zpx(17.))
+            .text_color(c(self.t.text))
+            .child(self.text.clone())
+    }
+}
+
 /// The shortcut as shown on this platform (only macOS shows keycaps).
 pub(super) fn keys(mac: &'static str) -> Option<&'static str> {
     cfg!(target_os = "macos").then_some(mac)

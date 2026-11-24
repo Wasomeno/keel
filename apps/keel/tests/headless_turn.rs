@@ -1,4 +1,5 @@
-//! One headless process, one mock turn, one Pi turn. The Pi child is the stub.
+//! One headless process, one mock turn, one in-process Keel harness turn
+//! backed by a local OpenAI-compatible SSE mock server.
 
 use std::fs;
 use std::io::Read;
@@ -10,13 +11,14 @@ use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 struct Running {
     child: Child,
     reaped: bool,
-    stub_dir: PathBuf,
     out: Arc<Mutex<String>>,
     err: Arc<Mutex<String>>,
 }
@@ -37,34 +39,7 @@ impl Drop for Running {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
-        kill_stub_group(&self.stub_dir);
     }
-}
-
-fn kill_stub_group(stub_dir: &Path) {
-    let Ok(meta) = fs::read_to_string(stub_dir.join("meta")) else {
-        return;
-    };
-    let Some(pid) = meta.lines().find_map(|line| line.strip_prefix("pid=")) else {
-        return;
-    };
-    let Some(pgid) = meta.lines().find_map(|line| line.strip_prefix("pgid=")) else {
-        return;
-    };
-    if pid.is_empty() || pid == "0" || pgid.is_empty() || pgid == "0" {
-        return;
-    }
-    let alive = Command::new("kill")
-        .args(["-0", pid])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !alive {
-        return;
-    }
-    let _ = Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
-        .status();
 }
 
 fn drain(mut pipe: impl Read + Send + 'static) -> (thread::JoinHandle<()>, Arc<Mutex<String>>) {
@@ -100,6 +75,69 @@ fn free_port() -> u16 {
             return port;
         }
     }
+}
+
+async fn start_mock_openai_sse_server() -> (u16, Arc<Mutex<Vec<(String, String)>>>) {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind mock llm");
+    let port = listener.local_addr().expect("mock addr").port();
+    let captured = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let captured_ref = Arc::clone(&captured);
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let captured = Arc::clone(&captured_ref);
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut req_line = String::new();
+                if reader.read_line(&mut req_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut content_length = 0usize;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if let Some((name, val)) = trimmed.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = val.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                if content_length > 0 {
+                    let _ = reader.read_exact(&mut body).await;
+                }
+                captured.lock().expect("captured").push((
+                    req_line.trim().to_string(),
+                    String::from_utf8_lossy(&body).into_owned(),
+                ));
+
+                let sse = concat!(
+                    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture-ok\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                    sse.len()
+                );
+                let _ = write_half.write_all(header.as_bytes()).await;
+                let _ = write_half.write_all(sse.as_bytes()).await;
+                let _ = write_half.flush().await;
+            });
+        }
+    });
+
+    (port, captured)
 }
 
 fn hello(token: &str) -> String {
@@ -159,7 +197,7 @@ fn occurrences(blob: &str, needle: &str) -> usize {
 }
 
 #[tokio::test]
-async fn headless_completes_a_mock_turn_and_a_pi_turn() {
+async fn headless_completes_a_mock_turn_and_a_keel_turn() {
     let root = std::env::temp_dir().join(format!(
         "keel-headless-{}-{}",
         std::process::id(),
@@ -172,19 +210,8 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
     fs::create_dir_all(root.join("work")).expect("work");
     let data = root.join("data");
     fs::create_dir_all(&data).expect("data");
-    let stub_src =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/harness/fixtures/pi_stub.py");
-    let stub = root.join("bin/pi");
-    fs::create_dir_all(stub.parent().expect("bin")).expect("bin");
-    fs::copy(&stub_src, &stub).expect("copy stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
-    let stub_dir = root.join("stub");
-    fs::create_dir_all(&stub_dir).expect("stub dir");
-    let session = root.join("pi-session.jsonl");
+
+    let (llm_port, captured_llm) = start_mock_openai_sse_server().await;
     let port = free_port();
     let exe = PathBuf::from(env!("CARGO_BIN_EXE_keel"));
     let mut child = Command::new(&exe)
@@ -193,12 +220,11 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
         .arg(&data)
         .env("KEEL_IPC_PORT", port.to_string())
         .env("KEEL_MOCK_HARNESS", "1")
-        .env("PI_EXECUTABLE", &stub)
-        .env("STUB_DIR", &stub_dir)
-        .env("STUB_SESSION", &session)
-        .env("STUB_MODE", "turn")
+        .env("KEEL_OPENAI_BASE_URL", format!("http://127.0.0.1:{llm_port}/v1"))
+        .env("OPENAI_API_KEY", "sk-test-fixture")
         .env_remove("KEEL_DEV_BEARER")
         .env_remove("KEEL_DATA_DIR")
+        .env_remove("KEEL_BROWSER_MCP_EXE")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -211,7 +237,6 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
     let mut running = Running {
         child,
         reaped: false,
-        stub_dir: stub_dir.clone(),
         out,
         err,
     };
@@ -286,13 +311,13 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
     let harnesses = listed["result"]["harnesses"]
         .as_array()
         .unwrap_or_else(|| panic!("{listed}"));
-    let pi = harnesses
+    let keel = harnesses
         .iter()
         .find(|row| row["id"] == "keel")
         .unwrap_or_else(|| panic!("{listed}"));
-    assert_eq!(pi["installed"], true, "{listed}");
-    assert_eq!(pi["version"], "1.0.4", "{listed}");
-    assert_eq!(pi["display_name"], "Keel");
+    assert_eq!(keel["installed"], true, "{listed}");
+    assert_eq!(keel["version"], env!("CARGO_PKG_VERSION"), "{listed}");
+    assert_eq!(keel["display_name"], "Keel");
     let mock = harnesses
         .iter()
         .find(|row| row["id"] == "mock")
@@ -348,7 +373,7 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
     wait_turn(&rpc, "\"delta\":\"ok\"", 0, &running).await;
 
     let work = root.join("work");
-    let pi_chat = rpc
+    let keel_chat = rpc
         .request(
             "m2",
             json!({
@@ -356,23 +381,23 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
                 "method": "create_chat",
                 "params": {
                     "harness": "keel",
-                    "model": "fixture-model",
+                    "model": "openai/gpt-4.1",
                     "cwd": work.to_string_lossy(),
-                    "title": "Pi"
+                    "title": "Keel"
                 }
             })
             .to_string(),
             &running.logs(),
         )
         .await;
-    let pi_id = pi_chat["result"]["chat_id"]
+    let keel_id = keel_chat["result"]["chat_id"]
         .as_str()
-        .unwrap_or_else(|| panic!("{pi_chat}"))
+        .unwrap_or_else(|| panic!("{keel_chat}"))
         .to_string();
     let _subscribed = rpc
         .request(
             "s2",
-            json!({"id": "s2", "method": "subscribe_chat", "params": {"chat_id": pi_id}})
+            json!({"id": "s2", "method": "subscribe_chat", "params": {"chat_id": keel_id}})
                 .to_string(),
             &running.logs(),
         )
@@ -385,7 +410,7 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
                 "id": "q2",
                 "method": "queue_command",
                 "params": {
-                    "chat_id": pi_id,
+                    "chat_id": keel_id,
                     "command": {
                         "type": "send",
                         "command_id": "22222222-2222-2222-2222-222222222222",
@@ -402,29 +427,21 @@ async fn headless_completes_a_mock_turn_and_a_pi_turn() {
     wait_turn(&rpc, "\"delta\":\"fixture-ok\"", before_done, &running).await;
 
     let db = data.join("profiles/local/store.sqlite");
-    let session_text = session.to_string_lossy().into_owned();
-    let listed_rows = sqlite_native(&db, &session_text);
+    let sessions_prefix = data.join("harnesses/keel/sessions");
+    let session_file = sqlite_native(&db, &sessions_prefix);
     assert!(
-        listed_rows.contains("sess-1") && listed_rows.contains(&session_text),
-        "{listed_rows}\n{}",
+        Path::new(&session_file).is_file(),
+        "expected session file on disk: {session_file}\n{}",
         running.logs()
     );
-    let args = fs::read_to_string(stub_dir.join("argv")).unwrap_or_default();
-    assert!(args.contains("fixture-model"), "{args}");
-    assert!(!args.contains("--no-session"), "{args}");
-    assert!(!args.lines().any(|line| line.starts_with('@')), "{args}");
-    let env_text = fs::read_to_string(stub_dir.join("env")).unwrap_or_default();
-    assert!(
-        env_text
-            .lines()
-            .filter(|line| !line.starts_with("KEEL_PLAN_STATE="))
-            .all(|line| !line.starts_with("KEEL_")),
-        "{env_text}"
-    );
-    let stdin = fs::read_to_string(stub_dir.join("stdin")).unwrap_or_default();
-    assert!(stdin.contains("get_state"), "{stdin}");
-    assert!(stdin.contains("prompt"), "{stdin}");
-    assert!(!stdin.contains("set_steering_mode"), "{stdin}");
+    let log_text = fs::read_to_string(&session_file).unwrap_or_default();
+    assert!(log_text.contains("fixture-ok"), "{log_text}");
+
+    let reqs = captured_llm.lock().expect("reqs");
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert!(reqs[0].0.starts_with("POST /v1/chat/completions"), "{reqs:?}");
+    assert!(reqs[0].1.contains("\"model\":\"gpt-4.1\""), "{}", reqs[0].1);
+    assert!(reqs[0].1.contains("hello"), "{}", reqs[0].1);
 
     let _ = Command::new("kill")
         .args(["-INT", &running.child.id().to_string()])
@@ -460,10 +477,10 @@ async fn wait_turn(rpc: &Rpc, delta: &str, done_before: usize, running: &Running
     }
 }
 
-fn sqlite_native(db: &Path, session: &str) -> String {
+fn sqlite_native(db: &Path, sessions_dir: &Path) -> String {
     let script = r#"
 import sqlite3, sys, time
-path, native, file = sys.argv[1:]
+path, prefix = sys.argv[1:]
 last = ""
 for _ in range(50):
     try:
@@ -473,25 +490,27 @@ for _ in range(50):
         last = str(err)
         time.sleep(0.05)
         continue
-    if any(row[0] == native and row[1] == file for row in rows):
-        print(rows)
-        raise SystemExit(0)
+    for native_id, file_path in rows:
+        if native_id and file_path and file_path.startswith(prefix) and file_path.endswith(".jsonl"):
+            print(file_path)
+            raise SystemExit(0)
     last = repr(rows)
     time.sleep(0.05)
-print(last)
-raise SystemExit(1)
+raise SystemExit(f"missing native session under {prefix}: {last}")
 "#;
     let output = Command::new("python3")
         .arg("-c")
         .arg(script)
         .arg(db)
-        .arg("sess-1")
-        .arg(session)
+        .arg(sessions_dir)
         .output()
         .expect("python3");
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     if !output.status.success() {
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        panic!(
+            "sqlite_native failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
-    text
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }

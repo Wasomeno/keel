@@ -1,70 +1,42 @@
-//! Keel's own harness: a pinned Pi, bundled with the app, at Pi's defaults.
+//! Keel's own harness profile and folder layout.
 //!
-//! [`crate::PiHarness::keel`] is the Pi driver with [`PiProfile::keel`]. It
-//! runs the Pi that ships beside the Keel binary (see `scripts/fetch-pi.sh`),
-//! never one the user installed, and points it at Keel's own Pi folder
-//! ([`set_pi_agent_dir`]): sign-in, settings and packages there are Keel's,
-//! apart from the user's `~/.pi`.
+//! [`crate::PiHarness::keel`] runs the in-process Rust harness using
+//! [`KeelProfile`] and [`PiProfile`], keeping Keel's sign-in, settings,
+//! and sessions in Keel's own folder ([`set_pi_agent_dir`]) apart from `~/.pi`.
 //!
 //! Keel's additions go in [`KeelProfile`], the one place for them:
-//! - a system prompt: set `system_prompt` (passed as `--append-system-prompt`);
-//! - extensions and tools: drop `.ts`/`.js` Pi extension files into
-//!   `{data_dir}/harnesses/keel/extensions/`, or list built-in ones in
-//!   `extensions`. Each loads with `--extension`;
-//! - Pi packages: folders bundled in `pi-packages/` beside the Pi folder are
-//!   registered in Keel's Pi settings (Command Code's provider ships there).
-//!   The Antigravity bridge is registered only when Google's ACP server is
-//!   installed ([`antigravity_acp_bin`]); see [`antigravity_env`].
+//! - a system prompt: set `system_prompt`;
+//! - extensions and tools: drop files into
+//!   `{data_dir}/harnesses/keel/extensions/`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use keel_proto::{HarnessId, PermissionMode};
+#[cfg(test)]
+use keel_proto::PermissionMode;
+use keel_proto::HarnessId;
 
 /// Folder under Keel's data dir that belongs to the Keel harness.
 pub const KEEL_HARNESS_DIR: &str = "harnesses/keel";
 
-/// The Pi release Keel bundles. `scripts/fetch-pi.sh` downloads this one.
+/// Historical Pi release string kept for compatibility with profile metadata.
 pub const PI_VERSION: &str = "1.5.0";
 
-/// `pi-packages/` folder of `@estebanforge/pi-antigravity-bridge`, which adds
-/// the `antigravity/*` models by driving Google's Antigravity ACP server.
+#[cfg(test)]
 pub(crate) const ANTIGRAVITY_BRIDGE: &str = "pi-antigravity-bridge";
 
-/// Google's Antigravity ACP server, under the home folder. Keel installs it;
-/// the bridge never does (it would fetch about 1.5 GB on its own).
+#[cfg(test)]
 const ANTIGRAVITY_ACP_BIN: &str = ".local/share/keel/antigravity-acp/1.3.0/agy_acp_server.par";
 
-/// The installed Antigravity ACP server, or `None` when it is missing.
+#[cfg(test)]
 pub(crate) fn antigravity_acp_bin() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
     let bin = Path::new(&home).join(ANTIGRAVITY_ACP_BIN);
     bin.is_file().then_some(bin)
 }
 
-/// Env for the Antigravity bridge in a Pi Keel starts. Without a server the
-/// bridge is not registered at all, so it gets nothing.
-///
-/// The bridge drives the ACP engine, so Antigravity asks for its native tools
-/// through ACP `session/request_permission`, which the bridge shows as a Pi
-/// `select` and Keel as a question; headless, it denies. `AGY_APPROVALS`
-/// stays off: its hook gate works only on the stream-json engine.
-///
-/// The ACP session mode follows Keel's: Ask is `default` (edits and commands
-/// ask), AutoEdit is `auto_edit` (edits pass, commands ask), full access is
-/// `yolo` via `AGY_SKIP_PERMISSIONS`, as Pi runs unasked. `AGY_ACP_MODE` comes
-/// from `scripts/pi-patches/pi-antigravity-bridge.patch`. `permission` is
-/// `None` for probes and sign-in, which ask (and so deny).
-///
-/// ACP has no per-turn read-only tool list. The bridge's `acpMode` maps a
-/// plan mode to `default` and documents that sending `plan` fails the turn,
-/// so this function never sets `AGY_ACP_MODE=plan`.
-///
-/// Auto-edit (`auto_edit`) lets file edits through without asking, and full
-/// access (`AGY_SKIP_PERMISSIONS=1`) becomes `yolo`. Either way a mutating
-/// call never reaches Keel's permission deny. While `plan_mode` is on, both
-/// are forced back to ask: skip stays `0` and the mode stays `default`.
+#[cfg(test)]
 pub(crate) fn antigravity_env(
     bin: Option<&Path>,
     permission: Option<PermissionMode>,
@@ -111,44 +83,7 @@ pub fn pi_agent_dir() -> Option<&'static Path> {
     PI_AGENT_DIR.get().map(PathBuf::as_path)
 }
 
-/// Keel's sign-in, as a Pi extension: `/keel-login <provider>` runs Pi's own
-/// OAuth login (`ModelRuntime::login`) and reports each step as a
-/// `{"type":"keel_login",...}` line on stdout, which Pi's RPC mode moves to
-/// stderr (see `PiHarness::sign_in`). Questions are answered the
-/// way a headless app can: a method picker takes Pi's default (the browser
-/// login), a blank text answer means github.com, and a pasted code is never
-/// needed because the browser's callback finishes the login.
-const LOGIN_EXTENSION: &str = r#"// Written by Keel; rewritten on each sign-in.
-export default function (pi: any) {
-  pi.registerCommand("keel-login", {
-    description: "Sign in to a provider for Keel",
-    handler: async (args: string, ctx: any) => {
-      const say = (line: object) => process.stdout.write(JSON.stringify({ type: "keel_login", ...line }) + "\n");
-      const never = (signal?: AbortSignal) =>
-        new Promise<string>((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
-      const [provider, deviceId] = args.trim().split(/\s+/);
-      try {
-        await ctx.modelRegistry.runtime.login(provider, "oauth", {
-          notify: (event: object) => say({ event }),
-          prompt: async (request: any) => {
-            if (request.type === "select") return request.options[0].id;
-            if (request.type === "text") return "";
-            if (request.type !== "manual_code") say({ event: { type: "progress", message: request.message } });
-            return never(request.signal);
-          },
-        }, { getDeviceId: () => deviceId });
-        say({ done: true });
-      } catch (error: any) {
-        say({ error: String(error?.message ?? error) });
-      }
-    },
-  });
-}
-"#;
-
-/// This install's device id, which some sign-ins send (ChatGPT for the
-/// `openai` provider). Kept as `deviceId` in `{agent}/settings.json`, the
-/// field Pi's own `/login` uses, and created on first use.
+#[cfg(test)]
 pub(crate) fn device_id(agent: &Path) -> String {
     let path = agent.join("settings.json");
     let mut settings: serde_json::Value = std::fs::read_to_string(&path)
@@ -172,32 +107,12 @@ pub(crate) fn device_id(agent: &Path) -> String {
     id
 }
 
-/// [`LOGIN_EXTENSION`] on disk beside Keel's Pi folder (the temp dir when
-/// none is set), rewritten only when it changed.
-pub(crate) fn login_extension() -> std::io::Result<PathBuf> {
-    let dir = pi_agent_dir()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(std::env::temp_dir);
-    let path = dir.join("keel-login.ts");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(LOGIN_EXTENSION) {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, LOGIN_EXTENSION)?;
-    }
-    Ok(path)
-}
-
-/// Register each folder in `pi-packages/` beside the bundled Pi (`exe` is
-/// `<root>/pi/pi`) in `{agent}/settings.json` `packages`, and drop entries
-/// for bundled folders that are gone (an older app location). Other
-/// entries and settings are left alone.
+#[cfg(test)]
 pub(crate) fn register_bundled_packages(exe: &Path, agent: &Path) {
     register_packages(exe, agent, antigravity_acp_bin().is_some());
 }
 
-/// [`register_bundled_packages`]; `antigravity` says whether the bridge's
-/// server is installed. Without it the bridge stays out (and an entry from
-/// before is dropped), so it never downloads its own.
+#[cfg(test)]
 fn register_packages(exe: &Path, agent: &Path, antigravity: bool) {
     let legacy_skill = agent.join("skills/indonesian-natural");
     if legacy_skill.is_dir() {
@@ -333,7 +248,7 @@ impl PiProfile {
         Self {
             id: HarnessId::Keel,
             display_name: "Keel",
-            description: "Keel's own agent, built on a bundled Pi.",
+            description: "Keel's own in-process Rust agent harness.",
             tag: "keel",
             keel: Some(KeelProfile::default()),
         }

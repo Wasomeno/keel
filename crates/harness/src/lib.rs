@@ -1,13 +1,11 @@
-//! Harness trait, the mock driver, and the Pi driver that runs Keel.
+//! Harness trait, the mock driver, and the in-process Keel driver.
 //!
 //! `run` returns a `'static` stream. The engine keeps [`ControlMsg`]'s sender.
-//! The task that owns the child owns `controls.inbound`.
+//! The task that owns the run owns `controls.inbound`.
 
-mod antigravity;
 pub mod keel;
 mod mock;
-mod pi;
-mod proc;
+mod native;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +20,9 @@ use tokio::sync::mpsc;
 
 pub use keel::{KeelProfile, PI_VERSION, PiProfile, pi_agent_dir, set_pi_agent_dir};
 pub use mock::{MockHarness, Step};
-pub use pi::{LABEL_DESC, MEMORY_PREAMBLE, MEMORY_PROTO, MEMORY_UNAVAILABLE, PiHarness};
+pub use native::{
+    KeelHarness, LABEL_DESC, MEMORY_PREAMBLE, MEMORY_PROTO, MEMORY_UNAVAILABLE, PiHarness,
+};
 
 /// Reports a CLI session id and, when the CLI has one, its session file.
 pub type SessionReport = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
@@ -47,6 +47,12 @@ pub struct AuthAccount {
     pub signed_in: bool,
     /// The stored credential's type (`oauth`, `api_key`), or why not.
     pub detail: String,
+    /// Whether this provider supports browser/device OAuth sign-in.
+    #[serde(default)]
+    pub supports_oauth: bool,
+    /// Whether the active credential is supplied by a process environment variable.
+    #[serde(default)]
+    pub from_env: bool,
 }
 
 /// A step of a [`Harness::sign_in`] the user has to see or act on.
@@ -67,29 +73,22 @@ pub(crate) async fn capture(
     args: &[String],
     limit: std::time::Duration,
 ) -> Option<std::process::Output> {
-    let mut cmd = proc::command(exe);
+    let mut cmd = tokio::process::Command::new(exe);
     cmd.args(args)
         .current_dir(std::env::temp_dir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    tokio::task::spawn_blocking(move || proc::output_timeout(cmd, limit))
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd.spawn().ok()?;
+    tokio::time::timeout(limit, keel_tools::process::wait_with_output(child))
         .await
+        .ok()?
         .ok()
-        .flatten()
 }
 
 /// A one-shot prompt that runs longer than this is killed.
 pub(crate) const ONE_SHOT_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// `[flag, model]` when a model is set, else nothing (the CLI's default).
-fn model_flag(flag: &str, model: &ModelId) -> Vec<String> {
-    if model.0.is_empty() {
-        Vec::new()
-    } else {
-        vec![flag.to_string(), model.0.clone()]
-    }
-}
 
 /// Model id the session spec stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1230,6 +1229,22 @@ pub trait Harness: Send + Sync {
     ) -> Result<(), HarnessError> {
         Err(HarnessError::Failed(format!(
             "{} has no sign-in",
+            self.display_name()
+        )))
+    }
+
+    /// Store or replace an API key for model provider `provider`.
+    async fn set_api_key(&self, _provider: &str, _api_key: &str) -> Result<(), HarnessError> {
+        Err(HarnessError::Failed(format!(
+            "{} does not support API keys",
+            self.display_name()
+        )))
+    }
+
+    /// Remove the stored credential (subscription OAuth token or API key) for `provider`.
+    async fn remove_credential(&self, _provider: &str) -> Result<(), HarnessError> {
+        Err(HarnessError::Failed(format!(
+            "{} does not support disconnecting accounts",
             self.display_name()
         )))
     }

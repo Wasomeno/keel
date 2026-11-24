@@ -32,10 +32,10 @@ use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_LG, RADIUS_MD, c, zpx};
 use agent::AgentTab;
 
 /// Default share of the window, and the bounds a drag keeps it in.
-const DEFAULT_SHARE: f32 = 0.42;
+const DEFAULT_SHARE: f32 = 0.34;
 const MIN_WIDTH: f32 = 320.;
 /// The chat keeps at least this much beside the pane.
-const MIN_CHAT: f32 = 360.;
+const MIN_CHAT: f32 = 460.;
 /// The page card's inset from the pane edges, and its border.
 const PAGE_INSET: f32 = 6.;
 /// Addresses the empty pane offers: the usual dev-server ports.

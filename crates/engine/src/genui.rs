@@ -202,7 +202,7 @@ pub fn ui_tools() -> Value {
         },
         {
             "name": "show_compare",
-            "description": "Show two or three columns of short claims. The card is the user's copy of the comparison: do not also write it in your reply. Call it for options or before/after as claims, not numbers. Numbers belong on show_chart or show_stats. Mark recommended on at most one column.",
+            "description": "Show two or three columns comparing competing options to choose between (or a before/after change) as short qualitative claims, never numbers (numbers belong on show_chart or show_stats). Do not call it to summarize task results, verification findings, or status splits (such as matched vs missing, verified vs unverified, done vs remaining, or passed vs failed) — report those in plain prose instead, because compare cards visually frame columns as choices to pick between. The card is the user's copy of the comparison: do not also write it in your reply.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -215,7 +215,7 @@ pub fn ui_tools() -> Value {
                             "properties": {
                                 "title": {"type": "string"},
                                 "points": {"type": "array", "items": {"type": "string"}, "maxItems": 4, "description": "Short claims, one line each"},
-                                "recommended": {"type": "boolean"}
+                                "recommended": {"type": "boolean", "description": "Set true on at most one column, and only when presenting options to choose between where you recommend one; leave false/omitted otherwise"}
                             },
                             "required": ["title", "points"]
                         }

@@ -178,13 +178,7 @@ pub fn verb(op: BrowserOp, args: &Args) -> Verb {
         BrowserOp::Click => v("Click", "Clicking", "Clicked", "click", "clicking"),
         BrowserOp::Type => v("Type", "Typing", "Typed", "type", "typing"),
         BrowserOp::Scroll => v("Scroll", "Scrolling", "Scrolled", "scroll", "scrolling"),
-        BrowserOp::Snapshot => v(
-            "Read page",
-            "Reading page",
-            "Read page",
-            "read page",
-            "reading page",
-        ),
+        BrowserOp::Snapshot => v("Read", "Reading", "Read", "read", "reading"),
         BrowserOp::Screenshot if args.full_page => v(
             "Take full-page screenshot",
             "Taking full-page screenshot",
@@ -589,9 +583,34 @@ pub fn redact_typed(text: &str) -> String {
     }
 }
 
+/// Format the outcome's page title as `"the <Title> page"` when present.
+fn page_label(out: &Outcome) -> Option<String> {
+    let title = out
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())?;
+    let short = cut(title, 36);
+    if short.to_ascii_lowercase().ends_with(" page") || short.eq_ignore_ascii_case("page") {
+        Some(format!("the {short}"))
+    } else {
+        Some(format!("the {short} page"))
+    }
+}
+
+fn element_phrase(tag: &str) -> String {
+    match tag {
+        "a" | "link" => "the link".to_string(),
+        "textbox" | "input" | "textarea" => "the field".to_string(),
+        "menuitem" => "the menu item".to_string(),
+        _ => format!("the {tag}"),
+    }
+}
+
 /// What the line names: a site, an element, the typed text and field.
 pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
     let url = out.url.as_deref().or(args.url.as_deref());
+    let page = page_label(out);
     // The outcome is the first line; a page diff may follow it.
     let result = out
         .text
@@ -603,23 +622,29 @@ pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
     let short_sel = |s: &str| cut(s, 40);
     match op {
         BrowserOp::OpenPane => "browser".to_string(),
-        BrowserOp::Navigate => args
-            .url
-            .as_deref()
-            .or(url)
-            .map(|u| site(out.url.as_deref().unwrap_or(u), true))
+        BrowserOp::Navigate => page
+            .or_else(|| {
+                args.url
+                    .as_deref()
+                    .or(url)
+                    .map(|u| site(out.url.as_deref().unwrap_or(u), true))
+            })
             .unwrap_or_else(|| "page".to_string()),
         BrowserOp::Console if args.level.as_deref().is_some_and(|l| l != "all") => {
             format!("{}s", args.level.as_deref().unwrap_or_default())
         }
-        BrowserOp::NewTab
-        | BrowserOp::Back
-        | BrowserOp::Forward
-        | BrowserOp::Snapshot
-        | BrowserOp::Console
-        | BrowserOp::Network => url.map(|u| site(u, false)).unwrap_or_default(),
-        BrowserOp::Reload => url
-            .map(|u| site(u, false))
+        BrowserOp::Snapshot => page
+            .or_else(|| url.map(|u| site(u, false)))
+            .unwrap_or_else(|| "page".to_string()),
+        BrowserOp::Screenshot => page.map(|p| format!("of {p}")).unwrap_or_default(),
+        BrowserOp::NewTab | BrowserOp::Back | BrowserOp::Forward => {
+            page.or_else(|| url.map(|u| site(u, false))).unwrap_or_default()
+        }
+        BrowserOp::Console | BrowserOp::Network => {
+            url.map(|u| site(u, false)).unwrap_or_default()
+        }
+        BrowserOp::Reload => page
+            .or_else(|| url.map(|u| site(u, false)))
             .unwrap_or_else(|| "page".to_string()),
         BrowserOp::Click | BrowserOp::Hover => {
             let lead = if op == BrowserOp::Click {
@@ -627,20 +652,28 @@ pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
             } else {
                 "hovered "
             };
-            match element_of(result, lead) {
-                Some((_, Some(label))) => format!("\u{201c}{}\u{201d}", cut(&label, 40)),
-                Some((tag, None)) if tag.contains(['#', '.']) => tag,
+            let parsed = element_of(result, lead);
+            let target = match &parsed {
+                Some((_, Some(label))) => format!("\u{201c}{}\u{201d}", cut(label, 40)),
+                Some((tag, None)) if tag.contains(['#', '.']) => tag.clone(),
+                Some((tag, None)) if page.is_some() && !tag.is_empty() => element_phrase(tag),
                 _ => match (&args.selector, args.x, args.y) {
                     _ if args.target.is_some() && args.selector.is_none() => {
                         args.target.clone().unwrap_or_default()
                     }
                     (Some(sel), _, _) => short_sel(sel),
                     (None, Some(x), Some(y)) => format!("at {}, {}", x.round(), y.round()),
-                    _ => match element_of(result, lead) {
-                        Some((tag, _)) if !tag.is_empty() => tag,
+                    _ => match &parsed {
+                        Some((tag, _)) if !tag.is_empty() => tag.clone(),
                         _ => String::new(),
                     },
                 },
+            };
+            match (target.is_empty(), page) {
+                (false, Some(p)) => format!("{target} in {p}"),
+                (false, None) => target,
+                (true, Some(p)) => format!("on {p}"),
+                (true, None) => String::new(),
             }
         }
         BrowserOp::Type => {
@@ -658,11 +691,17 @@ pub fn subject(op: BrowserOp, args: &Args, out: &Outcome) -> String {
                     .and_then(|n| n.parse::<usize>().ok())
                     .map(|n| format!("{n} character{}", if n == 1 { "" } else { "s" })),
             };
-            match (what, field) {
+            let base = match (what, field) {
                 (Some(what), Some(field)) => format!("{what} in {field}"),
                 (Some(what), None) => what,
                 (None, Some(field)) => format!("in {field}"),
                 (None, None) => String::new(),
+            };
+            match (base.is_empty(), page) {
+                (false, Some(p)) => format!("{base} in {p}"),
+                (false, None) => base,
+                (true, Some(p)) => format!("in {p}"),
+                (true, None) => String::new(),
             }
         }
         BrowserOp::Scroll => {
@@ -919,7 +958,7 @@ mod tests {
         );
         assert_eq!(
             subject(BrowserOp::Click, &args_of(r#"{"ref":"e12"}"#), &o),
-            "\u{201c}Search\u{201d}"
+            "\u{201c}Search\u{201d} in the Results page"
         );
         // Only the tail kept: the fields still come through.
         let o = outcome_of(&out[60..], false);
@@ -1093,6 +1132,29 @@ mod tests {
         assert_eq!(
             redact_typed("typed 7 chars into textbox \"Search\" (e5)"),
             "typed 7 chars into textbox \"Search\" (e5)"
+        );
+
+        let on_a = |text: &str| Outcome {
+            url: Some("http://localhost:3000/a".into()),
+            title: Some("A".into()),
+            text: Some(text.into()),
+            ..Outcome::default()
+        };
+        assert_eq!(
+            line("browser_navigate", r#"{"url":"http://localhost:3000/a"}"#, &on_a("")),
+            ("Opened", "the A page".to_string())
+        );
+        assert_eq!(
+            line("browser_click", r#"{"ref":"e12"}"#, &on_a("clicked button (e12)")),
+            ("Clicked", "the button in the A page".to_string())
+        );
+        assert_eq!(
+            line(
+                "browser_click",
+                r#"{"ref":"e12"}"#,
+                &on_a("clicked button \"Send\" (e12)")
+            ),
+            ("Clicked", "\u{201c}Send\u{201d} in the A page".to_string())
         );
     }
 }

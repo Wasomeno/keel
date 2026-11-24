@@ -216,12 +216,12 @@ impl KeelWindow {
             )
     }
 
-    /// Top row: room for the traffic lights, stationary collapse button, and window drag.
+    /// Top row: room for the traffic lights and window drag.
     fn render_sidebar_titlebar(&mut self, _t: Tokens, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .h(HEADER_HEIGHT)
             .flex_none()
-            .pl(self.traffic_lights_inset() + zpx(26.))
+            .pl(self.traffic_lights_inset())
             .pr_2()
             .flex()
             .flex_row()
@@ -594,15 +594,6 @@ impl KeelWindow {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.state.show_overflow_menu = false;
                         this.archive_chat(chat_id.clone(), cx);
-                    }))
-                    .into_any_element(),
-            );
-            items.push(
-                menu_action("track-mr", Icon::GitLab.el(zpx(14.)), false, t)
-                    .child("Track merge request")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.state.show_overflow_menu = false;
-                        this.mr_open_prompt(window, cx);
                     }))
                     .into_any_element(),
             );
@@ -1427,7 +1418,6 @@ impl KeelWindow {
                     .unwrap_or_else(|| crate::model_menu::format_name(&c.model))
             });
         let git = self.git_badge(&chat.id);
-        let mr_badge = self.mr_badge(&chat.id, t);
         let group = format!("chat-row-{}", chat.id);
         let chat_id = chat.id.clone();
         div()
@@ -1612,8 +1602,7 @@ impl KeelWindow {
                             .text_ellipsis()
                             .font_family(crate::style::MONO)
                             .children(git),
-                    )
-                    .children(mr_badge),
+                    ),
                 ),
             )
             .children(status_dot(status, &chat.id, t, self.reduced()))

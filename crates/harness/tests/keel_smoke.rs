@@ -77,7 +77,7 @@ async fn keel_harness_answers_a_real_read_only_prompt() {
     );
     assert!(text.to_lowercase().contains("ok"), "{text:?}");
     assert_eq!(tools, 0);
-    // Keel's session file and generated extensions live in its own folders.
+    // Keel's session file lives in its own sessions folder.
     let sessions = KeelProfile::sessions_dir(&data);
     let seen = seen.lock().unwrap().clone();
     eprintln!("reported sessions: {seen:?}");
@@ -87,8 +87,11 @@ async fn keel_harness_answers_a_real_read_only_prompt() {
             .is_some_and(|f| f.starts_with(&*sessions.to_string_lossy()))),
         "{seen:?}"
     );
-    assert!(data.join("browser-mcp/keel-smoke.ts").is_file());
-    assert!(data.join("keel-permission-ask.keel.ts").is_file());
-    assert!(!data.join("browser-mcp/pi-smoke.ts").exists());
+    assert!(
+        seen.iter()
+            .filter_map(|(_, file)| file.as_deref())
+            .any(|f| std::path::Path::new(f).is_file()),
+        "expected persisted session .jsonl file in {sessions:?}: {seen:?}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

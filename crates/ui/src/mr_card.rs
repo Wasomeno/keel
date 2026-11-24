@@ -41,9 +41,16 @@ impl MrCard {
         }
     }
 
-    /// For the transcript's height memo: changes when the state does.
+    /// For the transcript's height memo: changes when the state or stats change.
     pub fn content_len(&self) -> usize {
-        self.snap.title.len() + self.snap.status_text().len() + usize::from(self.offer_merge)
+        self.snap.title.len()
+            + self.snap.status_text().len()
+            + self.snap.source_branch.len()
+            + self.snap.target_branch.len()
+            + self.snap.created_at.len()
+            + self.snap.merged_at.len()
+            + usize::from(self.snap.files_changed.is_some())
+            + usize::from(self.offer_merge)
     }
 }
 

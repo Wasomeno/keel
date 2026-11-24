@@ -304,6 +304,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("vertexai", "Google"),
     ("xai", "xAI"),
     ("x-ai", "xAI"),
+    ("grok", "xAI"),
     ("meta", "Meta"),
     ("meta-llama", "Meta"),
     ("mistral", "Mistral"),
@@ -336,6 +337,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("tencent", "Tencent"),
     ("meituan", "Meituan"),
     ("nvidia", "NVIDIA"),
+    ("neuralwatt", "NeuralWatt"),
     ("sakana", "Sakana"),
     ("thinkingmachines", "Thinking Machines"),
     ("inclusionai", "InclusionAI"),
@@ -413,29 +415,45 @@ pub fn is_snapshot(id: &str) -> bool {
 
 /// The version in an ID: its short digit runs up to the first long one (a
 /// date). `claude-opus-4-7` → [4, 7]; `claude-3-5-sonnet-20241022` → [3, 5];
-/// `gpt-5.1-codex` → [5, 1]; none → empty.
+/// `gpt-5.1-codex` → [5, 1]; `grok-4.20` → [4, 2] (trailing zeros on a final
+/// dotted decimal part normalize so 4.20 < 4.3 < 4.7); none → empty.
 pub fn version(id: &str) -> Vec<u32> {
     let mut out = Vec::new();
     let mut run = String::new();
-    let flush = |run: &mut String, out: &mut Vec<u32>| -> bool {
+    let mut after_dot = false;
+    let flush = |run: &mut String, out: &mut Vec<u32>, after_dot: bool, next: Option<char>| -> bool {
         if run.is_empty() {
             return true;
         }
         let keep = run.len() <= 3;
         if keep {
-            out.push(run.parse().unwrap_or(0));
+            if after_dot && next != Some('.') && run.len() > 1 && run.ends_with('0') {
+                let trimmed = run.trim_end_matches('0');
+                let normalized = if trimmed.is_empty() { "0" } else { trimmed };
+                out.push(normalized.parse().unwrap_or(0));
+            } else {
+                out.push(run.parse().unwrap_or(0));
+            }
         }
         run.clear();
         keep
     };
+    let mut prev_dot = false;
     for ch in base(id).chars() {
         if ch.is_ascii_digit() {
+            if run.is_empty() {
+                after_dot = prev_dot;
+            }
             run.push(ch);
-        } else if !flush(&mut run, &mut out) {
-            return out;
+        } else {
+            if !flush(&mut run, &mut out, after_dot, Some(ch)) {
+                return out;
+            }
+            after_dot = false;
         }
+        prev_dot = ch == '.';
     }
-    flush(&mut run, &mut out);
+    flush(&mut run, &mut out, after_dot, None);
     out
 }
 
@@ -491,8 +509,8 @@ pub fn group(models: &[ModelOption]) -> Vec<Group> {
                     && members.iter().any(|&j| {
                         j != i
                             && !snaps[j]
-                            && variants[j] == variants[i]
-                            && versions[j] > versions[i]
+                            && ((variants[j] == variants[i] && versions[j] > versions[i])
+                                || (versions[i][0] > 0 && versions[j].first() > versions[i].first()))
                     })
             };
             let (mut older, mut current): (Vec<usize>, Vec<usize>) =
@@ -745,6 +763,10 @@ mod tests {
         assert_eq!(version("gpt-4o-2024-08-06"), vec![4]);
         assert_eq!(version("grok-code-fast"), Vec::<u32>::new());
         assert!(version("claude-opus-4-10") > version("claude-opus-4-9"));
+        assert_eq!(version("xai/grok-4.20"), vec![4, 2]);
+        assert!(version("xai/grok-4.7") > version("xai/grok-4.20"));
+        assert!(version("xai/grok-4.3") > version("xai/grok-4.20"));
+        assert_eq!(version("1.20.3"), vec![1, 20, 3]);
         let models = [
             m("claude-opus-4-5", "Opus 4.5"),
             m("claude-opus-4-7", "Opus 4.7"),
@@ -754,6 +776,20 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].current, vec![1]);
         assert_eq!(groups[0].older, vec![2, 0]);
+
+        let grok = [
+            m("xai/grok-4.20", "Grok 4.20"),
+            m("xai/grok-4.3", "Grok 4.3"),
+            m("xai/grok-4.5", "Grok 4.5"),
+            m("xai/grok-4.6", "Grok 4.6"),
+            m("xai/grok-4.7", "Grok 4.7"),
+            m("xai/grok-4", "Grok 4"),
+            m("xai/grok-3-mini", "Grok 3 Mini"),
+        ];
+        let grok_groups = group(&grok);
+        assert_eq!(grok_groups.len(), 1);
+        assert_eq!(grok_groups[0].current, vec![4]);
+        assert_eq!(grok_groups[0].older, vec![3, 2, 1, 0, 5, 6]);
     }
 
     #[test]

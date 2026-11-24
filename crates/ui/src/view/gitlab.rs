@@ -419,7 +419,7 @@ impl KeelWindow {
                 .min_h_0()
                 .w_full()
                 .px_6()
-                .pt_2()
+                .pt(crate::style::HEADER_HEIGHT + crate::style::zpx(8.))
                 .pb_4()
                 .flex()
                 .flex_col()

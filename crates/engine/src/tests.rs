@@ -3902,3 +3902,133 @@ async fn prepare_start_marks_scratch_and_recreates_missing_dir() {
     assert!(harness.scratch());
     assert!(cwd.is_dir());
 }
+
+struct AccountTestHarness {
+    inner: Arc<MockHarness>,
+    calls: Mutex<Vec<(&'static str, String, Option<String>)>>,
+}
+
+#[async_trait::async_trait]
+impl keel_harness::Harness for AccountTestHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Keel
+    }
+    fn display_name(&self) -> &str {
+        "Keel fixture"
+    }
+    fn installed(&self) -> bool {
+        true
+    }
+    fn executable(&self) -> Option<PathBuf> {
+        None
+    }
+    fn version(&self) -> &str {
+        "0"
+    }
+    async fn models(&self) -> Result<Vec<keel_harness::Model>, keel_harness::HarnessError> {
+        self.inner.models().await
+    }
+    async fn reasoning_levels(
+        &self,
+        model: &keel_harness::ModelId,
+    ) -> Result<Vec<keel_harness::ReasoningLevel>, keel_harness::HarnessError> {
+        self.inner.reasoning_levels(model).await
+    }
+    async fn set_api_key(
+        &self,
+        provider: &str,
+        api_key: &str,
+    ) -> Result<(), keel_harness::HarnessError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("set", provider.to_string(), Some(api_key.to_string())));
+        Ok(())
+    }
+    async fn remove_credential(&self, provider: &str) -> Result<(), keel_harness::HarnessError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("remove", provider.to_string(), None));
+        Ok(())
+    }
+    async fn run(
+        &self,
+        spec: keel_harness::SessionSpec,
+        controls: keel_harness::RunControls,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<AgentEvent, keel_harness::HarnessError>> + Send>,
+        >,
+        keel_harness::HarnessError,
+    > {
+        self.inner.run(spec, controls).await
+    }
+}
+
+#[test]
+fn provider_credential_rpcs_validate_and_clear_model_cache() {
+    let tmp = Tmp::new("acct-rpc");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(AccountTestHarness {
+        inner: Arc::new(MockHarness::echo()),
+        calls: Mutex::new(Vec::new()),
+    });
+    let store = DocsStore::open(tmp.path().join("profile")).expect("store");
+    let engine = Engine::open(EngineConfig {
+        store,
+        device_id: DEVICE.to_string(),
+        scope: "local".to_string(),
+        clock,
+        harnesses: vec![harness.clone()],
+        compaction_bytes: COMPACTION_BYTES,
+    });
+    let (outbound, _rx) = Outbound::pair();
+    let call = |method: &str, params: Value| -> Value {
+        let req = RpcRequest {
+            id: "r1".into(),
+            method: method.into(),
+            params,
+        };
+        serde_json::from_str(&engine.handle(&req, &outbound).expect("sync reply")).unwrap()
+    };
+
+    // Seed models cache so we verify both RPCs invalidate it.
+    engine
+        .inner
+        .models
+        .lock()
+        .unwrap()
+        .insert("keel".into(), json!([{"id": "mock", "name": "Mock"}]));
+    let set_resp = call(
+        "set_provider_api_key",
+        json!({ "provider": "opencode", "api_key": "sk-test-123" }),
+    );
+    assert!(set_resp.get("result").is_some(), "{set_resp}");
+    assert!(engine.inner.models.lock().unwrap().is_empty());
+
+    let empty_key = call(
+        "set_provider_api_key",
+        json!({ "provider": "opencode", "api_key": "   " }),
+    );
+    assert_eq!(empty_key["error"]["code"], json!("bad_params"));
+
+    engine
+        .inner
+        .models
+        .lock()
+        .unwrap()
+        .insert("keel".into(), json!([]));
+    let rm_resp = call("disconnect_provider", json!({ "provider": "xai" }));
+    assert!(rm_resp.get("result").is_some(), "{rm_resp}");
+    assert!(engine.inner.models.lock().unwrap().is_empty());
+
+    let calls = harness.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![
+            ("set", "opencode".into(), Some("sk-test-123".into())),
+            ("remove", "xai".into(), None),
+        ]
+    );
+}

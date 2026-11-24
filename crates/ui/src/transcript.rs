@@ -14,7 +14,7 @@
 //! - Paint-only syntax colors.
 
 use crate::hover_fade::HoverFadeExt;
-use crate::motion::reveal_on_hover_curved;
+use crate::motion::{reveal_on_hover, reveal_on_hover_curved};
 use crate::style::zpx;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -174,6 +174,18 @@ pub struct TranscriptState {
     /// Natural heights of rows mid entrance or exit, measured as they draw,
     /// so their height can glide.
     pub row_heights: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
+    /// Monotonic counter bumped whenever `items` changes, used to invalidate derived caches.
+    items_gen: u64,
+    /// Cached `user_points()` result keyed by `items_gen`.
+    user_points_cache: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<(usize, String)>>)>>,
+    /// Cached check for a live `TurnSummary` row keyed by `items_gen`.
+    live_turn_summary_cache: std::cell::Cell<Option<(u64, bool)>>,
+    /// Shared mirror of `stick_to_bottom` for off-entity scroll handlers and timeline.
+    stick_flag: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Shared flag telling scroll handlers whether `glide` is currently active.
+    glide_active: std::rc::Rc<std::cell::Cell<bool>>,
+    /// True once a row entrance/exit stamp is set; cleared when `reap` sees no moving rows.
+    has_motion: bool,
 }
 
 pub fn tool_group_height(
@@ -254,17 +266,42 @@ impl TranscriptState {
             opened_at: std::time::Instant::now(),
             burst: None,
             row_heights: std::rc::Rc::default(),
+            items_gen: 0,
+            user_points_cache: std::cell::RefCell::new(None),
+            live_turn_summary_cache: std::cell::Cell::new(None),
+            stick_flag: std::rc::Rc::new(std::cell::Cell::new(true)),
+            glide_active: std::rc::Rc::new(std::cell::Cell::new(false)),
+            has_motion: false,
         }
+    }
+
+    pub fn items_gen(&self) -> u64 {
+        self.items_gen
+    }
+
+    pub fn bump_items(&mut self) {
+        self.items_gen = self.items_gen.wrapping_add(1);
+    }
+
+    pub fn stick_flag(&self) -> std::rc::Rc<std::cell::Cell<bool>> {
+        self.stick_flag.clone()
+    }
+
+    pub fn glide_active(&self) -> std::rc::Rc<std::cell::Cell<bool>> {
+        self.glide_active.clone()
     }
 
     /// Drop every row (switching chats). Stickiness resets.
     pub fn clear(&mut self) {
         self.items = std::rc::Rc::default();
+        self.bump_items();
         self.height_memo.clear();
         self.list_state.reset(0);
         self.glide = None;
+        self.glide_active.set(false);
         self.opened_at = std::time::Instant::now();
         self.burst = None;
+        self.has_motion = false;
         self.row_heights.borrow_mut().clear();
         self.set_stick(true);
     }
@@ -273,6 +310,7 @@ impl TranscriptState {
     /// to the end.
     pub fn on_own_send(&mut self) {
         self.glide = None;
+        self.glide_active.set(false);
         self.set_stick(true);
     }
 
@@ -285,6 +323,7 @@ impl TranscriptState {
         }
         let from = -self.list_state.scroll_px_offset_for_scrollbar().y;
         self.glide = Some((f32::from(from), now));
+        self.glide_active.set(true);
     }
 
     /// One frame of the glide, before layout. True while still moving (ask
@@ -292,12 +331,14 @@ impl TranscriptState {
     /// push it; on landing, Tail takes over and pins the true bottom.
     pub fn advance_glide(&mut self, now: std::time::Instant) -> bool {
         let Some((from, at)) = self.glide else {
+            self.glide_active.set(false);
             return false;
         };
         let to = f32::from(self.list_state.max_offset_for_scrollbar().y);
         let (pos, done) = crate::motion::scroll_glide(from, to, now.saturating_duration_since(at));
         if done {
             self.glide = None;
+            self.glide_active.set(false);
             self.set_stick(true);
             return false;
         }
@@ -312,6 +353,7 @@ impl TranscriptState {
     /// the user's back (Normal mode never self-re-engages).
     pub(crate) fn set_stick(&mut self, on: bool) {
         self.stick_to_bottom = on;
+        self.stick_flag.set(on);
         if on {
             // Tail also anchors the scroll at the end right away.
             self.list_state.set_follow_mode(FollowMode::Tail);
@@ -328,8 +370,10 @@ impl TranscriptState {
     pub fn handle_scroll(&mut self, distance_from_bottom: Pixels, delta_y: Pixels) {
         if delta_y > zpx(0.0) {
             self.stick_to_bottom = false;
+            self.stick_flag.set(false);
         } else if delta_y < zpx(0.0) && distance_from_bottom <= Self::RE_ENGAGE_THRESHOLD {
             self.stick_to_bottom = true;
+            self.stick_flag.set(true);
         }
     }
 
@@ -339,12 +383,14 @@ impl TranscriptState {
         // The user's own scroll always wins over the pill's glide.
         if delta_y != px(0.) {
             self.glide = None;
+            self.glide_active.set(false);
         }
         let was_sticky = self.stick_to_bottom;
         let max = self.list_state.max_offset_for_scrollbar().y;
         if max <= zpx(0.) {
             // Everything fits: there is no "away from the bottom" to be.
             self.stick_to_bottom = true;
+            self.stick_flag.set(true);
         } else {
             let current = -self.list_state.scroll_px_offset_for_scrollbar().y;
             self.handle_scroll((max - current).max(zpx(0.)), delta_y);
@@ -379,6 +425,7 @@ impl TranscriptState {
             return;
         }
         self.glide = None;
+        self.glide_active.set(false);
         self.set_stick(false);
         self.list_state.scroll_to(gpui::ListOffset {
             item_ix: index,
@@ -386,9 +433,13 @@ impl TranscriptState {
         });
     }
 
-    /// First row of each user message, with a one-line preview. These are
-    /// the points a session is made of.
-    pub fn user_points(&self) -> Vec<(usize, String)> {
+    /// Cached first row of each user message, with a one-line preview.
+    pub fn user_points_rc(&self) -> std::rc::Rc<Vec<(usize, String)>> {
+        if let Some((cached_gen, ref cached)) = *self.user_points_cache.borrow()
+            && cached_gen == self.items_gen
+        {
+            return cached.clone();
+        }
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (index, row) in self.items.iter().enumerate() {
@@ -398,26 +449,52 @@ impl TranscriptState {
             let text = match &row.block {
                 TranscriptBlock::Paragraph { content, .. }
                 | TranscriptBlock::Heading { content, .. }
-                | TranscriptBlock::Quote { content, .. } => content.clone(),
-                TranscriptBlock::Images { .. } => "Image".to_string(),
+                | TranscriptBlock::Quote { content, .. } => content.as_str(),
+                TranscriptBlock::Images { .. } => "Image",
                 _ => continue,
             };
-            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if text.is_empty() {
+            let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if trimmed.is_empty() {
                 continue;
             }
-            let text = match text.char_indices().nth(72) {
-                Some((cut, _)) => format!("{}…", &text[..cut]),
-                None => text,
+            let preview = match trimmed.char_indices().nth(72) {
+                Some((cut, _)) => format!("{}…", &trimmed[..cut]),
+                None => trimmed,
             };
-            out.push((index, text));
+            out.push((index, preview));
         }
-        out
+        let rc = std::rc::Rc::new(out);
+        *self.user_points_cache.borrow_mut() = Some((self.items_gen, rc.clone()));
+        rc
+    }
+
+    /// First row of each user message, with a one-line preview. These are
+    /// the points a session is made of.
+    pub fn user_points(&self) -> Vec<(usize, String)> {
+        (*self.user_points_rc()).clone()
+    }
+
+    /// Whether the transcript currently contains any live `TurnSummary` row (O(1) cached).
+    pub fn has_live_turn_summary(&self) -> bool {
+        if let Some((cached_gen, has)) = self.live_turn_summary_cache.get()
+            && cached_gen == self.items_gen
+        {
+            return has;
+        }
+        let has = self.items.iter().any(|item| {
+            matches!(
+                item.block,
+                crate::markdown::TranscriptBlock::TurnSummary { live: true, .. }
+            )
+        });
+        self.live_turn_summary_cache.set(Some((self.items_gen, has)));
+        has
     }
 
     /// Set or replace rows in the transcript (e.g. from persisted session).
     pub fn set_rows(&mut self, rows: Vec<TranscriptRowItem>) {
         self.items = std::rc::Rc::new(rows);
+        self.bump_items();
         self.list_state.reset(self.items.len());
     }
 
@@ -433,7 +510,11 @@ impl TranscriptState {
     /// Append a new row to the end of the transcript.
     pub fn append_row(&mut self, row: TranscriptRowItem) {
         let index = self.items.len();
+        if row.enter.is_some() || row.leaving.is_some() {
+            self.has_motion = true;
+        }
         std::rc::Rc::make_mut(&mut self.items).push(row);
+        self.bump_items();
         self.list_state.splice(index..index, 1);
         self.last_measured_row = Some(self.items[index].row_id().to_string());
         self.measure_count += 1;
@@ -479,6 +560,7 @@ impl TranscriptState {
                 })
                 .collect();
             std::rc::Rc::make_mut(&mut self.items).splice(index..index, rows);
+            self.bump_items();
             self.list_state.splice(index..index, count);
             self.last_measured_row = Some(self.items[index + count - 1].row_id().to_string());
             self.measure_count += count;
@@ -519,6 +601,7 @@ impl TranscriptState {
                         row.block = block;
                         row.role = role.to_string();
                         std::rc::Rc::make_mut(&mut self.items)[ix] = row;
+                        self.bump_items();
                         self.last_measured_row = Some(self.items[ix].row_id().to_string());
                         self.measure_count += 1;
                         self.list_state.remeasure_items(ix..ix + 1);
@@ -538,6 +621,7 @@ impl TranscriptState {
                 let mut row = TranscriptRowItem::new(message_id, role, block);
                 row.enter = self.stamp_enter(live, now);
                 std::rc::Rc::make_mut(&mut self.items).insert(ix, row);
+                self.bump_items();
                 self.list_state.splice(ix..ix, 1);
                 self.last_measured_row = Some(self.items[ix].row_id().to_string());
                 self.measure_count += 1;
@@ -571,10 +655,13 @@ impl TranscriptState {
     /// removed at once (false).
     fn retire(&mut self, ix: usize, animate: bool, now: std::time::Instant) -> bool {
         if animate {
+            self.has_motion = true;
             std::rc::Rc::make_mut(&mut self.items)[ix].leaving = Some(now);
+            self.bump_items();
             return true;
         }
         std::rc::Rc::make_mut(&mut self.items).remove(ix);
+        self.bump_items();
         self.list_state.splice(ix..ix + 1, 0);
         false
     }
@@ -593,6 +680,7 @@ impl TranscriptState {
         if !live {
             return None;
         }
+        self.has_motion = true;
         let k = match self.burst {
             Some((at, k)) if now.saturating_duration_since(at) < crate::motion::ROW_BURST => k + 1,
             _ => {
@@ -609,10 +697,14 @@ impl TranscriptState {
     /// Drop ghosts whose exit has played. True while any row still enters
     /// or leaves (the view keeps asking for frames).
     pub fn reap(&mut self, now: std::time::Instant) -> bool {
+        if !self.has_motion {
+            return false;
+        }
         let done = |r: &TranscriptRowItem| {
             r.leaving
                 .is_some_and(|at| now.saturating_duration_since(at) >= crate::motion::ROW_EXIT)
         };
+        let mut removed = false;
         while let Some(ix) = self.items.iter().position(done) {
             let id = self.items[ix].row_id().to_string();
             std::rc::Rc::make_mut(&mut self.items).remove(ix);
@@ -620,11 +712,16 @@ impl TranscriptState {
             if !id.contains('#') {
                 self.row_heights.borrow_mut().remove(&id);
             }
+            removed = true;
+        }
+        if removed {
+            self.bump_items();
         }
         let moving = self
             .items
             .iter()
             .any(|r| r.look(now, self.reduced_motion).is_some());
+        self.has_motion = moving;
         // Fold bodies (`fold:`) and step rows keep theirs: a close starts from it.
         // ponytail: fold heights live until the chat switches; prune if chats get huge.
         if !moving && !self.row_heights.borrow().is_empty() {
@@ -741,7 +838,7 @@ impl TranscriptState {
                 px(FILES_HEAD_H + body_h + 12.0)
             }
             TranscriptBlock::MrCard { card, .. } => {
-                px(MR_HEAD_H + if card.offer_merge { MR_FOOT_H } else { 0.0 } + 10.0)
+                px(MR_HEAD_H + if mr_can_merge(card) { MR_FOOT_H } else { 0.0 } + 10.0)
             }
             TranscriptBlock::Tests { run, .. } => {
                 let failures = if run.failures.is_empty() {
@@ -823,9 +920,11 @@ pub enum RowAction {
         message_id: String,
         part_id: String,
     },
-    /// An MR card's Track: the chat's header follows this MR.
-    TrackMr {
-        mr: crate::mr::MrRef,
+    /// Manually refresh an MR card's snapshot from GitLab and persist it.
+    RefreshMr {
+        row_id: String,
+        message_id: String,
+        part_id: String,
     },
     /// A code block's Run: type `command` into a new terminal tab. A risky
     /// one only runs on a second click (`row_id` keys the arming).
@@ -895,6 +994,13 @@ pub enum MergeUi {
     Failed(String),
 }
 
+/// Live fetch state of an individual MR card in the transcript, by row id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardFetchUi {
+    Refreshing,
+    Failed(String),
+}
+
 /// Delivers a [`RowAction`] to the window that owns the list.
 pub type OnRowAction = std::rc::Rc<dyn Fn(RowAction, &mut gpui::App)>;
 
@@ -923,9 +1029,8 @@ pub struct RowContext {
     pub live_choices: Option<String>,
     /// MR cards' Merge buttons that are not idle, by row id.
     pub merges: std::rc::Rc<HashMap<String, MergeUi>>,
-    /// The MR this chat's header tracks, with its latest poll: a card for
-    /// the same MR shows that instead of its turn-end snapshot.
-    pub tracked_mr: Option<std::rc::Rc<crate::mr::Tracked>>,
+    /// MR cards currently refreshing or reporting a fetch error, by row id.
+    pub mr_fetches: std::rc::Rc<HashMap<String, CardFetchUi>>,
     /// Risky Run buttons clicked once, waiting for the second click.
     pub armed_runs: std::rc::Rc<std::collections::HashSet<String>>,
     /// When the running turn started. A live trace line shows the elapsed time.
@@ -1851,10 +1956,10 @@ fn test_bar(run: &crate::test_run::TestRun, t: Tokens, _reduced: bool) -> gpui::
         .children(segment(run.skipped, c(t.text_faint)))
 }
 
-/// A merge request as a card: its status badge, number and title, the
-/// branches, a status pill and "Open"; when the reply called it ready and
-/// GitLab agreed, a Merge button that asks for a second click before it
-/// merges (the engine checks the MR live first).
+/// A merge request as a singular sleek card: single status-tinted MR icon,
+/// truncated title (full text on hover), hover-revealed icon controls
+/// (Details tooltip, Refresh, Open), and a compact metadata line with the
+/// MR status pill, `!iid`, and `source → target` branches.
 fn render_mr_card(
     item: &TranscriptRowItem,
     card: &crate::mr_card::MrCard,
@@ -1864,171 +1969,350 @@ fn render_mr_card(
 ) -> gpui::Div {
     use crate::mr::MrStatus;
     let t = rc.tokens;
-    // Tracked in this chat: the header's latest poll, not the turn's snapshot.
-    let tracked = rc
-        .tracked_mr
-        .as_ref()
-        .filter(|tracked| tracked.mr == card.mr);
-    let snap = tracked
-        .and_then(|tracked| tracked.snap.as_ref())
-        .unwrap_or(&card.snap);
-    let status = snap.status();
-    let tint = c(crate::mr::status_color(Some(status), t));
+    let snap = &card.snap;
     let row_id = item.row_id().to_string();
+    let group = format!("mr-card-{row_id}");
+    let fetch_state = rc.mr_fetches.get(&row_id);
+    let refreshing = matches!(fetch_state, Some(CardFetchUi::Refreshing));
+    let card_error = match fetch_state {
+        Some(CardFetchUi::Failed(err)) => Some(err.clone()),
+        _ => None,
+    };
+    let status = snap.status();
+    let tint = if status == MrStatus::Unknown {
+        c(t.text_muted)
+    } else {
+        c(crate::mr::status_color(Some(status), t))
+    };
     let merge = rc.merges.get(&row_id).cloned();
-    let pill = |text: String, color: Hsla| {
+    let status_label = if refreshing && !snap.is_loaded() {
+        "Loading…".to_string()
+    } else {
+        snap.status_text()
+    };
+    let status_dot = if snap.draft {
         div()
             .flex_none()
-            .h(zpx(20.))
-            .px_2()
+            .size(px(6.))
+            .rounded_full()
+            .border_1()
+            .border_color(tint)
+    } else {
+        div()
+            .flex_none()
+            .size(px(6.))
+            .rounded_full()
+            .bg(tint)
+    };
+    let status_pill = div()
+        .flex_none()
+        .h(zpx(20.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded_full()
+        .bg(tint.opacity(0.12))
+        .text_size(zpx(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(tint)
+        .child(status_dot)
+        .child(status_label);
+    let branch_pill = |id_suffix: &str, name: String, max_w_px: f32| {
+        let tip = name.clone();
+        div()
+            .id(ElementId::Name(format!("mr-{id_suffix}-{row_id}").into()))
+            .min_w_0()
+            .max_w(zpx(max_w_px))
+            .truncate()
+            .px_1p5()
+            .py(px(2.))
+            .rounded(RADIUS_SM)
+            .border_1()
+            .border_color(c(t.border).opacity(0.6))
+            .bg(c(t.surface).opacity(0.75))
+            .font_family(MONO)
+            .text_size(zpx(11.5))
+            .line_height(zpx(14.))
+            .text_color(c(t.text_muted))
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new(tip.clone(), t)).into())
+            .child(name)
+    };
+    let branches = (!snap.source_branch.is_empty()).then(|| {
+        div()
+            .min_w_0()
             .flex()
             .items_center()
-            .gap_1p5()
-            .rounded_full()
-            .bg(color.opacity(0.12))
-            .text_size(zpx(11.5))
-            .text_color(color)
-            .child(div().size(px(6.)).rounded_full().bg(color))
-            .child(text)
+            .gap_1()
+            .child(branch_pill("src", snap.source_branch.clone(), 260.))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(zpx(11.))
+                    .text_color(c(t.text_faint))
+                    .child("→"),
+            )
+            .child(branch_pill("dst", snap.target_branch.clone(), 150.))
+    });
+    let icon_ctrl = |id: String, muted: bool| {
+        div()
+            .id(ElementId::Name(id.into()))
+            .flex_none()
+            .size(zpx(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .text_color(c(if muted { t.text_faint } else { t.text_muted }))
+    };
+    let interactive_ctrl = |d: gpui::Stateful<gpui::Div>| {
+        d.cursor_pointer()
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), Some(c(t.selected)))
+            .active(|s| s.opacity(0.85))
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(|s| s.opacity(1.).border_color(c(t.accent)))
     };
     let open = {
         let (url, on_action) = (card.url(), rc.on_action.clone());
-        div()
-            .id(ElementId::Name(format!("mr-open-{row_id}").into()))
-            .flex_none()
-            .h(zpx(24.))
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .rounded(RADIUS_MD)
-            .text_size(zpx(12.))
-            .text_color(c(t.text_muted))
-            .cursor_pointer()
-            .hover(|s| s.text_color(c(t.text)))
-            .hover_fade(c(t.hover), Some(c(t.selected)))
-            .active(|s| s.opacity(0.85))
+        let btn = interactive_ctrl(icon_ctrl(format!("mr-open-{row_id}"), false))
+            .aria_label("Open merge request")
+            .tooltip(move |_, cx| {
+                cx.new(|_| crate::view::Tip::new("Open on GitLab", t)).into()
+            })
             .on_click(move |_, _, cx| on_action(RowAction::OpenUrl { url: url.clone() }, cx))
-            .child("Open")
-            .child(Icon::External.el(zpx(11.)))
+            .child(Icon::External.el(zpx(12.)));
+        reveal_on_hover(
+            format!("mr-reveal-open-{row_id}"),
+            group.clone(),
+            0.45,
+            1.,
+            btn,
+        )
     };
-    // Tracking: a quiet label; otherwise a Track button (the header chip).
-    let track = if tracked.is_some() {
+    let refresh_btn = {
+        let (on_action, r_id, msg_id, p_id) = (
+            rc.on_action.clone(),
+            row_id.clone(),
+            message_id.to_string(),
+            part_id.to_string(),
+        );
+        let btn = icon_ctrl(format!("mr-refresh-{row_id}"), refreshing)
+            .aria_label("Refresh merge request")
+            .when(!refreshing, |d| {
+                interactive_ctrl(d).on_click(move |_, _, cx| {
+                    on_action(
+                        RowAction::RefreshMr {
+                            row_id: r_id.clone(),
+                            message_id: msg_id.clone(),
+                            part_id: p_id.clone(),
+                        },
+                        cx,
+                    )
+                })
+            })
+            .tooltip(move |_, cx| {
+                cx.new(|_| crate::view::Tip::new("Refresh MR from GitLab", t))
+                    .into()
+            })
+            .child(if refreshing {
+                Icon::Spinner.el(zpx(12.))
+            } else {
+                Icon::Reload.el(zpx(12.))
+            });
+        // Stays up while a refresh runs, so the spinner shows without hover.
+        reveal_on_hover(
+            format!("mr-reveal-refresh-{row_id}"),
+            group.clone(),
+            if refreshing { 1. } else { 0.45 },
+            1.,
+            btn,
+        )
+    };
+    let rows = mr_detail_rows(card, status, t);
+    let spoken = format!(
+        "Merge request {}. {}",
+        card.mr.label(),
+        rows.iter()
+            .map(MrDetailRow::spoken)
+            .collect::<Vec<_>>()
+            .join(". ")
+    );
+    let details = {
+        let heading: SharedString = card.mr.label().into();
+        let tip_rows = rows.clone();
+        let btn = interactive_ctrl(icon_ctrl(format!("mr-details-{row_id}"), false))
+            .aria_label(spoken)
+            .tooltip(move |_, cx| {
+                let (heading, rows) = (heading.clone(), tip_rows.clone());
+                cx.new(|_| MrDetailsTip { heading, rows, t }).into()
+            })
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(Icon::Info.el(zpx(13.)));
+        reveal_on_hover(
+            format!("mr-reveal-details-{row_id}"),
+            group.clone(),
+            0.45,
+            1.,
+            btn,
+        )
+    };
+    let badge = if snap.draft {
         div()
             .flex_none()
+            .size(zpx(20.))
             .flex()
             .items_center()
-            .gap_1()
-            .text_size(zpx(11.5))
+            .justify_center()
+            .rounded_full()
+            .border_1()
+            .border_color(tint.opacity(0.65))
+            .text_color(tint)
+            .child(Icon::GitLab.el(zpx(11.)))
+    } else {
+        div()
+            .flex_none()
+            .size(zpx(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(tint.opacity(0.14))
+            .text_color(tint)
+            .child(Icon::GitLab.el(zpx(11.)))
+    };
+    let title_el = if !snap.title.is_empty() {
+        let full = snap.title.clone();
+        div()
+            .id(ElementId::Name(format!("mr-title-{row_id}").into()))
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(zpx(14.))
+            .line_height(zpx(19.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(c(t.text))
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new(full.clone(), t)).into())
+            .child(snap.title.clone())
+            .into_any_element()
+    } else if refreshing {
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(zpx(13.))
             .text_color(c(t.text_faint))
-            .child(Icon::Eye.el(zpx(11.)))
-            .child("Tracking")
+            .child("Fetching merge request details…")
             .into_any_element()
     } else {
-        let (mr, on_action) = (card.mr.clone(), rc.on_action.clone());
         div()
-            .id(ElementId::Name(format!("mr-track-{row_id}").into()))
-            .flex_none()
-            .h(zpx(24.))
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .rounded(RADIUS_MD)
-            .text_size(zpx(12.))
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(zpx(13.))
             .text_color(c(t.text_muted))
-            .cursor_pointer()
-            .hover(|s| s.text_color(c(t.text)))
-            .hover_fade(c(t.hover), Some(c(t.selected)))
-            .active(|s| s.opacity(0.85))
-            .on_click(move |_, _, cx| on_action(RowAction::TrackMr { mr: mr.clone() }, cx))
-            .child(Icon::Eye.el(zpx(11.)))
-            .child("Track")
+            .child(card.mr.project.clone())
             .into_any_element()
     };
-    // CI on its own pill, unless the status already is the pipeline.
-    let ci = (!snap.pipeline.is_empty() && !matches!(status, MrStatus::Running | MrStatus::Failed))
-        .then(|| {
-            let (word, color) = match snap.pipeline.as_str() {
-                "success" => ("CI passed", t.success),
-                "failed" => ("CI failed", t.danger),
-                "running"
-                | "pending"
-                | "created"
-                | "preparing"
-                | "waiting_for_resource"
-                | "scheduled" => ("CI running", t.warning),
-                "canceled" => ("CI canceled", t.text_faint),
-                "skipped" => ("CI skipped", t.text_faint),
-                _ => ("CI", t.text_faint),
-            };
-            pill(word.to_string(), c(color))
-        });
-    let branches = (!snap.source_branch.is_empty()).then(|| {
-        div()
-            .truncate()
-            .font_family(MONO)
-            .text_size(zpx(11.5))
-            .text_color(c(t.text_faint))
-            .child(format!("{} → {}", snap.source_branch, snap.target_branch))
-    });
-    let head = div()
-        .px_3()
-        .py(px(10.))
+    let controls = div()
+        .flex_none()
         .flex()
         .items_center()
-        .gap_3()
+        .gap_0p5()
+        .child(details)
+        .child(refresh_btn)
+        .child(open);
+    let top_row = div()
+        .min_h(zpx(24.))
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .child(badge)
+        .child(title_el)
+        .child(controls);
+    let meta_row = div()
+        .min_h(zpx(20.))
+        .pl(zpx(28.))
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .child(status_pill)
         .child(
             div()
                 .flex_none()
-                .size(zpx(30.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(tint.opacity(0.15))
-                .text_color(tint)
-                .child(Icon::GitLab.el(zpx(14.))),
+                .font_family(MONO)
+                .text_size(zpx(11.5))
+                .text_color(c(t.text_faint))
+                .child(card.mr.label()),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap_1p5()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex_none()
-                                .font_family(MONO)
-                                .text_size(zpx(12.))
-                                .text_color(c(t.text_faint))
-                                .child(card.mr.label()),
+        .children(branches);
+    let main_body = div()
+        .px_3p5()
+        .py(px(11.))
+        .flex()
+        .flex_col()
+        .gap(px(7.))
+        .child(top_row)
+        .child(meta_row);
+    let error_bar = card_error.map(|err| {
+        let (on_action, r_id, msg_id, p_id) = (
+            rc.on_action.clone(),
+            row_id.clone(),
+            message_id.to_string(),
+            part_id.to_string(),
+        );
+        div()
+            .border_t_1()
+            .border_color(c(t.border).opacity(0.65))
+            .px_3p5()
+            .py(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_color(c(t.danger)).child(Icon::Alert.el(zpx(12.))))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(zpx(11.5))
+                    .text_color(c(t.text_muted))
+                    .child(err),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name(format!("mr-retry-{row_id}").into()))
+                    .flex_none()
+                    .px_2()
+                    .h(zpx(22.))
+                    .flex()
+                    .items_center()
+                    .rounded(RADIUS_SM)
+                    .text_size(zpx(11.5))
+                    .text_color(c(t.accent))
+                    .cursor_pointer()
+                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                    .active(|s| s.opacity(0.85))
+                    .on_click(move |_, _, cx| {
+                        on_action(
+                            RowAction::RefreshMr {
+                                row_id: r_id.clone(),
+                                message_id: msg_id.clone(),
+                                part_id: p_id.clone(),
+                            },
+                            cx,
                         )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(zpx(13.5))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(c(t.text))
-                                .child(snap.title.clone()),
-                        ),
-                )
-                .children(branches),
-        )
-        .children(ci)
-        .child(pill(snap.status_text(), tint))
-        .child(track)
-        .child(open);
-    let can_merge = card.offer_merge && !status.is_done() && status != MrStatus::Failed;
-    let foot = can_merge.then(|| {
+                    })
+                    .child("Retry"),
+            )
+    });
+    let can_merge = mr_can_merge(card);
+    let merge_btn_el = can_merge.then(|| {
         let on_action = rc.on_action.clone();
         let (label, icon, busy) = match &merge {
             Some(MergeUi::Armed) => ("Click again to merge".to_string(), Icon::Check, false),
@@ -2038,86 +2322,371 @@ fn render_mr_card(
         let armed = matches!(merge, Some(MergeUi::Armed));
         let (row, message_id, part_id) =
             (row_id.clone(), message_id.to_string(), part_id.to_string());
-        let error = match &merge {
-            Some(MergeUi::Failed(why)) => Some(why.clone()),
-            _ => None,
+        let merge_btn = div()
+            .id(ElementId::Name(format!("mr-merge-{row_id}").into()))
+            .flex_none()
+            .h(zpx(26.))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .rounded(RADIUS_MD)
+            .text_size(zpx(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(c(t.text_on_accent))
+            .bg(c(if armed { t.success } else { t.accent }))
+            .when(busy, |d| d.opacity(0.7))
+            .when(!busy, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.opacity(0.9))
+                    .active(move |s| s.opacity(0.75))
+                    .on_click(move |_, _, cx| {
+                        on_action(
+                            RowAction::Merge {
+                                row_id: row.clone(),
+                                message_id: message_id.clone(),
+                                part_id: part_id.clone(),
+                            },
+                            cx,
+                        )
+                    })
+            })
+            .child(icon.el(zpx(11.5)))
+            .child(label);
+        if armed {
+            crate::motion::settle(merge_btn, format!("mr-armed-{row_id}"), rc.reduced)
+        } else {
+            merge_btn.into_any_element()
+        }
+    });
+    let merge_err = match &merge {
+        Some(MergeUi::Failed(why)) => Some(why.clone()),
+        _ => None,
+    };
+    let foot = (can_merge || merge_err.is_some()).then(|| {
+        let left = if let Some(err) = merge_err {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(zpx(11.5))
+                .text_color(c(t.danger))
+                .child(err)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(zpx(11.5))
+                .text_color(c(t.text_faint))
+                .child(format!(
+                    "Keel checks {} on GitLab again before merging",
+                    card.mr.label()
+                ))
+                .into_any_element()
         };
         div()
             .border_t_1()
-            .border_color(c(t.border))
-            .px_3()
-            .h(zpx(MR_FOOT_H))
+            .border_color(c(t.border).opacity(0.65))
+            .bg(c(t.surface).opacity(0.55))
+            .px_3p5()
+            .py(px(7.))
             .flex()
             .items_center()
+            .justify_between()
             .gap_3()
+            .child(left)
+            .children(merge_btn_el)
+    });
+    let card_el = div()
+        .id(ElementId::Name(format!("mr-card-{row_id}").into()))
+        .w_full()
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(c(t.border))
+        .bg(c(t.floating))
+        .overflow_hidden()
+        .hover_probe(group)
+        .child(main_body)
+        .children(error_bar)
+        .children(foot);
+    div().w_full().py_1().child(card_el)
+}
+
+/// Whether an MR card shows its Merge footer: Merge is offered and the MR is
+/// still open. The height estimator uses the same rule.
+fn mr_can_merge(card: &crate::mr_card::MrCard) -> bool {
+    use crate::mr::MrStatus;
+    let status = card.snap.status();
+    card.offer_merge
+        && !status.is_done()
+        && status != MrStatus::Failed
+        && status != MrStatus::Unknown
+}
+
+/// One line of the Details tooltip.
+#[derive(Clone)]
+struct MrDetailRow {
+    label: &'static str,
+    /// A colored dot before the value: the state and CI.
+    dot: Option<u32>,
+    /// The value as spans; `None` takes the default text color.
+    value: Vec<(SharedString, Option<u32>)>,
+    /// The change bar's five cells: green for additions, red for deletions.
+    bar: Option<[u32; 5]>,
+    /// A faint line under the value, such as the exact time under a relative one.
+    note: Option<SharedString>,
+}
+
+impl MrDetailRow {
+    fn text(label: &'static str, value: impl Into<SharedString>) -> Self {
+        Self {
+            label,
+            dot: None,
+            value: vec![(value.into(), None)],
+            bar: None,
+            note: None,
+        }
+    }
+
+    /// The row as one phrase, for assistive tech.
+    fn spoken(&self) -> String {
+        let value = self
+            .value
+            .iter()
+            .map(|(text, _)| text.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        match &self.note {
+            Some(note) => format!("{}: {value}, {note}", self.label),
+            None => format!("{}: {value}", self.label),
+        }
+    }
+}
+
+/// The Details tooltip's rows: CI, change stats, times, and the project.
+/// MR status lives on the main card itself.
+fn mr_detail_rows(
+    card: &crate::mr_card::MrCard,
+    status: crate::mr::MrStatus,
+    t: Tokens,
+) -> Vec<MrDetailRow> {
+    use crate::mr::{MrStatus, ago_iso, format_local_iso};
+    let snap = &card.snap;
+    let mut rows = Vec::new();
+    if !snap.pipeline.is_empty() {
+        let (word, color) = match snap.pipeline.as_str() {
+            "success" => ("Passed".to_string(), t.success),
+            "failed" => ("Failed".to_string(), t.danger),
+            "running"
+            | "pending"
+            | "created"
+            | "preparing"
+            | "waiting_for_resource"
+            | "scheduled" => ("Running".to_string(), t.warning),
+            "canceled" => ("Canceled".to_string(), t.text_faint),
+            "skipped" => ("Skipped".to_string(), t.text_faint),
+            other => (other.to_string(), t.text_faint),
+        };
+        rows.push(MrDetailRow {
+            label: "CI",
+            dot: Some(color),
+            value: vec![(word.into(), None)],
+            bar: None,
+            note: None,
+        });
+    }
+    let (adds, dels) = (snap.additions, snap.deletions);
+    let files = snap.files_changed.map(|n| {
+        if n == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{n} files")
+        }
+    });
+    if files.is_some() || adds.is_some() || dels.is_some() {
+        let mut value: Vec<(SharedString, Option<u32>)> = Vec::new();
+        if let Some(files) = files {
+            value.push((files.into(), None));
+        }
+        if let Some(a) = adds {
+            value.push((format!("+{a}").into(), Some(t.success)));
+        }
+        if let Some(d) = dels {
+            value.push((format!("-{d}").into(), Some(t.danger)));
+        }
+        rows.push(MrDetailRow {
+            label: "Changes",
+            dot: None,
+            value,
+            bar: adds.zip(dels).and_then(|(a, d)| diff_bar_cells(a, d, t)),
+            note: None,
+        });
+    }
+    let time_row = |label: &'static str, iso: &str| -> Option<MrDetailRow> {
+        let ago = ago_iso(iso)?;
+        Some(MrDetailRow {
+            label,
+            dot: None,
+            value: vec![(ago.into(), None)],
+            bar: None,
+            note: format_local_iso(iso).map(SharedString::from),
+        })
+    };
+    rows.extend(time_row("Opened", &snap.created_at));
+    match status {
+        MrStatus::Merged => rows.extend(time_row("Merged", &snap.merged_at)),
+        MrStatus::Closed => rows.extend(time_row("Closed", &snap.closed_at)),
+        _ if !snap.updated_at.is_empty() && snap.updated_at != snap.created_at => {
+            rows.extend(time_row("Updated", &snap.updated_at))
+        }
+        _ => {}
+    }
+    rows.push(MrDetailRow::text("Project", card.mr.project.clone()));
+    rows
+}
+
+/// The change bar's five cells: green for the share of additions, red for the
+/// rest. `None` when the MR changes nothing.
+fn diff_bar_cells(add: u64, del: u64, t: Tokens) -> Option<[u32; 5]> {
+    let total = add + del;
+    if total == 0 {
+        return None;
+    }
+    let mut green = ((add as f32 / total as f32) * 5.0).round() as usize;
+    if add > 0 && green == 0 {
+        green = 1;
+    }
+    if del > 0 && green == 5 {
+        green = 4;
+    }
+    Some(std::array::from_fn(|i| {
+        if i < green { t.success } else { t.danger }
+    }))
+}
+
+/// The MR card's Details tooltip: the MR's label, then one line per row of
+/// [`mr_detail_rows`]. Labels share a column; values are colored spans.
+struct MrDetailsTip {
+    heading: SharedString,
+    rows: Vec<MrDetailRow>,
+    t: Tokens,
+}
+
+impl Render for MrDetailsTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.t;
+        div()
+            .w(zpx(328.))
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .gap(zpx(6.))
+            .px(zpx(12.))
+            .py(zpx(10.))
+            .floating_surface(t)
+            .text_size(zpx(12.))
+            .line_height(zpx(16.))
+            .text_color(c(t.text))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(zpx(12.))
-                    .text_color(c(if error.is_some() {
-                        t.danger
-                    } else {
-                        t.text_faint
-                    }))
-                    .child(error.unwrap_or_else(|| {
-                        format!(
-                            "Keel checks {} on GitLab again before merging",
-                            card.mr.label()
-                        )
-                    })),
+                    .pb(zpx(6.))
+                    .border_b_1()
+                    .border_color(c(t.border).opacity(0.55))
+                    .font_family(MONO)
+                    .text_size(zpx(11.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(t.text_muted))
+                    .child(self.heading.clone()),
             )
-            .child({
-                let merge_btn = div()
-                    .id(ElementId::Name(format!("mr-merge-{row_id}").into()))
-                    .flex_none()
-                    .h(zpx(28.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .rounded(RADIUS_MD)
-                    .text_size(zpx(12.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(c(t.text_on_accent))
-                    .bg(c(if armed { t.success } else { t.accent }))
-                    .when(busy, |d| d.opacity(0.7))
-                    .when(!busy, |d| {
-                        d.cursor_pointer()
-                            .hover(move |s| s.opacity(0.9))
-                            .active(move |s| s.opacity(0.75))
-                            .on_click(move |_, _, cx| {
-                                on_action(
-                                    RowAction::Merge {
-                                        row_id: row.clone(),
-                                        message_id: message_id.clone(),
-                                        part_id: part_id.clone(),
-                                    },
-                                    cx,
-                                )
-                            })
-                    })
-                    .child(icon.el(zpx(12.)))
-                    .child(label);
-                if armed {
-                    crate::motion::settle(merge_btn, format!("mr-armed-{row_id}"), rc.reduced)
+            .children(self.rows.iter().map(|row| {
+                let single_text = row.dot.is_none() && row.bar.is_none() && row.value.len() == 1;
+                let value = if single_text {
+                    let (text, color) = &row.value[0];
+                    if row.label == "Project" {
+                        let wrapped: SharedString = text.replace('/', "/\u{200b}").into();
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_size(zpx(11.5))
+                            .line_height(zpx(15.))
+                            .text_color(c(t.text_muted))
+                            .child(wrapped)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(c((*color).unwrap_or(t.text)))
+                            .child(text.clone())
+                            .into_any_element()
+                    }
                 } else {
-                    merge_btn.into_any_element()
-                }
-            })
-    });
-    div().w_full().py_1().child(
-        div()
-            .w_full()
-            .rounded(RADIUS_LG)
-            .border_1()
-            .border_color(c(t.border))
-            .bg(c(t.surface))
-            .overflow_hidden()
-            .child(head)
-            .children(foot),
-    )
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .children(
+                            row.dot
+                                .map(|dot| div().flex_none().size(px(6.)).rounded_full().bg(c(dot))),
+                        )
+                        .children(row.value.iter().map(|(text, color)| {
+                            div()
+                                .flex_none()
+                                .text_color(c((*color).unwrap_or(t.text)))
+                                .child(text.clone())
+                        }))
+                        .children(row.bar.map(|cells| {
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .children(
+                                    cells
+                                        .into_iter()
+                                        .map(|cell| div().size(px(5.)).rounded(px(1.5)).bg(c(cell))),
+                                )
+                        }))
+                        .into_any_element()
+                };
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_start()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(zpx(54.))
+                            .text_size(zpx(11.5))
+                            .line_height(zpx(16.))
+                            .text_color(c(t.text_faint))
+                            .child(row.label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(zpx(1.))
+                            .child(value)
+                            .children(row.note.clone().map(|note| {
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(zpx(11.))
+                                    .line_height(zpx(14.))
+                                    .text_color(c(t.text_faint))
+                                    .child(note)
+                            })),
+                    )
+            }))
+    }
 }
 
 /// Before → after figures as a row of tiles: the label, the new value large,
@@ -2741,7 +3310,7 @@ fn render_file_changes(
 const STAT_H: f32 = 84.;
 const FILES_HEAD_H: f32 = 36.;
 const FILE_ROW_H: f32 = 30.;
-const MR_HEAD_H: f32 = 56.;
+const MR_HEAD_H: f32 = 75.;
 const MR_FOOT_H: f32 = 44.;
 const TESTS_SUMMARY_H: f32 = 84.;
 const CHOICE_HEADER_H: f32 = 30.;
@@ -3967,6 +4536,40 @@ pub fn bar_button(
         .when(!label.is_empty(), |d| d.child(label))
 }
 
+/// Zero-alloc check matching [`message_text`]: true when `items[ix]` ends a
+/// message that has at least one non-leaving block with markdown text.
+pub fn has_message_text(items: &[TranscriptRowItem], ix: usize) -> bool {
+    let Some(item) = items.get(ix) else {
+        return false;
+    };
+    let id = &item.message_id;
+    if items.get(ix + 1).is_some_and(|next| next.message_id == *id) {
+        return false;
+    }
+    let start = items[..ix]
+        .iter()
+        .rposition(|r| r.message_id != *id)
+        .map_or(0, |p| p + 1);
+    items[start..=ix]
+        .iter()
+        .any(|r| r.leaving.is_none() && block_has_markdown(&r.block))
+}
+
+fn block_has_markdown(block: &TranscriptBlock) -> bool {
+    match block {
+        TranscriptBlock::Paragraph { .. }
+        | TranscriptBlock::Heading { .. }
+        | TranscriptBlock::Quote { .. }
+        | TranscriptBlock::Code { .. }
+        | TranscriptBlock::List { .. }
+        | TranscriptBlock::Table { .. }
+        | TranscriptBlock::Rule { .. }
+        | TranscriptBlock::Chart { .. } => true,
+        TranscriptBlock::Interim(_) => false,
+        _ => false,
+    }
+}
+
 /// The text of the message `items[ix]` ends, as Markdown; `None` when the
 /// next row is still the same message or it has no text (tools, images).
 pub fn message_text(items: &[TranscriptRowItem], ix: usize) -> Option<String> {
@@ -4043,11 +4646,12 @@ fn block_markdown(block: &TranscriptBlock) -> Option<String> {
     })
 }
 
-/// The Copy button under a message; `text` from [`message_text`]. Shown while
-/// the message is hovered (and while it says Copied); hidden, it keeps its room.
+/// The Copy button under a message; computes markdown lazily on click via [`message_text`].
+/// Shown while the message is hovered (and while it says Copied); hidden, it keeps its room.
 pub fn message_copy(
     item: &TranscriptRowItem,
-    text: String,
+    items: std::rc::Rc<Vec<TranscriptRowItem>>,
+    ix: usize,
     shown: bool,
     rc: &RowContext,
 ) -> AnyElement {
@@ -4074,13 +4678,15 @@ pub fn message_copy(
             )
             .t_caption()
             .on_click(move |_, _, cx| {
-                on_action(
-                    RowAction::Copy {
-                        row_id: key.clone(),
-                        content: text.clone(),
-                    },
-                    cx,
-                )
+                if let Some(content) = message_text(&items, ix) {
+                    on_action(
+                        RowAction::Copy {
+                            row_id: key.clone(),
+                            content,
+                        },
+                        cx,
+                    );
+                }
             }),
         )
         .into_any_element()
@@ -8241,6 +8847,63 @@ mod tests {
         // Hiding middle series out of 3 preserves a single centered 2-bar pair with a 2px gap
         let mid_hidden = bar_group_spans(slot, &[1.0, 0.0, 1.0]);
         assert!((mid_hidden[2].0 - (mid_hidden[0].0 + mid_hidden[0].1) - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn user_points_and_live_summary_caches_reuse_until_mutated() {
+        let mut t = TranscriptState::new(false);
+        t.upsert_message("u1", "user", vec![para("u1#0", "hello world")]);
+        t.upsert_message("a1", "assistant", vec![para("a1#0", "reply")]);
+
+        let p1 = t.user_points_rc();
+        let p2 = t.user_points_rc();
+        assert!(std::rc::Rc::ptr_eq(&p1, &p2), "user_points_rc should share the cached Rc");
+        assert_eq!(p1.len(), 1);
+        assert!(!t.has_live_turn_summary());
+
+        t.upsert_message(
+            "a2",
+            "assistant",
+            vec![TranscriptBlock::TurnSummary {
+                id: "a2#worked".into(),
+                label: "Working".into(),
+                failed: false,
+                expanded: false,
+                live: true,
+            }],
+        );
+        assert!(t.has_live_turn_summary());
+
+        t.upsert_message("u2", "user", vec![para("u2#0", "second prompt")]);
+        let p3 = t.user_points_rc();
+        assert!(!std::rc::Rc::ptr_eq(&p1, &p3));
+        assert_eq!(p3.len(), 2);
+    }
+
+    #[test]
+    fn has_message_text_matches_message_text_across_blocks() {
+        let rows = vec![
+            TranscriptRowItem::new("m1", "assistant", para("m1#0", "first")),
+            TranscriptRowItem::new("m1", "assistant", para("m1#1", "second")),
+            TranscriptRowItem::new(
+                "m2",
+                "assistant",
+                TranscriptBlock::TurnSummary {
+                    id: "m2#0".into(),
+                    label: "Worked".into(),
+                    failed: false,
+                    expanded: false,
+                    live: false,
+                },
+            ),
+        ];
+        for ix in 0..rows.len() {
+            assert_eq!(
+                has_message_text(&rows, ix),
+                message_text(&rows, ix).is_some(),
+                "mismatch at row {ix}"
+            );
+        }
     }
 }
 

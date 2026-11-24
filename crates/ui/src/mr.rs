@@ -1,10 +1,4 @@
-//! The per-session merge request monitor's model: which MR a chat tracks,
-//! its last fetched state, the one-time "track this?" offer, and MRs never
-//! to offer again. `session-mr.json` in the data dir, keyed by chat id.
-//! Rendering and polling live in `view/mr_chip.rs`.
-
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+//! Merge request card snapshot model, status mapping, and timestamp helpers.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +9,7 @@ pub use keel_proto::mr::{MrRef, find_mr_urls, parse_remote, parse_url};
 #[serde(default)]
 pub struct MrSnapshot {
     pub title: String,
-    /// `opened`, `merged`, `closed`, `locked`.
+    /// `opened`, `merged`, `closed`, `locked`. Empty when not fetched yet.
     pub state: String,
     pub draft: bool,
     pub detailed_merge_status: String,
@@ -24,7 +18,13 @@ pub struct MrSnapshot {
     pub pipeline: String,
     pub source_branch: String,
     pub target_branch: String,
+    pub created_at: String,
+    pub merged_at: String,
+    pub closed_at: String,
     pub updated_at: String,
+    pub files_changed: Option<u64>,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
     pub web_url: String,
 }
 
@@ -33,6 +33,12 @@ impl MrSnapshot {
     pub fn parse(v: &serde_json::Value) -> Self {
         let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
         let detailed = s("detailed_merge_status");
+        let num = |k: &str| {
+            v[k].as_u64().or_else(|| {
+                v[k].as_str()
+                    .and_then(|raw| raw.trim().trim_end_matches('+').parse::<u64>().ok())
+            })
+        };
         Self {
             title: s("title"),
             state: s("state"),
@@ -46,14 +52,25 @@ impl MrSnapshot {
             pipeline: s("pipeline"),
             source_branch: s("source_branch"),
             target_branch: s("target_branch"),
+            created_at: s("created_at"),
+            merged_at: s("merged_at"),
+            closed_at: s("closed_at"),
             updated_at: s("updated_at"),
+            files_changed: num("files_changed").or_else(|| num("changes_count")),
+            additions: num("additions"),
+            deletions: num("deletions"),
             web_url: s("web_url"),
         }
     }
 
+    pub fn is_loaded(&self) -> bool {
+        !self.state.trim().is_empty()
+    }
+
     /// The one state the dot shows (draft is drawn separately: hollow).
     pub fn status(&self) -> MrStatus {
-        match self.state.as_str() {
+        match self.state.trim() {
+            "" => return MrStatus::Unknown,
             "merged" => return MrStatus::Merged,
             "closed" | "locked" => return MrStatus::Closed,
             _ => {}
@@ -77,20 +94,33 @@ impl MrSnapshot {
         }
     }
 
-    /// Words for the hover card.
+    /// Words for the card and hover tooltip, reflecting GitLab's real state.
     pub fn status_text(&self) -> String {
         let status = self.status();
+        let dms = self.detailed_merge_status.as_str();
         let word = match status {
-            MrStatus::Open => "Open",
+            MrStatus::Unknown => "Unknown",
+            MrStatus::Open => match dms {
+                "not_approved" => "Needs approval",
+                "discussions_not_resolved" => "Unresolved threads",
+                "ci_must_pass" => "Waiting for CI",
+                "ci_still_running" => "Pipeline running",
+                "checking" | "unchecked" => "Checking",
+                "requested_changes" => "Changes requested",
+                "blocked_status" | "approvals_syncing" => "Blocked",
+                "not_open" => "Not open",
+                _ => "Open",
+            },
             MrStatus::Running => "Pipeline running",
             MrStatus::Failed => "Pipeline failed",
-            MrStatus::Conflicts if self.detailed_merge_status == "need_rebase" => "Needs rebase",
+            MrStatus::Conflicts if dms == "need_rebase" => "Needs rebase",
             MrStatus::Conflicts => "Has conflicts",
             MrStatus::Mergeable => "Ready to merge",
             MrStatus::Merged => "Merged",
+            MrStatus::Closed if self.state == "locked" => "Locked",
             MrStatus::Closed => "Closed",
         };
-        if self.draft && !status.is_done() {
+        if self.draft && !status.is_done() && status != MrStatus::Unknown {
             if status == MrStatus::Open {
                 "Draft".into()
             } else {
@@ -108,6 +138,7 @@ const MERGED: u32 = 0x8B5C_F6FF;
 /// A status's color: the header dot and the MR card.
 pub fn status_color(status: Option<MrStatus>, t: keel_theme::Tokens) -> u32 {
     match status {
+        Some(MrStatus::Unknown) => t.text_faint,
         None | Some(MrStatus::Open | MrStatus::Running) => t.accent,
         Some(MrStatus::Failed) => t.danger,
         Some(MrStatus::Conflicts) => t.warning,
@@ -119,6 +150,7 @@ pub fn status_color(status: Option<MrStatus>, t: keel_theme::Tokens) -> u32 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MrStatus {
+    Unknown,
     Open,
     Running,
     Failed,
@@ -139,254 +171,103 @@ impl MrStatus {
     }
 }
 
-/// The MR in a chat's header.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Tracked {
-    pub mr: MrRef,
-    #[serde(default)]
-    pub snap: Option<MrSnapshot>,
-    /// Last good fetch and last attempt (ms), and failures since the last
-    /// good one (the last one's message in `error`).
-    #[serde(default)]
-    pub ok_ms: i64,
-    #[serde(default)]
-    pub tried_ms: i64,
-    #[serde(default)]
-    pub errors: u32,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-impl Tracked {
-    pub fn new(mr: MrRef) -> Self {
-        Self {
-            mr,
-            snap: None,
-            ok_ms: 0,
-            tried_ms: 0,
-            errors: 0,
-            error: None,
+/// Parses a GitLab ISO-8601 timestamp (`2026-11-24T17:53:56.835+07:00` or
+/// `...Z`) into Unix epoch seconds, adjusting for its timezone offset.
+pub fn parse_iso_epoch(iso: &str) -> Option<i64> {
+    let iso = iso.trim();
+    if iso.len() < 19 {
+        return None;
+    }
+    let num = |s: &str| s.parse::<i64>().ok();
+    let (y, m, d) = (num(&iso[0..4])?, num(&iso[5..7])?, num(&iso[8..10])?);
+    let (hh, mm, ss) = (num(&iso[11..13])?, num(&iso[14..16])?, num(&iso[17..19])?);
+    let rest = &iso[19..];
+    let after_frac = if let Some(after_dot) = rest.strip_prefix('.') {
+        after_dot.trim_start_matches(|c: char| c.is_ascii_digit())
+    } else {
+        rest
+    };
+    let tz_offset_secs = if after_frac.is_empty() || after_frac.eq_ignore_ascii_case("z") {
+        0
+    } else if let Some(sign) = after_frac.bytes().next().filter(|&b| b == b'+' || b == b'-') {
+        let digits: String = after_frac[1..]
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect();
+        if digits.len() < 2 {
+            return None;
         }
-    }
-
-    pub fn status(&self) -> Option<MrStatus> {
-        self.snap.as_ref().map(MrSnapshot::status)
-    }
-
-    /// Due for a fetch: never tried, or `every` ms since the last try,
-    /// doubled per failure (up to 16×).
-    pub fn due(&self, now: i64, every: i64) -> bool {
-        self.tried_ms == 0 || now - self.tried_ms >= every << self.errors.min(4)
-    }
-}
-
-/// "Track this?" under the turn that mentioned an MR.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Offer {
-    pub mr: MrRef,
-    /// The turn's message id (the row it rides under).
-    pub msg_id: String,
-    /// Fetched for its title; `None` until then.
-    #[serde(default)]
-    pub snap: Option<MrSnapshot>,
-}
-
-/// A quiet history line: "!42 merged · 3:12 PM".
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Note {
-    pub text: String,
-    /// The row it sits under; filled in when the chat is next on screen.
-    #[serde(default)]
-    pub msg_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SessionMr {
-    pub tracked: Option<Tracked>,
-    pub offer: Option<Offer>,
-    /// MR keys ignored, stopped or finished here: never offered again.
-    pub seen: Vec<String>,
-    pub notes: Vec<Note>,
-}
-
-/// What a mention of an MR in a turn led to.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Mention {
-    Nothing,
-    /// Offered under the turn (a plain mention, or a second MR to replace with).
-    Offered,
-    /// The agent created it: tracked right away (with Undo).
-    Tracked,
-}
-
-impl SessionMr {
-    fn is_seen(&self, mr: &MrRef) -> bool {
-        self.seen.iter().any(|k| *k == mr.key())
-    }
-
-    fn remember(&mut self, mr: &MrRef) {
-        if !self.is_seen(mr) {
-            self.seen.push(mr.key());
-        }
-    }
-
-    /// `mr` showed up in turn `msg_id`; `created` when a tool in that turn
-    /// made it. One MR per session: anything else is only offered.
-    pub fn mention(&mut self, mr: MrRef, msg_id: &str, created: bool) -> Mention {
-        if self.is_seen(&mr) || self.tracked.as_ref().is_some_and(|t| t.mr == mr) {
-            return Mention::Nothing;
-        }
-        if self.offer.as_ref().is_some_and(|o| o.mr == mr) {
-            return Mention::Nothing;
-        }
-        if created && self.tracked.is_none() {
-            self.offer = None;
-            self.tracked = Some(Tracked::new(mr));
-            return Mention::Tracked;
-        }
-        self.offer = Some(Offer {
-            mr,
-            msg_id: msg_id.to_string(),
-            snap: None,
-        });
-        Mention::Offered
-    }
-
-    /// Track (from the offer, the prompt, or Replace): the old one, if any,
-    /// is remembered so it isn't offered again.
-    pub fn track(&mut self, mr: MrRef) {
-        if self.tracked.as_ref().is_some_and(|t| t.mr == mr) {
-            return;
-        }
-        if let Some(old) = self.tracked.take() {
-            self.remember(&old.mr);
-        }
-        if self.offer.as_ref().is_some_and(|o| o.mr == mr) {
-            self.offer = None;
-        }
-        self.tracked = Some(Tracked::new(mr));
-    }
-
-    pub fn ignore_offer(&mut self) {
-        if let Some(offer) = self.offer.take() {
-            self.remember(&offer.mr);
-        }
-    }
-
-    pub fn stop(&mut self) {
-        if let Some(t) = self.tracked.take() {
-            self.remember(&t.mr);
-        }
-    }
-
-    /// The tracked MR merged or closed and its moment in the header is over:
-    /// drop it and leave a note.
-    pub fn finish(&mut self, note: String) {
-        if let Some(t) = self.tracked.take() {
-            self.remember(&t.mr);
-            self.notes.push(Note {
-                text: note,
-                msg_id: None,
-            });
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tracked.is_none()
-            && self.offer.is_none()
-            && self.seen.is_empty()
-            && self.notes.is_empty()
-    }
-}
-
-/// Every session's MR state.
-#[derive(Default)]
-pub struct MrStore {
-    pub sessions: HashMap<String, SessionMr>,
-}
-
-impl MrStore {
-    fn path(data_dir: &Path) -> PathBuf {
-        data_dir.join("session-mr.json")
-    }
-
-    pub fn load(data_dir: &Path) -> Self {
-        let sessions = std::fs::read_to_string(Self::path(data_dir))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        Self { sessions }
-    }
-
-    pub fn save(&mut self, data_dir: &Path) {
-        self.sessions.retain(|_, s| !s.is_empty());
-        let path = Self::path(data_dir);
-        let Ok(text) = serde_json::to_string_pretty(&self.sessions) else {
-            return;
+        let oh: i64 = digits[0..2].parse().ok()?;
+        let om: i64 = if digits.len() >= 4 {
+            digits[2..4].parse().ok()?
+        } else {
+            0
         };
-        let _ = std::fs::create_dir_all(data_dir);
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, format!("{text}\n")).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
-    }
-
-    pub fn get(&self, chat: &str) -> Option<&SessionMr> {
-        self.sessions.get(chat)
-    }
-
-    pub fn entry(&mut self, chat: &str) -> &mut SessionMr {
-        self.sessions.entry(chat.to_string()).or_default()
-    }
-
-    pub fn tracked(&self, chat: &str) -> Option<&Tracked> {
-        self.sessions.get(chat)?.tracked.as_ref()
-    }
+        let mag = oh * 3600 + om * 60;
+        if sign == b'+' { mag } else { -mag }
+    } else {
+        0
+    };
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let naive_secs = (era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss;
+    Some(naive_secs - tz_offset_secs)
 }
 
-/// What the "Track merge request…" box accepts: a URL, or `!42` / `42` in
-/// `default` (the project this chat already points at).
-pub fn parse_input(input: &str, default: Option<(&str, &str)>) -> Result<MrRef, String> {
-    let input = input.trim();
-    if input.contains("://") {
-        return parse_url(input).ok_or_else(|| "That isn't a merge request link.".to_string());
-    }
-    let iid: u64 = input
-        .trim_start_matches('!')
-        .parse()
-        .map_err(|_| "Paste a merge request link or type !42.".to_string())?;
-    let (host, project) = default
-        .ok_or_else(|| "No GitLab project known for this chat; paste the full link.".to_string())?;
-    Ok(MrRef {
-        host: host.to_string(),
-        project: project.to_string(),
-        iid,
+/// `"5m ago"` for a GitLab ISO time relative to `now_secs`.
+pub fn ago_iso_at(iso: &str, now_secs: i64) -> Option<String> {
+    let secs = parse_iso_epoch(iso)?;
+    let age = (now_secs - secs).max(0);
+    Some(match age {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 86_400 * 30 => format!("{}d ago", s / 86_400),
+        s => format!("{}mo ago", s / (86_400 * 30)),
     })
 }
 
-/// A turn's tool call made an MR (rather than just mentioning one).
-pub fn tool_creates_mr(name: &str, summary: &str) -> bool {
-    let text = format!("{name} {summary}").to_ascii_lowercase();
-    [
-        "mr create",
-        "create_merge_request",
-        "merge_request.create",
-        "create-merge-request",
-        "createmergerequest",
-        "mr_create",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
+/// `"5m ago"` for a GitLab ISO time against the current wall clock.
+pub fn ago_iso(iso: &str) -> Option<String> {
+    ago_iso_at(iso, crate::timer::now_ms() / 1000)
 }
 
-/// Title cut to `max` characters with an ellipsis.
-pub fn truncate(title: &str, max: usize) -> String {
-    if title.chars().count() <= max {
-        return title.to_string();
+/// Exact local date/time for tooltips (e.g. `"Nov 24, 2026 · 5:53 PM"`).
+pub fn format_local_iso(iso: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let secs = parse_iso_epoch(iso)? as libc::time_t;
+    #[cfg(unix)]
+    let tm = {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let res = unsafe { libc::localtime_r(&secs, &mut tm) };
+        if res.is_null() {
+            return None;
+        }
+        tm
+    };
+    #[cfg(not(unix))]
+    let _ = secs;
+    #[cfg(not(unix))]
+    return Some(iso.to_string());
+    #[cfg(unix)]
+    {
+        let month = MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("Jan");
+        let day = tm.tm_mday;
+        let year = 1900 + tm.tm_year;
+        let h24 = tm.tm_hour;
+        let ampm = if h24 >= 12 { "PM" } else { "AM" };
+        let h12 = match h24 % 12 {
+            0 => 12,
+            h => h,
+        };
+        let min = tm.tm_min;
+        Some(format!("{month} {day}, {year} · {h12}:{min:02} {ampm}"))
     }
-    let cut: String = title.chars().take(max.saturating_sub(1)).collect();
-    format!("{}…", cut.trim_end())
 }
 
 #[cfg(test)]
@@ -430,22 +311,6 @@ mod tests {
             mr(42).web_url(),
             "https://gitlab.com/kev/keel/-/merge_requests/42"
         );
-    }
-
-    #[test]
-    fn input_takes_a_link_or_a_number_in_the_chats_project() {
-        let default = Some(("https://gitlab.com", "kev/keel"));
-        assert_eq!(parse_input("!42", default), Ok(mr(42)));
-        assert_eq!(parse_input(" 42 ", default), Ok(mr(42)));
-        assert_eq!(
-            parse_input(
-                "https://gitlab.com/kev/keel/-/merge_requests/42/diffs",
-                None
-            ),
-            Ok(mr(42))
-        );
-        assert!(parse_input("!42", None).is_err());
-        assert!(parse_input("hello", default).is_err());
     }
 
     #[test]
@@ -503,48 +368,43 @@ mod tests {
     }
 
     #[test]
-    fn one_mr_per_session_and_seen_ones_never_come_back() {
-        let mut s = SessionMr::default();
-        assert_eq!(s.mention(mr(1), "m1", false), Mention::Offered);
-        s.ignore_offer();
-        assert_eq!(s.mention(mr(1), "m1", false), Mention::Nothing);
-        assert_eq!(s.mention(mr(2), "m2", true), Mention::Tracked);
-        assert_eq!(s.tracked.as_ref().map(|t| t.mr.iid), Some(2));
-        // A second one is only offered (as a replacement).
-        assert_eq!(s.mention(mr(3), "m3", true), Mention::Offered);
-        s.track(mr(3));
-        assert_eq!(
-            (s.tracked.as_ref().map(|t| t.mr.iid), s.offer.is_none()),
-            (Some(3), true)
-        );
-        assert_eq!(s.mention(mr(2), "m2", true), Mention::Nothing);
-        s.finish("!3 merged".into());
-        assert!(s.tracked.is_none());
-        assert_eq!(s.notes.len(), 1);
-        assert_eq!(s.mention(mr(3), "m3", true), Mention::Nothing);
+    fn snapshot_status_handles_empty_and_detailed_states() {
+        let empty = MrSnapshot::default();
+        assert_eq!(empty.status(), MrStatus::Unknown);
+        assert_eq!(empty.status_text(), "Unknown");
+        assert!(!empty.is_loaded());
+
+        let approvals = MrSnapshot {
+            state: "opened".into(),
+            detailed_merge_status: "not_approved".into(),
+            ..Default::default()
+        };
+        assert_eq!(approvals.status(), MrStatus::Open);
+        assert_eq!(approvals.status_text(), "Needs approval");
+
+        let parsed = MrSnapshot::parse(&serde_json::json!({
+            "title": "Fix table",
+            "state": "merged",
+            "created_at": "2026-11-24T15:00:00+07:00",
+            "merged_at": "2026-11-24T17:53:56.835+07:00",
+            "files_changed": 4,
+            "additions": 120,
+            "deletions": 32,
+        }));
+        assert!(parsed.is_loaded());
+        assert_eq!(parsed.status(), MrStatus::Merged);
+        assert_eq!(parsed.files_changed, Some(4));
+        assert_eq!(parsed.additions, Some(120));
+        assert_eq!(parsed.deletions, Some(32));
     }
 
     #[test]
-    fn polling_backs_off_after_errors() {
-        let mut t = Tracked::new(mr(1));
-        assert!(t.due(1_000, 60_000));
-        t.tried_ms = 1_000;
-        assert!(!t.due(30_000, 60_000));
-        assert!(t.due(61_000, 60_000));
-        t.errors = 2;
-        assert!(!t.due(200_000, 60_000));
-        assert!(t.due(241_000, 60_000));
-    }
-
-    #[test]
-    fn tools_that_create_mrs_are_told_apart() {
-        assert!(tool_creates_mr("Bash", "glab mr create --fill"));
-        assert!(tool_creates_mr("mcp__gitlab__create_merge_request", ""));
-        assert!(!tool_creates_mr("Bash", "glab mr view 42"));
-        assert_eq!(
-            truncate("A fairly long merge request title here", 12),
-            "A fairly lo…"
-        );
-        assert_eq!(truncate("short", 12), "short");
+    fn iso_timestamp_respects_timezone_offsets() {
+        let utc = parse_iso_epoch("2026-11-24T10:53:56Z").unwrap();
+        let plus7 = parse_iso_epoch("2026-11-24T17:53:56.835+07:00").unwrap();
+        let minus5 = parse_iso_epoch("2026-11-24T05:53:56-05:00").unwrap();
+        assert_eq!(utc, plus7);
+        assert_eq!(utc, minus5);
+        assert_eq!(ago_iso_at("2026-11-24T17:50:00+07:00", utc + 60), Some("4m ago".into()));
     }
 }

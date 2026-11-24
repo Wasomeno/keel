@@ -183,7 +183,16 @@ impl KeelWindow {
                 "ok"
             }
             "settings" => {
-                self.toggle_settings(cx);
+                if arg.is_empty() {
+                    self.toggle_settings(cx);
+                } else if let Some(tab) = super::settings::SettingsTab::from_name(arg) {
+                    if !self.settings_open {
+                        self.open_settings(cx);
+                    }
+                    self.select_settings_tab(tab, cx);
+                } else {
+                    return format!("error: unknown settings tab {arg:?}");
+                }
                 "ok"
             }
             "scroll_settings" => {
@@ -267,6 +276,7 @@ impl KeelWindow {
                     if let crate::markdown::TranscriptBlock::Chart { chart, .. } = &mut item.block {
                         chart.kind = kind;
                     }
+                    self.transcript.bump_items();
                     self.transcript.list_state.remeasure_items(idx..idx + 1);
                 }
                 cx.notify();
@@ -612,9 +622,8 @@ impl KeelWindow {
                 "ok"
             }
             "points" => {
-                self.show_points_menu = !self.show_points_menu;
-                cx.notify();
-                "ok"
+                let pts = self.transcript.user_points().len();
+                return format!("timeline:{pts}");
             }
             "effort" => {
                 self.show_effort_menu = !self.show_effort_menu;
@@ -669,6 +678,11 @@ impl KeelWindow {
                 };
                 // The list moves first: `on_wheel` reads the post-scroll position.
                 self.transcript.list_state.scroll_by(gpui::px(-dy));
+                if dy.abs() > 0.5 {
+                    self.timeline_scroll_until
+                        .set(Some(std::time::Instant::now() + std::time::Duration::from_millis(420)));
+                    gpui::App::notify(&mut **cx, self.timeline_view.entity_id());
+                }
                 self.transcript.on_wheel(gpui::px(dy));
                 "ok"
             }

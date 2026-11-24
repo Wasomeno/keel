@@ -74,9 +74,6 @@ impl KeelWindow {
             .on_action(cx.listener(|this, _: &ToggleTimer, _, cx| {
                 this.timer_set_hidden(!this.timer.hidden, cx)
             }))
-            .on_action(cx.listener(|this, _: &TrackMergeRequest, window, cx| {
-                this.mr_open_prompt(window, cx)
-            }))
             .on_action(cx.listener(|this, _: &NextChat, _, cx| this.step_chat(1, cx)))
             .on_action(cx.listener(|this, _: &PrevChat, _, cx| this.step_chat(-1, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
@@ -110,9 +107,10 @@ impl KeelWindow {
                 if !this.close_menus(cx) {
                     if this.right_panel_expanded() {
                         this.toggle_right_panel_expand(cx);
-                    } else if this.settings_open || this.gitlab_open {
+                    } else if this.settings_open {
+                        this.close_settings(cx);
+                    } else if this.gitlab_open {
                         this.close_pages();
-                        this.finish_settings_exit(cx);
                         cx.notify();
                     } else {
                         cx.propagate();
@@ -133,6 +131,24 @@ impl KeelWindow {
                 let key = event.keystroke.key.as_str();
                 let m = event.keystroke.modifiers;
                 if !this.lightbox_fx.shown() && this.dotify_key(event, window, cx) {
+                    cx.stop_propagation();
+                } else if this.settings_open && key == "escape" && !m.modified() {
+                    if this.skills.modal_skill.is_some() {
+                        this.dismiss_skill_modal(cx);
+                        cx.stop_propagation();
+                    } else if this.memory.modal.is_some() {
+                        this.dismiss_memory_modal(cx);
+                        cx.stop_propagation();
+                    } else if this.api_key_edit.is_some() {
+                        this.cancel_api_key_edit(Some(window), cx);
+                        window.focus(&this.focus_handle, cx);
+                        cx.stop_propagation();
+                    } else if this.account_confirm.is_some() {
+                        this.cancel_account_confirm(cx);
+                        cx.stop_propagation();
+                    }
+                } else if this.renaming_chat.is_some() && key == "escape" && !m.modified() {
+                    this.cancel_chat_title_rename(window, cx);
                     cx.stop_propagation();
                 } else if let Some(super::Lightbox::Diagram { source, view, .. }) =
                     this.lightbox.as_ref().filter(|_| this.lightbox_fx.shown())
@@ -262,12 +278,10 @@ impl KeelWindow {
             return true;
         }
         let timer_menu = self.timer_close_menu();
-        let mr_menu = self.mr_close_menus();
         let diagram_menu = self.diagram_menu.take().is_some();
         let scope_menu = self.projects.close_scope();
         let project_sheet = self.projects.close_sheet();
         let open = timer_menu
-            || mr_menu
             || diagram_menu
             || scope_menu
             || project_sheet
@@ -279,7 +293,7 @@ impl KeelWindow {
             || self.show_effort_menu
             || self.show_permission_menu
             || self.show_subagent_menu
-            || self.show_points_menu
+            || self.show_chat_menu
             || self.show_sound_menu
             || self.state.show_branch_picker
             || self.confirming_delete_chats.is_some()
@@ -316,7 +330,7 @@ impl KeelWindow {
         self.show_effort_menu = false;
         self.show_permission_menu = false;
         self.show_subagent_menu = false;
-        self.show_points_menu = false;
+        self.show_chat_menu = false;
         self.show_sound_menu = false;
         self.state.show_branch_picker = false;
         if self.menus_cut {

@@ -1540,6 +1540,7 @@ impl Engine {
                     .as_ref()
                     .map(|row| row.name.clone())
                     .unwrap_or_default();
+                let mut pending_mr: Option<(String, String, keel_proto::mr::MrRef, bool)> = None;
                 // A Keel UI tool's result is the card spec. Store it on this
                 // message now; the host draws it. No second model.
                 if keel_proto::is_ui_tool(&name)
@@ -1557,6 +1558,28 @@ impl Engine {
                 {
                     let id = spec["component"].as_str().unwrap_or("ui");
                     let _ = doc.put_ui(&message_id, id, &spec.to_string());
+                    if id == "mr"
+                        && !spec["snap"]["state"].is_string()
+                        && let (Some(host), Some(project), Some(iid)) = (
+                            spec["host"].as_str(),
+                            spec["project"].as_str(),
+                            spec["iid"].as_u64(),
+                        )
+                    {
+                        pending_mr = Some((
+                            message_id.clone(),
+                            id.to_string(),
+                            keel_proto::mr::MrRef {
+                                host: host.to_string(),
+                                project: project.to_string(),
+                                iid,
+                            },
+                            spec["offer_merge"] == true,
+                        ));
+                    }
+                }
+                if let Some((msg_id, part_id, mr, offer_merge)) = pending_mr {
+                    self.spawn_refresh_mr(chat_id, &msg_id, &part_id, mr, offer_merge, None);
                 }
                 let images = self.tool_images(chat_id, &name, images);
                 if let Some(doc) = state.store.session(chat_id) {
@@ -3460,6 +3483,85 @@ impl Engine {
         success(id, serde_json::json!({ "state": "starting" }))
     }
 
+    /// Store or update a provider's API key on Keel's harness and drop cached models.
+    fn rpc_set_provider_api_key(&self, id: &str, params: &Value) -> String {
+        let Some(provider) = params["provider"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            return failure(id, RpcErrorCode::BadParams, "provider is required");
+        };
+        let Some(api_key) = params["api_key"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            return failure(id, RpcErrorCode::BadParams, "API key is required");
+        };
+        let Some(harness) = self
+            .inner
+            .harnesses
+            .iter()
+            .find(|h| h.id() == HarnessId::Keel)
+            .cloned()
+        else {
+            return failure(id, RpcErrorCode::BadParams, "Keel's harness is not available");
+        };
+        let provider = provider.to_string();
+        let api_key = api_key.to_string();
+        let result = block_on_timeout(
+            async move { harness.set_api_key(&provider, &api_key).await },
+            Duration::from_secs(10),
+        );
+        match result {
+            Some(Ok(())) => {
+                self.inner
+                    .models
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clear();
+                success(id, serde_json::json!({}))
+            }
+            Some(Err(err)) => failure(id, RpcErrorCode::BadParams, &err.to_string()),
+            None => failure(id, RpcErrorCode::Internal, "saving API key timed out"),
+        }
+    }
+
+    /// Remove a provider's stored credential (subscription or API key) and drop cached models.
+    fn rpc_disconnect_provider(&self, id: &str, params: &Value) -> String {
+        let Some(provider) = params["provider"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            return failure(id, RpcErrorCode::BadParams, "provider is required");
+        };
+        if let Some((_, Some(task))) = self
+            .inner
+            .sign_ins
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(provider)
+        {
+            task.abort();
+        }
+        let Some(harness) = self
+            .inner
+            .harnesses
+            .iter()
+            .find(|h| h.id() == HarnessId::Keel)
+            .cloned()
+        else {
+            return failure(id, RpcErrorCode::BadParams, "Keel's harness is not available");
+        };
+        let provider = provider.to_string();
+        let result = block_on_timeout(
+            async move { harness.remove_credential(&provider).await },
+            Duration::from_secs(10),
+        );
+        match result {
+            Some(Ok(())) => {
+                self.inner
+                    .models
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clear();
+                success(id, serde_json::json!({}))
+            }
+            Some(Err(err)) => failure(id, RpcErrorCode::Internal, &err.to_string()),
+            None => failure(id, RpcErrorCode::Internal, "disconnecting provider timed out"),
+        }
+    }
+
     /// Check a GitLab token with its host, then keep both: the token in a
     /// 0600 file, the host and user in `connections.json`.
     // ponytail: blocks this RPC up to 15 s on the network; move to a task if connects get frequent.
@@ -3550,6 +3652,103 @@ impl Engine {
         "{}".to_string()
     }
 
+    fn read_mr_card_part(
+        doc: &keel_doc::SessionDoc,
+        message_id: &str,
+        part_id: &str,
+    ) -> Option<(keel_proto::mr::MrRef, bool)> {
+        let spec = doc
+            .view()
+            .messages
+            .iter()
+            .find(|m| m.id == message_id)
+            .and_then(|m| {
+                m.parts.iter().find_map(|part| match part {
+                    keel_doc::PartView::Ui { id, spec } if id == part_id => {
+                        serde_json::from_str::<Value>(spec).ok()
+                    }
+                    _ => None,
+                })
+            })
+            .filter(|spec| spec["component"] == "mr")?;
+        let mr = keel_proto::mr::MrRef {
+            host: spec["host"].as_str().unwrap_or_default().to_string(),
+            project: spec["project"].as_str().unwrap_or_default().to_string(),
+            iid: spec["iid"].as_u64().unwrap_or_default(),
+        };
+        Some((mr, spec["offer_merge"] == true))
+    }
+
+    fn spawn_refresh_mr(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        part_id: &str,
+        mr: keel_proto::mr::MrRef,
+        offer_merge: bool,
+        reply: Option<(String, keel_rpc::Outbound)>,
+    ) {
+        let (engine, data_dir) = (self.clone(), compute_data_dir(&self.inner.profile));
+        let (chat_id, message_id, part_id) = (
+            chat_id.to_string(),
+            message_id.to_string(),
+            part_id.to_string(),
+        );
+        std::thread::spawn(move || {
+            let outcome = connections::gitlab_mr(&data_dir, &mr.host, &mr.project, mr.iid);
+            if let Ok(ref snap) = outcome {
+                let mut state = engine.lock();
+                if let Some(doc) = state.store.session(&chat_id) {
+                    let _ = doc.put_ui(
+                        &message_id,
+                        &part_id,
+                        &genui::mr_card(&mr, snap, offer_merge).to_string(),
+                    );
+                }
+                state.dirty = true;
+                engine.push_message(&state, &chat_id, &message_id);
+            }
+            if let Some((id, outbound)) = reply {
+                let payload = match outcome {
+                    Ok(snap) => success(&id, snap),
+                    Err(err) => failure(&id, RpcErrorCode::BadParams, &err),
+                };
+                outbound.push(&payload);
+            }
+        });
+    }
+
+    /// Refresh an MR card's persisted snapshot (`{chat_id, message_id, part_id}`).
+    /// Fetches live state + diff stats from GitLab and rewrites the card in the doc.
+    fn rpc_refresh_mr(&self, id: &str, params: &Value, outbound: &keel_rpc::Outbound) -> String {
+        let (Some(chat_id), Some(message_id), Some(part_id)) = (
+            params["chat_id"].as_str(),
+            params["message_id"].as_str(),
+            params["part_id"].as_str(),
+        ) else {
+            return failure(
+                id,
+                RpcErrorCode::BadParams,
+                "chat_id, message_id and part_id are required",
+            );
+        };
+        let Some(doc) = self.ensure_session(chat_id) else {
+            return failure(id, RpcErrorCode::UnknownChat, "unknown chat");
+        };
+        let Some((mr, offer_merge)) = Self::read_mr_card_part(&doc, message_id, part_id) else {
+            return failure(id, RpcErrorCode::BadParams, "no MR card there");
+        };
+        self.spawn_refresh_mr(
+            chat_id,
+            message_id,
+            part_id,
+            mr,
+            offer_merge,
+            Some((id.to_string(), outbound.clone())),
+        );
+        "{}".to_string()
+    }
+
     /// The Merge button on an MR card (`{chat_id, message_id, part_id}`). The
     /// MR is the one that card shows, read from the doc, never from the
     /// caller; `connections::gitlab_merge` checks it live first. On success
@@ -3569,26 +3768,8 @@ impl Engine {
         let Some(doc) = self.ensure_session(chat_id) else {
             return failure(id, RpcErrorCode::UnknownChat, "unknown chat");
         };
-        let spec = doc
-            .view()
-            .messages
-            .iter()
-            .find(|m| m.id == message_id)
-            .and_then(|m| {
-                m.parts.iter().find_map(|part| match part {
-                    keel_doc::PartView::Ui { id, spec } if id == part_id => {
-                        serde_json::from_str::<Value>(spec).ok()
-                    }
-                    _ => None,
-                })
-            });
-        let Some(spec) = spec.filter(|spec| spec["component"] == "mr") else {
+        let Some((mr, _)) = Self::read_mr_card_part(&doc, message_id, part_id) else {
             return failure(id, RpcErrorCode::BadParams, "no MR card there");
-        };
-        let mr = keel_proto::mr::MrRef {
-            host: spec["host"].as_str().unwrap_or_default().to_string(),
-            project: spec["project"].as_str().unwrap_or_default().to_string(),
-            iid: spec["iid"].as_u64().unwrap_or_default(),
         };
         let (engine, data_dir, id, outbound) = (
             self.clone(),
@@ -5207,10 +5388,18 @@ impl EngineHost for Engine {
                 }
                 success(&request.id, serde_json::json!({}))
             }
-            "list_connections" => success(
-                &request.id,
-                serde_json::json!({ "connections": connections::list(&compute_data_dir(&self.inner.profile)) }),
-            ),
+            "set_provider_api_key" => self.rpc_set_provider_api_key(&request.id, &request.params),
+            "disconnect_provider" => self.rpc_disconnect_provider(&request.id, &request.params),
+            "list_connections" => {
+                let data_dir = compute_data_dir(&self.inner.profile);
+                success(
+                    &request.id,
+                    serde_json::json!({
+                        "connections": connections::list(&data_dir),
+                        "gitlab_hosts": connections::gitlab_hosts(&data_dir),
+                    }),
+                )
+            }
             "connect_gitlab" => self.rpc_connect_gitlab(&request.id, &request.params),
             "connect_dotify" => self.rpc_connect_dotify(&request.id, &request.params, outbound),
             "dotify" => self.rpc_dotify(&request.id, &request.params, outbound),
@@ -5218,6 +5407,7 @@ impl EngineHost for Engine {
             "gitlab_projects" => self.rpc_gitlab(&request.id, &request.params, false),
             "gitlab_board" => self.rpc_gitlab(&request.id, &request.params, true),
             "gitlab_mr" => self.rpc_gitlab_mr(&request.id, &request.params, outbound),
+            "refresh_mr" => self.rpc_refresh_mr(&request.id, &request.params, outbound),
             "merge_mr" => self.rpc_merge_mr(&request.id, &request.params, outbound),
             "create_space" => self.rpc_create_space(&request.id, &request.params),
             "create_chat" => self.rpc_create(&request.id, &request.params),

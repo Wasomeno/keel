@@ -11,6 +11,7 @@ keel-harness.workspace = true
 keel-proto.workspace = true
 keel-rpc.workspace = true
 keel-store.workspace = true
+keel-tools.workspace = true
 libc.workspace = true
 notify.workspace = true
 serde.workspace = true

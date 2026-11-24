@@ -12,7 +12,9 @@ use keel_theme::Tokens;
 use keel_update::{Check, GateError, Offer, Ready, Status, UpdateError, msg};
 
 use super::KeelWindow;
-use super::settings::{section_header, setting_row, settings_list, text_button_owned, toggle};
+use super::settings::{
+    section_header, setting_row_info, settings_list, text_button_owned, toggle,
+};
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
 use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_MD, RADIUS_SM, c, zpx};
@@ -532,7 +534,8 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .py_3()
+            .min_h(zpx(44.))
+            .py_2p5()
             .gap_4()
             .child(
                 div()
@@ -582,11 +585,11 @@ impl KeelWindow {
             );
 
         let auto = self.state.ui_settings.auto_update != Some(false);
-        let auto_row = setting_row(
+        let auto_row = setting_row_info(
             t,
             "Check automatically",
             Some(
-                "Once a day on launch. Downloads in the background and installs only when you relaunch.",
+                "Checks once a day on launch. Downloads in the background and installs only when you relaunch.",
             ),
             toggle(
                 "updates-auto".into(),
@@ -608,7 +611,7 @@ impl KeelWindow {
             .flex()
             .flex_col()
             .child(section_header(
-                "Updates",
+                "UPDATES",
                 "New versions of Keel, signed and verified before they install.",
                 None,
                 t,

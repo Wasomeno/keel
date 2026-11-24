@@ -27,7 +27,7 @@ use super::{
 use crate::icons::Icon;
 use crate::motion::{ease_out, ease_out_strong};
 use crate::state::AppState;
-use crate::style::{KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, c, zpx};
+use crate::style::{HEADER_HEIGHT, KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, c, zpx};
 
 const HOME_ROW_H: f32 = 54.;
 /// Chats listed under an unfolded project. The rest stay on the project home.
@@ -211,15 +211,19 @@ impl Projects {
         let Some(folder) = project.folders.iter().find(|f| paths_eq(&f.path, path)) else {
             return fallback;
         };
-        if project
-            .folders
-            .first()
-            .is_some_and(|f| f.alias == folder.alias)
-        {
-            project.name.clone()
-        } else {
-            format!("{} · {}", project.name, folder.alias)
-        }
+        project_folder_label(project, folder)
+    }
+
+    /// Folder chip text for a chat that runs in one of its project's folders:
+    /// the project name for the primary folder, `Project · alias` for a
+    /// secondary one. `None` for an unlinked chat or a missing project (and
+    /// for a cwd that is not one of the project's folders), so the composer
+    /// can fall back to the chat's space name.
+    pub(super) fn chat_project_label(&self, chat_id: &str, cwd: &str) -> Option<String> {
+        let id = self.chat_project_id(chat_id)?;
+        let project = self.store.project(&id)?;
+        let folder = project.folders.iter().find(|f| paths_eq(&f.path, cwd))?;
+        Some(project_folder_label(project, folder))
     }
 
     /// Alias and the folder's own name, one per folder, for the files tree.
@@ -480,6 +484,21 @@ impl Projects {
         folder_changes_text(status.changes, status.repo, status.exists)
     }
 
+}
+
+/// One project folder's chip wording: the project name for the primary
+/// folder, `Project · alias` for a secondary one. Shared by the new-chat
+/// tab and a chat's read-only tab, so the two cannot drift.
+fn project_folder_label(project: &Project, folder: &ProjectFolder) -> String {
+    if project
+        .folders
+        .first()
+        .is_some_and(|f| f.alias == folder.alias)
+    {
+        project.name.clone()
+    } else {
+        format!("{} · {}", project.name, folder.alias)
+    }
 }
 
 fn folder_changes_text(changes: Option<u32>, repo: bool, exists: bool) -> String {
@@ -2915,7 +2934,7 @@ impl KeelWindow {
                     .w_full()
                     .max_w(zpx(680.))
                     .px(zpx(32.))
-                    .pt(zpx(28.))
+                    .pt(HEADER_HEIGHT + zpx(28.))
                     .pb(zpx(32.))
                     .flex()
                     .flex_col()
@@ -3222,6 +3241,93 @@ fn match_named<'a>(store: &'a projects::Projects, arg: &'a str) -> Option<(&'a P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A view over one two-folder project, `Resona` (`web` is primary).
+    fn projects_with_resona(tag: &str) -> Projects {
+        let temp = std::env::temp_dir().join(format!(
+            "keel-test-projects-label-{}-{tag}",
+            std::process::id()
+        ));
+        let mut projects = Projects::load(&temp);
+        projects.store.projects = vec![Project {
+            id: "p".into(),
+            name: "Resona".into(),
+            folders: vec![
+                ProjectFolder {
+                    path: "/r/web".into(),
+                    alias: "web".into(),
+                    ..Default::default()
+                },
+                ProjectFolder {
+                    path: "/r/api".into(),
+                    alias: "api".into(),
+                    ..Default::default()
+                },
+            ],
+            created_at: 0,
+        }];
+        projects
+    }
+
+    fn link_chat(projects: &mut Projects, chat: &str, project: &str) {
+        projects.store.chats.insert(
+            chat.into(),
+            projects::ChatScope {
+                project: project.into(),
+                scope: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn a_chat_in_the_primary_folder_is_named_by_its_project() {
+        let mut projects = projects_with_resona("primary");
+        link_chat(&mut projects, "c1", "p");
+        projects.picked = Some("p".into());
+        assert_eq!(
+            projects.folder_chip(Some("/r/web"), "fallback".into()),
+            "Resona"
+        );
+        assert_eq!(
+            projects.chat_project_label("c1", "/r/web").as_deref(),
+            Some("Resona")
+        );
+        // A cwd that is not one of the project's folders falls back.
+        assert_eq!(projects.chat_project_label("c1", "/elsewhere"), None);
+    }
+
+    #[test]
+    fn a_chat_in_a_secondary_folder_names_the_alias() {
+        let mut projects = projects_with_resona("secondary");
+        link_chat(&mut projects, "c1", "p");
+        projects.picked = Some("p".into());
+        assert_eq!(
+            projects.folder_chip(Some("/r/api"), "fallback".into()),
+            "Resona · api"
+        );
+        assert_eq!(
+            projects.chat_project_label("c1", "/r/api").as_deref(),
+            Some("Resona · api")
+        );
+    }
+
+    #[test]
+    fn an_unlinked_chat_has_no_project_label() {
+        let projects = projects_with_resona("unlinked");
+        assert_eq!(projects.chat_project_label("c1", "/r/web"), None);
+    }
+
+    #[test]
+    fn a_link_to_a_missing_project_has_no_label() {
+        let mut projects = projects_with_resona("missing");
+        link_chat(&mut projects, "c1", "gone");
+        projects.picked = Some("gone".into());
+        assert_eq!(projects.chat_project_label("c1", "/r/web"), None);
+        assert_eq!(
+            projects.folder_chip(Some("/r/web"), "fallback".into()),
+            "fallback"
+        );
+    }
 
     #[test]
     fn folder_change_labels_stay_per_folder() {

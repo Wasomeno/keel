@@ -1935,8 +1935,8 @@ mod tests {
         s.kind = StepKind::Execute;
         s.verb = crate::trace::verb_for(StepKind::Execute, "bash");
         s.subject = "pnpm test".into();
-        // No label: title is the plain verb; subject stays for the body only.
-        assert_eq!(split_title(&s), ("Ran".into(), String::new()));
+        // No label: title joins verb + subject and splits the subject out.
+        assert_eq!(split_title(&s), ("Ran".into(), "pnpm test".into()));
         s.label = "Running the test suite".into();
         assert_eq!(
             split_title(&s),

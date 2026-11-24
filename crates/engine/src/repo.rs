@@ -87,7 +87,12 @@ pub async fn run_git_cmd(
     let child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn git: {e}"))?;
-    let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+    let output = match tokio::time::timeout(
+        timeout_duration,
+        keel_tools::process::wait_with_output(child),
+    )
+    .await
+    {
         Ok(res) => res.map_err(|e| format!("git execution error: {e}"))?,
         Err(_) => {
             return Err(format!(

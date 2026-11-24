@@ -14,7 +14,7 @@ use super::files_panel::FilesTab;
 use super::{KeelWindow, drag_region, icon_button};
 use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use crate::icons::Icon;
-use crate::motion::{FAST, ease_out_strong, panel_shift, stagger_in};
+use crate::motion::{FAST, ease_out_strong, panel_slide_geometry, stagger_in};
 use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_MD, RADIUS_XL, c, zpx};
 
 /// Spacing inside the launcher and between cards.
@@ -61,6 +61,9 @@ pub(super) struct RightPanel {
     pub(super) tabs: Vec<RightTab>,
     pub(super) active: usize,
     next_id: u64,
+    /// Tabs with `id < settled_tab_id` existed when the drawer opened, so they
+    /// slide in solidly with the panel instead of replaying a child entrance.
+    pub(super) settled_tab_id: u64,
     launcher_gen: u64,
     pub(super) animate_launcher: bool,
     /// When the user clicks Terminal on a Launcher tab, record its tab id so
@@ -86,6 +89,7 @@ impl RightPanel {
             }],
             active: 0,
             next_id: 2,
+            settled_tab_id: 2,
             launcher_gen: 0,
             animate_launcher: false,
             pending_terminal_launcher: None,
@@ -107,6 +111,10 @@ impl RightPanel {
 
     fn tab_pos(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
+    }
+
+    pub(super) fn mark_tabs_settled(&mut self) {
+        self.settled_tab_id = self.next_id;
     }
 }
 
@@ -335,6 +343,7 @@ impl KeelWindow {
         rp.expand_from = 0.;
         rp.expand_anim = None;
         rp.animate_launcher = false;
+        rp.settled_tab_id = rp.next_id;
         self.sync_active_right_tab_on_enter(Some(window), cx);
         self.schedule_right_panel_settle(cx);
         cx.notify();
@@ -631,6 +640,9 @@ impl KeelWindow {
             self.right_panel.tabs.push(tab);
             self.right_panel.active = self.right_panel.tabs.len() - 1;
         }
+        if !was_open {
+            self.right_panel.settled_tab_id = self.right_panel.next_id;
+        }
         self.right_panel.animate_launcher = was_open;
         if was_open {
             self.right_panel.launcher_gen += 1;
@@ -650,7 +662,8 @@ impl KeelWindow {
         if !self.browser_allowed() {
             return;
         }
-        if !self.right_panel.open {
+        let was_open = self.right_panel.open;
+        if !was_open {
             self.open_right_panel(window, cx);
         }
         match action {
@@ -677,6 +690,9 @@ impl KeelWindow {
                 self.right_panel.pending_terminal_launcher = replace_id;
                 self.new_terminal(cx);
             }
+        }
+        if !was_open {
+            self.right_panel.settled_tab_id = self.right_panel.next_id;
         }
     }
 
@@ -914,6 +930,7 @@ impl KeelWindow {
         } else {
             return Vec::new();
         };
+        let (spacer_w, right_offset) = panel_slide_geometry(full, slide_k);
 
         // Keep `pane` as one persistent element across toggling/settled states so
         // descendant `GlobalElementId`s (animations, hover states, scroll handles)
@@ -925,7 +942,7 @@ impl KeelWindow {
             .absolute()
             .top_0()
             .bottom_0()
-            .right(px(panel_shift(full, slide_k)))
+            .right(px(right_offset))
             .w(px(current_w))
             .child(body)
             .when(!expanded && !expanding, |d| {
@@ -936,7 +953,7 @@ impl KeelWindow {
         let spacer = div()
             .h_full()
             .flex_none()
-            .w(px(full * self.right_panel_target()))
+            .w(px(spacer_w))
             .into_any_element();
 
         vec![spacer, pane]
@@ -987,6 +1004,7 @@ impl KeelWindow {
         let changes_count = self.files.changes_count();
         let file_dirty = self.files.dirty();
         let selected_file_name = self.files.selected_file_name().map(str::to_string);
+        let settled_tab_id = self.right_panel.settled_tab_id;
 
         let pills = if lone_launcher {
             Vec::new()
@@ -1210,7 +1228,11 @@ impl KeelWindow {
                         })
                         .child(pill);
 
-                    stagger_in(slot, ("right-tab-in", id as usize), 0, reduced)
+                    if id >= settled_tab_id {
+                        stagger_in(slot, ("right-tab-in", id as usize), 0, reduced)
+                    } else {
+                        slot.into_any_element()
+                    }
                 })
                 .collect::<Vec<_>>()
         };
@@ -1265,13 +1287,9 @@ impl KeelWindow {
             cx,
         );
 
-        let close_btn = self.right_tip_target(
-            icon_button("right-panel-close", Icon::PanelRight, t).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| this.toggle_right_panel(window, cx),
-            )),
-            "right-panel-close",
-            cx,
-        );
+        // Reserve the exact top-right slot occupied by the window-pinned
+        // `toggle-right-panel-btn` so the drawer slides cleanly beneath it.
+        let trigger_slot = div().flex_none().size(zpx(26.));
 
         div()
             .relative()
@@ -1287,7 +1305,7 @@ impl KeelWindow {
             })
             .child(left_strip)
             .child(expand_btn)
-            .child(close_btn)
+            .child(trigger_slot)
     }
 
     fn render_right_launcher(&self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1397,7 +1415,6 @@ impl KeelWindow {
             "right-new-tab" => ("New tab", keys("⌘T")),
             "right-panel-expand" if self.right_panel.expanded => ("Restore", keys("⌘⇧F")),
             "right-panel-expand" => ("Expand", keys("⌘⇧F")),
-            "right-panel-close" => ("Hide panel", keys("⌘⌥B")),
             _ => return self.browser_tip_label(id),
         };
         Some((text.to_string(), key))

@@ -29,6 +29,15 @@ keel-theme = { path = "crates/theme" }
 keel-ui = { path = "crates/ui" }
 keel-update = { path = "crates/update" }
 
+keel-llm-types = { path = "../keel-harness/crates/keel-llm-types" }
+keel-llm-protocol = { path = "../keel-harness/crates/keel-llm-protocol" }
+keel-llm-route = { path = "../keel-harness/crates/keel-llm-route" }
+keel-llm-catalog = { path = "../keel-harness/crates/keel-llm-catalog" }
+keel-tools = { path = "../keel-harness/crates/keel-tools" }
+keel-mcp = { path = "../keel-harness/crates/keel-mcp" }
+keel-core = { path = "../keel-harness/crates/keel-core" }
+tokio-util = { version = "0.7", features = ["rt"] }
+
 async-trait = "0.1"
 
 # gpui-fast is a retained-mode fork of upstream GPUI. Exact pins: 0.1.x is

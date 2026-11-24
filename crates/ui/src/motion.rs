@@ -25,11 +25,11 @@ pub const SPATIAL: Duration = Duration::from_millis(420);
 /// feel each way, the close a touch quicker (<250ms for responsive navigation).
 pub const SHEET_OPEN: Duration = Duration::from_millis(240);
 pub const SHEET_CLOSE: Duration = Duration::from_millis(180);
-/// Right side panels (browser, files, terminal) on [`glide_curve`].
-/// A wide pane opens on the long-travel beat ([`SPATIAL`]). The close is
-/// quicker, and still long enough for that width to read as a slide.
-pub const PANEL_OPEN: Duration = SPATIAL;
-pub const PANEL_CLOSE: Duration = Duration::from_millis(320);
+/// Right side panels (browser, files, terminal) on [`drawer_curve`].
+/// Stays under the 300 ms UI budget with a snappy deceleration and no long
+/// creeping tail; the close is quicker so exits get out of the way.
+pub const PANEL_OPEN: Duration = Duration::from_millis(260);
+pub const PANEL_CLOSE: Duration = Duration::from_millis(200);
 /// A spring settling: long enough for its overshoot to read.
 pub const SPRING: Duration = Duration::from_millis(380);
 /// Loops.
@@ -46,46 +46,16 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// `cubic-bezier(0.23, 1, 0.32, 1)`: the entrance curve. Stronger than
-/// [`ease_out`], so the first frames move at once.
-pub fn ease_out_strong(t: f32) -> f32 {
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     if t <= 0. {
         return 0.;
     }
     if t >= 1. {
         return 1.;
     }
-    let (x1, y1, x2, y2) = (0.23, 1.0, 0.32, 1.0);
     let bez = |a: f32, b: f32, s: f32| {
         3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3)
     };
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    for _ in 0..12 {
-        let mid = (lo + hi) / 2.;
-        if bez(x1, x2, mid) < t {
-            lo = mid
-        } else {
-            hi = mid
-        }
-    }
-    bez(y1, y2, (lo + hi) / 2.)
-}
-
-/// `cubic-bezier(0.32, 0.72, 0, 1)`, the iOS sheet curve: moves at once
-/// (no hesitation) without a first-frame lurch, then settles long and soft.
-/// For a long move from one resting spot to another, like the composer's drop.
-pub fn glide_curve(t: f32) -> f32 {
-    if t <= 0. {
-        return 0.;
-    }
-    if t >= 1. {
-        return 1.;
-    }
-    let (x1, y1, x2, y2) = (0.32, 0.72, 0.0, 1.0);
-    let bez = |a: f32, b: f32, s: f32| {
-        3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3)
-    };
-    // x(s) is increasing on 0..1: bisect for the s where x(s) = t.
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..24 {
         let mid = (lo + hi) / 2.;
@@ -96,6 +66,25 @@ pub fn glide_curve(t: f32) -> f32 {
         }
     }
     bez(y1, y2, (lo + hi) / 2.)
+}
+
+/// `cubic-bezier(0.23, 1, 0.32, 1)`: the entrance curve. Stronger than
+/// [`ease_out`], so the first frames move at once.
+pub fn ease_out_strong(t: f32) -> f32 {
+    cubic_bezier(0.23, 1.0, 0.32, 1.0, t)
+}
+
+/// `cubic-bezier(0.32, 0.72, 0, 1)`, the iOS sheet curve: moves at once
+/// (no hesitation) without a first-frame lurch, then settles long and soft.
+/// For a long move from one resting spot to another, like the composer's drop.
+pub fn glide_curve(t: f32) -> f32 {
+    cubic_bezier(0.32, 0.72, 0.0, 1.0, t)
+}
+
+/// `cubic-bezier(0.25, 1, 0.5, 1)`: strong, snappy ease-out with clean
+/// deceleration and no lingering creep tail at the end of a drawer slide.
+pub fn drawer_curve(t: f32) -> f32 {
+    cubic_bezier(0.25, 1.0, 0.5, 1.0, t)
 }
 
 /// A damped spring: shoots toward the target, overshoots it by about 6%
@@ -484,6 +473,38 @@ pub fn sheet_look(t: f32, leaving: bool, reduced: bool) -> (f32, f32) {
 /// the whole motion.
 pub fn panel_shift(width: f32, k: f32) -> f32 {
     -width * (1. - k.clamp(0., 1.))
+}
+
+/// Pixel-locked `(spacer_w, right_offset)` for a right-side pane of settled
+/// `width` at open fraction `k` (`0.0` hidden, `1.0` flush). Both the main
+/// chat session spacer and the sliding drawer derive from the same rounded
+/// visible width so the divider edge stays 1:1 with zero seam or overlap.
+pub fn panel_slide_geometry(width: f32, k: f32) -> (f32, f32) {
+    let visible = (width * unit(k)).round();
+    (visible, visible - width)
+}
+
+/// Visibility (`0.0..=1.0`) for the main header's right-pane open button at
+/// panel open fraction `k`. Tucks away in the first ~45% of opening and waits
+/// until the closing drawer clears ~45% before fading back in, preventing
+/// duplicate toggle buttons during the transition.
+pub fn right_panel_trigger_vis(k: f32) -> f32 {
+    (1.0 - unit(k) / 0.45).clamp(0.0, 1.0)
+}
+
+/// Smooth composer `max_w` across a right-pane slide (`k` in `0.0..=1.0`).
+/// Interpolates between the settled closed and open widths so the composer
+/// never hits the left gutter mid-slide and squeezes only its right edge at
+/// the end of the motion.
+pub fn composer_slide_max_w(
+    available_closed: f32,
+    available_open: f32,
+    cap: f32,
+    k: f32,
+) -> f32 {
+    let closed = available_closed.max(1.).min(cap);
+    let open = available_open.max(1.).min(cap);
+    closed + (open - closed) * unit(k)
 }
 
 /// Fade out over [`SPATIAL`].
@@ -1153,13 +1174,35 @@ mod tests {
 
     #[test]
     fn panel_slide_is_a_long_solid_travel() {
-        assert_eq!(PANEL_OPEN, SPATIAL);
+        assert!(PANEL_OPEN <= Duration::from_millis(300));
         assert!(PANEL_CLOSE < PANEL_OPEN);
-        assert!(PANEL_CLOSE <= Duration::from_millis(500));
+        assert_eq!(drawer_curve(0.), 0.);
+        assert_eq!(drawer_curve(1.), 1.);
+        assert!(drawer_curve(0.5) > 0.8);
         assert_eq!(panel_shift(400., 0.), -400.);
         assert_eq!(panel_shift(400., 0.5), -200.);
         assert_eq!(panel_shift(400., 1.), 0.);
         assert_eq!(panel_shift(400., 1.5), 0.);
+
+        assert_eq!(panel_slide_geometry(400., 0.), (0., -400.));
+        assert_eq!(panel_slide_geometry(400., 1.), (400., 0.));
+        for k in [0.0, 0.13, 0.333, 0.5, 0.77, 1.0] {
+            let (spacer_w, right_offset) = panel_slide_geometry(481., k);
+            assert_eq!(spacer_w, 481. + right_offset);
+        }
+
+        assert_eq!(right_panel_trigger_vis(0.), 1.);
+        assert_eq!(right_panel_trigger_vis(0.45), 0.);
+        assert_eq!(right_panel_trigger_vis(1.), 0.);
+        let mid = right_panel_trigger_vis(0.225);
+        assert!((mid - 0.5).abs() < 1e-4, "{mid}");
+
+        // Wide window: stays at cap.
+        assert_eq!(composer_slide_max_w(1500., 900., 728., 0.5), 728.);
+        // Crossing cap: interpolates linearly across k so the right edge never squeezes late.
+        assert_eq!(composer_slide_max_w(1248., 710., 728., 0.), 728.);
+        assert_eq!(composer_slide_max_w(1248., 710., 728., 0.5), 719.);
+        assert_eq!(composer_slide_max_w(1248., 710., 728., 1.), 710.);
     }
 
     #[test]

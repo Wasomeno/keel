@@ -3,8 +3,8 @@
 use crate::hover_fade::HoverFadeExt;
 use crate::style::zpx;
 use gpui::{
-    AnimationExt as _, ClickEvent, Context, ElementId, IntoElement, Render, ScrollEvent, Window,
-    WindowAppearance, div, list, prelude::*, px,
+    AnimationExt as _, ClickEvent, Context, ElementId, IntoElement, Render, Window,
+    WindowAppearance, div, prelude::*, px,
 };
 use keel_proto::ChatStatus;
 use keel_theme::{Tokens, resolve_syntax_theme};
@@ -14,7 +14,7 @@ use crate::icons::Icon;
 use crate::style::{
     HEADER_HEIGHT, KeelStyled, MONO, RADIUS_MD, RADIUS_SM, SANS, apply_base_theme, c,
 };
-use crate::transcript::{RowAction, RowContext, render_row};
+use crate::transcript::{RowAction, RowContext};
 
 impl Render for KeelWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -31,7 +31,6 @@ impl Render for KeelWindow {
         self.sync_active_chat(window, cx);
         self.sync_prompt_suggestion(window, cx);
         self.fullscreen = window.is_fullscreen();
-        self.mr_note_window_active(window.is_window_active(), cx);
 
         let system_dark = matches!(
             window.appearance(),
@@ -74,15 +73,16 @@ impl Render for KeelWindow {
             });
             for input in [
                 &self.rename_input,
+                &self.chat_title_input,
                 &self.gitlab_host,
                 &self.browser_sites,
                 &self.gitlab_token,
                 &self.dotify_token,
+                &self.api_key_input,
                 &self.dotify_search,
                 &self.gitlab_filter,
                 &self.skills_filter,
                 &self.memory_desc,
-                &self.mr_input,
                 &self.browser.address,
             ] {
                 input.update(cx, |s, cx| {
@@ -131,7 +131,7 @@ impl Render for KeelWindow {
 
         // New-chat hero: on entry its animations replay; on exit the composer
         // drops from the middle to its dock while the transcript fills in.
-        let page = self.settings_open || self.gitlab_open;
+        let page = self.gitlab_open;
         let hero = self.hero_visible() && !show_question && !page && !self.projects.home_open();
         if hero != self.was_hero {
             self.hero_gen += 1;
@@ -200,8 +200,7 @@ impl Render for KeelWindow {
 
         // The timer's corner layer: over the transcript when there is one
         // (so bottom corners clear the composer), else under the header.
-        // Settings covers the pane, so a corner clock would sit on it.
-        let page_timer = ((hero || page) && !self.settings_open && self.settings_leaving.is_none())
+        let page_timer = (hero || page)
             .then(|| self.render_timer_corners(t, HEADER_HEIGHT, cx))
             .flatten();
 
@@ -319,25 +318,20 @@ impl Render for KeelWindow {
                                 d.opacity(opacity).left(zpx(dx))
                             })
                             .map(|d| {
-                                // Settings paints over the whole window, sidebars
-                                // included; the column keeps the page underneath.
-                                if self.settings_open {
-                                    d
-                                } else if self.gitlab_open {
-                                    d.child(self.render_header(t, true, false, false, cx))
-                                        .child(self.render_gitlab(t, cx))
+                                if self.gitlab_open {
+                                    d.child(self.render_gitlab(t, cx))
+                                        .child(self.render_header(t, window, true, false, false, cx))
                                 } else if self.projects.home_open() {
-                                    d.child(self.render_header(t, true, false, false, cx))
-                                        .child(self.render_project_home(t, cx))
+                                    d.child(self.render_project_home(t, cx))
+                                        .child(self.render_header(t, window, true, false, false, cx))
                                 } else if hero {
                                     let composer = self
                                         .render_composer(t, window, true, cx)
                                         .into_any_element();
-                                    d.child(self.render_header(t, true, false, false, cx))
-                                        .child(self.render_hero_center(composer, hero_gen, reduced))
+                                    d.child(self.render_hero_center(composer, hero_gen, reduced))
+                                        .child(self.render_header(t, window, true, false, false, cx))
                                 } else {
-                                    d.child(self.render_header(t, false, exiting, false, cx))
-                                        .child(if self.subagent_open.is_some() {
+                                    d.child(if self.subagent_open.is_some() {
                                             self.render_subagent_session(t, cx)
                                         } else {
                                             self.render_transcript(t, window, cx).into_any_element()
@@ -351,17 +345,21 @@ impl Render for KeelWindow {
                                                 .then(|| self.render_thinking(t))
                                                 .flatten(),
                                         )
+                                        .child(self.render_header(t, window, false, exiting, false, cx))
                                 }
                             })
                             .children(page_timer)
                             .when(!hero && !page && !self.projects.home_open(), |d| {
+                                self.sync_chat_timeline(t, cx);
                                 if self.subagent_open.is_some() || show_question {
                                     self.dock_h.set(0.);
-                                    return d.child(if show_question {
-                                        self.render_question_panel(t, window, cx).into_any_element()
-                                    } else {
-                                        self.render_subagent_note(t)
-                                    });
+                                    return d
+                                        .child(if show_question {
+                                            self.render_question_panel(t, window, cx).into_any_element()
+                                        } else {
+                                            self.render_subagent_note(t)
+                                        })
+                                        .child(self.timeline_view.clone());
                                 }
                                 let composer = self
                                     .render_composer(t, window, false, cx)
@@ -375,38 +373,7 @@ impl Render for KeelWindow {
                                 // transcript reserves its height as room under the newest row. Held still while
                                 // the hero drop morphs it.
                                 let dock_h = self.dock_h.clone();
-                                let cur_dock_h = self.dock_h.get();
-                                d.when(cur_dock_h > 0., |d| {
-                                    d.child(
-                                        div()
-                                            .absolute()
-                                            .bottom_0()
-                                            .left_0()
-                                            .right_0()
-                                            .h(px(cur_dock_h))
-                                            .bg(c(t.window)),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .bottom(px(cur_dock_h))
-                                            .left_0()
-                                            .right_0()
-                                            .h(zpx(28.))
-                                            .bg(gpui::linear_gradient(
-                                                180.,
-                                                gpui::linear_color_stop(
-                                                    gpui::Hsla {
-                                                        a: 0.,
-                                                        ..c(t.window)
-                                                    },
-                                                    0.,
-                                                ),
-                                                gpui::linear_color_stop(c(t.window), 1.),
-                                            )),
-                                    )
-                                })
-                                .child(
+                                d.child(
                                     div()
                                         .absolute()
                                         .bottom_0()
@@ -434,16 +401,17 @@ impl Render for KeelWindow {
                                             )
                                         }),
                                 )
-                                .children(self.render_latest_pill(t, cx))
+                                .child(self.timeline_view.clone())
                             })
                             .children(self.render_subagent_menu(t, cx))
-                            .children(self.render_mr_prompt(t, cx))
+                            .children(self.render_chat_menu(t, cx))
                             .children(self.render_lightbox(t, window, cx)),
                     ),
             )
             .children(self.render_right_panel(t, t == keel_theme::Tokens::dark(), window, cx))
             // Last children: paint over the content.
-            .children(self.render_sidebar_trigger(t, cx))
+            .children(self.render_sidebar_trigger(t, window, cx))
+            .children(self.render_right_panel_trigger(t, hero || page || self.projects.home_open(), cx))
             .children(self.render_sidebar_peek(t, cx))
             .children(self.render_zoom_toast(t))
             .children(self.render_notice(t, cx))
@@ -455,14 +423,12 @@ impl Render for KeelWindow {
                 Vec::new()
             })
             .children(self.render_timer_drag(t, cx))
-            .children(self.render_mr_card(t, cx))
-            .children(self.render_mr_menu(t, cx))
             .children(self.render_session_summary_card(t, window, cx))
             .children(self.render_project_folder_card(t, window, cx))
-            // Settings covers both sidebars; the delete scrims cover that too.
+            // Settings modal floats over the workspace; delete & update modals sit above it.
             .children(
                 (self.settings_open || self.settings_leaving.is_some())
-                    .then(|| self.render_settings_page(t, window, cx)),
+                    .then(|| self.render_settings_modal(t, window, cx)),
             )
             .children(self.render_delete_space_modal(t, cx))
             .children(self.render_delete_chats_modal(t, cx))
@@ -497,7 +463,7 @@ fn hero_title_text() -> gpui::Div {
 
 /// Space under the newest message, on top of the input slot's own 16 px.
 /// Generous tail room so the Latest pill and composer dock never occlude diagram cards or actions.
-const TAIL_ROOM: f32 = 120.;
+pub(super) const TAIL_ROOM: f32 = 120.;
 /// How much of the picture the chat glow shows at the pane's foot, and how
 /// far up the pane it rises (fractions).
 const CHAT_GLOW: f32 = 0.08;
@@ -639,19 +605,16 @@ impl KeelWindow {
         )
     }
 
-    /// Stationary sidebar trigger button pinned adjacent to the macOS traffic lights.
-    /// Follows Emil Kowalski craft principles:
-    /// - Stationary anchor: 0px mouse travel across toggle states.
-    /// - Continuous morph: smooth crossfade and micro-rotation between `SidebarOpen` and `SidebarClose`.
-    /// - Elevation transition: high-contrast floating card over desktop wallpapers when collapsed,
-    ///   smoothly dissolving into an integrated sidebar titlebar action when expanded.
-    /// - Active tactile feedback: crisp scale / press feedback on click.
+    /// Fixed top-left toggle matching the right-panel trigger, anchored right
+    /// after the window traffic lights so it never shifts across sidebar
+    /// toggles or new-session navigation.
     pub(super) fn render_sidebar_trigger(
         &mut self,
         t: Tokens,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if self.settings_open || (self.right_panel_expanded() && self.right_panel_open()) {
+        if self.right_panel_expanded() && self.right_panel_open() {
             return None;
         }
         let open = if self.sidebar_toggling() {
@@ -661,88 +624,92 @@ impl KeelWindow {
         } else {
             1.0
         };
-
-        let top_inset = (HEADER_HEIGHT - zpx(26.)) / 2.;
-        let tooltip_text = if open > 0.5 {
+        let tip_text = if open > 0.5 {
             "Collapse sidebar (⌘B)"
         } else {
             "Expand sidebar (⌘B)"
         };
-
-        // Subtle micro-rotation on the chevrons during the morph (Emil Kowalski craft principle)
-        let open_rot = -std::f32::consts::PI * (12.0 / 180.0) * open;
-        let close_rot = std::f32::consts::PI * (12.0 / 180.0) * (1.0 - open);
-
-        let open_icon = div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .opacity((1.0 - open).max(0.0))
-            .child(
-                Icon::SidebarOpen
-                    .el(zpx(15.))
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(open_rot))),
-            );
-
-        let close_icon = div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .opacity(open.max(0.0))
-            .child(
-                Icon::SidebarClose
-                    .el(zpx(15.))
-                    .with_transformation(gpui::Transformation::rotate(gpui::radians(close_rot))),
-            );
+        let btn = icon_button("sidebar-toggle-btn", Icon::PanelLeft, t)
+            .tooltip(move |_, cx| {
+                cx.new(|_| super::dotify_ui::Tip::new(tip_text, t))
+                    .into()
+            })
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_sidebar(cx)));
 
         Some(
             div()
-                .id("sidebar-toggle-btn")
                 .absolute()
-                .top(top_inset)
-                .left(self.traffic_lights_inset())
-                .size(zpx(26.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(RADIUS_MD)
-                // When collapsed: high-contrast floating card backing over wallpapers.
-                // As the sidebar expands under it: smoothly dissolves into the sidebar background.
-                .bg(c(t.floating).opacity((1.0 - open).clamp(0.0, 1.0)))
-                .border_1()
-                .border_color(c(t.border).opacity((1.0 - 0.5 * open).clamp(0.0, 1.0)))
-                .when(open < 0.95, |d| {
-                    d.shadow(vec![gpui::BoxShadow {
-                        color: c(t.shadow).opacity(1.0 - open),
-                        offset: gpui::point(zpx(0.), zpx(1.5)),
-                        blur_radius: zpx(6.),
-                        spread_radius: zpx(0.),
-                        inset: false,
-                    }])
-                })
-                .text_color(c(t.text))
-                .cursor_pointer()
-                .hover(|s| s.text_color(c(t.text)))
-                .hover_fade(c(t.surface), Some(c(t.selected)))
-                .active(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_sidebar(cx)))
-                .tooltip(move |_, cx| {
-                    cx.new(|_| crate::view::dotify_ui::Tip::new(tooltip_text, t))
+                .top((HEADER_HEIGHT - zpx(26.)) * 0.5)
+                .left(self.traffic_lights_inset() + zpx(6.))
+                .child(btn)
+                .into_any_element(),
+        )
+    }
+
+    /// Fixed top-right toggle matching `render_sidebar_trigger`, anchored at
+    /// the window's top-right corner so opening or closing the right panel
+    /// glides underneath one persistent button instead of swapping triggers.
+    pub(super) fn render_right_panel_trigger(
+        &mut self,
+        t: Tokens,
+        hide_on_page: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let open_now = self.right_panel_open_now();
+        let vis = if hide_on_page { open_now } else { 1.0 };
+        if vis <= 0.001 {
+            return None;
+        }
+        let open = if self.right_panel_toggling() {
+            open_now > 0.5
+        } else {
+            self.right_panel_open()
+        };
+        let activity = self.right_panel_activity(t);
+        let dot_vis = crate::motion::right_panel_trigger_vis(open_now);
+        let tip_text = if open {
+            "Hide panel (⌘⌥B)".to_string()
+        } else {
+            activity
+                .as_ref()
+                .map(|(_, _, hint)| format!("Open side panel — {hint} (⌘⌥B)"))
+                .unwrap_or_else(|| "Open side panel (⌘⌥B)".to_string())
+        };
+        let btn = icon_button("toggle-right-panel-btn", Icon::PanelRight, t)
+            .relative()
+            .when(vis > 0.25, |b| {
+                b.tooltip(move |_, cx| {
+                    cx.new(|_| super::dotify_ui::Tip::new(tip_text.clone(), t))
                         .into()
                 })
                 .tooltip_show_delay(crate::view::tooltip::delay())
-                .child(
-                    div()
-                        .relative()
-                        .size_full()
-                        .child(open_icon)
-                        .child(close_icon),
-                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.toggle_right_panel(window, cx)
+                }))
+            })
+            .when(dot_vis > 0.001, |b| {
+                b.when_some(activity, |b, (col, bright, _)| {
+                    b.child(
+                        div()
+                            .absolute()
+                            .top(zpx(5.))
+                            .right(zpx(5.))
+                            .size(zpx(6.))
+                            .rounded_full()
+                            .bg(c(col))
+                            .opacity(dot_vis * if bright { 1. } else { 0.7 }),
+                    )
+                })
+            });
+
+        Some(
+            div()
+                .absolute()
+                .top((HEADER_HEIGHT - zpx(26.)) * 0.5)
+                .right(zpx(8.))
+                .opacity(vis)
+                .child(btn)
                 .into_any_element(),
         )
     }
@@ -898,8 +865,8 @@ impl KeelWindow {
             // both centers so the 2D path glides continuously with zero horizontal snap.
             let sidebar_w = self.state.sidebar_width() * self.sidebar_open_now();
             let viewport_w = f32::from(window.viewport_size().width);
-            let browser_w = if self.browser_allowed() && self.right_panel_open() {
-                self.browser_width(window)
+            let browser_w = if self.browser_allowed() {
+                self.browser_width(window) * self.right_panel_open_now()
             } else {
                 0.
             };
@@ -1041,6 +1008,7 @@ impl KeelWindow {
     fn render_header(
         &mut self,
         t: Tokens,
+        window: &Window,
         hero: bool,
         _entering: bool,
         bare: bool,
@@ -1055,65 +1023,33 @@ impl KeelWindow {
         };
         // The session timer rides beside the sidebar toggle.
         let timer = (!bare).then(|| self.render_timer_header(t, cx)).flatten();
-        // The session's merge request, after its title (nothing when none).
-        let mr_chip = if hero {
-            None
-        } else {
-            self.render_mr_chip(t, cx)
-        };
-        // Left padding smoothly interpolates from clearing the stationary toggle button (collapsed)
-        // to tight margin (expanded), coordinating with the sliding main pane.
-        let collapsed_pl = f32::from(self.traffic_lights_inset() + zpx(26.) + zpx(6.));
-        let expanded_pl = f32::from(zpx(6.));
+        // Left padding smoothly interpolates from clearing the traffic lights plus the
+        // fixed top-left sidebar trigger (collapsed) to a compact margin (expanded).
+        let collapsed_pl = f32::from(self.traffic_lights_inset() + zpx(38.));
+        let expanded_pl = f32::from(zpx(10.));
         let left_pad = (1.0 - open) * collapsed_pl + open * expanded_pl;
-        div()
-            .h(HEADER_HEIGHT)
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .pr_2()
-            .gap_1()
-            .pl(px(left_pad))
-            .children(timer)
-            .children(mr_chip.map(|chip| div().pl_2().child(chip)))
-            .child(drag_region("header-drag"))
-            .when(!hero && !self.right_panel_open(), |d| {
-                let activity = self.right_panel_activity(t);
-                let tip_text = activity
-                    .map(|(_, _, hint)| format!("Open side panel — {hint} (⌘⌥B)"))
-                    .unwrap_or_else(|| "Open side panel (⌘⌥B)".to_string());
-                d.child(
-                    icon_button("toggle-right-panel-btn", Icon::PanelRight, t)
-                        .relative()
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| super::dotify_ui::Tip::new(tip_text.clone(), t))
-                                .into()
-                        })
-                        .tooltip_show_delay(crate::view::tooltip::delay())
-                        .when_some(activity, |b, (col, bright, _)| {
-                            b.child(
-                                div()
-                                    .absolute()
-                                    .top(zpx(5.))
-                                    .right(zpx(5.))
-                                    .size(zpx(6.))
-                                    .rounded_full()
-                                    .bg(c(col))
-                                    .opacity(if bright { 1. } else { 0.7 }),
-                            )
-                        })
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_right_panel(window, cx)
-                        })),
-                )
-            })
-            .when(!hero && !self.subagents.is_empty(), |d| {
-                let running = self
-                    .subagents
-                    .values()
-                    .any(|sub| sub.get("status").and_then(|v| v.as_str()) == Some("running"));
-                d.child(
+        let right_spacer_w = if hero {
+            0.
+        } else {
+            let full = self.right_panel_width(window);
+            crate::motion::panel_slide_geometry(full, self.right_panel_open_now()).0
+        };
+        let right_pad = if hero {
+            f32::from(zpx(8.))
+        } else {
+            f32::from(zpx(8.)) + (f32::from(zpx(30.)) - right_spacer_w).max(0.)
+        };
+        let show_subagents_btn = !hero && !self.subagents.is_empty();
+        let right_controls = show_subagents_btn.then(|| {
+            let running = self.subagents.values().any(|sub| {
+                sub.get("status").and_then(|v| v.as_str()) == Some("running")
+            });
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(
                     icon_button("subagents-btn", Icon::Brain, t)
                         .when(self.show_subagent_menu, |b| {
                             b.bg(c(t.selected)).text_color(c(t.text))
@@ -1137,7 +1073,293 @@ impl KeelWindow {
                             }
                         })),
                 )
+        });
+        let chat_title = (!bare && !hero)
+            .then(|| self.render_chat_title(t, cx))
+            .flatten();
+        let header_context = (!bare && !hero && chat_title.is_some())
+            .then(|| self.render_header_context(t))
+            .flatten();
+        if bare || hero {
+            return div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(HEADER_HEIGHT)
+                .flex()
+                .flex_row()
+                .items_center()
+                .pr(px(right_pad))
+                .gap_1()
+                .pl(px(left_pad))
+                .children(timer)
+                .child(drag_region("header-drag"))
+                .children(right_controls)
+                .into_any_element();
+        }
+        // Align the left-most header item (workspace context, or title when scratch)
+        // with the centered reading column, while keeping `subagents-btn` clear of
+        // the fixed top-right panel trigger.
+        let pane_w = self.pane_width(window).unwrap_or(1100.);
+        let col_w = f32::from(self.column_max()).min(pane_w);
+        let col_left = (pane_w - col_w) * 0.5 + f32::from(zpx(16.));
+        let timer_reserve = if timer.is_some() {
+            f32::from(zpx(116.))
+        } else {
+            0.
+        };
+        let bar_spacer = (col_left - (left_pad + timer_reserve + f32::from(zpx(4.)))).max(0.);
+        div()
+            .id("header-top-bar")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(HEADER_HEIGHT)
+            .occlude()
+            .flex()
+            .flex_row()
+            .items_center()
+            .pr(px(right_pad))
+            .gap_1()
+            .pl(px(left_pad))
+            .bg(c(t.floating))
+            .border_b_1()
+            .border_color(c(t.border).opacity(0.65))
+            .children(timer)
+            .when(chat_title.is_some() && bar_spacer > 1., |d| {
+                d.child(
+                    drag_region("header-drag-left")
+                        .flex_none()
+                        .w(px(bar_spacer)),
+                )
             })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .children(header_context.map(|ctx| {
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .child(ctx)
+                            .child(render_breadcrumb_chevron(t))
+                    }))
+                    .children(chat_title),
+            )
+            .child(drag_region("header-drag-right"))
+            .children(right_controls)
+            .into_any_element()
+    }
+
+    fn render_chat_title(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (chat_id, display_title, is_placeholder) = self.active_chat_title()?;
+        if self.renaming_chat.as_deref() == Some(chat_id.as_str()) {
+            return Some(
+                div()
+                    .id("header-chat-title-edit")
+                    .flex_none()
+                    .w(zpx(280.))
+                    .h(zpx(26.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded(RADIUS_MD)
+                    .bg(c(t.surface))
+                    .border_1()
+                    .border_color(c(t.focus))
+                    .text_size(zpx(13.5))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(self.chat_title_input.clone())
+                    .into_any_element(),
+            );
+        }
+        let anim_rev = match &mut self.chat_title_anim {
+            Some((prev_chat, prev_title, rev)) if *prev_chat == chat_id => {
+                if *prev_title != display_title {
+                    *prev_title = display_title.clone();
+                    *rev += 1;
+                }
+                Some(*rev).filter(|r| *r > 0)
+            }
+            slot => {
+                *slot = Some((chat_id.clone(), display_title.clone(), 0));
+                None
+            }
+        };
+        let tip = display_title.clone();
+        let group = "header-chat-title-hover";
+        let menu_open = self.show_chat_menu;
+        let anchor_cell = self.chat_menu_anchor.clone();
+        let more_btn = div()
+            .id("header-chat-title-more-btn")
+            .relative()
+            .flex_none()
+            .size(zpx(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(RADIUS_MD)
+            .text_color(c(if menu_open { t.text } else { t.text_muted }))
+            .when(menu_open, |b| b.bg(c(t.selected)))
+            .cursor_pointer()
+            .hover(|s| s.text_color(c(t.text)))
+            .hover_fade(c(t.hover), Some(c(t.selected)))
+            .active(|s| s.opacity(0.85))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                if !this.menu_just_dismissed("chat-title-menu") {
+                    this.show_chat_menu = !this.show_chat_menu;
+                    cx.notify();
+                }
+            }))
+            .child(Icon::Ellipsis.el(zpx(13.)))
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| anchor_cell.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+        let more_trigger = crate::motion::reveal_on_hover(
+            "header-chat-title-more",
+            group,
+            if menu_open { 1. } else { 0. },
+            1.,
+            more_btn,
+        );
+        let label = div()
+            .id("header-chat-title-label")
+            .min_w_0()
+            .truncate()
+            .text_size(zpx(13.5))
+            .font_weight(if is_placeholder {
+                gpui::FontWeight::MEDIUM
+            } else {
+                gpui::FontWeight::BOLD
+            })
+            .text_color(c(if is_placeholder { t.text_muted } else { t.text }))
+            .tooltip(move |_, cx| {
+                cx.new(|_| super::dotify_ui::Tip::new(tip.clone(), t))
+                    .into()
+            })
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(display_title);
+        let label_el = match anim_rev {
+            Some(rev) => crate::motion::fade_in(
+                label,
+                ("header-chat-title-fade", rev),
+                self.reduced(),
+            ),
+            None => label.into_any_element(),
+        };
+        Some(
+            div()
+                .id("header-chat-title")
+                .hover_probe(group)
+                .min_w_0()
+                .max_w(zpx(340.))
+                .h(zpx(26.))
+                .pr_1()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded(RADIUS_MD)
+                .child(label_el)
+                .child(more_trigger)
+                .into_any_element(),
+        )
+    }
+
+    /// Secondary workspace context in the top bar formatted as a plain breadcrumb
+    /// path (`folder / branch`) using the same font and size as the chat title.
+    fn render_header_context(&self, t: Tokens) -> Option<gpui::AnyElement> {
+        let id = self.current_chat.as_deref()?;
+        let chat = self.state.chats.get(id)?;
+        if self.state.is_scratch_chat(chat) {
+            return None;
+        }
+        let project_name = self
+            .projects
+            .chat_project_id(id)
+            .and_then(|pid| self.projects.store.project(&pid))
+            .map(|p| p.name.clone())
+            .filter(|n| !n.is_empty());
+        let space_name = self
+            .state
+            .spaces
+            .get(&chat.space_id)
+            .map(|s| s.name.clone())
+            .filter(|n| !n.is_empty());
+        let project_label = self.projects.chat_project_label(id, &chat.cwd);
+        let folder_display = match (project_name, project_label, space_name) {
+            (Some(proj), Some(label), Some(space))
+                if label == proj && !space.eq_ignore_ascii_case(&proj) =>
+            {
+                Some(format!("{proj} · {space}"))
+            }
+            (_, Some(label), _) => Some(label),
+            (Some(proj), None, Some(space)) if !space.eq_ignore_ascii_case(&proj) => {
+                Some(format!("{proj} · {space}"))
+            }
+            (Some(proj), None, _) => Some(proj),
+            (None, None, Some(space)) => Some(space),
+            (None, None, None) => None,
+        };
+        let branch = (!chat.branch.is_empty()).then(|| chat.branch.clone());
+        let repo = self.issue_repo.as_ref().map(|(_, p)| p.name.clone());
+        let folder_tip = if chat.cwd.is_empty() {
+            folder_display.clone().unwrap_or_default()
+        } else {
+            chat.cwd.clone()
+        };
+        let mut items: Vec<(&'static str, String, String, f32)> = Vec::new();
+        if let Some(label) = folder_display {
+            items.push(("header-context-folder", label, folder_tip, 180.));
+        }
+        if let Some(br) = branch {
+            let tip = br.clone();
+            items.push(("header-context-branch", br, tip, 230.));
+        }
+        if let Some(name) = repo {
+            let tip = name.clone();
+            items.push(("header-context-repo", name, tip, 150.));
+        }
+        if items.is_empty() {
+            return None;
+        }
+        let mut row = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .overflow_hidden();
+        for (ix, (seg_id, label, tip, max_w_px)) in items.into_iter().enumerate() {
+            if ix > 0 {
+                row = row.child(render_breadcrumb_chevron(t));
+            }
+            row = row.child(
+                div()
+                    .id(seg_id)
+                    .min_w_0()
+                    .max_w(zpx(max_w_px))
+                    .h(zpx(26.))
+                    .flex()
+                    .items_center()
+                    .text_size(zpx(13.5))
+                    .text_color(c(t.text_muted))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::dotify_ui::Tip::new(tip.clone(), t))
+                            .into()
+                    })
+                    .tooltip_show_delay(crate::view::tooltip::delay())
+                    .child(div().min_w_0().truncate().child(label)),
+            );
+        }
+        Some(row.into_any_element())
     }
 
     /// The composer dead center in the window, rising in as the screen opens.
@@ -1147,12 +1369,9 @@ impl KeelWindow {
         n: u64,
         reduced: bool,
     ) -> impl IntoElement {
-        // The header takes HEADER_HEIGHT off the top; matching it underneath
-        // puts the composer on the window's true center line.
         div()
             .flex_1()
             .min_h_0()
-            .pb(HEADER_HEIGHT)
             .flex()
             .flex_col()
             .justify_center()
@@ -1313,12 +1532,7 @@ impl KeelWindow {
         };
         // Inline loader: the last line of the active turn, under the newest row.
         // The collapsed trace line is the status once a step exists.
-        let trace_status = self.transcript.items.iter().any(|item| {
-            matches!(
-                item.block,
-                crate::markdown::TranscriptBlock::TurnSummary { live: true, .. }
-            )
-        });
+        let trace_status = self.transcript.has_live_turn_summary();
         let loader_row = (running && self.current_chat.is_some() && !trace_status)
             .then(|| self.transcript.items.len().checked_sub(1))
             .flatten();
@@ -1407,7 +1621,7 @@ impl KeelWindow {
                 look,
             }
         });
-        let timer = self.render_timer_corners(t, px(0.), cx);
+        let timer = self.render_timer_corners(t, HEADER_HEIGHT, cx);
         // The pill's glide to the end runs before layout. Frames are asked
         // for only while it is moving.
         let pill_now = std::time::Instant::now();
@@ -1418,17 +1632,6 @@ impl KeelWindow {
         if self.transcript.reap(pill_now) {
             window.request_animation_frame();
         }
-        // Shown for the whole time the user is away from the tail, including
-        // the glide home. Hiding it for that glide was a flash: the pill
-        // appeared, then vanished for the travel, then the list snapped.
-        let want_pill = self.current_chat.is_some() && !self.transcript.stick_to_bottom && !self.transcript.is_at_bottom();
-        self.latest_pill.set(want_pill, pill_now, reduced);
-        if self.latest_pill.animating(pill_now) {
-            window.request_animation_frame();
-        }
-        // MR offers, Undo and notes ride under their turn's last row.
-        let mr_rows = self.mr_inline_rows();
-        let on_mr = self.mr_on_action(cx);
         if self.geo_trace.on.get() {
             let top = self.transcript.list_state.logical_scroll_top();
             self.geo_trace.push(serde_json::json!({
@@ -1448,12 +1651,6 @@ impl KeelWindow {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                // Wheel-up unsticks the follow; only wheel-down that reaches the bottom re-engages it.
-                let dy = event.delta.pixel_delta(window.line_height()).y;
-                this.transcript.on_wheel(dy);
-                cx.notify();
-            }))
             .when(self.current_chat.is_some() && self.transcript.items.is_empty(), |d| {
                 d.child(self.render_empty_chat(t))
             })
@@ -1462,14 +1659,15 @@ impl KeelWindow {
                 // latest row in view during layout, only while following.
                 let items = self.transcript.items.clone();
                 let weak = cx.entity().downgrade();
-                let hover_cell = self.hovered_row.clone();
                 let handle = window.window_handle();
                 // Wrap width for prose/bubbles: the reading column's width, so
                 // inline file chips get a real pixel cap (not only relative).
                 let rem = 2. * f32::from(window.rem_size());
                 let wrap_hold = Some((f32::from(self.column_max()) - rem).max(200.));
                 self.measure_step_line(window);
-                let rc = RowContext {
+                self.mr_hydrate_cards(cx);
+                let open_lines = self.open_lines_rc();
+                let rc = std::rc::Rc::new(RowContext {
                     tokens: t,
                     syntax,
                     reduced: self.reduced(),
@@ -1584,10 +1782,9 @@ impl KeelWindow {
                             RowAction::Choose { text } => view.choose(text, cx),
                             RowAction::OpenUrl { url } => cx.open_url(&url),
                             RowAction::Merge { row_id, message_id, part_id } => view.merge_mr(row_id, message_id, part_id, cx),
-                            RowAction::TrackMr { mr } => {
-                                if let Some(chat) = view.current_chat.clone() {
-                                    view.mr_track(chat, mr, cx);
-                                }
+                            RowAction::RefreshMr { row_id, message_id, part_id } => {
+                                view.refresh_mr_card(row_id, message_id, part_id, cx);
+                                cx.notify();
                             }
                             RowAction::OpenFullOutput { title, content, error } => {
                                 view.open_lightbox(super::Lightbox::Output { title, content, error }, cx);
@@ -1598,6 +1795,7 @@ impl KeelWindow {
                     order: 0,
                     live_choices: self.live_choices(),
                     merges: std::rc::Rc::new(self.mr_merges.clone()),
+                    mr_fetches: std::rc::Rc::new(self.mr_fetches.clone()),
                     armed_runs: std::rc::Rc::new(self.armed_runs.clone()),
                     run_at: (self.active_status() == Some(ChatStatus::Running) || self.dev_live)
                         .then_some(self.loader_seed.0),
@@ -1610,13 +1808,8 @@ impl KeelWindow {
                     now_ms: crate::trace_view::now_ms(),
                     clock_epoch: self.clock_epoch,
                     viewport_h: f32::from(window.viewport_size().height),
-                    open_lines: std::rc::Rc::new(self.open_lines()),
+                    open_lines,
                     row_heights: self.transcript.row_heights.clone(),
-                    tracked_mr: self
-                        .current_chat
-                        .as_deref()
-                        .and_then(|chat| self.mr.tracked(chat))
-                        .map(|tracked| std::rc::Rc::new(tracked.clone())),
                     // Mid-slide the text wraps once, at the narrower end
                     // of the slide (inside a row's px_4), and holds it.
                     prose_max_w: wrap_hold.map_or(crate::transcript::PROSE_MAX_W, |w| crate::transcript::PROSE_MAX_W.min(w / crate::style::zoom())),
@@ -1630,203 +1823,41 @@ impl KeelWindow {
                             crate::transcript::RowProbe::Tool => super::dev::GeoTrace::probe(&tr, |g| &g.tool),
                         }) as std::rc::Rc<dyn Fn(crate::transcript::RowProbe) -> Option<gpui::AnyElement>>
                     }),
-                };
+                });
                 let column = self.column_max();
+                let list_state = self.transcript.list_state.clone();
+                self.transcript_list.update(cx, |view, _| {
+                    view.props = Some(super::transcript_list::TranscriptListProps {
+                        list_state,
+                        items,
+                        rc,
+                        column,
+                        dock_h,
+                        loader_row,
+                        loader,
+                    });
+                });
                 d.flex().flex_row().overflow_hidden().child(
-                    // Match empty-chat `pt_6`: keep ListAlignment::Top, but leave
-                    // comfortable room under the header so the first bubble isn't flush.
-                    // The list spans the pane so the wheel scrolls it anywhere;
-                    // each row centers itself in the reading column.
+                    // Full-height list so scrolled rows travel under the overlaid
+                    // header; row 0 carries `HEADER_HEIGHT + pt_6` top padding.
                     div()
                         .h_full()
                         .w_full()
-                        .pt_6()
                         .opacity(reveal_opacity)
                         .flex()
                         .flex_col()
-                        .child(div().relative().flex_1().min_h_0().w_full().children(super::dev::GeoTrace::probe(&self.geo_trace, |g| &g.list)).child(
-                        list(self.transcript.list_state.clone(), move |ix, _, _| {
-                            let row = match items.get(ix) {
-                                Some(item) => {
-                                    let lines = mr_rows.get(&ix);
-                                    let loader = loader.filter(|_| loader_row == Some(ix));
-                                    let copy = crate::transcript::message_text(&items, ix);
-                                    // Its message's Copy shows while any of its rows is hovered.
-                                    let shown = hover_cell.row.get().and_then(|h| items.get(h)).is_some_and(|h| h.message_id == item.message_id);
-                                    if lines.is_none() && loader.is_none() && copy.is_none() {
-                                        render_row(ix, item, ix.checked_sub(1).and_then(|p| items.get(p)), &rc)
-                                    } else {
-                                        div()
-                                            .w_full()
-                                            .flex()
-                                            .flex_col()
-                                            .child(render_row(ix, item, ix.checked_sub(1).and_then(|p| items.get(p)), &rc))
-                                            .children(copy.map(|text| crate::transcript::message_copy(item, text, shown, &rc)))
-                                            .children(lines.into_iter().flatten().map(|line| super::mr_chip::render_inline(line, t, reduced, &on_mr)))
-                                            .children(loader.map(|loader| loader.render()))
-                                            .into_any()
-                                    }
-                                }
-                                None => div().into_any(),
-                            };
-                            let hover = hover_cell.clone();
+                        .child(
                             div()
                                 .relative()
+                                .flex_1()
+                                .min_h_0()
                                 .w_full()
-                                .flex()
-                                .justify_center()
-                                // Which row the mouse is over, checked every frame (not
-                                // only on mouse moves), so a scroll under a still mouse
-                                // follows too. Rows stack with no gaps; leaving clears
-                                // only its own row, so moving within a message never
-                                // drops the hover, whatever order the rows paint in.
-                                .child(
-                                    gpui::canvas(
-                                        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-                                        move |_, hitbox, window, _| {
-                                            // This row's verdict: set it, true when that changed.
-                                            let settle = |hover: &super::RowHover, window: &gpui::Window| {
-                                                let now = hover.row.get();
-                                                let over = !hover.outside.get() && hitbox.is_hovered(window);
-                                                let next = if over { Some(ix) } else { now.filter(|h| *h != ix) };
-                                                hover.row.set(next);
-                                                next != now
-                                            };
-                                            // A refresh asked for mid-draw is dropped: a change
-                                            // found while painting (a scroll moved rows under a
-                                            // still mouse) shows on the next frame instead.
-                                            if settle(&hover, window) {
-                                                window.request_animation_frame();
-                                            }
-                                            let exit = hover.clone();
-                                            window.on_mouse_event(move |_: &gpui::MouseExitEvent, _, window, _| {
-                                                exit.outside.set(true);
-                                                if exit.row.take().is_some() {
-                                                    window.refresh();
-                                                }
-                                            });
-                                            // A move settles it at once and repaints (moves
-                                            // repaint only when something asks).
-                                            let moved = hover.clone();
-                                            let hitbox = hitbox.clone();
-                                            window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, window, _| {
-                                                if phase != gpui::DispatchPhase::Bubble {
-                                                    return;
-                                                }
-                                                moved.outside.set(false);
-                                                let now = moved.row.get();
-                                                let next = if hitbox.is_hovered(window) { Some(ix) } else { now.filter(|h| *h != ix) };
-                                                if next != now {
-                                                    moved.row.set(next);
-                                                    window.refresh();
-                                                }
-                                            });
-                                        },
-                                    )
-                                    .absolute()
-                                    .inset_0(),
-                                )
-                                // Room under the newest message (and its loader), so
-                                // the turn ends well clear of the input.
-                                .when(ix + 1 == items.len(), |d| d.pb(zpx(TAIL_ROOM) + px(dock_h)))
-                                .child(div().w_full().max_w(column).child(row))
-                                .into_any()
-                        })
-                        .w_full()
-                        .h_full(),
-                    )),
+                                .children(super::dev::GeoTrace::probe(&self.geo_trace, |g| &g.list))
+                                .child(self.transcript_list.clone()),
+                        ),
                 )
             })
             .children(timer)
-    }
-
-    /// The "Latest" pill, painted over the composer inside the main pane so
-    /// the right side panel, settings, and overlays naturally cover it.
-    fn render_latest_pill(
-        &mut self,
-        t: Tokens,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let now = std::time::Instant::now();
-        if self.settings_open
-            || (self.right_panel_open()
-                && self.right_panel_expanded()
-                && !self.right_panel_expanding())
-            || !self.latest_pill.mounted(now)
-            || self.transcript.is_at_bottom()
-        {
-            return None;
-        }
-        let reduced = self.reduced();
-        let running_since =
-            (self.active_status() == Some(ChatStatus::Running)).then_some(self.loader_seed.0);
-        // Floating (absolute), so its motion never shifts the list. Sits just above
-        // the composer dock outside the message column's text area.
-        let look = self.latest_pill.look_at(now);
-        let live = !self.latest_pill.leaving(now);
-        let rise = 4. - look.dy;
-        let dock_h = self.dock_h.get();
-        // Painted after the transcript and composer (so neither clips or covers
-        // it), while remaining below deferred composer menus and sibling
-        // full-pane overlays like the expanded right side panel.
-        Some(
-            div()
-                .absolute()
-                .bottom(px(dock_h) + zpx(rise))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .id("jump-to-latest")
-                        .opacity(look.opacity)
-                        .h(zpx(28.))
-                        .px(zpx(12.))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(zpx(5.))
-                        .rounded_full()
-                        .bg(c(t.floating))
-                        .border_1()
-                        .border_color(c(t.border))
-                        .t_small()
-                        .text_size(zpx(crate::style::SMALL.size))
-                        .line_height(zpx(crate::style::SMALL.line))
-                        .text_color(c(t.text_muted))
-                        .when(live, |d| {
-                            d.cursor_pointer()
-                                .hover(|s| s.text_color(c(t.text)).bg(c(t.hover)))
-                        })
-                        .map(|d| match running_since {
-                            // Run is live but out of view: the one small cue
-                            // (the inline loader is up there, not duplicated here).
-                            Some(since) => d
-                                .gap(zpx(6.))
-                                .child(crate::motion::dot_grid(
-                                    c(t.text),
-                                    "latest-running-dots",
-                                    reduced,
-                                ))
-                                .child(div().child("Running"))
-                                .child(
-                                    div()
-                                        .text_color(c(t.text_muted))
-                                        .child(crate::motion::elapsed_label(since.elapsed())),
-                                )
-                                .child(Icon::ChevronDown.el(zpx(13.))),
-                            None => d.child(Icon::ChevronDown.el(zpx(13.))).child("Latest"),
-                        })
-                        .when(live, |d| {
-                            d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.transcript.glide_to_latest(std::time::Instant::now());
-                                cx.notify();
-                            }))
-                        }),
-                )
-                .into_any_element(),
-        )
     }
 
     /// A chat with no rows yet: a skeleton while its history loads, then a hint.
@@ -1887,7 +1918,7 @@ impl KeelWindow {
                 .w_full()
                 .max_w(self.column_max())
                 .px_4()
-                .pt_6()
+                .pt(HEADER_HEIGHT + zpx(24.))
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -1917,11 +1948,10 @@ impl KeelWindow {
         )
     }
 
-    /// Settings over the whole window, sidebars included. The header stays
-    /// so the sidebar toggle still works. The page fades and rises 8 px
-    /// into place; leaving drops the same 8 px, quicker. A close keeps it
-    /// painted until that exit finishes.
-    fn render_settings_page(
+    /// Centered Settings modal (⌘,) floating over the active workspace.
+    /// Scrim fades in/out over `BASE`/`FAST`; the modal card rises 10 px in
+    /// on `ease_out_strong` (180 ms) and drops 6 px out via `dismiss` (120 ms).
+    fn render_settings_modal(
         &mut self,
         t: Tokens,
         window: &mut gpui::Window,
@@ -1937,40 +1967,83 @@ impl KeelWindow {
         let reduced = self.reduced();
         let sheet = self.settings_gen;
         let leaving = self.settings_leaving == Some(sheet);
-        // ⌘, opens this often enough that a sheet-length move feels late.
-        // Enter 220, leave 160: the response is quicker than the arrival.
-        let duration = if reduced {
-            std::time::Duration::from_millis(1)
-        } else if leaving {
-            crate::motion::BASE
-        } else {
-            crate::motion::SLOW + crate::motion::FAST / 6
-        };
-        // `relative` + `top`, not margin and not the overlay's inset: an
-        // absolute inset-0 layer stretches when its top inset moves. gpui
-        // has no transform on a div, so this is the move that doesn't reflow.
-        let page = div()
-            .relative()
-            .size_full()
+
+        let card = div()
+            .id(("settings-modal-card", sheet as usize))
+            .w(zpx(840.))
+            .max_w(gpui::relative(0.92))
+            .h(zpx(600.))
+            .max_h(gpui::relative(0.86))
+            .rounded(zpx(12.))
+            .bg(c(t.window))
+            .border_1()
+            .border_color(c(t.border))
+            .overflow_hidden()
+            .occlude()
+            .shadow(vec![
+                gpui::BoxShadow {
+                    color: c(t.shadow).opacity(0.95),
+                    offset: gpui::point(zpx(0.), zpx(14.)),
+                    blur_radius: zpx(36.),
+                    spread_radius: zpx(-4.),
+                    inset: false,
+                },
+                gpui::BoxShadow {
+                    color: c(t.shadow).opacity(0.6),
+                    offset: gpui::point(zpx(0.), zpx(2.)),
+                    blur_radius: zpx(8.),
+                    spread_radius: zpx(0.),
+                    inset: false,
+                },
+            ])
             .flex()
             .flex_col()
-            .bg(c(t.window))
-            .child(self.render_header(t, true, false, true, cx))
+            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
             .child(self.render_settings(t, cx));
-        let page = page.with_animation(
-            ("settings-sheet", sheet as usize),
-            gpui::Animation::new(duration).with_easing(crate::motion::ease_out),
-            move |el, delta| {
-                let (opacity, dy) = crate::motion::sheet_look(delta, leaving, reduced);
-                el.opacity(opacity).top(zpx(dy))
-            },
-        );
-        div()
+
+        let card = if leaving {
+            crate::motion::dismiss(card, ("settings-modal-out", sheet as usize), reduced)
+        } else if reduced {
+            card.into_any_element()
+        } else {
+            card.with_animation(
+                ("settings-modal-in", sheet as usize),
+                gpui::Animation::new(std::time::Duration::from_millis(180))
+                    .with_easing(crate::motion::ease_out_strong),
+                |el, delta| el.opacity(delta).relative().top(zpx(10.0 * (1.0 - delta))),
+            )
+            .into_any_element()
+        };
+
+        let backdrop = div()
+            .id(("settings-modal-scrim", sheet as usize))
             .absolute()
             .inset_0()
             .occlude()
-            .overflow_hidden()
-            .child(page)
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                if this.settings_open {
+                    this.close_settings(cx);
+                }
+            }))
+            .child(card);
+
+        crate::motion::scrim(
+            backdrop,
+            (
+                if leaving {
+                    "settings-scrim-out"
+                } else {
+                    "settings-scrim-in"
+                },
+                sheet as usize,
+            ),
+            0.52,
+            leaving,
+            reduced,
+        )
     }
 
     /// Delete-a-folder confirmation, same scrim as the chat one, over the
@@ -3037,7 +3110,7 @@ impl KeelWindow {
                 div()
                     .flex_none()
                     .px_4()
-                    .pt_3()
+                    .pt(HEADER_HEIGHT + zpx(12.))
                     .pb_2()
                     .w_full()
                     .max_w(self.column_max())
@@ -3271,23 +3344,79 @@ impl KeelWindow {
                 .into_any_element(),
         )
     }
+
+    fn render_chat_menu(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let chat_id = self.current_chat.clone()?;
+        let open = self.show_chat_menu && self.renaming_chat.is_none();
+        let leaving = self.menu_phase("chat-title-menu", open, cx)?;
+        let anchor_pos = self
+            .chat_menu_anchor
+            .get()
+            .map(|b| gpui::point(b.left(), b.bottom() + zpx(6.)));
+        let (archive_id, delete_id) = (chat_id.clone(), chat_id);
+        let items: Vec<gpui::AnyElement> = vec![
+            super::menu_action("rename-chat-action", Icon::PenLine.el(zpx(14.)), false, t)
+                .child("Rename")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.show_chat_menu = false;
+                    this.start_chat_title_rename(window, cx);
+                }))
+                .into_any_element(),
+            super::menu_separator(t).into_any_element(),
+            super::menu_action("archive-chat-action", Icon::Archive.el(zpx(14.)), false, t)
+                .child("Archive chat")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.show_chat_menu = false;
+                    this.archive_chat(archive_id.clone(), cx);
+                }))
+                .into_any_element(),
+            super::menu_action("delete-chat-action", Icon::Trash.el(zpx(14.)), true, t)
+                .child("Delete chat")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.show_chat_menu = false;
+                    this.ask_delete_chats(vec![delete_id.clone()], cx);
+                }))
+                .into_any_element(),
+        ];
+        let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+            this.note_menu_dismissed("chat-title-menu");
+            this.show_chat_menu = false;
+            cx.notify();
+        });
+        Some(super::floating_menu_positioned(
+            "chat-title-menu",
+            t,
+            180.,
+            gpui::Anchor::TopLeft,
+            anchor_pos,
+            false,
+            leaving,
+            self.reduced(),
+            dismiss,
+            items,
+        ))
+    }
 }
 
 /// The running turn's loader line: a verb for what the agent is doing,
 /// rotating every `VERB_SECS`, and the elapsed time.
 #[derive(Clone, Copy)]
-struct InlineLoader {
-    tokens: Tokens,
-    verbs: &'static [&'static str],
-    since: std::time::Instant,
-    seed: usize,
-    reduced: bool,
+pub(super) struct InlineLoader {
+    pub(super) tokens: Tokens,
+    pub(super) verbs: &'static [&'static str],
+    pub(super) since: std::time::Instant,
+    pub(super) seed: usize,
+    pub(super) reduced: bool,
     /// Mid entrance or exit (timestamp-driven); `None` at rest.
-    look: Option<crate::motion::RowLook>,
+    pub(super) look: Option<crate::motion::RowLook>,
 }
 
 impl InlineLoader {
-    fn render(self) -> gpui::AnyElement {
+    pub(super) fn render(self) -> gpui::AnyElement {
         let t = self.tokens;
         // The grid's animation re-renders every frame, so the verb and timer tick on their own.
         let verb = self.verbs[(self.seed + (self.since.elapsed().as_secs() / VERB_SECS) as usize)
@@ -3390,6 +3519,24 @@ fn subagent_status(status: &str, t: Tokens) -> (u32, String) {
         "interrupted" => (t.text_muted, "stopped".to_string()),
         other => (t.text_muted, other.to_string()),
     }
+}
+
+/// Subtle right-pointing chevron separating segments in the top header breadcrumb.
+fn render_breadcrumb_chevron(t: Tokens) -> impl IntoElement {
+    div()
+        .flex_none()
+        .px(zpx(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(c(t.text_faint))
+        .child(
+            Icon::ChevronDown
+                .el(zpx(12.))
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                    -std::f32::consts::FRAC_PI_2,
+                ))),
+        )
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! The Keel window: state and behavior here, rendering split by region.
 
 mod browser_panel;
+mod chat_timeline;
 mod composer_view;
 mod dev;
 mod dotify;
@@ -11,7 +12,6 @@ mod gitlab;
 mod keyboard;
 mod main_pane;
 mod model_picker;
-mod mr_chip;
 mod projects;
 mod prompt_suggestion;
 mod question;
@@ -22,6 +22,7 @@ mod sidebar;
 mod terminal_panel;
 mod timer_pill;
 pub(crate) mod tooltip;
+mod transcript_list;
 mod updates;
 
 /// A receipt line for the transcript, drawn like the card's own receipt.
@@ -69,14 +70,7 @@ struct MsgEntry {
     images: Vec<ImageRef>,
 }
 
-/// The transcript row under the mouse, set as rows paint. `outside` holds
-/// from the mouse leaving the window to its next move: gpui keeps the last
-/// position, so a redraw would otherwise find the row hovered again.
-#[derive(Default)]
-struct RowHover {
-    row: std::cell::Cell<Option<usize>>,
-    outside: std::cell::Cell<bool>,
-}
+use transcript_list::RowHover;
 
 /// Most images one message carries.
 const MAX_IMAGES: usize = 10;
@@ -156,6 +150,10 @@ pub struct KeelWindow {
     question_stopped: std::collections::HashSet<String>,
     /// MR cards' Merge buttons that are armed, merging or failed, by row id.
     mr_merges: HashMap<String, crate::transcript::MergeUi>,
+    /// MR cards currently refreshing or failed, by row id.
+    mr_fetches: HashMap<String, crate::transcript::CardFetchUi>,
+    /// MR card keys (`chat|message|part`) already auto-hydrated once this launch.
+    mr_auto_hydrated: HashSet<String>,
     /// Risky Run buttons clicked once, by row id.
     armed_runs: std::collections::HashSet<String>,
     // Subagents of the active chat: engine `subagents.{id}` views by id,
@@ -165,12 +163,15 @@ pub struct KeelWindow {
     subagent_open: Option<String>,
     subagent_caps: keel_proto::SubagentCaps,
     show_subagent_menu: bool,
-    /// The points menu above the composer.
-    show_points_menu: bool,
     /// Dev demo (`KEEL_TEST_CARD` / `KEEL_DEMO_PERMISSION`): the folded
     /// receipt stays in the slot instead of giving way to the composer.
     demo_hold_exit: bool,
     rename_input: Entity<InputState>,
+    chat_title_input: Entity<InputState>,
+    renaming_chat: Option<String>,
+    chat_title_anim: Option<(String, String, u64)>,
+    show_chat_menu: bool,
+    chat_menu_anchor: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     focus_handle: FocusHandle,
     input_style_for: Option<Tokens>,
 
@@ -275,8 +276,10 @@ pub struct KeelWindow {
     /// Per space: the generation of its last fold toggle, for the chevron's turn.
     space_fold_gen: HashMap<String, u64>,
     glide_gen: u64,
-    /// The floating "Latest" pill's enter/exit.
-    latest_pill: crate::motion::Presence,
+    timeline_view: Entity<chat_timeline::ChatTimelineView>,
+    timeline_sync_key: Option<chat_timeline::TimelineSyncKey>,
+    timeline_scroll_until: std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    transcript_list: Entity<transcript_list::TranscriptListView>,
     pub(super) last_sent_prompt: Option<(String, String)>,
     pub(super) pending_composer_restore: Option<(String, String)>,
     /// Sent, and nothing visible has come back yet: show the thinking row.
@@ -370,6 +373,14 @@ pub struct KeelWindow {
     /// the exit; a newer open or close wins.
     settings_leaving: Option<u64>,
     settings_gen: u64,
+    /// Active category in the split-pane Settings layout, plus previous tab
+    /// and generation/timestamp for the sliding rail indicator and directional
+    /// content crossfade.
+    settings_tab: settings::SettingsTab,
+    settings_tab_prev: settings::SettingsTab,
+    settings_tab_gen: u64,
+    settings_tab_at: Option<std::time::Instant>,
+    settings_gitlab_form_open: bool,
     /// The page on screen (0 chat, 1 Settings, 2 GitLab), the one before,
     /// and when it changed: the new page glides in from its side.
     page_key: u8,
@@ -382,6 +393,16 @@ pub struct KeelWindow {
     /// fades in once (the number names that entrance).
     sign_in: Option<(String, settings::SignInUi)>,
     auth_landed: Option<(String, u64)>,
+    /// Settings → Accounts: inline API key editor, collapsing exit, two-click
+    /// disconnect/remove confirmation `(provider, seq)`, per-row transition
+    /// generation, and in-flight disconnect/remove provider.
+    api_key_input: Entity<InputState>,
+    api_key_edit: Option<settings::ApiKeyEditState>,
+    api_key_closing: Option<(String, u64)>,
+    account_confirm: Option<(String, u64)>,
+    account_confirm_gen: u64,
+    account_state_seq: HashMap<String, u64>,
+    account_busy: Option<String>,
     connections: Vec<settings::ConnectionRow>,
     gitlab_host: Entity<InputState>,
     /// Settings → Browser: the allowed-sites list, and whether it has been
@@ -481,6 +502,9 @@ pub struct KeelWindow {
     menus_leaving: HashMap<SharedString, u64>,
     /// Numbers those fades.
     menu_leave_gen: u64,
+    /// Numbers each composer picker chip's chevron flip, per `Picker`, so
+    /// opening one menu does not spin the others.
+    picker_chevron_gen: [u64; 4],
     /// Escape asked for the next frame's menu closes to skip their fade.
     menus_cut: bool,
     /// Set for one frame from `menus_cut`: menus closing now vanish at once.
@@ -516,6 +540,8 @@ pub struct KeelWindow {
     fold_gen: u64,
     /// Folded rows (tool groups, thinking) the user opened, by row id.
     expanded_tools: HashSet<String>,
+    /// Cached `open_lines` map derived from `expanded_tools`; invalidated on toggle.
+    open_lines_cache: Option<std::rc::Rc<HashMap<String, bool>>>,
     /// ⌘⌥E: every turn shows its steps instead of "Show works".
     expand_steps: bool,
     /// Phase origin for trace shimmers, shared by every line.
@@ -564,11 +590,6 @@ pub struct KeelWindow {
     /// The session timer (persisted) and its pill's view state.
     timer: crate::timer::SessionTimer,
     timer_ui: timer_pill::TimerUi,
-    /// Per-session merge request monitor (persisted), its chip's view
-    /// state, and the "Track merge request…" box.
-    mr: crate::mr::MrStore,
-    mr_ui: mr_chip::MrUi,
-    mr_input: Entity<InputState>,
     /// The menu an outside click just closed. A click on that menu's own
     /// trigger arrives right after, and must not reopen it.
     menu_dismissed: Option<(&'static str, std::time::Instant)>,
@@ -714,6 +735,7 @@ impl KeelWindow {
                 .placeholder("Type your answer… (Enter to submit)")
         });
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Space name"));
+        let chat_title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Chat title"));
         let gitlab_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter projects"));
         let picker_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let gitlab_host =
@@ -735,11 +757,14 @@ impl KeelWindow {
                 .placeholder("Personal access token")
                 .masked(true)
         });
-        let mr_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Merge request link or !42"));
         let dotify_token = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Dotify token (with or without Bearer)")
+                .masked(true)
+        });
+        let api_key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Enter API key")
                 .masked(true)
         });
         let dotify_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
@@ -791,11 +816,19 @@ impl KeelWindow {
                     }
                 },
             ),
-            cx.subscribe_in(&mr_input, window, |this, _, event: &InputEvent, _, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.mr_submit_prompt(cx);
-                }
-            }),
+            cx.subscribe_in(
+                &chat_title_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.save_chat_title_rename(Some(window), cx);
+                    }
+                    InputEvent::Blur => {
+                        this.save_chat_title_rename(None, cx);
+                    }
+                    _ => {}
+                },
+            ),
             // The project list filters as you type.
             cx.subscribe_in(&gitlab_filter, window, |_, _, _: &InputEvent, _, cx| {
                 cx.notify()
@@ -858,6 +891,23 @@ impl KeelWindow {
                     }
                     InputEvent::Change => {
                         if this.dotify.connect_error.take().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
+                },
+            ),
+            cx.subscribe_in(
+                &api_key_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.save_api_key(window, cx);
+                    }
+                    InputEvent::Change => {
+                        if let Some(edit) = &mut this.api_key_edit
+                            && edit.error.take().is_some()
+                        {
                             cx.notify();
                         }
                     }
@@ -1064,12 +1114,79 @@ impl KeelWindow {
             .detach();
         }
         let timer = crate::timer::SessionTimer::load(&state.data_dir);
-        let mr = crate::mr::MrStore::load(&state.data_dir);
         let projects = projects::Projects::load(&state.data_dir);
+        let transcript = TranscriptState::new(reduced);
+        let dock_h: std::rc::Rc<std::cell::Cell<f32>> = Default::default();
+        let hovered_row: std::rc::Rc<RowHover> = Default::default();
+        let timeline_scroll_until: std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>> =
+            Default::default();
+        let stick_flag = transcript.stick_flag();
+        let glide_active = transcript.glide_active();
+        let list_state = transcript.list_state.clone();
+        let tokens = state.effective_tokens(matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        ));
+        let on_jump_row: std::rc::Rc<dyn Fn(usize, &mut Window, &mut gpui::App)> =
+            std::rc::Rc::new({
+                let entity = cx.entity().downgrade();
+                move |row_ix, _window, cx| {
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.timeline_view.read(cx).shown() {
+                            this.transcript.scroll_to_row(row_ix);
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        let on_jump_latest: std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)> = std::rc::Rc::new({
+            let entity = cx.entity().downgrade();
+            move |_window, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    if this.timeline_view.read(cx).shown() {
+                        this.transcript.on_own_send();
+                        this.transcript.scroll_to_bottom();
+                        cx.notify();
+                    }
+                });
+            }
+        });
+        let timeline_view = cx.new(|_| {
+            chat_timeline::ChatTimelineView::new(
+                tokens,
+                reduced,
+                list_state,
+                stick_flag.clone(),
+                dock_h.clone(),
+                timeline_scroll_until.clone(),
+                on_jump_row,
+                on_jump_latest,
+            )
+        });
+        let timeline_id = timeline_view.entity_id();
+        let on_wheel_sync: std::rc::Rc<dyn Fn(gpui::Pixels, &mut gpui::App)> =
+            std::rc::Rc::new({
+                let entity = cx.entity().downgrade();
+                move |dy, cx| {
+                    let _ = entity.update(cx, |this, _| {
+                        this.transcript.on_wheel(dy);
+                    });
+                }
+            });
+        let transcript_list = cx.new(|_| {
+            transcript_list::TranscriptListView::new(
+                hovered_row.clone(),
+                timeline_id,
+                timeline_scroll_until.clone(),
+                stick_flag,
+                glide_active,
+                on_wheel_sync,
+            )
+        });
         let mut this = Self {
             state,
             client,
-            transcript: TranscriptState::new(reduced),
+            transcript,
             current_chat: None,
             chat_gen: 0,
             chat_reveal: None,
@@ -1105,14 +1222,20 @@ impl KeelWindow {
             card_height: Default::default(),
             question_stopped: Default::default(),
             mr_merges: HashMap::new(),
+            mr_fetches: HashMap::new(),
+            mr_auto_hydrated: HashSet::new(),
             armed_runs: Default::default(),
             subagents: BTreeMap::new(),
             subagent_open: None,
             subagent_caps: keel_proto::SubagentCaps::default(),
             show_subagent_menu: false,
-            show_points_menu: false,
             demo_hold_exit: false,
             rename_input,
+            chat_title_input,
+            renaming_chat: None,
+            chat_title_anim: None,
+            show_chat_menu: false,
+            chat_menu_anchor: Default::default(),
             focus_handle: cx.focus_handle(),
             input_style_for: None,
             harnesses: Vec::new(),
@@ -1178,7 +1301,10 @@ impl KeelWindow {
             row_enter: HashMap::new(),
             space_fold_gen: HashMap::new(),
             glide_gen: 0,
-            latest_pill: crate::motion::Presence::hidden(),
+            timeline_view,
+            timeline_sync_key: None,
+            timeline_scroll_until,
+            transcript_list,
             last_sent_prompt: None,
             pending_composer_restore: None,
             awaiting_first_output: false,
@@ -1209,7 +1335,7 @@ impl KeelWindow {
             model_chip_bounds: Default::default(),
             effort_chip_bounds: Default::default(),
             permission_chip_bounds: Default::default(),
-            dock_h: Default::default(),
+            dock_h,
             tail_dock_h: 0.,
             hero_title: Default::default(),
             dock_slot: Default::default(),
@@ -1226,12 +1352,24 @@ impl KeelWindow {
             last_settings_toggle: None,
             settings_leaving: None,
             settings_gen: 0,
+            settings_tab: settings::SettingsTab::General,
+            settings_tab_prev: settings::SettingsTab::General,
+            settings_tab_gen: 0,
+            settings_tab_at: None,
+            settings_gitlab_form_open: false,
             page_key: 0,
             page_from: 0,
             page_at: None,
             harness_status: None,
             sign_in: None,
             auth_landed: None,
+            api_key_input,
+            api_key_edit: None,
+            api_key_closing: None,
+            account_confirm: None,
+            account_confirm_gen: 0,
+            account_state_seq: HashMap::new(),
+            account_busy: None,
             connections: Vec::new(),
             gitlab_host,
             browser_sites,
@@ -1288,6 +1426,7 @@ impl KeelWindow {
             menus_open: HashSet::new(),
             menus_leaving: HashMap::new(),
             menu_leave_gen: 0,
+            picker_chevron_gen: [0; 4],
             menus_cut: false,
             menus_cut_now: false,
             branches_loading: false,
@@ -1304,11 +1443,12 @@ impl KeelWindow {
             fold_toggles: HashMap::new(),
             fold_gen: 0,
             expanded_tools: HashSet::new(),
+            open_lines_cache: None,
             expand_steps: false,
             clock_epoch: std::time::Instant::now(),
             motion_ticker: None,
             copied: None,
-            hovered_row: Default::default(),
+            hovered_row,
             pending_images: Vec::new(),
             attaching: 0,
             images_leaving: Vec::new(),
@@ -1336,9 +1476,6 @@ impl KeelWindow {
             notice_exit: None,
             timer,
             timer_ui: Default::default(),
-            mr,
-            mr_ui: Default::default(),
-            mr_input,
             menu_dismissed: None,
             unread: Default::default(),
             dock_label: None,
@@ -1355,7 +1492,6 @@ impl KeelWindow {
         this.load_harnesses(cx);
         // A timer left running keeps counting (wall clock) and ticking.
         this.ensure_timer_tick(cx);
-        this.mr_start(cx);
         this.dotify_boot(cx);
         this.dotify_dev_hooks(cx);
         this.updates_boot(cx);
@@ -1600,8 +1736,8 @@ impl KeelWindow {
     }
 
     /// The duration for the right panel animation, scaling with distance if reversed mid-flight.
-    /// Opening uses [`crate::motion::PANEL_OPEN`] ([`crate::motion::SPATIAL`], a wide pane)
-    /// and closing uses [`crate::motion::PANEL_CLOSE`] (320 ms), still quicker than the open.
+    /// Opening uses [`crate::motion::PANEL_OPEN`] (260 ms) and closing uses
+    /// [`crate::motion::PANEL_CLOSE`] (200 ms), shorter than the open.
     pub(super) fn right_panel_duration(&self) -> std::time::Duration {
         let base = if self.right_panel_target() >= self.right_panel_from {
             crate::motion::PANEL_OPEN
@@ -1634,7 +1770,7 @@ impl KeelWindow {
         }
         let t = (elapsed.as_secs_f32() / dur.as_secs_f32()).min(1.);
         self.right_panel_from
-            + (self.right_panel_target() - self.right_panel_from) * crate::motion::glide_curve(t)
+            + (self.right_panel_target() - self.right_panel_from) * crate::motion::drawer_curve(t)
     }
 
     /// Called right before toggling any right side panel to capture the starting position.
@@ -1672,6 +1808,7 @@ impl KeelWindow {
             }
         };
         self.right_panel.animate_launcher = false;
+        self.right_panel.mark_tabs_settled();
         self.right_panel_from = from;
         let now = std::time::Instant::now();
         let next = self.right_panel_anim.map_or(1, |(_, n)| n + 1);
@@ -1901,13 +2038,18 @@ impl KeelWindow {
         self.publish_task = None;
         self.step_break = false;
         self.transcript.clear();
+        self.hovered_row.clear();
+        self.timeline_view.update(cx, |v, _| v.cut());
+        self.timeline_sync_key = None;
+        self.timeline_scroll_until.set(None);
         self.awaiting_first_output = false;
         self.invalidate_suggestion();
-        self.mr_on_switch(cx);
         self.subagents.clear();
         self.subagent_open = None;
         self.show_subagent_menu = false;
         self.subagent_caps = keel_proto::SubagentCaps::default();
+        self.renaming_chat = None;
+        self.show_chat_menu = false;
 
         let draft = want
             .as_deref()
@@ -2633,14 +2775,9 @@ impl KeelWindow {
             }
             rows.extend(entry.blocks.all_blocks());
             let role = entry.role.clone();
-            let text = (role == "user").then(|| entry.blocks.full_text.clone());
             let later = self.later_messages(id);
             self.transcript
                 .upsert_message_before(id, &role, rows, &later);
-            // A link the user pastes is offered too.
-            if let Some(text) = text {
-                self.mr_scan(id, &text, false);
-            }
             return;
         }
         let Some(pos) = self.msg_order.iter().position(|m| m == id) else {
@@ -2875,8 +3012,6 @@ impl KeelWindow {
         // Files the turn wrote: named by finished write tools or by an answer
         // line that says it created one. Kept only if they exist.
         let mut written: Vec<String> = Vec::new();
-        // MR links in the turn, and whether one of its tools made one.
-        let (mut mr_text, mut mr_created) = (String::new(), false);
         // In-memory diff line counts from tools in this turn (0ms, pure memory)
         let mut in_memory_stats: std::collections::HashMap<
             String,
@@ -2888,8 +3023,6 @@ impl KeelWindow {
                 continue;
             };
             written.extend(crate::files::candidates_in_text(&entry.blocks.full_text));
-            mr_text.push_str(&entry.blocks.full_text);
-            mr_text.push('\n');
             for step in &entry.steps {
                 let crate::turn::Step::Tools(tools) = step else {
                     continue;
@@ -2902,9 +3035,6 @@ impl KeelWindow {
                     ));
                     // A screenshot the tool returned gets a chip too.
                     written.extend(tool.images.iter().cloned());
-                    mr_created |= crate::mr::tool_creates_mr(&tool.name, &tool.summary);
-                    mr_text.push_str(&tool.summary);
-                    mr_text.push('\n');
 
                     if let Some(diff) = &tool.diff {
                         let (mut add, mut rem) = (0u32, 0u32);
@@ -2951,7 +3081,6 @@ impl KeelWindow {
         } else {
             crate::files::resolve_all(written, &roots)
         };
-        self.mr_scan(head, &mr_text, mr_created);
         if files.is_empty() {
             return None;
         }
@@ -3093,6 +3222,7 @@ impl KeelWindow {
                 row_id
             }
         };
+        self.open_lines_cache = None;
         self.fold_gen += 1;
         self.fold_toggles
             .retain(|_, (_, at)| at.elapsed() < Duration::from_secs(1));
@@ -3122,6 +3252,15 @@ impl KeelWindow {
                 _ => None,
             })
             .collect()
+    }
+
+    pub(super) fn open_lines_rc(&mut self) -> std::rc::Rc<HashMap<String, bool>> {
+        if let Some(cached) = &self.open_lines_cache {
+            return cached.clone();
+        }
+        let rc = std::rc::Rc::new(self.open_lines());
+        self.open_lines_cache = Some(rc.clone());
+        rc
     }
 
     /// ⌘⌥E: show or hide the steps of every turn.
@@ -4355,6 +4494,77 @@ impl KeelWindow {
         }
     }
 
+    /// Refresh an MR card's live snapshot from GitLab and persist it in the session doc.
+    pub(super) fn refresh_mr_card(
+        &mut self,
+        row_id: String,
+        message_id: String,
+        part_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::transcript::CardFetchUi;
+        let (Some(chat_id), Some(client)) = (self.current_chat.clone(), self.client.clone()) else {
+            return;
+        };
+        if matches!(self.mr_fetches.get(&row_id), Some(CardFetchUi::Refreshing)) {
+            return;
+        }
+        self.mr_fetches.insert(row_id.clone(), CardFetchUi::Refreshing);
+        cx.spawn(async move |this, cx| {
+            let params = serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "part_id": part_id,
+            });
+            let res = client.call("refresh_mr", params).await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.mr_fetches.remove(&row_id);
+                    }
+                    Err(err) => {
+                        this.mr_fetches
+                            .insert(row_id, CardFetchUi::Failed(err.to_string()));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Hydrates any unloaded MR cards (`snap.state` empty) in the active chat once.
+    pub(super) fn mr_hydrate_cards(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.current_chat.clone() else {
+            return;
+        };
+        let pending: Vec<(String, String, String)> = self
+            .transcript
+            .items
+            .iter()
+            .filter_map(|item| match &item.block {
+                crate::markdown::TranscriptBlock::MrCard {
+                    card,
+                    message_id,
+                    part_id,
+                    ..
+                } if !card.snap.is_loaded() => Some((
+                    item.row_id().to_string(),
+                    message_id.clone(),
+                    part_id.clone(),
+                )),
+                _ => None,
+            })
+            .filter(|(_, message_id, part_id)| {
+                self.mr_auto_hydrated
+                    .insert(format!("{chat_id}|{message_id}|{part_id}"))
+            })
+            .collect();
+        for (row_id, message_id, part_id) in pending {
+            self.refresh_mr_card(row_id, message_id, part_id, cx);
+        }
+    }
+
     /// An MR card's Merge button. The first click arms it for a few seconds;
     /// a second one asks the engine to merge, which checks the MR live and
     /// rewrites the card (merged) on success.
@@ -4381,7 +4591,6 @@ impl KeelWindow {
                         match res {
                             Ok(_) => {
                                 this.mr_merges.remove(&row_id);
-                                this.mr_poke(cx);
                             }
                             Err(err) => {
                                 this.mr_merges.insert(row_id, MergeUi::Failed(err.to_string()));
@@ -4690,6 +4899,9 @@ impl KeelWindow {
             return;
         }
         self.settings_open = false;
+        self.api_key_edit = None;
+        self.api_key_closing = None;
+        self.account_confirm = None;
         if self.reduced() {
             self.settings_leaving = None;
             return;
@@ -4819,6 +5031,8 @@ impl KeelWindow {
         let effort = self.selected_effort.clone();
         let permission = self.effective_permission().as_str();
         let plan_mode = self.plan_on_value();
+        // The branch this chat starts on, before the registry mirror lands.
+        let branch = self.state.selected_branch.clone();
         self.creating_chat = first_message.is_some();
         self.create_error = None;
         let scratch = target.is_none();
@@ -4835,7 +5049,7 @@ impl KeelWindow {
                     "reasoning": effort,
                     "permission": permission,
                     "plan_mode": plan_mode,
-                    "branch": self.state.selected_branch,
+                    "branch": branch,
                 });
                 (space_id, cwd, link, params)
             }
@@ -4894,6 +5108,11 @@ impl KeelWindow {
                         });
                         chat.space_id = space_id;
                         chat.cwd = cwd;
+                        // Before the registry mirror lands, the tab and the
+                        // sidebar row already name the branch it started on.
+                        if !scratch {
+                            chat.branch = branch.clone().unwrap_or_default();
+                        }
                         chat.harness = harness;
                         chat.model = model;
                         chat.reasoning = effort;
@@ -5338,6 +5557,98 @@ impl KeelWindow {
                         this.state.renaming_space = None;
                     }
                     Err(err) => this.report("rename failed", err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn active_chat_title(&self) -> Option<(String, String, bool)> {
+        let chat_id = self.current_chat.as_ref()?;
+        let raw = self
+            .state
+            .chats
+            .get(chat_id)
+            .map(|c| c.title.trim())
+            .filter(|title| !title.is_empty() && *title != "New chat");
+        let is_placeholder = raw.is_none();
+        let display = raw.unwrap_or("New chat").to_string();
+        Some((chat_id.clone(), display, is_placeholder))
+    }
+
+    pub(super) fn start_chat_title_rename(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((chat_id, display, is_placeholder)) = self.active_chat_title() else {
+            return;
+        };
+        let prefill = if is_placeholder {
+            String::new()
+        } else {
+            display
+        };
+        self.renaming_chat = Some(chat_id);
+        self.chat_title_input.update(cx, |s, cx| {
+            s.set_value(prefill, window, cx);
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn cancel_chat_title_rename(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.renaming_chat.take().is_none() {
+            return false;
+        }
+        self.composer.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+        true
+    }
+
+    pub(super) fn save_chat_title_rename(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat_id) = self.renaming_chat.take() else {
+            return;
+        };
+        let new_title = self.chat_title_input.read(cx).value().trim().to_string();
+        if let Some(window) = window {
+            self.composer.update(cx, |s, cx| s.focus(window, cx));
+        }
+        let prev = self
+            .state
+            .chats
+            .get(&chat_id)
+            .map(|c| c.title.clone())
+            .unwrap_or_default();
+        if new_title.is_empty() || new_title == prev.trim() {
+            cx.notify();
+            return;
+        }
+        if let Some(chat) = self.state.chats.get_mut(&chat_id) {
+            chat.title = new_title.clone();
+        }
+        let Some(client) = self.client.clone() else {
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let res = client.rename_chat(&chat_id, &new_title).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = res {
+                    if let Some(chat) = this.state.chats.get_mut(&chat_id) {
+                        chat.title = prev;
+                    }
+                    this.report("rename failed", err);
                 }
                 cx.notify();
             });
@@ -6404,7 +6715,7 @@ mod turn_tests {
             panic!()
         };
         assert!(live);
-        assert_eq!(label, "Working");
+        assert_eq!(label, "Reading memory");
 
         let plan = TranscriptBlock::Plan {
             id: "m#plan".into(),

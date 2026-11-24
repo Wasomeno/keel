@@ -620,7 +620,7 @@ impl KeelWindow {
             order: 0,
             live_choices: None,
             merges: Rc::new(HashMap::new()),
-            tracked_mr: None,
+            mr_fetches: Rc::new(HashMap::new()),
             armed_runs: Rc::new(HashSet::new()),
             run_at: None,
             step_from: None,

@@ -22,7 +22,7 @@ fn tools() -> Value {
     let raw = format!(
         r#"[
   {{"name":"browser_open_pane","description":"Show Keel's browser pane to the user. Every other tool works without it.","inputSchema":{{"type":"object","properties":{{}}}}}},
-  {{"name":"browser_navigate","description":"Load a URL in this chat's browser tab and wait for it. Returns the page snapshot.","inputSchema":{{"type":"object","properties":{{"url":{{"type":"string","description":"http(s) URL, or a host like localhost:3000"}},{SNAP}}},"required":["url"]}}}},
+  {{"name":"browser_navigate","description":"Load a URL in the browser pane for interactive, JS-rendered, localhost, or logged-in pages. Prefer web_search or web_fetch for web searches and reading public pages.","inputSchema":{{"type":"object","properties":{{"url":{{"type":"string","description":"http(s) URL, or a host like localhost:3000"}},{SNAP}}},"required":["url"]}}}},
   {{"name":"browser_snapshot","description":"The page as a list of elements with refs (e12) for the other tools: roles, names, values, states. mode text gives the visible text instead.","inputSchema":{{"type":"object","properties":{{"mode":{{"type":"string","enum":["interactive","text"],"description":"interactive (default) or text"}}}}}}}},
   {{"name":"browser_click","description":"Click an element by ref (or selector, or x/y viewport pixels). Waits for any navigation it starts, then returns what changed.","inputSchema":{{"type":"object","properties":{{{REF},{SEL},"x":{{"type":"number"}},"y":{{"type":"number"}},"double":{{"type":"boolean"}},{SNAP}}}}}}},
   {{"name":"browser_type","description":"Replace the text of a field (by ref or selector; else the focused one). submit presses Enter after.","inputSchema":{{"type":"object","properties":{{"text":{{"type":"string"}},{REF},{SEL},"submit":{{"type":"boolean"}},{SNAP}}},"required":["text"]}}}},
@@ -80,7 +80,10 @@ pub fn run(socket: PathBuf) -> i32 {
             }),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                let mut args = params.get("arguments").cloned().unwrap_or(json!({}));
+                if let Some(obj) = args.as_object_mut() {
+                    obj.remove("label");
+                }
                 match call_sock(&link, name, args) {
                     Ok(result) => json!({
                         "jsonrpc": "2.0",
