@@ -5,13 +5,12 @@ use gpui::{ClickEvent, Context, IntoElement, div, prelude::*};
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
-use super::super::sidebar::filled_button;
 use super::ConnectionRow;
 use super::controls::{
-    card_group_header, field, info_badge, settings_card, status_pill, text_button_owned,
+    ButtonKind, button, card_group_header, field, info_badge, settings_card, status_pill,
 };
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_MD, c, zpx};
+use crate::style::{INPUT_H, KeelStyled, ROW_MIN_H, c, r_md, zpx};
 
 impl KeelWindow {
     pub(in crate::view) fn load_connections_pub(&mut self, cx: &mut Context<Self>) {
@@ -103,7 +102,7 @@ impl KeelWindow {
         div()
             .flex()
             .flex_col()
-            .gap_5()
+            .gap(zpx(24.))
             .child(self.render_browser_card(t, cx))
             .child(self.render_connections_card(t, cx))
     }
@@ -125,25 +124,24 @@ impl KeelWindow {
         let row = div()
             .flex()
             .flex_col()
-            .gap_2p5()
-            .py_3()
+            .gap(zpx(8.))
+            .py(zpx(12.))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .gap_2()
+                    .gap(zpx(8.))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_1p5()
+                            .gap(zpx(6.))
                             .child(
                                 div()
                                     .t_body()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(c(t.text))
                                     .child("Allowed sites"),
                             )
@@ -160,16 +158,16 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap(zpx(8.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .h(zpx(32.))
-                            .px_2p5()
+                            .h(zpx(INPUT_H))
+                            .px(zpx(8.))
                             .flex()
                             .items_center()
-                            .rounded(RADIUS_MD)
+                            .rounded(r_md())
                             .bg(c(t.input))
                             .border_1()
                             .border_color(c(t.border))
@@ -177,8 +175,13 @@ impl KeelWindow {
                             .child(self.browser_sites.clone()),
                     )
                     .child(
-                        filled_button("save-browser-sites-btn", "Save", t.accent, t)
-                            .when(!dirty, |b| b.opacity(0.45))
+                        button(
+                            "save-browser-sites-btn",
+                            "Save",
+                            ButtonKind::Primary,
+                            dirty,
+                            t,
+                        )
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.save_browser_sites(cx)
                             })),
@@ -189,7 +192,7 @@ impl KeelWindow {
             .flex()
             .flex_col()
             .child(card_group_header(
-                "BROWSER",
+                "Browser",
                 Some("Controls which sites agents can load in the built-in browser pane."),
                 None,
                 t,
@@ -218,14 +221,15 @@ impl KeelWindow {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .py_2p5()
-                    .gap_3()
+                    .min_h(zpx(ROW_MIN_H))
+                    .py(zpx(10.))
+                    .gap(zpx(16.))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_2p5()
+                            .gap(zpx(8.))
                             .min_w_0()
                             .child(
                                 div()
@@ -234,17 +238,13 @@ impl KeelWindow {
                                     .rounded_full()
                                     .bg(c(t.success)),
                             )
-                            .child(
-                                div()
-                                    .t_body()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(c(t.text))
-                                    .child(if conn.kind == "gitlab" {
-                                        "GitLab".to_string()
-                                    } else {
-                                        conn.kind.clone()
-                                    }),
-                            )
+                            .child(div().t_body().text_color(c(t.text)).child(
+                                if conn.kind == "gitlab" {
+                                    "GitLab".to_string()
+                                } else {
+                                    conn.kind.clone()
+                                },
+                            ))
                             .child(div().t_small().text_color(c(t.text_muted)).child(format!(
                                 "{} · @{}",
                                 conn.host.trim_start_matches("https://"),
@@ -260,10 +260,18 @@ impl KeelWindow {
                             }),
                     )
                     .child(
-                        text_button_owned(format!("disconnect-{}", conn.host), "Disconnect", t)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        button(
+                            format!("disconnect-{}", conn.host),
+                            "Disconnect",
+                            ButtonKind::Ghost,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
                                 this.disconnect(kind.clone(), host.clone(), cx)
-                            })),
+                            },
+                        )),
                     )
             })
             .collect();
@@ -272,8 +280,8 @@ impl KeelWindow {
             let gitlab_form = div()
                 .flex()
                 .flex_col()
-                .gap_3()
-                .py_3()
+                .gap(zpx(12.))
+                .py(zpx(12.))
                 .child(
                     div()
                         .flex()
@@ -285,11 +293,10 @@ impl KeelWindow {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap_1p5()
+                                .gap(zpx(6.))
                                 .child(
                                     div()
                                         .t_body()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(c(t.text))
                                         .child("Connect GitLab"),
                                 )
@@ -301,7 +308,13 @@ impl KeelWindow {
                         )
                         .when(has_conns, |d| {
                             d.child(
-                                text_button_owned("gitlab-form-cancel".into(), "Cancel", t)
+                                button(
+                                    "gitlab-form-cancel",
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    true,
+                                    t,
+                                )
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.settings_gitlab_form_open = false;
                                         this.connect_error = None;
@@ -314,7 +327,7 @@ impl KeelWindow {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_2()
+                        .gap(zpx(8.))
                         .child(field(
                             t,
                             "Address",
@@ -332,7 +345,7 @@ impl KeelWindow {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_1p5()
+                            .gap(zpx(6.))
                             .t_small()
                             .text_color(c(t.danger))
                             .child(Icon::Alert.el(zpx(12.)))
@@ -341,13 +354,13 @@ impl KeelWindow {
                 })
                 .child(
                     div().flex().flex_row().justify_end().child(
-                        filled_button(
+                        button(
                             "connect-gitlab-btn",
                             if busy { "Checking…" } else { "Connect" },
-                            t.accent,
+                            ButtonKind::Primary,
+                            !busy,
                             t,
                         )
-                        .when(busy, |b| b.opacity(0.6))
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, window, cx| {
                                 if !this.connect_busy {
@@ -365,7 +378,7 @@ impl KeelWindow {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .py_2p5()
+                    .py(zpx(10.))
                     .child(
                         div()
                             .t_small()
@@ -373,11 +386,19 @@ impl KeelWindow {
                             .child("Add another GitLab instance"),
                     )
                     .child(
-                        text_button_owned("gitlab-form-open".into(), "+ Connect GitLab", t)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        button(
+                            "gitlab-form-open",
+                            "+ Connect GitLab",
+                            ButtonKind::Ghost,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
                                 this.settings_gitlab_form_open = true;
                                 cx.notify();
-                            })),
+                            },
+                        )),
                     ),
             );
         }
@@ -385,9 +406,9 @@ impl KeelWindow {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap(zpx(24.))
             .child(card_group_header(
-                "CONNECTIONS",
+                "Connections",
                 Some("External services Keel can talk to. Tokens stay local on this Mac, readable only by you."),
                 None,
                 t,

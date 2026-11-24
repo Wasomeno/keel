@@ -39,11 +39,37 @@ pub fn load_mono(cx: &gpui::App) {
     }
 }
 
-/// Radii: controls `SM`, rows and chips `MD`, cards and popovers `LG`, composer `XL`.
+/// Radii: badges `SM`, buttons and inputs `MD`, cards `LG`, modals `XL`.
+/// These constants are unscaled `px`. Settings paints the same steps through
+/// [`r_sm`], [`r_md`], [`r_lg`], and [`r_xl`] so they follow zoom.
 pub const RADIUS_SM: Pixels = px(4.);
 pub const RADIUS_MD: Pixels = px(6.);
 pub const RADIUS_LG: Pixels = px(10.);
 pub const RADIUS_XL: Pixels = px(14.);
+
+/// Spacing scale in logical pixels. Paint with [`zpx`].
+pub const SP: [f32; 9] = [2., 4., 6., 8., 12., 16., 20., 24., 32.];
+
+/// Fixed control and settings-chrome heights, logical pixels. Paint with [`zpx`].
+pub const CONTROL_H: f32 = 26.;
+pub const INPUT_H: f32 = 28.;
+pub const NAV_ITEM_H: f32 = 30.;
+pub const ROW_MIN_H: f32 = 44.;
+pub const HEADER_H: f32 = 52.;
+
+/// Zoomed radii. Settings uses these; the `RADIUS_*` constants stay unscaled.
+pub fn r_sm() -> Pixels {
+    zpx(4.)
+}
+pub fn r_md() -> Pixels {
+    zpx(6.)
+}
+pub fn r_lg() -> Pixels {
+    zpx(10.)
+}
+pub fn r_xl() -> Pixels {
+    zpx(14.)
+}
 
 /// Fixed chrome heights.
 pub const HEADER_HEIGHT: Pixels = px(40.);

@@ -8,14 +8,11 @@ use gpui::{
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
-use super::super::sidebar::{filled_button, text_button};
-use super::controls::{
-    creator_pill, open_browser_url, reveal_in_finder, row_text, toggle,
-};
+use super::controls::{ButtonKind, button, open_browser_url, reveal_in_finder, toggle};
 use super::{MemoryTab, SkillConfirm, SkillRow, SkillStatusFilter};
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::style::{KeelStyled, MONO, RADIUS_MD, RADIUS_SM, c, zpx};
+use crate::style::{INPUT_H, KeelStyled, MONO, c, r_lg, r_md, r_sm, r_xl, zpx};
 
 impl KeelWindow {
     pub(in crate::view) fn load_skills(&mut self, cx: &mut Context<Self>) {
@@ -126,16 +123,16 @@ impl KeelWindow {
         let needle = query.trim().to_lowercase();
         let rows = self.skills.rows.clone();
         let reduced = self.reduced();
-        let mut body = div().size_full().flex().flex_col().gap_3();
+        let mut body = div().size_full().flex().flex_col().gap(zpx(12.));
 
         if missing {
             return body.child(
                 div()
-                    .py_3()
+                    .py(zpx(12.))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap(zpx(8.))
                     .t_body()
                     .text_color(c(t.danger))
                     .child(Icon::Alert.el(zpx(14.)))
@@ -150,8 +147,8 @@ impl KeelWindow {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .py_2()
+                        .gap(zpx(8.))
+                        .py(zpx(8.))
                         .child(
                             div()
                                 .t_body()
@@ -159,9 +156,11 @@ impl KeelWindow {
                                 .child("Couldn't read skills."),
                         )
                         .child(div().t_small().text_color(c(t.danger)).child(err))
-                        .child(text_button("skills-retry", "Retry", t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| this.load_skills(cx)),
-                        )),
+                        .child(
+                            button("skills-retry", "Retry", ButtonKind::Ghost, true, t).on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| this.load_skills(cx)),
+                            ),
+                        ),
                 );
             }
             Some(Ok(skills)) => skills,
@@ -173,7 +172,13 @@ impl KeelWindow {
         body = body.child(self.render_skills_header(t, missing, total, enabled_count, cx));
 
         if let Some(notice) = self.skills.notice.clone() {
-            body = body.child(div().pb_2().t_small().text_color(c(t.danger)).child(notice));
+            body = body.child(
+                div()
+                    .pb(zpx(8.))
+                    .t_small()
+                    .text_color(c(t.danger))
+                    .child(notice),
+            );
         }
         // The banner rises in, and drops out on Cancel, quicker than it came.
         if let Some(confirm) = self.skills.confirm.clone() {
@@ -282,12 +287,12 @@ impl KeelWindow {
                 || status_filter != SkillStatusFilter::All;
             let empty_box = if is_filtering {
                 div()
-                    .py_12()
+                    .py(zpx(32.))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_3()
+                    .gap(zpx(12.))
                     .child(Icon::Search.el(zpx(24.)).text_color(c(t.text_faint)))
                     .child(
                         div()
@@ -296,25 +301,32 @@ impl KeelWindow {
                             .child("No skills match your search or filter."),
                     )
                     .child(
-                        text_button("skills-reset-filters", "Reset filters", t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                        button(
+                            "skills-reset-filters",
+                            "Reset filters",
+                            ButtonKind::Ghost,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
                                 this.skills.author_filter = None;
                                 this.skills.status_filter = SkillStatusFilter::All;
                                 this.skills
                                     .list_scroll
                                     .scroll_to_item(0, gpui::ScrollStrategy::Top);
                                 cx.notify();
-                            }),
-                        ),
+                            },
+                        )),
                     )
             } else {
                 div()
-                    .py_12()
+                    .py(zpx(32.))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_2()
+                    .gap(zpx(8.))
                     .child(Icon::Puzzle.el(zpx(26.)).text_color(c(t.text_faint)))
                     .child(
                         div()
@@ -343,10 +355,9 @@ impl KeelWindow {
 
         let count = matched.len();
         let weak = cx.entity().downgrade();
-        let switch_flips = self.switch_flips.clone();
         let row_errors = self.skills.row_errors.clone();
 
-        const SKILL_ROW_H: f32 = 62.0;
+        const SKILL_ROW_H: f32 = 56.0;
 
         let list_el = uniform_list("skills-list", count, move |range, _window, _cx| {
             range
@@ -361,10 +372,6 @@ impl KeelWindow {
                     let enabled = skill.enabled;
                     let packaged = scope == "package";
                     let error = row_errors.get(&path).cloned();
-                    let flip = switch_flips
-                        .get(&format!("skill-{path}"))
-                        .filter(|(_, at)| !reduced && at.elapsed() < crate::motion::BASE * 2)
-                        .map(|(n, _)| *n);
 
                     let weak_row = weak.clone();
                     let skill_for_click = skill.clone();
@@ -373,22 +380,17 @@ impl KeelWindow {
 
                     let card = div()
                         .id(ElementId::Name(format!("skill-card-{path}").into()))
-                        .h(zpx(56.))
+                        .h(zpx(SKILL_ROW_H))
                         .w_full()
-                        .px_3p5()
-                        .py_2()
-                        .rounded(RADIUS_MD)
-                        .bg(c(t.input).opacity(0.35))
-                        .border_1()
-                        .border_color(c(t.border).opacity(0.5))
-                        .hover(|s| s.border_color(c(t.border)))
+                        .px(zpx(16.))
+                        .when(ix > 0, |d| d.border_t_1().border_color(c(t.border)))
                         .hover_fade(c(t.hover), None)
                         .cursor_pointer()
                         .flex()
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .gap_3()
+                        .gap(zpx(12.))
                         .on_click(move |_, _, cx| {
                             let skill = skill_for_click.clone();
                             let _ = weak_row.update(cx, |this, cx| {
@@ -403,17 +405,13 @@ impl KeelWindow {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap_3()
+                                .gap(zpx(12.))
                                 .child(
                                     div()
                                         .size(zpx(32.))
                                         .flex_none()
-                                        .rounded(RADIUS_SM)
-                                        .bg(if enabled {
-                                            c(t.accent).opacity(0.12)
-                                        } else {
-                                            c(t.input)
-                                        })
+                                        .rounded(r_sm())
+                                        .bg(c(t.input))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -435,15 +433,13 @@ impl KeelWindow {
                                                 .flex()
                                                 .flex_row()
                                                 .items_center()
-                                                .gap_2()
+                                                .gap(zpx(8.))
                                                 .min_w_0()
                                                 .overflow_hidden()
                                                 .child(
                                                     div()
                                                         .flex_none()
-                                                        .text_size(zpx(13.5))
-                                                        .line_height(zpx(18.))
-                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .t_body()
                                                         .text_color(c(t.text))
                                                         .child(name.clone()),
                                                 )
@@ -457,18 +453,15 @@ impl KeelWindow {
                                                             .flex()
                                                             .flex_row()
                                                             .items_center()
-                                                            .px_1p5()
+                                                            .px(zpx(6.))
                                                             .h(zpx(17.))
-                                                            .rounded(RADIUS_SM)
+                                                            .rounded(r_sm())
                                                             .bg(c(t.window))
                                                             .border_1()
-                                                            .border_color(c(t.border).opacity(0.5))
+                                                            .border_color(c(t.border))
                                                             .child(
                                                                 div()
-                                                                    .text_size(zpx(11.))
-                                                                    .font_weight(
-                                                                        gpui::FontWeight::MEDIUM,
-                                                                    )
+                                                                    .t_caption()
                                                                     .text_color(c(t.text_muted))
                                                                     .child(format!("by {author}")),
                                                             ),
@@ -476,17 +469,17 @@ impl KeelWindow {
                                                 })
                                                 .child(
                                                     div()
-                                                        .px_1p5()
+                                                        .px(zpx(6.))
                                                         .h(zpx(17.))
                                                         .flex()
                                                         .items_center()
-                                                        .rounded(RADIUS_SM)
+                                                        .rounded(r_sm())
                                                         .bg(c(t.window))
                                                         .border_1()
-                                                        .border_color(c(t.border).opacity(0.4))
+                                                        .border_color(c(t.border))
                                                         .font_family(MONO)
-                                                        .text_size(zpx(10.5))
-                                                        .text_color(c(t.accent).opacity(0.9))
+                                                        .t_caption()
+                                                        .text_color(c(t.text_muted))
                                                         .child(
                                                             insert
                                                                 .strip_prefix("/skill:")
@@ -499,8 +492,7 @@ impl KeelWindow {
                                             div()
                                                 .min_w_0()
                                                 .truncate()
-                                                .text_size(zpx(12.))
-                                                .line_height(zpx(16.))
+                                                .t_small()
                                                 .text_color(c(t.text_muted))
                                                 .child(description.clone()),
                                         ),
@@ -513,15 +505,14 @@ impl KeelWindow {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap_3()
+                                .gap(zpx(12.))
                                 .when(error.is_some(), |d| {
                                     d.child(
                                         div()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded(RADIUS_SM)
-                                            .bg(c(t.danger).opacity(0.12))
-                                            .text_size(zpx(11.))
+                                            .px(zpx(6.))
+                                            .py(zpx(2.))
+                                            .rounded(r_sm())
+                                            .t_caption()
                                             .text_color(c(t.danger))
                                             .child("Error"),
                                     )
@@ -532,17 +523,15 @@ impl KeelWindow {
                                         .flex()
                                         .flex_row()
                                         .items_center()
-                                        .gap_1p5()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded(RADIUS_SM)
-                                        .bg(c(t.hover).opacity(0.5))
-                                        .border_1()
-                                        .border_color(c(t.border).opacity(0.4))
-                                        .hover(|s| s.border_color(c(t.border)))
+                                        .gap(zpx(6.))
+                                        .px(zpx(10.))
+                                        .h(zpx(crate::style::CONTROL_H))
+                                        .rounded(r_md())
                                         .hover_fade(c(t.hover), None)
+                                        .active(|s| s.opacity(0.8))
                                         .t_small()
-                                        .text_color(c(t.text_muted))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(c(t.text))
                                         .child(
                                             Icon::ScrollText
                                                 .el(zpx(12.))
@@ -560,7 +549,7 @@ impl KeelWindow {
                                     let weak_toggle = weak.clone();
                                     let path_t = path_for_toggle.clone();
                                     let scope_t = scope_for_toggle.clone();
-                                    toggle(format!("skill-{path_t}"), enabled, flip, t)
+                                    toggle(format!("skill-{path_t}"), enabled, t)
                                         .on_click(move |_, _, cx| {
                                             cx.stop_propagation();
                                             let path = path_t.clone();
@@ -577,7 +566,6 @@ impl KeelWindow {
                         .id(("skill-row", ix))
                         .h(zpx(SKILL_ROW_H))
                         .w_full()
-                        .pb(zpx(6.))
                         .child(card)
                         .into_any_element()
                 })
@@ -587,31 +575,21 @@ impl KeelWindow {
         .size_full();
 
         let filter_epoch = self.skills.filter_epoch as usize;
-        let animated_list = if reduced {
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .child(list_el)
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .with_animation(
-                    ("skills-filter-list", filter_epoch),
-                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
-                    |el, delta| {
-                        let ease = crate::motion::ease_out(delta);
-                        el.opacity(0.15 + 0.85 * ease)
-                            .relative()
-                            .top(zpx(8. * (1.0 - ease)))
-                    },
-                )
-                .child(list_el)
-                .into_any_element()
-        };
+        let animated_list = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .rounded(r_lg())
+            .border_1()
+            .border_color(c(t.border))
+            .overflow_hidden()
+            .with_animation(
+                ("skills-filter-list", filter_epoch),
+                gpui::Animation::new(std::time::Duration::from_millis(120))
+                    .with_easing(crate::motion::ease_out),
+                |el, delta| el.opacity(delta),
+            )
+            .child(list_el);
 
         body.child(animated_list)
     }
@@ -629,7 +607,7 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .pb_1()
+            .pb(zpx(4.))
             .child(
                 div()
                     .t_small()
@@ -638,10 +616,15 @@ impl KeelWindow {
             )
             .when(!missing, |d| {
                 d.child(
-                    filled_button("skills-add-btn", "+ Add skill…", t.accent, t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.choose_skill_folder(cx)
-                        }),
+                    button(
+                        "skills-add-btn",
+                        "+ Add skill…",
+                        ButtonKind::Primary,
+                        true,
+                        t,
+                    )
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.choose_skill_folder(cx)),
                     ),
                 )
             })
@@ -659,26 +642,26 @@ impl KeelWindow {
         div()
             .flex()
             .flex_col()
-            .gap_2p5()
-            .pb_2()
+            .gap(zpx(8.))
+            .pb(zpx(8.))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap(zpx(12.))
                     // Search box
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .h(zpx(34.))
-                            .px_2p5()
+                            .h(zpx(INPUT_H))
+                            .px(zpx(8.))
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_2()
-                            .rounded(RADIUS_MD)
+                            .gap(zpx(8.))
+                            .rounded(r_md())
                             .bg(c(t.input))
                             .border_1()
                             .border_color(c(t.border))
@@ -718,13 +701,18 @@ impl KeelWindow {
                         .flex_row()
                         .items_center()
                         .flex_wrap()
-                        .gap_1p5()
-                        .pb_1()
+                        .gap(zpx(6.))
+                        .pb(zpx(4.))
                         .child(
-                            creator_pill(
-                                "skill-author-all".into(),
-                                "All Creators".into(),
-                                author_filter.is_none(),
+                            button(
+                                "skill-author-all",
+                                "All Creators",
+                                if author_filter.is_none() {
+                                    ButtonKind::Secondary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                true,
                                 t,
                             )
                             .on_click(cx.listener(
@@ -739,10 +727,15 @@ impl KeelWindow {
                         .children(authors.iter().map(|(author, count)| {
                             let is_sel = author_filter.as_deref() == Some(author);
                             let author_val = author.clone();
-                            creator_pill(
+                            button(
                                 format!("skill-author-{author}"),
                                 format!("{author} ({count})"),
-                                is_sel,
+                                if is_sel {
+                                    ButtonKind::Secondary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                true,
                                 t,
                             )
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -760,7 +753,11 @@ impl KeelWindow {
             })
     }
 
-    pub(super) fn render_skill_modal(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_skill_modal(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let (skill, leaving, modal_gen) =
             match (&self.skills.modal_skill, &self.skills.modal_leaving) {
                 (Some(s), _) => (s.clone(), false, self.skills.modal_gen),
@@ -792,11 +789,8 @@ impl KeelWindow {
             .w(zpx(720.))
             .max_w(gpui::relative(0.92))
             .max_h(gpui::relative(0.85))
-            .rounded(crate::style::RADIUS_LG)
-            .bg(c(t.surface))
-            .border_1()
-            .border_color(c(t.border))
             .floating_surface(t)
+            .rounded(r_xl())
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -808,12 +802,11 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_3()
-            .px_5()
-            .py_3p5()
+            .gap(zpx(12.))
+            .px(zpx(20.))
+            .py(zpx(12.))
             .border_b_1()
-            .border_color(c(t.border).opacity(0.5))
-            .bg(c(t.window).opacity(0.5))
+            .border_color(c(t.border))
             .child(
                 div()
                     .flex_1()
@@ -821,25 +814,19 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2p5()
+                    .gap(zpx(8.))
                     .flex_wrap()
                     .child(
                         div()
                             .size(zpx(28.))
-                            .rounded(RADIUS_SM)
-                            .bg(c(t.accent).opacity(0.12))
+                            .rounded(r_sm())
+                            .bg(c(t.input))
                             .flex()
                             .items_center()
                             .justify_center()
                             .child(Icon::Puzzle.el(zpx(15.)).text_color(c(t.accent))),
                     )
-                    .child(
-                        div()
-                            .text_size(zpx(16.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                            .child(name.clone()),
-                    )
+                    .child(div().t_title().text_color(c(t.text)).child(name.clone()))
                     .when(!author.is_empty(), |d| {
                         d.child(
                             div()
@@ -847,16 +834,15 @@ impl KeelWindow {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .px_2()
+                                .px(zpx(8.))
                                 .h(zpx(20.))
-                                .rounded(RADIUS_SM)
+                                .rounded(r_sm())
                                 .bg(c(t.window))
                                 .border_1()
-                                .border_color(c(t.border).opacity(0.5))
+                                .border_color(c(t.border))
                                 .child(
                                     div()
-                                        .text_size(zpx(11.5))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .t_caption()
                                         .text_color(c(t.text_muted))
                                         .child(format!("by {author}")),
                                 ),
@@ -864,17 +850,17 @@ impl KeelWindow {
                     })
                     .child(
                         div()
-                            .px_2()
+                            .px(zpx(8.))
                             .h(zpx(20.))
                             .flex()
                             .items_center()
-                            .rounded(RADIUS_SM)
+                            .rounded(r_sm())
                             .bg(c(t.window))
                             .border_1()
-                            .border_color(c(t.border).opacity(0.5))
+                            .border_color(c(t.border))
                             .font_family(MONO)
-                            .text_size(zpx(11.5))
-                            .text_color(c(t.accent))
+                            .t_caption()
+                            .text_color(c(t.text_muted))
                             .child(
                                 insert
                                     .strip_prefix("/skill:")
@@ -884,22 +870,11 @@ impl KeelWindow {
                     ),
             )
             .child(
-                div()
-                    .id("skill-modal-close-x")
-                    .size(zpx(26.))
-                    .rounded(RADIUS_SM)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .text_color(c(t.text_muted))
-                    .hover(|s| s.text_color(c(t.text)))
-                    .hover_fade(c(t.hover), None)
-                    .active(|s| s.opacity(0.7))
-                    .child(Icon::Close.el(zpx(14.)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                super::controls::icon_button("skill-modal-close-x", Icon::Close, t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.dismiss_skill_modal(cx);
-                    })),
+                    }),
+                ),
             );
         card = card.child(header);
 
@@ -910,17 +885,17 @@ impl KeelWindow {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p_5()
+            .p(zpx(20.))
             .flex()
             .flex_col()
-            .gap_4()
+            .gap(zpx(16.))
             .child(
                 div()
-                    .p_3()
-                    .rounded(RADIUS_MD)
-                    .bg(c(t.input).opacity(0.4))
+                    .p(zpx(12.))
+                    .rounded(r_md())
+                    .bg(c(t.input))
                     .border_1()
-                    .border_color(c(t.border).opacity(0.5))
+                    .border_color(c(t.border))
                     .t_body()
                     .text_color(c(t.text))
                     .child(description),
@@ -935,39 +910,61 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .px_5()
-            .py_3()
+            .px(zpx(20.))
+            .py(zpx(12.))
             .border_t_1()
-            .border_color(c(t.border).opacity(0.5))
-            .bg(c(t.window).opacity(0.4))
+            .border_color(c(t.border))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap(zpx(12.))
                     .child({
                         let path_finder = path_finder.clone();
-                        row_text("skill-modal-finder", "Reveal in Finder", t.text_faint, t)
-                            .on_click(cx.listener(move |_, _: &ClickEvent, _, _| {
+                        button(
+                            "skill-modal-finder",
+                            "Reveal in Finder",
+                            ButtonKind::Ghost,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |_, _: &ClickEvent, _, _| {
                                 reveal_in_finder(&path_finder);
-                            }))
+                            },
+                        ))
                     })
                     .when(!source_url.is_empty(), |d| {
                         let url = source_url.clone();
                         d.child(
-                            row_text("skill-modal-source", "View source ↗", t.text_faint, t)
-                                .on_click(cx.listener(move |_, _: &ClickEvent, _, _| {
+                            button(
+                                "skill-modal-source",
+                                "View source ↗",
+                                ButtonKind::Ghost,
+                                true,
+                                t,
+                            )
+                            .on_click(cx.listener(
+                                move |_, _: &ClickEvent, _, _| {
                                     open_browser_url(&url);
-                                })),
+                                },
+                            )),
                         )
                     })
                     .when(removable, |d| {
                         let path_remove = path_finder.clone();
                         let name_remove = name.clone();
                         d.child(
-                            row_text("skill-modal-remove", "Remove skill", t.danger, t).on_click(
-                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            button(
+                                "skill-modal-remove",
+                                "Remove skill",
+                                ButtonKind::Danger,
+                                true,
+                                t,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
                                     this.dismiss_skill_modal(cx);
                                     this.skills.confirm_gen += 1;
                                     this.skills.confirm_leaving = None;
@@ -976,17 +973,17 @@ impl KeelWindow {
                                         name: name_remove.clone(),
                                     });
                                     cx.notify();
-                                }),
-                            ),
+                                },
+                            )),
                         )
                     }),
             )
             .child(
-                filled_button("skill-modal-done-btn", "Done", t.accent, t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
+                button("skill-modal-done-btn", "Done", ButtonKind::Primary, true, t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.dismiss_skill_modal(cx);
-                    },
-                )),
+                    }),
+                ),
             );
         card = card.child(footer);
 
@@ -1010,7 +1007,6 @@ impl KeelWindow {
             .absolute()
             .inset_0()
             .occlude()
-            .bg(gpui::rgba(0x00000080))
             .flex()
             .items_center()
             .justify_center()
@@ -1020,27 +1016,24 @@ impl KeelWindow {
             }))
             .child(card_el);
 
-        let scrim = if reduced {
-            scrim.into_any_element()
-        } else if leaving {
-            scrim
-                .with_animation(
-                    ("skill-scrim-out", modal_gen as usize),
-                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(1.0 - delta),
-                )
-                .into_any_element()
-        } else {
-            scrim
-                .with_animation(
-                    ("skill-scrim-in", modal_gen as usize),
-                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .into_any_element()
-        };
-
-        Some(gpui::deferred(scrim).with_priority(3).into_any_element())
+        Some(
+            gpui::deferred(crate::motion::scrim(
+                scrim,
+                (
+                    if leaving {
+                        "skill-scrim-out"
+                    } else {
+                        "skill-scrim-in"
+                    },
+                    modal_gen as usize,
+                ),
+                0.24,
+                leaving,
+                reduced,
+            ))
+            .with_priority(3)
+            .into_any_element(),
+        )
     }
 
     fn render_skill_confirm(
@@ -1066,13 +1059,12 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_3()
-            .p_3()
-            .mb_3()
-            .rounded(RADIUS_MD)
-            .bg(c(if danger { t.danger } else { t.accent }).opacity(0.1))
+            .gap(zpx(12.))
+            .p(zpx(12.))
+            .mb(zpx(12.))
+            .rounded(r_md())
             .border_1()
-            .border_color(c(if danger { t.danger } else { t.accent }).opacity(0.3))
+            .border_color(c(if danger { t.danger } else { t.border }))
             .child(
                 div()
                     .flex_1()
@@ -1086,21 +1078,37 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap(zpx(8.))
                     .child(
-                        row_text(
+                        button(
                             "skills-confirm-go",
                             action,
-                            if danger { t.danger } else { t.accent },
+                            if danger {
+                                ButtonKind::Danger
+                            } else {
+                                ButtonKind::Primary
+                            },
+                            true,
                             t,
                         )
                         .on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_skill(cx)),
                         ),
                     )
-                    .child(text_button("skills-confirm-cancel", "Cancel", t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_skill_confirm(cx)),
-                    )),
+                    .child(
+                        button(
+                            "skills-confirm-cancel",
+                            "Cancel",
+                            ButtonKind::Ghost,
+                            true,
+                            t,
+                        )
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.dismiss_skill_confirm(cx)
+                            }),
+                        ),
+                    ),
             )
     }
 
@@ -1188,7 +1196,6 @@ impl KeelWindow {
             }
         }
         self.skills.row_errors.remove(&path);
-        self.note_switch_flip(&format!("skill-{path}"));
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1212,7 +1219,6 @@ impl KeelWindow {
                                 row.enabled = !enabled;
                             }
                         }
-                        this.note_switch_flip(&format!("skill-{path}"));
                         this.skills.row_errors.insert(path, "Couldn't update settings.".into());
                     }
                 }
@@ -1354,12 +1360,12 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
     let body = skill_markdown_body(text);
     if body.is_empty() {
         return div()
-            .py_2()
+            .py(zpx(8.))
             .t_small()
             .text_color(c(t.text_faint))
             .child("No instructions found in SKILL.md.");
     }
-    let mut out = div().flex().flex_col().gap_2();
+    let mut out = div().flex().flex_col().gap(zpx(8.));
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -1372,9 +1378,9 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
         if let Some(heading) = trimmed.strip_prefix("### ") {
             out = out.child(
                 div()
-                    .pt_1()
-                    .text_size(zpx(13.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .pt(zpx(4.))
+                    .t_small()
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(c(t.text))
                     .child(heading.to_string()),
             );
@@ -1382,12 +1388,12 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
         } else if let Some(heading) = trimmed.strip_prefix("## ") {
             out = out.child(
                 div()
-                    .pt_2()
-                    .pb_0p5()
+                    .pt(zpx(8.))
+                    .pb(zpx(2.))
                     .border_b_1()
-                    .border_color(c(t.border).opacity(0.3))
-                    .text_size(zpx(14.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .border_color(c(t.border))
+                    .t_body()
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(c(t.text))
                     .child(heading.to_string()),
             );
@@ -1395,12 +1401,11 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
         } else if let Some(heading) = trimmed.strip_prefix("# ") {
             out = out.child(
                 div()
-                    .pt_2p5()
-                    .pb_1()
+                    .pt(zpx(10.))
+                    .pb(zpx(4.))
                     .border_b_1()
-                    .border_color(c(t.border).opacity(0.4))
-                    .text_size(zpx(15.))
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .border_color(c(t.border))
+                    .t_title()
                     .text_color(c(t.text))
                     .child(heading.to_string()),
             );
@@ -1417,15 +1422,13 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
             }
             out = out.child(
                 div()
-                    .my_1()
-                    .p_2p5()
-                    .rounded(RADIUS_SM)
+                    .my(zpx(4.))
+                    .p(zpx(8.))
+                    .rounded(r_sm())
                     .bg(c(t.input))
                     .border_1()
-                    .border_color(c(t.border).opacity(0.5))
-                    .font_family(MONO)
-                    .text_size(zpx(11.5))
-                    .line_height(zpx(16.))
+                    .border_color(c(t.border))
+                    .t_code()
                     .text_color(c(t.text))
                     .overflow_hidden()
                     .child(code_lines.join("\n")),
@@ -1433,13 +1436,12 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
         } else if let Some(quote) = trimmed.strip_prefix("> ") {
             out = out.child(
                 div()
-                    .my_1()
-                    .pl_3()
-                    .py_0p5()
+                    .my(zpx(4.))
+                    .pl(zpx(12.))
+                    .py(zpx(2.))
                     .border_l_2()
                     .border_color(c(t.accent))
-                    .text_size(zpx(12.5))
-                    .line_height(zpx(18.))
+                    .t_small()
                     .text_color(c(t.text_muted))
                     .child(quote.to_string()),
             );
@@ -1451,20 +1453,13 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
                     .flex()
                     .flex_row()
                     .items_start()
-                    .gap_2()
-                    .pl_1()
-                    .child(
-                        div()
-                            .text_size(zpx(12.5))
-                            .line_height(zpx(18.))
-                            .text_color(c(t.text_faint))
-                            .child("•"),
-                    )
+                    .gap(zpx(8.))
+                    .pl(zpx(4.))
+                    .child(div().t_small().text_color(c(t.text_faint)).child("•"))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(zpx(12.5))
-                            .line_height(zpx(18.))
+                            .t_small()
                             .text_color(c(t.text_muted))
                             .child(item.to_string()),
                     ),
@@ -1473,8 +1468,7 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
         } else {
             out = out.child(
                 div()
-                    .text_size(zpx(12.5))
-                    .line_height(zpx(18.))
+                    .t_small()
                     .text_color(c(t.text_muted))
                     .child(trimmed.to_string()),
             );
@@ -1483,4 +1477,3 @@ fn render_skill_instructions(text: &str, t: Tokens) -> gpui::Div {
     }
     out
 }
-

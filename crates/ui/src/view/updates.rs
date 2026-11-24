@@ -13,11 +13,11 @@ use keel_update::{Check, GateError, Offer, Ready, Status, UpdateError, msg};
 
 use super::KeelWindow;
 use super::settings::{
-    section_header, setting_row_info, settings_list, text_button_owned, toggle,
+    ButtonKind, button, section_header, setting_row_info, settings_list, toggle,
 };
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_MD, RADIUS_SM, c, zpx};
+use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_SM, c, zpx};
 
 /// `fraction` slot for the download thread: f32 bits, or this for unknown.
 const NO_FRACTION: u32 = u32::MAX;
@@ -493,25 +493,24 @@ impl KeelWindow {
             _ => None,
         };
 
-        let button = (!hide_button).then(|| {
+        let action = (!hide_button).then(|| {
             if ready {
-                text_button_owned("updates-relaunch".into(), "Relaunch to update", t)
+                button(
+                    "updates-relaunch",
+                    "Relaunch to update",
+                    ButtonKind::Primary,
+                    true,
+                    t,
+                )
                     .on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.open_update_confirm(cx)),
                     )
                     .into_any_element()
             } else if busy {
-                div()
-                    .px_2p5()
-                    .py_1()
-                    .flex_none()
-                    .rounded(RADIUS_MD)
-                    .t_small()
-                    .text_color(c(t.text_faint))
-                    .child("Check now")
+                button("updates-check-busy", "Check now", ButtonKind::Ghost, false, t)
                     .into_any_element()
             } else {
-                text_button_owned("updates-check".into(), "Check now", t)
+                button("updates-check", "Check now", ButtonKind::Ghost, true, t)
                     .on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.updates_check(true, cx)),
                     )
@@ -524,7 +523,7 @@ impl KeelWindow {
             .clone()
             .filter(|u| u.starts_with("https://"))
             .map(|url| {
-                text_button_owned("updates-notes".into(), "Release notes", t)
+                button("updates-notes", "Release notes", ButtonKind::Ghost, true, t)
                     .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
                     .into_any_element()
             });
@@ -547,7 +546,6 @@ impl KeelWindow {
                     .child(
                         div()
                             .t_body()
-                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(c(t.text))
                             .child(format!("Keel {}", keel_update::CURRENT_VERSION)),
                     )
@@ -581,7 +579,7 @@ impl KeelWindow {
                     .items_center()
                     .gap_1()
                     .children(notes)
-                    .children(button),
+                    .children(action),
             );
 
         let auto = self.state.ui_settings.auto_update != Some(false);
@@ -591,19 +589,14 @@ impl KeelWindow {
             Some(
                 "Checks once a day on launch. Downloads in the background and installs only when you relaunch.",
             ),
-            toggle(
-                "updates-auto".into(),
-                auto,
-                self.recent_flip("updates-auto"),
-                t,
-            )
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                let on = this.state.ui_settings.auto_update == Some(false);
-                this.note_switch_flip("updates-auto");
-                this.state.ui_settings.auto_update = (!on).then_some(false);
-                this.state.save_settings();
-                cx.notify();
-            }))
+            toggle("updates-auto".into(), auto, t).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    let on = this.state.ui_settings.auto_update == Some(false);
+                    this.state.ui_settings.auto_update = (!on).then_some(false);
+                    this.state.save_settings();
+                    cx.notify();
+                },
+            ))
             .into_any_element(),
         );
 
@@ -611,7 +604,7 @@ impl KeelWindow {
             .flex()
             .flex_col()
             .child(section_header(
-                "UPDATES",
+                "Updates",
                 "New versions of Keel, signed and verified before they install.",
                 None,
                 t,
@@ -644,11 +637,8 @@ impl KeelWindow {
             .w(zpx(360.))
             .max_w(gpui::relative(0.9))
             .p_4()
-            .rounded(crate::style::RADIUS_LG)
-            .bg(c(t.surface))
-            .border_1()
-            .border_color(c(t.border))
             .floating_surface(t)
+            .rounded(crate::style::r_xl())
             .flex()
             .flex_col()
             .gap_3()
@@ -667,19 +657,14 @@ impl KeelWindow {
                     .justify_end()
                     .gap_2()
                     .child(
-                        super::sidebar::text_button("cancel-update-btn", "Cancel", t).on_click(
+                        button("cancel-update-btn", "Cancel", ButtonKind::Ghost, true, t).on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.dismiss_update_confirm(cx)
                             }),
                         ),
                     )
                     .child(
-                        super::sidebar::filled_button(
-                            "confirm-update-btn",
-                            "Relaunch",
-                            t.accent,
-                            t,
-                        )
+                        button("confirm-update-btn", "Relaunch", ButtonKind::Primary, true, t)
                         .on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| this.updates_install(cx)),
                         ),
@@ -720,7 +705,7 @@ impl KeelWindow {
                     },
                     modal_gen as usize,
                 ),
-                0.7,
+                0.24,
                 leaving,
                 reduced,
             ))
@@ -784,7 +769,7 @@ impl KeelWindow {
                     .child(format!("Keel {version} is ready to install.")),
             )
             .child(
-                text_button_owned("update-line-open".into(), "Open Settings", t).on_click(
+                button("update-line-open", "Open Settings", ButtonKind::Ghost, true, t).on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.open_settings(cx);
                         this.dotify
