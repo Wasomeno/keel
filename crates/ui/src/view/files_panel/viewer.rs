@@ -594,6 +594,7 @@ impl KeelWindow {
         let syntax = keel_theme::resolve_syntax_theme(self.state.ui_settings.theme, dark);
         let weak = cx.entity().downgrade();
         let zoom = crate::style::zoom();
+        let content_w = (width / zoom - 48.).max(200.);
         let rc = Rc::new(crate::transcript::RowContext {
             tokens: t,
             syntax,
@@ -632,7 +633,8 @@ impl KeelWindow {
             viewport_h: f32::from(window.viewport_size().height),
             open_lines: Rc::new(HashMap::new()),
             row_heights: Rc::new(std::cell::RefCell::new(HashMap::new())),
-            prose_max_w: crate::transcript::PROSE_MAX_W.min((width / zoom - 48.).max(200.)),
+            prose_max_w: crate::transcript::PROSE_MAX_W.min(content_w),
+            column_w: content_w,
             bubble_max_w: None,
             plan_running: false,
             plan_cards: std::rc::Rc::new(std::collections::HashMap::new()),

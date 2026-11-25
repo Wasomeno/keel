@@ -76,7 +76,6 @@ pub const HEADER_HEIGHT: Pixels = px(40.);
 /// Space the macOS traffic lights take at the left of the title bar.
 pub const TRAFFIC_LIGHTS_WIDTH: Pixels = px(78.);
 pub const TRANSCRIPT_MAX_WIDTH: Pixels = px(760.);
-pub const TRANSCRIPT_COLLAPSED_MAX_WIDTH: Pixels = px(760.);
 
 /// UI zoom (⌘+ / ⌘- / ⌘0): a factor every fixed size goes through via
 /// [`zpx`]. Process-wide, set from the view and `ui-settings.json`.

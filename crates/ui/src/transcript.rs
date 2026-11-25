@@ -4,8 +4,10 @@
 //! Block rows with stable `{message_id}#{block_id}` identifiers; a message's rows
 //! are contiguous and upserted by row id, so live rows and the persisted message
 //! with the same id merge instead of duplicating.
-//! Height memoization by `(row_id, content_len, width)`: a row is remeasured only
-//! when its memo key (content) changes; width changes are handled by the list.
+//! Height memoization by `(row_id, content_len, width, prose measure)`: an estimate
+//! is reused only when that key matches. The list remeasures when its own width
+//! changes. The prose measure is part of the key because text wraps inside the
+//! column, and zoom clears the memo the same way (the list width does not move).
 //! Stick-to-bottom with user-scroll interrupt:
 //! - Wheel-up breaks stickiness.
 //! - Re-engages when within 70 px of the bottom, or immediately on user's own send.
@@ -35,12 +37,15 @@ use crate::markdown::TranscriptBlock;
 use crate::markdown::{ColumnAlign, ImageRef, Inline, InlineSpan, ToolEntry};
 use crate::style::{KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, READING, c};
 
-/// Height memo key: (row_id, content_len, width_in_pixels_rounded).
+/// Height memo key: row, content length, container width, and the prose measure.
+/// The measure is design pixels (`PROSE_MAX_W`). A narrower reading column wraps
+/// to a different height at the same container width, so the old entry misses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HeightMemoKey {
     pub row_id: String,
     pub content_len: usize,
     pub width: u32,
+    pub measure: u32,
 }
 
 /// Memoized row heights to avoid re-measuring unchanged rows.
@@ -59,6 +64,7 @@ impl HeightMemo {
             row_id: row_id.to_string(),
             content_len,
             width: f32::from(width).round() as u32,
+            measure: PROSE_MAX_W.round() as u32,
         }
     }
 
@@ -1102,8 +1108,12 @@ pub struct RowContext {
     pub open_lines: std::rc::Rc<HashMap<String, bool>>,
     /// Natural heights of rows mid entrance or exit (`TranscriptState::row_heights`).
     pub row_heights: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
-    /// Maximum width for prose blocks (paragraphs, lists, headings).
+    /// Maximum width for prose blocks (paragraphs, lists, headings, quotes),
+    /// design pixels. Code, tables, and trace rows are not capped by this.
     pub prose_max_w: f32,
+    /// Uncapped column content width, in the same unit as `prose_max_w`.
+    /// Diagrams scale to this so they keep the full column.
+    pub column_w: f32,
     /// Mid-slide: the widest a user bubble may wrap at, in px. Rows follow
     /// the column's gliding width (their edges and right-aligned icons move
     /// with it), while text wraps once at the narrower end and keeps it.
@@ -1162,7 +1172,7 @@ fn render_mermaid(
 ) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
     let row_id = item.row_id().to_string();
-    let col = rc.prose_max_w;
+    let col = rc.column_w;
     let swapped = crate::mermaid::maybe_swap_direction(content, col);
     let source = swapped.into_owned();
     let size = crate::mermaid::size(&source).unwrap_or((1., 1.));
@@ -5903,10 +5913,9 @@ fn flow(block: &TranscriptBlock) -> Flow {
 
 /// Prose line height (px at zoom 1): 22.5 on the 14 px body, about 1.6.
 pub const PROSE_LINE: f32 = 22.5;
-/// Prose stops at a comfortable measure (about 85 characters); code,
-/// tables and trace lines still use the whole column.
-pub const PROSE_MAX_W: f32 = 660.;
-pub const PROSE_COLLAPSED_MAX_W: f32 = 740.;
+/// Reading measure for prose (about 65–75 characters at 14 px). Code,
+/// tables, and trace rows still use the whole column.
+pub const PROSE_MAX_W: f32 = 540.;
 
 /// Space above a row, from what comes before it: paragraphs ~0.8em apart,
 /// headings with more room above than below, trace lines tight among
