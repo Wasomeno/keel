@@ -910,7 +910,12 @@ impl TranscriptState {
             TranscriptBlock::PlanCard { plan, .. } => {
                 px(36. + 20. + plan.steps.len() as f32 * 40. + 48.)
             }
-            TranscriptBlock::Citations { .. } => px(68.0),
+            TranscriptBlock::Citations {
+                citations, expanded, ..
+            } => px(crate::citations::source_list_height(
+                &crate::citations::group_citation_rows(&citations.items),
+                *expanded,
+            )),
         };
         self.height_memo.insert(row_id, content_len, width, height);
         height
@@ -2999,143 +3004,397 @@ fn citation_open_action(cite: &crate::citations::CitationItem) -> Option<RowActi
     }
 }
 
-/// Evidence & source citations card: sleek strip of directly clickable source pills.
-fn render_citations(
-    item: &TranscriptRowItem,
-    citations: &crate::citations::Citations,
-    rc: &RowContext,
-) -> gpui::Div {
+/// Sources list open/close. [`crate::motion::drawer_curve`] is
+/// `cubic-bezier(0.25, 1, 0.5, 1)`: strong ease-out, gone in 200ms.
+const SOURCES_FOLD: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 0 closed, 1 open. Reduced motion and a finished fold sit at the end.
+fn sources_fold_shown(expanded: bool, elapsed: std::time::Duration, reduced: bool) -> f32 {
+    if reduced || elapsed >= SOURCES_FOLD {
+        return if expanded { 1. } else { 0. };
+    }
+    let t = (elapsed.as_secs_f32() / SOURCES_FOLD.as_secs_f32()).clamp(0., 1.);
+    let eased = crate::motion::drawer_curve(t);
+    if expanded { eased } else { 1. - eased }
+}
+
+/// Ease of a sources toggle still in flight. `None` at rest and under
+/// reduced motion, so the list cuts instead of moving.
+fn sources_fold_ease(row_id: &str, rc: &RowContext) -> Option<f32> {
+    let (_, at) = rc.toggles.get(row_id)?;
+    if rc.reduced || at.elapsed() >= SOURCES_FOLD {
+        return None;
+    }
+    Some(crate::motion::drawer_curve(
+        (at.elapsed().as_secs_f32() / SOURCES_FOLD.as_secs_f32()).clamp(0., 1.),
+    ))
+}
+
+fn source_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+}
+
+/// A tiny icon only when the label does not already say what it is.
+fn source_kind_icon(kind: crate::citations::CitationKind) -> Option<Icon> {
     use crate::citations::CitationKind;
-    let t = rc.tokens;
-    let row_id = item.row_id().to_string();
+    match kind {
+        CitationKind::File => None,
+        CitationKind::Diff => Some(Icon::GitCompare),
+        CitationKind::Command => Some(Icon::Tool),
+        CitationKind::Url => Some(Icon::Globe),
+    }
+}
 
-    let kind_icon = |item: &crate::citations::CitationItem| -> Icon {
-        match item.kind {
-            CitationKind::File => item
-                .path
-                .as_deref()
-                .map(|p| crate::files::FileKind::of(std::path::Path::new(p)).icon())
-                .unwrap_or(Icon::File),
-            CitationKind::Diff => Icon::GitCompare,
-            CitationKind::Command => Icon::Tool,
-            CitationKind::Url => Icon::Globe,
-        }
-    };
+fn sources_chevron(open: f32) -> gpui::Div {
+    let icon = Icon::ChevronDown
+        .el(zpx(12.))
+        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+            -std::f32::consts::FRAC_PI_2 * (1. - open),
+        )));
+    div().flex_none().child(icon)
+}
 
-    let pills = citations.items.iter().map(|cite| {
-        let tip_item = cite.clone();
-        let on_action = rc.on_action.clone();
-        let click_action = citation_open_action(cite);
-        let cite_id = cite.id;
-        div()
+/// Tooltip, and a hover/click only when the citation can open something.
+fn bind_citation(
+    el: gpui::Stateful<gpui::Div>,
+    cite: &crate::citations::CitationItem,
+    t: Tokens,
+    on_action: &OnRowAction,
+) -> gpui::Stateful<gpui::Div> {
+    let tip_item = cite.clone();
+    let action = citation_open_action(cite);
+    let on_action = on_action.clone();
+    el.tooltip_show_delay(crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)))
+        .tooltip(move |_, cx| {
+            let item = tip_item.clone();
+            cx.new(move |_| CitationTip {
+                item,
+                tokens: t,
+                entrance: crate::view::tooltip::Entrance::new(),
+            })
+            .into()
+        })
+        .when(action.is_some(), |d| {
+            d.cursor_pointer()
+                .hover(|s| s.text_color(c(t.text)))
+                .hover_fade(c(t.hover), Some(c(t.selected)))
+        })
+        .when_some(action, |d, action| {
+            d.on_click(move |_, _, cx| on_action(action.clone(), cx))
+        })
+}
+
+fn source_marker(row_id: &str, cite_id: usize, t: Tokens) -> gpui::Stateful<gpui::Div> {
+    citation_marker(
+        ElementId::Name(format!("cite-mark-{row_id}-{cite_id}").into()),
+        format!("[{cite_id}]"),
+        t,
+    )
+}
+
+fn source_range_text(span: String) -> gpui::Div {
+    div()
+        .flex_none()
+        .font_family(MONO)
+        .text_size(zpx(11.))
+        .line_height(zpx(16.))
+        .whitespace_nowrap()
+        .child(span)
+}
+
+fn source_name(name: String, t: Tokens) -> gpui::Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(zpx(12.5))
+        .line_height(zpx(16.))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(c(t.text))
+        .child(name)
+}
+
+/// One file, one target: the whole row is the hit target.
+fn source_file_row(
+    row_id: &str,
+    path: &str,
+    cite: &crate::citations::CitationItem,
+    t: Tokens,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let span = cite.line_span();
+    let row = div()
+        .id(ElementId::Name(
+            format!("cite-row-{row_id}-{}", cite.id).into(),
+        ))
+        .w_full()
+        .min_h(zpx(crate::citations::SOURCE_ROW_H))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(8.))
+        .rounded(RADIUS_SM)
+        .text_color(c(t.text_muted));
+    bind_citation(row, cite, t, on_action)
+        .child(source_name(source_file_name(path).to_string(), t).flex_1())
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(4.))
+                .child(source_marker(row_id, cite.id, t))
+                .children(span.map(source_range_text)),
+        )
+        .into_any_element()
+}
+
+/// One filename, then each line range as its own target.
+fn source_file_group(
+    row_id: &str,
+    path: &str,
+    items: &[crate::citations::CitationItem],
+    t: Tokens,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let targets = items.iter().map(|cite| {
+        let span = cite.line_span();
+        let hit = div()
             .id(ElementId::Name(
-                format!("cite-pill-{row_id}-{cite_id}").into(),
+                format!("cite-range-{row_id}-{}", cite.id).into(),
             ))
-            .max_w(zpx(240.))
-            .h(zpx(26.))
-            .px(zpx(8.))
+            .h(zpx(24.))
+            .px(zpx(4.))
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .gap(zpx(5.))
-            .rounded_full()
-            .border_1()
-            .bg(c(t.surface).opacity(0.75))
-            .border_color(c(t.border).opacity(0.65))
+            .gap(zpx(4.))
+            .rounded(RADIUS_SM)
             .text_color(c(t.text_muted))
-            .when(click_action.is_some(), |d| {
-                d.cursor_pointer()
-                    .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
-                    .hover_fade(c(t.surface), None)
-                    .active(|s| s.opacity(0.85))
-            })
-            .tooltip_show_delay(
-                crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)),
-            )
-            .tooltip(move |_, cx| {
-                let item = tip_item.clone();
-                cx.new(move |_| CitationTip {
-                    item,
-                    tokens: t,
-                    entrance: crate::view::tooltip::Entrance::new(),
-                })
-                .into()
-            })
-            .when_some(click_action, |d, action| {
-                d.on_click(move |_, _, cx| {
-                    on_action(action.clone(), cx);
-                })
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(MONO)
-                    .text_size(zpx(11.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(c(t.text_faint))
-                    .child(format!("[{cite_id}]")),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(c(t.text_muted))
-                    .child(kind_icon(cite).el(zpx(11.5))),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(zpx(12.))
-                    .child(cite.label.clone()),
-            )
+            .whitespace_nowrap();
+        bind_citation(hit, cite, t, on_action)
+            .child(source_marker(row_id, cite.id, t))
+            .children(span.map(source_range_text))
+            .into_any_element()
     });
-
-    let card = div()
+    div()
         .w_full()
-        .rounded(RADIUS_LG)
-        .border_1()
-        .border_color(c(t.border))
-        .bg(c(t.floating))
-        .overflow_hidden()
+        .min_h(zpx(crate::citations::SOURCE_ROW_H))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(8.))
+        .child(
+            source_name(source_file_name(path).to_string(), t)
+                .flex_none()
+                .max_w(zpx(240.)),
+        )
         .child(
             div()
-                .w_full()
-                .px_3()
-                .py(px(9.))
+                .flex_1()
+                .min_w_0()
                 .flex()
-                .flex_col()
-                .gap(px(7.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .text_size(zpx(11.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(c(t.text_muted))
-                        .child(Icon::File.el(zpx(12.)))
-                        .child("Evidence & sources")
-                        .child(
-                            div()
-                                .px_1p5()
-                                .py(px(1.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(c(t.border).opacity(0.6))
-                                .bg(c(t.surface).opacity(0.75))
-                                .font_family(MONO)
-                                .text_size(zpx(10.5))
-                                .text_color(c(t.text_faint))
-                                .child(format!("{}", citations.items.len())),
-                        ),
-                )
-                .child(div().flex().flex_row().flex_wrap().gap_1p5().children(pills)),
-        );
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap(zpx(4.))
+                .children(targets),
+        )
+        .into_any_element()
+}
 
-    div().w_full().py_1().child(crate::motion::appear(
-        card,
-        format!("citations-{}", item.row_id()),
+fn source_single_row(
+    row_id: &str,
+    cite: &crate::citations::CitationItem,
+    t: Tokens,
+    on_action: &OnRowAction,
+) -> AnyElement {
+    let label = cite.label.clone();
+    let icon = source_kind_icon(cite.kind);
+    let row = div()
+        .id(ElementId::Name(
+            format!("cite-row-{row_id}-{}", cite.id).into(),
+        ))
+        .w_full()
+        .min_h(zpx(crate::citations::SOURCE_ROW_H))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(8.))
+        .rounded(RADIUS_SM)
+        .text_color(c(t.text_muted));
+    bind_citation(row, cite, t, on_action)
+        .child(source_marker(row_id, cite.id, t))
+        .children(icon.map(|icon| {
+            div()
+                .flex_none()
+                .text_color(c(t.text_faint))
+                .child(icon.el(zpx(12.)))
+        }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(zpx(12.5))
+                .line_height(zpx(16.))
+                .child(label),
+        )
+        .into_any_element()
+}
+
+fn source_rows(
+    row_id: &str,
+    groups: &[crate::citations::CitationGroup],
+    t: Tokens,
+    on_action: &OnRowAction,
+) -> gpui::Div {
+    use crate::citations::CitationGroup;
+    let rows = groups.iter().map(|group| match group {
+        CitationGroup::File { path, items } if items.len() == 1 => {
+            source_file_row(row_id, path, &items[0], t, on_action)
+        }
+        CitationGroup::File { path, items } => source_file_group(row_id, path, items, t, on_action),
+        CitationGroup::Single(item) => source_single_row(row_id, item, t, on_action),
+    });
+    div()
+        .w_full()
+        .pt(zpx(crate::citations::SOURCE_PAD))
+        .flex()
+        .flex_col()
+        .children(rows)
+}
+
+/// The rows under the header. Opening and closing set an explicit height
+/// (plus opacity) for [`SOURCES_FOLD`]. gpui-fast applies that height in
+/// layout, and a visible list row is measured again on each content frame
+/// (`keeps_row` only skips a scroll-layer composite), so the list slot
+/// tracks it. The toggle also flips `expanded` on the block, which changes
+/// [`TranscriptBlock::content_len`] and makes the upsert call
+/// `remeasure_items`. Reduced motion skips this and mounts or drops the
+/// rows in one frame.
+fn sources_fold_body(
+    body: gpui::Div,
+    row_id: &str,
+    expanded: bool,
+    estimate: f32,
+    ease: Option<f32>,
+    rc: &RowContext,
+) -> Option<AnyElement> {
+    let Some(ease) = ease else {
+        return expanded.then(|| body.into_any_element());
+    };
+    let shown = if expanded { ease } else { 1. - ease };
+    let key = format!("cite:{row_id}");
+    let heights = rc.row_heights.clone();
+    let natural = heights
+        .borrow()
+        .get(&key)
+        .copied()
+        .unwrap_or(estimate)
+        .max(1.);
+    let measure_key = key.clone();
+    let heights_paint = heights.clone();
+    let measure = gpui::canvas(
+        move |bounds, _, _| {
+            let h = f32::from(bounds.size.height);
+            if h > 1. {
+                heights_paint.borrow_mut().insert(measure_key.clone(), h);
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+    Some(
+        div()
+            .w_full()
+            .overflow_hidden()
+            .h(px(natural * shown))
+            .opacity(shown)
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w_full()
+                    .child(body)
+                    .child(measure),
+            )
+            .into_any_element(),
+    )
+}
+
+/// Evidence & sources: a hairline, a `Sources · n` disclosure, then one
+/// quiet row per file (ranges share the name) or per other citation.
+/// The block's left edge is the prose column; the gap above it is the
+/// text-to-block rhythm from [`row_gap`].
+fn render_citations(
+    item: &TranscriptRowItem,
+    citations: &crate::citations::Citations,
+    expanded: bool,
+    rc: &RowContext,
+) -> gpui::Div {
+    let t = rc.tokens;
+    let row_id = item.row_id().to_string();
+    let groups = crate::citations::group_citation_rows(&citations.items);
+    let count = citations.items.len();
+    let ease = sources_fold_ease(&row_id, rc);
+    let open = ease.map_or(if expanded { 1. } else { 0. }, |e| {
+        if expanded { e } else { 1. - e }
+    });
+    let toggle = rc.on_action.clone();
+    let toggle_id = row_id.clone();
+    let open_now = expanded;
+    let header = div()
+        .id(ElementId::Name(format!("sources-head-{row_id}").into()))
+        .w_full()
+        .h(zpx(crate::citations::SOURCE_HEAD_H))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(zpx(4.))
+        .rounded(RADIUS_SM)
+        .cursor_pointer()
+        .text_size(zpx(11.5))
+        .line_height(zpx(16.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(c(t.text_muted))
+        .hover(|s| s.text_color(c(t.text)))
+        .hover_fade(c(t.hover), Some(c(t.selected)))
+        .on_click(move |_, _, cx| {
+            toggle(
+                RowAction::Toggle {
+                    row_id: format!("{toggle_id}={}", if open_now { 0 } else { 1 }),
+                },
+                cx,
+            );
+        })
+        .child(sources_chevron(open))
+        .child(format!("Sources · {count}"));
+
+    let estimate = f32::from(zpx(crate::citations::source_body_height(&groups)));
+    let body = source_rows(&row_id, &groups, t, &rc.on_action);
+    let body = sources_fold_body(body, &row_id, expanded, estimate, ease, rc);
+    let block = div()
+        .w_full()
+        .min_w_0()
+        .max_w(zpx(rc.prose_max_w))
+        .pt(zpx(crate::citations::SOURCE_PAD))
+        .border_t_1()
+        .border_color(c(t.border).opacity(0.45))
+        .flex()
+        .flex_col()
+        .child(header)
+        .children(body);
+
+    div().w_full().child(crate::motion::appear(
+        block,
+        format!("citations-{row_id}"),
         crate::motion::BASE,
         4.,
         rc.reduced,
@@ -6057,6 +6316,12 @@ pub fn render_row(
                 2 => 44.0,
                 _ => 38.0,
             }),
+            TranscriptBlock::Citations {
+                citations, expanded, ..
+            } => Some(crate::citations::source_list_height(
+                &crate::citations::group_citation_rows(&citations.items),
+                *expanded,
+            )),
             _ => None,
         });
     let measure = gpui::canvas(
@@ -6489,7 +6754,9 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             rc.on_action.clone(),
             rc.tokens,
         ),
-        TranscriptBlock::Citations { citations, .. } => render_citations(item, citations, rc),
+        TranscriptBlock::Citations {
+            citations, expanded, ..
+        } => render_citations(item, citations, *expanded, rc),
         TranscriptBlock::Files { items, .. } => div()
             .w_full()
             .py_1()
@@ -7227,8 +7494,9 @@ const MARKER_PAD_X: f32 = 3.5;
 /// [`MARKER_PAD_X`], so the period sits just outside the badge, not over the fill.
 const MARKER_PUNCT_PULL: f32 = 2.0;
 
-/// Superscript-sized mono marker. Callers add the hover and click.
-fn marker_chip(
+/// Square mono `[n]` marker shared by inline badges and the sources list.
+/// Callers add hover, click, and the inline superscript offset.
+fn citation_marker(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     t: Tokens,
@@ -7236,9 +7504,6 @@ fn marker_chip(
     div()
         .id(id.into())
         .flex_none()
-        .relative()
-        // A few pixels above the baseline, so it reads as a superscript.
-        .top(zpx(-3.))
         .h(zpx(13.))
         .px(zpx(MARKER_PAD_X))
         .flex()
@@ -7254,6 +7519,16 @@ fn marker_chip(
         .border_color(c(t.border).opacity(0.6))
         .text_color(c(t.text_muted))
         .child(label.into())
+}
+
+/// Superscript-sized mono marker. Callers add the hover and click.
+fn marker_chip(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
+    // A few pixels above the baseline, so it reads as a superscript.
+    citation_marker(id, label, t).relative().top(zpx(-3.))
 }
 
 /// A sleek clickable link chip with favicon icon, text, and rich URL tooltip.
@@ -9441,6 +9716,70 @@ mod tests {
             .height_memo
             .get("m_code#0", block.content_len(), width);
         assert_eq!(h2, Some(h1));
+    }
+
+    #[test]
+    fn citation_height_memo_keeps_open_and_closed_apart() {
+        use crate::citations::{CitationItem, CitationKind, Citations};
+        let item = |id: usize, path: &str| CitationItem {
+            id,
+            kind: CitationKind::File,
+            label: path.into(),
+            excerpt: "x".into(),
+            path: Some(path.into()),
+            lines: Some((1, 4)),
+            url: None,
+            command: None,
+        };
+        let citations = Citations {
+            items: vec![item(1, "a.rs"), item(2, "b.rs")],
+        };
+        let collapsed = TranscriptBlock::Citations {
+            id: "m#ui-c".into(),
+            citations: citations.clone(),
+            expanded: false,
+        };
+        let open = TranscriptBlock::Citations {
+            id: "m#ui-c".into(),
+            citations,
+            expanded: true,
+        };
+        assert_ne!(collapsed.content_len(), open.content_len());
+        let mut transcript = TranscriptState::new(false);
+        let width = px(600.);
+        let closed_h = transcript.compute_block_height(&collapsed, width);
+        let open_h = transcript.compute_block_height(&open, width);
+        assert!(open_h > closed_h);
+        assert_eq!(
+            transcript
+                .height_memo
+                .get("m#ui-c", collapsed.content_len(), width),
+            Some(closed_h)
+        );
+        assert_eq!(
+            transcript
+                .height_memo
+                .get("m#ui-c", open.content_len(), width),
+            Some(open_h)
+        );
+        // A second read of the closed key must not pick up the open height.
+        assert_eq!(transcript.compute_block_height(&collapsed, width), closed_h);
+    }
+
+    #[test]
+    fn sources_fold_eases_out_and_cuts_when_reduced() {
+        let ms = |n| std::time::Duration::from_millis(n);
+        assert_eq!(sources_fold_shown(true, ms(0), false), 0.);
+        assert_eq!(sources_fold_shown(false, ms(0), false), 1.);
+        assert_eq!(sources_fold_shown(true, SOURCES_FOLD, false), 1.);
+        assert_eq!(sources_fold_shown(false, SOURCES_FOLD, false), 0.);
+        let mid = sources_fold_shown(true, ms(100), false);
+        assert!(
+            mid > 0.8 && mid < 1.,
+            "drawer curve is most of the way by halfway: {mid}"
+        );
+        assert_eq!(sources_fold_shown(true, ms(0), true), 1.);
+        assert_eq!(sources_fold_shown(false, ms(40), true), 0.);
     }
 
     #[test]

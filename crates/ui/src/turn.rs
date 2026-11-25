@@ -790,9 +790,16 @@ pub fn push_rows(
                 });
             }
             Step::Citations { id, citations } => {
+                let row_id = format!("{message_id}#ui-{id}");
+                let rows = crate::citations::group_citation_rows(&citations.items).len();
                 out.push(TranscriptBlock::Citations {
-                    id: format!("{message_id}#ui-{id}"),
+                    id: row_id.clone(),
                     citations: citations.clone(),
+                    expanded: crate::citations::sources_expanded(
+                        rows,
+                        expanded(&format!("{row_id}=1")),
+                        expanded(&format!("{row_id}=0")),
+                    ),
                 });
             }
             // Placed where its table was; one whose table isn't found goes last.
@@ -1434,5 +1441,43 @@ mod tests {
             kinds(&rows),
             ["Looking it up.Here is what I found.", "tools1"]
         );
+    }
+
+    #[test]
+    fn citation_lists_start_closed_after_four_rows_until_the_user_chooses() {
+        use crate::citations::{CitationItem, CitationKind, Citations};
+        let item = |id: usize, path: &str| CitationItem {
+            id,
+            kind: CitationKind::File,
+            label: path.into(),
+            excerpt: "x".into(),
+            path: Some(path.into()),
+            lines: Some((1, 2)),
+            url: None,
+            command: None,
+        };
+        let citations = |n: usize| Citations {
+            items: (1..=n).map(|id| item(id, &format!("f{id}.rs"))).collect(),
+        };
+        let step = |n: usize| Step::Citations {
+            id: "c".into(),
+            citations: citations(n),
+        };
+        let open = |rows: &[TranscriptBlock]| match &rows[0] {
+            TranscriptBlock::Citations { expanded, .. } => *expanded,
+            _ => panic!("citations row"),
+        };
+        let mut rows = Vec::new();
+        push_rows("m", &[step(4)], &|_| false, &mut rows);
+        assert!(open(&rows), "four grouped rows start open");
+        rows.clear();
+        push_rows("m", &[step(5)], &|_| false, &mut rows);
+        assert!(!open(&rows), "five grouped rows start closed");
+        rows.clear();
+        push_rows("m", &[step(5)], &|id| id.ends_with("#ui-c=1"), &mut rows);
+        assert!(open(&rows), "a saved open choice wins");
+        rows.clear();
+        push_rows("m", &[step(1)], &|id| id.ends_with("#ui-c=0"), &mut rows);
+        assert!(!open(&rows), "a saved close choice wins");
     }
 }

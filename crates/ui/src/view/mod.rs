@@ -7214,6 +7214,7 @@ mod turn_tests {
             TranscriptBlock::Citations {
                 id: "m#ui-cite".into(),
                 citations: cite_card,
+                expanded: true,
             },
             TranscriptBlock::Paragraph {
                 id: "m#t1".into(),
