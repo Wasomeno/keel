@@ -488,9 +488,13 @@ pub enum TranscriptBlock {
         plan: crate::plan::Plan,
     },
     /// Evidence & source citations linked to inline `[1]`, `[2]` badges.
+    /// `expanded` is the user's open/closed choice (lists of more than four
+    /// grouped rows start closed). It is part of [`Self::content_len`] so the
+    /// transcript's height memo does not reuse a collapsed height.
     Citations {
         id: String,
         citations: crate::citations::Citations,
+        expanded: bool,
     },
     /// Narration the agent wrote between steps (a paragraph, list, heading
     /// or quote), shown muted inside an open turn fold. It keeps the inner
@@ -646,7 +650,9 @@ impl TranscriptBlock {
                     + plan.footer.len()
                     + plan.steps.iter().map(|s| s.title.len() + 1).sum::<usize>()
             }
-            Self::Citations { citations, .. } => citations.content_len(),
+            Self::Citations {
+                citations, expanded, ..
+            } => citations.content_len() + usize::from(*expanded),
         }
     }
 }
