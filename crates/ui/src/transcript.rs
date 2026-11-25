@@ -3061,6 +3061,7 @@ fn bind_citation(
     el: gpui::Stateful<gpui::Div>,
     cite: &crate::citations::CitationItem,
     t: Tokens,
+    syntax: SyntaxPaintMap,
     on_action: &OnRowAction,
 ) -> gpui::Stateful<gpui::Div> {
     let tip_item = cite.clone();
@@ -3069,10 +3070,8 @@ fn bind_citation(
     el.tooltip_show_delay(crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)))
         .tooltip(move |_, cx| {
             let item = tip_item.clone();
-            cx.new(move |_| CitationTip {
-                item,
-                tokens: t,
-                entrance: crate::view::tooltip::Entrance::new(),
+            cx.new(move |_| {
+                CitationTip::new(item, t, syntax, crate::view::tooltip::Entrance::new())
             })
             .into()
         })
@@ -3121,6 +3120,7 @@ fn source_file_row(
     path: &str,
     cite: &crate::citations::CitationItem,
     t: Tokens,
+    syntax: SyntaxPaintMap,
     on_action: &OnRowAction,
 ) -> AnyElement {
     let span = cite.line_span();
@@ -3136,7 +3136,7 @@ fn source_file_row(
         .gap(zpx(8.))
         .rounded(RADIUS_SM)
         .text_color(c(t.text_muted));
-    bind_citation(row, cite, t, on_action)
+    bind_citation(row, cite, t, syntax, on_action)
         .child(source_name(source_file_name(path).to_string(), t).flex_1())
         .child(
             div()
@@ -3157,6 +3157,7 @@ fn source_file_group(
     path: &str,
     items: &[crate::citations::CitationItem],
     t: Tokens,
+    syntax: SyntaxPaintMap,
     on_action: &OnRowAction,
 ) -> AnyElement {
     let targets = items.iter().map(|cite| {
@@ -3175,7 +3176,7 @@ fn source_file_group(
             .rounded(RADIUS_SM)
             .text_color(c(t.text_muted))
             .whitespace_nowrap();
-        bind_citation(hit, cite, t, on_action)
+        bind_citation(hit, cite, t, syntax, on_action)
             .child(source_marker(row_id, cite.id, t))
             .children(span.map(source_range_text))
             .into_any_element()
@@ -3210,6 +3211,7 @@ fn source_single_row(
     row_id: &str,
     cite: &crate::citations::CitationItem,
     t: Tokens,
+    syntax: SyntaxPaintMap,
     on_action: &OnRowAction,
 ) -> AnyElement {
     let label = cite.label.clone();
@@ -3226,7 +3228,7 @@ fn source_single_row(
         .gap(zpx(8.))
         .rounded(RADIUS_SM)
         .text_color(c(t.text_muted));
-    bind_citation(row, cite, t, on_action)
+    bind_citation(row, cite, t, syntax, on_action)
         .child(source_marker(row_id, cite.id, t))
         .children(icon.map(|icon| {
             div()
@@ -3250,15 +3252,16 @@ fn source_rows(
     row_id: &str,
     groups: &[crate::citations::CitationGroup],
     t: Tokens,
+    syntax: SyntaxPaintMap,
     on_action: &OnRowAction,
 ) -> gpui::Div {
     use crate::citations::CitationGroup;
     let rows = groups.iter().map(|group| match group {
         CitationGroup::File { path, items } if items.len() == 1 => {
-            source_file_row(row_id, path, &items[0], t, on_action)
+            source_file_row(row_id, path, &items[0], t, syntax, on_action)
         }
-        CitationGroup::File { path, items } => source_file_group(row_id, path, items, t, on_action),
-        CitationGroup::Single(item) => source_single_row(row_id, item, t, on_action),
+        CitationGroup::File { path, items } => source_file_group(row_id, path, items, t, syntax, on_action),
+        CitationGroup::Single(item) => source_single_row(row_id, item, t, syntax, on_action),
     });
     div()
         .w_full()
@@ -3378,7 +3381,7 @@ fn render_citations(
         .child(format!("Sources · {count}"));
 
     let estimate = f32::from(zpx(crate::citations::source_body_height(&groups)));
-    let body = source_rows(&row_id, &groups, t, &rc.on_action);
+    let body = source_rows(&row_id, &groups, t, rc.syntax, &rc.on_action);
     let body = sources_fold_body(body, &row_id, expanded, estimate, ease, rc);
     let block = div()
         .w_full()
@@ -7880,7 +7883,37 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
 struct CitationTip {
     item: crate::citations::CitationItem,
     tokens: Tokens,
+    syntax: SyntaxPaintMap,
+    spans: crate::syntax::Spans,
     entrance: crate::view::tooltip::Entrance,
+}
+
+impl CitationTip {
+    fn new(
+        item: crate::citations::CitationItem,
+        tokens: Tokens,
+        syntax: SyntaxPaintMap,
+        entrance: crate::view::tooltip::Entrance,
+    ) -> Self {
+        let lang = matches!(
+            item.kind,
+            crate::citations::CitationKind::File | crate::citations::CitationKind::Diff
+        )
+        .then(|| {
+            item.path
+                .as_deref()
+                .and_then(|p| p.rsplit_once('.').map(|(_, ext)| ext))
+        })
+        .flatten();
+        let spans = crate::syntax::highlight(&item.excerpt, lang);
+        Self {
+            item,
+            tokens,
+            syntax,
+            spans,
+            entrance,
+        }
+    }
 }
 
 impl Render for CitationTip {
@@ -7905,30 +7938,72 @@ impl Render for CitationTip {
         const MAX_TIP_LINES: usize = 8;
         let total_lines = self.item.excerpt.lines().count();
         let start_line = self.item.lines.map(|(s, _)| s);
-        let code_rows: Vec<AnyElement> = self
+        let has_lang = !self.spans.is_empty();
+        let plain_fg = if has_lang {
+            c(self.syntax.plain << 8 | 0xFF)
+        } else {
+            c(t.text)
+        };
+        let mut base = 0usize;
+        let mut code_rows: Vec<AnyElement> = Vec::new();
+        for (ix, chunk) in self
             .item
             .excerpt
-            .lines()
+            .split_inclusive('\n')
             .take(MAX_TIP_LINES)
             .enumerate()
-            .map(|(ix, line_text)| {
-                let trimmed_line = if line_text.chars().count() > 96 {
-                    let cut: String = line_text.chars().take(95).collect();
-                    format!("{cut}…")
-                } else {
-                    line_text.to_string()
-                };
-                let line_color = if self.item.kind == CitationKind::Diff {
-                    if line_text.starts_with('+') && !line_text.starts_with("+++") {
-                        t.success
-                    } else if line_text.starts_with('-') && !line_text.starts_with("---") {
-                        t.danger
-                    } else {
-                        t.text
+        {
+            let raw_line = chunk.trim_end_matches(['\r', '\n']);
+            let is_diff_added = self.item.kind == CitationKind::Diff
+                && raw_line.starts_with('+')
+                && !raw_line.starts_with("+++");
+            let is_diff_removed = self.item.kind == CitationKind::Diff
+                && raw_line.starts_with('-')
+                && !raw_line.starts_with("---");
+            let line_color = if is_diff_added {
+                c(t.success)
+            } else if is_diff_removed {
+                c(t.danger)
+            } else {
+                plain_fg
+            };
+
+            let (display_line, clip_bytes) = match raw_line.char_indices().nth(95) {
+                Some((idx, _)) => (format!("{}…", &raw_line[..idx]), idx),
+                None => (raw_line.to_string(), raw_line.len()),
+            };
+
+            let highlights = if has_lang && !is_diff_added && !is_diff_removed {
+                crate::code_block::line_highlights(
+                    raw_line.len(),
+                    base,
+                    &self.spans,
+                    &self.syntax,
+                    false,
+                    c(t.text_faint),
+                )
+                .into_iter()
+                .filter_map(|(r, style)| {
+                    if r.start >= clip_bytes {
+                        return None;
                     }
-                } else {
-                    t.text
-                };
+                    let end = r.end.min(clip_bytes);
+                    (r.start < end).then_some((r.start..end, style))
+                })
+                .collect()
+            } else {
+                Vec::new()
+            };
+
+            let code_el: AnyElement = if highlights.is_empty() {
+                div().child(display_line).into_any_element()
+            } else {
+                gpui::StyledText::new(display_line)
+                    .with_highlights(highlights)
+                    .into_any_element()
+            };
+
+            code_rows.push(
                 div()
                     .flex()
                     .flex_row()
@@ -7952,12 +8027,13 @@ impl Render for CitationTip {
                             .font_family(MONO)
                             .text_size(zpx(11.5))
                             .line_height(zpx(16.))
-                            .text_color(c(line_color))
-                            .child(trimmed_line),
+                            .text_color(line_color)
+                            .child(code_el),
                     )
-                    .into_any_element()
-            })
-            .collect();
+                    .into_any_element(),
+            );
+            base += chunk.len();
+        }
 
         let hint = match self.item.kind {
             CitationKind::File => "Click to open in Files panel",
@@ -8071,6 +8147,7 @@ fn citation_badge(
     id_key: &str,
     cite: &crate::citations::CitationItem,
     t: Tokens,
+    syntax: SyntaxPaintMap,
     on_action: OnRowAction,
 ) -> gpui::Stateful<gpui::Div> {
     let tip_item = cite.clone();
@@ -8092,10 +8169,8 @@ fn citation_badge(
         )
         .tooltip(move |_, cx| {
             let item = tip_item.clone();
-            cx.new(move |_| CitationTip {
-                item,
-                tokens: t,
-                entrance: crate::view::tooltip::Entrance::new(),
+            cx.new(move |_| {
+                CitationTip::new(item, t, syntax, crate::view::tooltip::Entrance::new())
             })
             .into()
         })
@@ -8496,6 +8571,7 @@ fn inline_text(
                                 &format!("{id}-{item_ix}"),
                                 cite,
                                 t,
+                                rc.syntax,
                                 rc.on_action.clone(),
                             );
                             elements.push(badge.into_any_element());

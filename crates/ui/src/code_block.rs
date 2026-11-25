@@ -1111,7 +1111,7 @@ fn line_text(
     .into_any_element()
 }
 
-fn line_highlights(
+pub(crate) fn line_highlights(
     len: usize,
     base: usize,
     spans: &Spans,
