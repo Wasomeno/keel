@@ -7840,10 +7840,71 @@ fn inline_chip_max_w(rc: &RowContext) -> gpui::Pixels {
     px(from_bubble.min(from_prose).min(HARD_CAP * crate::style::zoom()))
 }
 
+/// Inline code matches the sentence: mono, normal weight, no brighter than
+/// the body, and no background. A fill paints a full line-height slab.
+const INLINE_CODE_PX: f32 = 13.;
+
+fn inline_code_color(t: Tokens) -> Hsla {
+    c(t.text_muted)
+}
+
+fn inline_highlight(style: &crate::markdown::InlineStyle, t: Tokens) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        // Code stays at the body's weight. Bold still leads; code does not.
+        font_weight: if style.code {
+            None
+        } else {
+            style.bold.then_some(gpui::FontWeight::SEMIBOLD)
+        },
+        font_style: style.italic.then_some(gpui::FontStyle::Italic),
+        strikethrough: style.strike.then(|| gpui::StrikethroughStyle {
+            thickness: px(1.),
+            color: None,
+        }),
+        color: if style.code {
+            Some(inline_code_color(t))
+        } else if style.bold {
+            Some(c(t.text))
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+/// Styled text for `text`, which is `full[origin..origin+text.len()]`.
+/// Code ranges switch to `MONO`. HighlightStyle cannot change family, so the
+/// family override is a second pass on the same ranges. gpui only applies an
+/// override when the whole run sits inside it, and highlights are what split
+/// the runs, so every code span is also a highlight.
+fn styled_prose(text: &str, spans: &[InlineSpan], origin: usize, t: Tokens) -> gpui::StyledText {
+    let end = origin + text.len();
+    let mut highlights = Vec::new();
+    let mut families = Vec::new();
+    for span in spans {
+        let start = span.range.start.max(origin);
+        let stop = span.range.end.min(end);
+        if start >= stop || span.link.is_some() {
+            continue;
+        }
+        let local = (start - origin)..(stop - origin);
+        highlights.push((local.clone(), inline_highlight(&span.style, t)));
+        if span.style.code {
+            families.push((local, gpui::SharedString::from(MONO)));
+        }
+    }
+    let mut styled = gpui::StyledText::new(text.to_string());
+    if !highlights.is_empty() {
+        styled = styled.with_highlights(highlights);
+    }
+    if !families.is_empty() {
+        styled = styled.with_font_family_overrides(families);
+    }
+    styled
+}
+
 /// Text with its inline styles: bold, italic, strikethrough, inline code,
-/// links, and clickable file chips. Inline code stays in the text run, a
-/// step heavier than the sentence. A code-block fill here is a line-tall
-/// slab, so a short span reads as a highlighter.
+/// links, and clickable file chips.
 fn inline_text(
     id: String,
     text: &str,
@@ -7868,31 +7929,7 @@ fn inline_text(
                 gpui::StyledText::new(text.to_string()),
             );
         }
-        let highlights = spans.iter().map(|span| {
-            let style = gpui::HighlightStyle {
-                font_weight: if span.style.bold {
-                    Some(gpui::FontWeight::SEMIBOLD)
-                } else if span.style.code {
-                    Some(gpui::FontWeight::MEDIUM)
-                } else {
-                    None
-                },
-                font_style: span.style.italic.then_some(gpui::FontStyle::Italic),
-                strikethrough: span.style.strike.then(|| gpui::StrikethroughStyle {
-                    thickness: px(1.),
-                    color: None,
-                }),
-                // Bold and code lead by brightness as much as weight (body text is dimmer).
-                color: if span.style.code || span.style.bold {
-                    Some(c(t.text))
-                } else {
-                    None
-                },
-                ..Default::default()
-            };
-            (span.range.clone(), style)
-        });
-        let styled = gpui::StyledText::new(text.to_string()).with_highlights(highlights);
+        let styled = styled_prose(text, spans, 0, t);
         return selectable(key, text, order, rc, |s| s.into_any_element(), styled);
     }
 
@@ -7974,7 +8011,8 @@ fn inline_text(
                     hug_next = true;
                     continue;
                 }
-                // Match `StyledText` inline code: clean medium monospace without line-tall slabs.
+                // Same mono as the StyledText path, at a size that matches the
+                // 14px body. No fill: a background paints a line-tall slab.
                 let mut first_in_code = true;
                 for code_word in slice_str.split_whitespace() {
                     let pull = first_in_code && hug_next && !slice_str.starts_with(char::is_whitespace);
@@ -7983,10 +8021,10 @@ fn inline_text(
                         div()
                             .flex_none()
                             .when(pull, |d| d.ml(zpx(-4.)))
-                            .text_color(c(t.text))
-                            .font_family(crate::style::MONO)
-                            .text_size(zpx(13.))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(inline_code_color(t))
+                            .font_family(MONO)
+                            .text_size(zpx(INLINE_CODE_PX))
+                            .font_weight(gpui::FontWeight::NORMAL)
                             .child(code_word.to_string())
                             .into_any_element(),
                     );
@@ -9638,6 +9676,29 @@ mod tests {
             link: Some("https://example.com".into()),
         };
         assert!(needs_inline_chips("here", &[linked]));
+    }
+
+    #[test]
+    fn inline_code_is_muted_and_not_heavier_than_body() {
+        let t = keel_theme::Tokens::dark();
+        let code = crate::markdown::InlineStyle {
+            code: true,
+            bold: true,
+            ..Default::default()
+        };
+        let hl = inline_highlight(&code, t);
+        assert_eq!(hl.font_weight, None, "code stays at the body's weight");
+        assert_eq!(hl.color, Some(c(t.text_muted)));
+        assert!(hl.background_color.is_none());
+        let bold = inline_highlight(
+            &crate::markdown::InlineStyle {
+                bold: true,
+                ..Default::default()
+            },
+            t,
+        );
+        assert_eq!(bold.font_weight, Some(gpui::FontWeight::SEMIBOLD));
+        assert_eq!(bold.color, Some(c(t.text)));
     }
 
     #[test]
