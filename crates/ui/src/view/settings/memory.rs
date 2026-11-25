@@ -1,16 +1,15 @@
 //! Settings → Memory: inline first-class tab for inspecting, editing,
 //! archiving, and deleting persistent agent notes.
 
-use gpui::{AnimationExt, AnyElement, ClickEvent, Context, ElementId, IntoElement, div, prelude::*};
+use gpui::{AnyElement, ClickEvent, Context, ElementId, IntoElement, div, prelude::*};
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
-use super::super::sidebar::{filled_button, text_button};
-use super::controls::row_text;
+use super::controls::{ButtonKind, button, icon_button, input_shell, settings_card};
 use super::{MemoryConfirm, MemoryNote, MemoryOpen, MemoryScopeView, MemoryTab};
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::style::{KeelStyled, MONO, RADIUS_MD, RADIUS_SM, c, zpx};
+use crate::style::{KeelStyled, MONO, ROW_MIN_H, c, r_sm, r_xl, zpx};
 
 impl KeelWindow {
     pub(in crate::view) fn load_memory(&mut self, cx: &mut Context<Self>) {
@@ -71,11 +70,14 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_4()
-            .pb_3()
+            .gap(zpx(16.))
+            .pb(zpx(12.))
             .child(self.render_segmented_control(
                 "memory-scope",
-                &[("You", MemoryTab::You), ("This project", MemoryTab::Project)],
+                &[
+                    ("You", MemoryTab::You),
+                    ("This project", MemoryTab::Project),
+                ],
                 tab,
                 96.0,
                 t,
@@ -88,12 +90,30 @@ impl KeelWindow {
                 },
             ));
 
-        let muted_line = |text: &'static str| {
+        // Centered in the space under the scope switch: icon, title, one line.
+        let empty_state = |title: &'static str, line: &'static str| {
             div()
-                .py_3()
-                .t_body()
-                .text_color(c(t.text_muted))
-                .child(text)
+                .pt(zpx(96.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(zpx(8.))
+                .child(Icon::Brain.el(zpx(24.)).text_color(c(t.text_faint)))
+                .child(
+                    div()
+                        .t_body()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(t.text))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .max_w(zpx(380.))
+                        .text_center()
+                        .t_small()
+                        .text_color(c(t.text_muted))
+                        .child(line),
+                )
         };
         let scope: Result<Option<MemoryScopeView>, String> = match tab {
             MemoryTab::You => match &self.memory.user {
@@ -111,8 +131,8 @@ impl KeelWindow {
             Err(err) => div()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .py_2()
+                .gap(zpx(8.))
+                .py(zpx(8.))
                 .child(
                     div()
                         .t_body()
@@ -121,34 +141,43 @@ impl KeelWindow {
                 )
                 .child(div().t_small().text_color(c(t.danger)).child(err))
                 .child(
-                    text_button("memory-retry", "Retry", t)
+                    button("memory-retry", "Retry", ButtonKind::Ghost, true, t)
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_memory(cx))),
                 )
                 .into_any_element(),
-            Ok(None) => muted_line("Open a chat that has a folder to see its project notes.")
-                .into_any_element(),
-            Ok(Some(scope)) if scope.notes.is_empty() => muted_line("None yet.").into_any_element(),
+            Ok(None) => empty_state(
+                "No project open",
+                "Open a chat that has a folder to see its project notes.",
+            )
+            .into_any_element(),
+            Ok(Some(scope)) if scope.notes.is_empty() => empty_state(
+                "No memories yet",
+                "Notes the agent saves to remember across chats show up here.",
+            )
+            .into_any_element(),
             Ok(Some(scope)) => {
-                let mut list = div().flex().flex_col().gap_0p5();
-                if scope.truncated {
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .pb_2()
-                            .t_small()
-                            .text_color(c(t.warning))
-                            .child(Icon::Alert.el(zpx(12.)))
-                            .child(
-                                "The index is over the cap. Later chats will not see every line.",
-                            ),
-                    );
-                }
-                for note in scope.notes {
-                    list = list.child(self.render_memory_row(tab, note, t, cx));
-                }
+                let warning = scope.truncated.then(|| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(zpx(6.))
+                        .pb(zpx(8.))
+                        .t_small()
+                        .text_color(c(t.warning))
+                        .child(Icon::Alert.el(zpx(12.)))
+                        .child("The index is over the cap. Later chats will not see every line.")
+                });
+                let rows: Vec<_> = scope
+                    .notes
+                    .into_iter()
+                    .map(|note| self.render_memory_row(tab, note, t, cx))
+                    .collect();
+                let list = div()
+                    .flex()
+                    .flex_col()
+                    .children(warning)
+                    .child(settings_card(rows, t));
                 crate::motion::appear(
                     list,
                     ("memory-list-in", self.memory.list_epoch as usize),
@@ -168,17 +197,17 @@ impl KeelWindow {
         note: MemoryNote,
         t: Tokens,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let tag = |text: String, mono: bool| {
             div()
                 .flex_none()
-                .px_1p5()
+                .px(zpx(6.))
                 .h(zpx(18.))
                 .flex()
                 .items_center()
-                .rounded(RADIUS_SM)
+                .rounded(r_sm())
                 .bg(c(t.input))
-                .text_size(zpx(11.5))
+                .t_caption()
                 .text_color(c(t.text_muted))
                 .when(mono, |d| d.font_family(MONO))
                 .child(text)
@@ -194,14 +223,13 @@ impl KeelWindow {
                 format!("memory-row-{}-{}", tab.scope(), note.slug).into(),
             ))
             .w_full()
-            .h(zpx(40.))
-            .px_3()
+            .min_h(zpx(ROW_MIN_H))
+            .py(zpx(10.))
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_3()
-            .rounded(RADIUS_MD)
+            .gap(zpx(16.))
             .cursor_pointer()
             .hover_fade(c(t.hover), None)
             .active(|s| s.opacity(0.8))
@@ -223,7 +251,7 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1p5()
+                    .gap(zpx(6.))
                     .when(note.unindexed, |d| d.child(tag("Unindexed".into(), false)))
                     .when(!note.kind.is_empty(), |d| {
                         d.child(tag(note.kind.clone(), false))
@@ -374,7 +402,11 @@ impl KeelWindow {
         cx.notify();
     }
 
-    pub(super) fn render_memory_modal(&mut self, t: Tokens, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_memory_modal(
+        &mut self,
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let (open, leaving, modal_gen) = match (&self.memory.modal, &self.memory.modal_leaving) {
             (Some(o), _) => (o.clone(), false, self.memory.modal_gen),
             (None, Some((n, o))) => (o.clone(), true, *n),
@@ -391,28 +423,17 @@ impl KeelWindow {
                 .text_color(c(t.text_muted))
                 .child(label)
         };
-        let input_box = || {
-            div()
-                .w_full()
-                .px_2p5()
-                .py_1p5()
-                .rounded(RADIUS_MD)
-                .bg(c(t.input))
-                .border_1()
-                .border_color(c(t.border))
-                .t_body()
-                .text_color(c(t.text))
-        };
+        let input_box = || input_shell(t).w_full().flex_none();
         let tag = |text: String, mono: bool| {
             div()
                 .flex_none()
-                .px_1p5()
+                .px(zpx(6.))
                 .h(zpx(18.))
                 .flex()
                 .items_center()
-                .rounded(RADIUS_SM)
+                .rounded(r_sm())
                 .bg(c(t.input))
-                .text_size(zpx(11.5))
+                .t_caption()
                 .text_color(c(t.text_muted))
                 .when(mono, |d| d.font_family(MONO))
                 .child(text)
@@ -423,9 +444,9 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_3()
-            .px_5()
-            .py_3()
+            .gap(zpx(12.))
+            .px(zpx(20.))
+            .py(zpx(12.))
             .border_b_1()
             .border_color(c(t.border))
             .child(
@@ -435,14 +456,8 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(zpx(15.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                            .child("Edit note"),
-                    )
+                    .gap(zpx(8.))
+                    .child(div().t_title().text_color(c(t.text)).child("Edit note"))
                     .when(note.unindexed, |d| d.child(tag("Unindexed".into(), false)))
                     .when(!note.kind.is_empty(), |d| {
                         d.child(tag(note.kind.clone(), false))
@@ -450,22 +465,9 @@ impl KeelWindow {
                     .child(tag(note.slug.clone(), true)),
             )
             .child(
-                div()
-                    .id("memory-modal-close-x")
-                    .size(zpx(26.))
-                    .rounded(RADIUS_SM)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .text_color(c(t.text_muted))
-                    .hover(|s| s.text_color(c(t.text)))
-                    .hover_fade(c(t.hover), None)
-                    .active(|s| s.opacity(0.7))
-                    .child(Icon::Close.el(zpx(14.)))
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)),
-                    ),
+                icon_button("memory-modal-close-x", Icon::Close, t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)),
+                ),
             );
 
         let loading = open.loaded.is_none();
@@ -476,19 +478,19 @@ impl KeelWindow {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px_5()
-            .py_4()
+            .px(zpx(20.))
+            .py(zpx(16.))
             .flex()
             .flex_col()
-            .gap_1p5()
+            .gap(zpx(6.))
             .child(field("Description"))
             .child(input_box().child(self.memory_desc.clone()))
             .child(div().h(zpx(8.)))
             .child(field("Body"))
             .child(
                 input_box()
-                    .min_h(zpx(160.))
-                    .when(loading, |d| d.opacity(0.6))
+                    .h(zpx(160.))
+                    .items_start()
                     .child(self.memory_body.clone()),
             )
             .when_some(read_error, |d, err| {
@@ -516,19 +518,29 @@ impl KeelWindow {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_2()
+                        .gap(zpx(8.))
                         .child(div().t_small().text_color(c(t.text)).child(question))
-                        .child(row_text("memory-confirm-go", action, t.danger, t).on_click(
-                            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.memory_modal_action(Some(kind), cx)
-                            }),
-                        ))
-                        .child(text_button("memory-confirm-cancel", "Cancel", t).on_click(
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.memory.confirm = None;
-                                cx.notify();
-                            }),
-                        )),
+                        .child(
+                            button("memory-confirm-go", action, ButtonKind::Danger, true, t)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.memory_modal_action(Some(kind), cx)
+                                })),
+                        )
+                        .child(
+                            button(
+                                "memory-confirm-cancel",
+                                "Cancel",
+                                ButtonKind::Ghost,
+                                true,
+                                t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
+                                    this.memory.confirm = None;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
                     ("memory-confirm-in", self.memory.confirm_gen as usize),
                     crate::motion::FAST,
                     4.,
@@ -540,10 +552,10 @@ impl KeelWindow {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_1()
+                .gap(zpx(4.))
                 .when(!note.unindexed, |d| {
                     d.child(
-                        row_text("memory-archive", "Archive", t.text_muted, t).on_click(
+                        button("memory-archive", "Archive", ButtonKind::Ghost, true, t).on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.memory.confirm = Some(MemoryConfirm::Archive);
                                 this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
@@ -553,13 +565,13 @@ impl KeelWindow {
                     )
                 })
                 .child(
-                    row_text("memory-delete", "Delete", t.danger, t).on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| {
+                    button("memory-delete", "Delete", ButtonKind::Danger, true, t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.memory.confirm = Some(MemoryConfirm::Delete);
                             this.memory.confirm_gen = this.memory.confirm_gen.wrapping_add(1);
                             cx.notify();
-                        },
-                    )),
+                        }),
+                    ),
                 )
                 .into_any_element(),
         };
@@ -568,9 +580,9 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_3()
-            .px_5()
-            .py_3()
+            .gap(zpx(12.))
+            .px(zpx(20.))
+            .py(zpx(12.))
             .border_t_1()
             .border_color(c(t.border))
             .child(left)
@@ -579,18 +591,27 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(text_button("memory-cancel", "Cancel", t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)),
-                    ))
+                    .gap(zpx(8.))
                     .child(
-                        filled_button("memory-save", "Save", t.accent, t)
-                            .when(busy || loading, |d| d.opacity(0.6))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                if !loading {
-                                    this.memory_modal_action(None, cx)
-                                }
-                            })),
+                        button("memory-cancel", "Cancel", ButtonKind::Ghost, true, t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.dismiss_memory_modal(cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "memory-save",
+                            "Save",
+                            ButtonKind::Primary,
+                            !busy && !loading,
+                            t,
+                        )
+                        .when(!busy && !loading, |b| {
+                            b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.memory_modal_action(None, cx)
+                            }))
+                        }),
                     ),
             );
 
@@ -599,11 +620,8 @@ impl KeelWindow {
             .w(zpx(640.))
             .max_w(gpui::relative(0.92))
             .max_h(gpui::relative(0.85))
-            .rounded(crate::style::RADIUS_LG)
-            .bg(c(t.surface))
-            .border_1()
-            .border_color(c(t.border))
             .floating_surface(t)
+            .rounded(r_xl())
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -628,31 +646,28 @@ impl KeelWindow {
             .absolute()
             .inset_0()
             .occlude()
-            .bg(gpui::rgba(0x00000080))
             .flex()
             .items_center()
             .justify_center()
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dismiss_memory_modal(cx)))
             .child(card);
-        let scrim = if reduced {
-            scrim.into_any_element()
-        } else if leaving {
-            scrim
-                .with_animation(
-                    ("memory-scrim-out", modal_gen as usize),
-                    gpui::Animation::new(crate::motion::FAST).with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(1.0 - delta),
-                )
-                .into_any_element()
-        } else {
-            scrim
-                .with_animation(
-                    ("memory-scrim-in", modal_gen as usize),
-                    gpui::Animation::new(crate::motion::BASE).with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .into_any_element()
-        };
-        Some(gpui::deferred(scrim).with_priority(3).into_any_element())
+        Some(
+            gpui::deferred(crate::motion::scrim(
+                scrim,
+                (
+                    if leaving {
+                        "memory-scrim-out"
+                    } else {
+                        "memory-scrim-in"
+                    },
+                    modal_gen as usize,
+                ),
+                0.24,
+                leaving,
+                reduced,
+            ))
+            .with_priority(3)
+            .into_any_element(),
+        )
     }
 }

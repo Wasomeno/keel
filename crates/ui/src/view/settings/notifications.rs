@@ -6,12 +6,12 @@ use keel_theme::Tokens;
 
 use super::super::KeelWindow;
 use super::controls::{
-    card_group_header, render_sound_preview_btn, setting_row_info, settings_card,
-    text_button_owned, toggle,
+    ButtonKind, button, card_group_header, render_sound_preview_btn, setting_row_info,
+    settings_card, toggle,
 };
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_MD, RADIUS_SM, c, zpx};
+use crate::style::{CONTROL_H, KeelStyled, c, r_md, r_sm, zpx};
 
 impl KeelWindow {
     fn set_notify(&mut self, change: impl FnOnce(&mut keel_proto::NotifySettings)) {
@@ -20,12 +20,7 @@ impl KeelWindow {
         self.refresh_dock_badge();
     }
 
-    fn notify_toggle(
-        &mut self,
-        id: &'static str,
-        change: impl FnOnce(&mut keel_proto::NotifySettings),
-    ) {
-        self.note_switch_flip(id);
+    fn notify_toggle(&mut self, change: impl FnOnce(&mut keel_proto::NotifySettings)) {
         self.set_notify(change);
     }
 
@@ -35,7 +30,6 @@ impl KeelWindow {
             crate::platform_notify::play_sound(&path, n.volume.max(0.05));
             self.sound_preview_epoch = self.sound_preview_epoch.wrapping_add(1);
             let epoch = self.sound_preview_epoch;
-            self.note_switch_flip("sound-preview");
             cx.notify();
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
@@ -44,7 +38,6 @@ impl KeelWindow {
                 let _ = this.update(cx, |this, cx| {
                     if this.sound_preview_epoch == epoch {
                         this.sound_preview_epoch = 0;
-                        this.note_switch_flip("sound-preview");
                         cx.notify();
                     }
                 });
@@ -95,9 +88,7 @@ impl KeelWindow {
         use keel_proto::{BadgeStyle, SoundChoice};
 
         let n = self.state.ui_settings.notifications.clone();
-        let switch = |this: &Self, id: &'static str, on: bool| {
-            toggle(id.to_string(), on, this.recent_flip(id), t)
-        };
+        let switch = |id: &'static str, on: bool| toggle(id.to_string(), on, t);
 
         // 1. Triggers card
         let trigger_rows = vec![
@@ -105,9 +96,9 @@ impl KeelWindow {
                 t,
                 "Agent finished",
                 None,
-                switch(self, "notify-finished", n.on_finished)
+                switch("notify-finished", n.on_finished)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.notify_toggle("notify-finished", |n| n.on_finished = !n.on_finished);
+                        this.notify_toggle(|n| n.on_finished = !n.on_finished);
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -115,12 +106,10 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Needs your input",
-                Some("Alerts when an agent asks a question or requests permission."),
-                switch(self, "notify-input", n.on_needs_input)
+                None,
+                switch("notify-input", n.on_needs_input)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.notify_toggle("notify-input", |n| {
-                            n.on_needs_input = !n.on_needs_input
-                        });
+                        this.notify_toggle(|n| n.on_needs_input = !n.on_needs_input);
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -128,10 +117,10 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Turn error",
-                Some("Alerts if a turn fails or is cut off unexpectedly."),
-                switch(self, "notify-error", n.on_error)
+                None,
+                switch("notify-error", n.on_error)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.notify_toggle("notify-error", |n| n.on_error = !n.on_error);
+                        this.notify_toggle(|n| n.on_error = !n.on_error);
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -146,17 +135,21 @@ impl KeelWindow {
                 BannerPermission::Denied => (
                     "Banners are blocked in macOS System Settings.",
                     Some(
-                        text_button_owned("notify-open-settings".into(), "Open Settings", t)
-                            .on_click(|_, _, _| {
-                                crate::platform_notify::open_notification_settings()
-                            })
-                            .into_any_element(),
+                        button(
+                            "notify-open-settings",
+                            "Open Settings",
+                            ButtonKind::Ghost,
+                            true,
+                            t,
+                        )
+                        .on_click(|_, _, _| crate::platform_notify::open_notification_settings())
+                        .into_any_element(),
                     ),
                 ),
                 BannerPermission::NotAsked => (
                     "Permission required to show macOS banners.",
                     Some(
-                        text_button_owned("notify-ask".into(), "Allow", t)
+                        button("notify-ask", "Allow", ButtonKind::Ghost, true, t)
                             .on_click(|_, _, _| crate::platform_notify::request_permission())
                             .into_any_element(),
                     ),
@@ -168,14 +161,14 @@ impl KeelWindow {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap_3()
-                .py_2()
+                .gap(zpx(12.))
+                .py(zpx(8.))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_2()
+                        .gap(zpx(8.))
                         .t_small()
                         .text_color(c(t.warning))
                         .child(Icon::Alert.el(zpx(13.)))
@@ -188,7 +181,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Badge",
-                Some("Shown on the Dock icon and sidebar chats."),
+                Some("On the Dock icon and sidebar chats."),
                 self.render_segmented_control(
                     "badge",
                     &[
@@ -209,10 +202,10 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Bounce Dock icon",
-                Some("Bounces once when an agent needs your input."),
-                switch(self, "notify-bounce", n.bounce)
+                None,
+                switch("notify-bounce", n.bounce)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.notify_toggle("notify-bounce", |n| n.bounce = !n.bounce);
+                        this.notify_toggle(|n| n.bounce = !n.bounce);
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -220,10 +213,10 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "macOS banner",
-                Some("Shows a native macOS notification banner. Click it to jump to the chat."),
-                switch(self, "notify-banner", n.banner)
+                Some("Click a banner to jump to its chat."),
+                switch("notify-banner", n.banner)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.notify_toggle("notify-banner", |n| n.banner = !n.banner);
+                        this.notify_toggle(|n| n.banner = !n.banner);
                         if this.state.ui_settings.notifications.banner
                             && banner_permission() == BannerPermission::NotAsked
                         {
@@ -294,10 +287,10 @@ impl KeelWindow {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded(RADIUS_SM)
+                        .gap(zpx(8.))
+                        .px(zpx(8.))
+                        .py(zpx(4.))
+                        .rounded(r_sm())
                         .t_small()
                         .cursor_pointer()
                         .when(selected, |d| d.bg(c(t.selected)))
@@ -326,10 +319,10 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded(RADIUS_SM)
+                    .gap(zpx(8.))
+                    .px(zpx(8.))
+                    .py(zpx(4.))
+                    .rounded(r_sm())
                     .t_small()
                     .text_color(c(t.accent))
                     .cursor_pointer()
@@ -362,13 +355,6 @@ impl KeelWindow {
 
         let is_playing = self.sound_preview_epoch > 0;
         let is_none = matches!(n.sound, SoundChoice::None);
-        let preview_flip = self
-            .switch_flips
-            .get("sound-preview")
-            .filter(|(_, at)| {
-                !self.reduced() && at.elapsed() < std::time::Duration::from_millis(220)
-            })
-            .map(|(n, _)| *n);
 
         let sound_anchor = div()
             .relative()
@@ -378,10 +364,10 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .px_2p5()
-                    .h(zpx(26.))
-                    .rounded(RADIUS_MD)
+                    .gap(zpx(8.))
+                    .px(zpx(10.))
+                    .h(zpx(CONTROL_H))
+                    .rounded(r_md())
                     .bg(if self.show_sound_menu {
                         c(t.selected)
                     } else {
@@ -397,7 +383,7 @@ impl KeelWindow {
                     .text_color(c(t.text))
                     .cursor_pointer()
                     .hover_fade(c(t.hover), Some(c(t.selected)))
-                    .active(|s| s.opacity(0.85))
+                    .active(|s| s.opacity(0.8))
                     .child(Icon::Volume2.el(zpx(12.)).text_color(c(if is_none {
                         t.text_faint
                     } else {
@@ -426,25 +412,24 @@ impl KeelWindow {
             )
             .children(sound_menu);
 
-        let sound_control = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(sound_anchor)
-            .when(!is_none, |d| {
-                d.child(
-                    render_sound_preview_btn(is_playing, preview_flip, self.reduced(), t).on_click(
+        let sound_control =
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(8.))
+                .child(sound_anchor)
+                .when(!is_none, |d| {
+                    d.child(render_sound_preview_btn(is_playing, t).on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.preview_sound(cx)),
-                    ),
-                )
-            });
+                    ))
+                });
 
         let sound_rows = vec![
             setting_row_info(
                 t,
                 "Sound",
-                Some("Played when an agent finishes or needs attention."),
+                None,
                 sound_control.into_any_element(),
             ),
             setting_row_info(
@@ -473,10 +458,10 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Background only",
-                Some("Only play sounds when Keel is not the active window."),
-                switch(self, "notify-sound-bg", n.sound_in_background_only)
+                Some("Only while Keel isn't the active window."),
+                switch("notify-sound-bg", n.sound_in_background_only)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.notify_toggle("notify-sound-bg", |n| {
+                        this.notify_toggle(|n| {
                             n.sound_in_background_only = !n.sound_in_background_only
                         });
                         cx.notify();
@@ -488,14 +473,14 @@ impl KeelWindow {
         div()
             .flex()
             .flex_col()
-            .gap_5()
+            .gap(zpx(24.))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .child(card_group_header(
-                        "NOTIFY WHEN",
-                        Some("Triggers for chats you aren't currently viewing."),
+                        "Notify when",
+                        Some("For chats you aren't looking at."),
                         None,
                         t,
                     ))
@@ -505,14 +490,14 @@ impl KeelWindow {
                 div()
                     .flex()
                     .flex_col()
-                    .child(card_group_header("ALERTS", None, None, t))
+                    .child(card_group_header("Alerts", None, None, t))
                     .child(settings_card(alert_rows, t)),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .child(card_group_header("SOUND", None, None, t))
+                    .child(card_group_header("Sound", None, None, t))
                     .child(settings_card(sound_rows, t)),
             )
     }

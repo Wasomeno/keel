@@ -10,7 +10,7 @@ mod notifications;
 mod skills;
 
 use gpui::{
-    AnimationExt, AnyElement, ClickEvent, Context, ElementId, IntoElement,
+    AnimationExt, AnyElement, ClickEvent, Context, ElementId, IntoElement, SpringAnimation,
     UniformListScrollHandle, div, prelude::*,
 };
 use keel_theme::Tokens;
@@ -18,18 +18,18 @@ use keel_theme::Tokens;
 use super::KeelWindow;
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_MD, c, zpx};
+use crate::style::{HEADER_H, KeelStyled, NAV_ITEM_H, c, r_md, zpx};
 
 pub(super) use controls::{
-    section_header, setting_row_info, settings_list, text_button_owned, toggle,
+    ButtonKind, button, icon_button, section_header, setting_row_info, settings_close_motion,
+    settings_list, settings_open_motion, toggle,
 };
 
 const RAIL_WIDTH: f32 = 196.0;
-const DETAIL_MAX_WIDTH: f32 = 680.0;
-const GROUP_LABEL_H: f32 = 24.0;
-const GROUP_GAP: f32 = 16.0;
-const ITEM_H: f32 = 32.0;
 const ITEM_GAP: f32 = 2.0;
+const GROUP_GAP: f32 = 12.0;
+/// First nav item's center lines up with the header title's center.
+const RAIL_PAD_TOP: f32 = (HEADER_H - NAV_ITEM_H) / 2.0;
 
 /// Top-level category in the split-pane Settings rail.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,6 +44,7 @@ pub(super) enum SettingsTab {
 }
 
 impl SettingsTab {
+    #[cfg(test)]
     pub(super) fn index(self) -> usize {
         match self {
             Self::General => 0,
@@ -77,18 +78,6 @@ impl SettingsTab {
         }
     }
 
-    pub(super) fn info_tip(self) -> Option<&'static str> {
-        match self {
-            Self::Skills => {
-                Some("Reusable instructions Keel can load across chats. Click any skill to inspect its SKILL.md.")
-            }
-            Self::Memory => {
-                Some("Notes the agent saves for future chats. Edit, archive, or delete them here.")
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "general" | "appearance" | "updates" | "background" => Some(Self::General),
@@ -101,27 +90,18 @@ impl SettingsTab {
         }
     }
 
-    /// Exact vertical offset (logical px) of this item inside the nav rail list
-    /// container, matching the fixed group header and item heights.
+    /// Vertical offset of this item inside the nav list. Two groups, no labels:
+    /// General and Notifications, then a 12px gap, then the agent items.
+    /// Items are [`NAV_ITEM_H`] tall and 2px apart.
     fn rail_y(self) -> f32 {
+        let step = NAV_ITEM_H + ITEM_GAP;
         match self {
-            Self::General => GROUP_LABEL_H,
-            Self::Notifications => GROUP_LABEL_H + ITEM_H + ITEM_GAP,
-            Self::Accounts => {
-                GROUP_LABEL_H + 2.0 * ITEM_H + ITEM_GAP + GROUP_GAP + GROUP_LABEL_H
-            }
-            Self::Skills => {
-                GROUP_LABEL_H + 2.0 * ITEM_H + ITEM_GAP + GROUP_GAP + GROUP_LABEL_H
-                    + (ITEM_H + ITEM_GAP)
-            }
-            Self::Memory => {
-                GROUP_LABEL_H + 2.0 * ITEM_H + ITEM_GAP + GROUP_GAP + GROUP_LABEL_H
-                    + 2.0 * (ITEM_H + ITEM_GAP)
-            }
-            Self::Integrations => {
-                GROUP_LABEL_H + 2.0 * ITEM_H + ITEM_GAP + GROUP_GAP + GROUP_LABEL_H
-                    + 3.0 * (ITEM_H + ITEM_GAP)
-            }
+            Self::General => 0.,
+            Self::Notifications => step,
+            Self::Accounts => step + NAV_ITEM_H + GROUP_GAP,
+            Self::Skills => step + NAV_ITEM_H + GROUP_GAP + step,
+            Self::Memory => step + NAV_ITEM_H + GROUP_GAP + step * 2.,
+            Self::Integrations => step + NAV_ITEM_H + GROUP_GAP + step * 3.,
         }
     }
 }
@@ -321,6 +301,9 @@ pub(super) struct SkillsPage {
     pub modal_leaving: Option<(u64, SkillRow)>,
     pub modal_gen: u64,
     pub modal_scroll: gpui::ScrollHandle,
+    /// The creator filter menu next to the search.
+    pub creator_menu_open: bool,
+    pub creator_btn_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl Default for SkillsPage {
@@ -347,6 +330,8 @@ impl Default for SkillsPage {
             modal_leaving: None,
             modal_gen: 0,
             modal_scroll: gpui::ScrollHandle::default(),
+            creator_menu_open: false,
+            creator_btn_bounds: Default::default(),
         }
     }
 }
@@ -393,10 +378,6 @@ impl MemoryScopeView {
             notes,
             truncated: v["truncated"].as_bool().unwrap_or(false),
         })
-    }
-
-    pub(crate) fn indexed(&self) -> usize {
-        self.notes.iter().filter(|n| !n.unindexed).count()
     }
 }
 
@@ -510,7 +491,6 @@ impl KeelWindow {
         if self.settings_tab == tab {
             return;
         }
-        self.settings_tab_prev = self.settings_tab;
         self.settings_tab = tab;
         self.settings_tab_gen = self.settings_tab_gen.wrapping_add(1);
         self.settings_tab_at = Some(std::time::Instant::now());
@@ -576,100 +556,39 @@ impl KeelWindow {
             .children(memory_modal)
     }
 
-    fn rail_badge(&self, tab: SettingsTab) -> Option<String> {
-        match tab {
-            SettingsTab::Accounts => {
-                let count = self
-                    .harness_status
-                    .as_ref()
-                    .and_then(|h| h.first())
-                    .and_then(|h| h.accounts.as_ref())
-                    .map(|rows| rows.iter().filter(|a| a.signed_in).count())
-                    .unwrap_or(0);
-                (count > 0).then(|| count.to_string())
-            }
-            SettingsTab::Skills => match &self.skills.rows {
-                Some(Ok(rows)) => {
-                    let on = rows.iter().filter(|r| r.enabled).count();
-                    (on > 0).then(|| on.to_string())
-                }
-                _ => None,
-            },
-            SettingsTab::Memory => match &self.memory.user {
-                Some(Ok(scope)) if scope.indexed() > 0 => Some(scope.indexed().to_string()),
-                _ => None,
-            },
-            SettingsTab::Integrations => {
-                let n = self.connections.len();
-                (n > 0).then(|| n.to_string())
-            }
-            _ => None,
-        }
-    }
-
     fn render_nav_rail(&self, t: Tokens, cx: &mut Context<Self>) -> gpui::Div {
         let active = self.settings_tab;
-        let prev = self.settings_tab_prev;
-        let animating = self.recent_tab_switch();
-        let tab_gen = self.settings_tab_gen;
         let update_ready = matches!(self.updates.status, keel_update::Status::Ready { .. })
             && self.updates.ready.is_some();
 
-        let make_pill = move |draw_top: f32, draw_h: f32| {
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(zpx(draw_top))
-                .h(zpx(draw_h))
-                .rounded(RADIUS_MD)
-                .bg(c(t.selected))
-        };
-
-        let sliding_pill: AnyElement = if animating && prev != active {
-            let start_y = prev.rail_y();
-            let end_y = active.rail_y();
-            make_pill(start_y, ITEM_H)
-                .with_animation(
-                    ElementId::Name(format!("settings-rail-pill-{tab_gen}").into()),
-                    gpui::Animation::new(std::time::Duration::from_millis(170)),
-                    move |_el, delta| {
-                        let (y, h) =
-                            controls::compute_pill_geometry(start_y, end_y, ITEM_H, delta);
-                        make_pill(y, h)
-                    },
-                )
-                .into_any_element()
-        } else {
-            make_pill(active.rail_y(), ITEM_H).into_any_element()
-        };
-
-        let group_label = |title: &'static str| {
-            div()
-                .h(zpx(GROUP_LABEL_H))
-                .px_2p5()
-                .flex()
-                .items_center()
-                .t_caption()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(c(t.text_faint))
-                .child(title)
-        };
+        let sliding_pill = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(zpx(NAV_ITEM_H))
+            .rounded(r_md())
+            .bg(c(t.selected))
+            .with_spring(
+                "settings-rail-pill",
+                SpringAnimation::new(controls::PILL_SPRING).to(zpx(active.rail_y())),
+                |el, y| el.top(y),
+            );
 
         let render_item = |tab: SettingsTab| {
             let is_active = tab == active;
-            let badge = self.rail_badge(tab);
             let show_dot = tab == SettingsTab::General && update_ready;
             div()
-                .id(ElementId::Name(format!("settings-tab-{}", tab.label()).into()))
-                .h(zpx(ITEM_H))
-                .px_2p5()
-                .rounded(RADIUS_MD)
+                .id(ElementId::Name(
+                    format!("settings-tab-{}", tab.label()).into(),
+                ))
+                .h(zpx(NAV_ITEM_H))
+                .px(zpx(10.))
+                .rounded(r_md())
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap_2()
+                .gap(zpx(8.))
                 .cursor_pointer()
                 .when(!is_active, |d| d.hover_fade(c(t.hover), None))
                 .active(|s| s.opacity(0.8))
@@ -681,13 +600,9 @@ impl KeelWindow {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_2p5()
+                        .gap(zpx(8.))
                         .min_w_0()
-                        .child(
-                            tab.icon()
-                                .el(zpx(14.))
-                                .text_color(c(if is_active { t.text } else { t.text_muted })),
-                        )
+                        .child(tab.icon().el(zpx(14.)).text_color(c(t.text_muted)))
                         .child(
                             div()
                                 .t_body()
@@ -700,28 +615,15 @@ impl KeelWindow {
                                 .child(tab.label()),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .when(show_dot, |d| {
-                            d.child(div().size(zpx(6.)).rounded_full().bg(c(t.accent)))
-                        })
-                        .when_some(badge, |d, count| {
-                            d.child(
-                                div()
-                                    .t_caption()
-                                    .text_color(c(if is_active {
-                                        t.text_muted
-                                    } else {
-                                        t.text_faint
-                                    }))
-                                    .child(count),
-                            )
-                        }),
-                )
+                .when(show_dot, |d| {
+                    d.child(
+                        div()
+                            .size(zpx(6.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(c(t.accent)),
+                    )
+                })
         };
 
         let nav_list = div()
@@ -730,7 +632,6 @@ impl KeelWindow {
             .flex()
             .flex_col()
             .child(sliding_pill)
-            .child(group_label("APP"))
             .child(
                 div()
                     .flex()
@@ -740,7 +641,6 @@ impl KeelWindow {
                     .child(render_item(SettingsTab::Notifications)),
             )
             .child(div().h(zpx(GROUP_GAP)))
-            .child(group_label("AGENT"))
             .child(
                 div()
                     .flex()
@@ -759,131 +659,52 @@ impl KeelWindow {
             .bg(c(t.sidebar))
             .border_r_1()
             .border_color(c(t.border))
-            .px_3()
-            .pt_4()
-            .pb_4()
+            .px(zpx(8.))
+            .pb(zpx(16.))
             .flex()
             .flex_col()
             .justify_between()
+            .child(div().pt(zpx(RAIL_PAD_TOP)).child(nav_list))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .h(zpx(24.))
-                            .px_2p5()
-                            .flex()
-                            .items_center()
-                            .text_size(zpx(15.))
-                            .line_height(zpx(20.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                            .child("Settings"),
-                    )
-                    .child(nav_list),
-            )
-            .child(
-                div()
-                    .px_2p5()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(c(t.border))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .t_caption()
-                            .text_color(c(t.text_faint))
-                            .child(format!("Keel {}", keel_update::CURRENT_VERSION)),
-                    )
-                    .when(update_ready, |d| {
-                        d.child(
-                            div()
-                                .t_caption()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(c(t.accent))
-                                .child("Update ready"),
-                        )
-                    }),
+                    .px(zpx(10.))
+                    .t_caption()
+                    .text_color(c(t.text_faint))
+                    .child(format!("Keel {}", keel_update::CURRENT_VERSION)),
             )
     }
 
     fn render_detail_pane(&mut self, t: Tokens, cx: &mut Context<Self>) -> gpui::Div {
         let tab = self.settings_tab;
-        let prev = self.settings_tab_prev;
         let animating = self.recent_tab_switch();
         let tab_gen = self.settings_tab_gen;
-        let dir: f32 = if tab.index() >= prev.index() { 1.0 } else { -1.0 };
 
         let header = div()
             .w_full()
+            .h(zpx(HEADER_H))
+            .px(zpx(24.))
             .flex()
-            .flex_col()
+            .flex_row()
             .items_center()
+            .justify_between()
             .border_b_1()
             .border_color(c(t.border))
+            .child(div().t_title().text_color(c(t.text)).child(tab.label()))
             .child(
-                div()
-                    .w_full()
-                    .max_w(zpx(DETAIL_MAX_WIDTH))
-                    .px_6()
-                    .h(zpx(52.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(zpx(15.))
-                                    .line_height(zpx(20.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(c(t.text))
-                                    .child(tab.label()),
-                            )
-                            .children(tab.info_tip().map(|tip| {
-                                controls::info_badge(format!("tab-info-{}", tab.label()), tip, t)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("settings-done-btn")
-                            .size(zpx(26.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(RADIUS_MD)
-                            .text_color(c(t.text_muted))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(c(t.text)))
-                            .hover_fade(c(t.hover), Some(c(t.selected)))
-                            .active(|s| s.opacity(0.8))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| crate::view::dotify_ui::Tip::new("Close (Esc)", t))
-                                    .into()
-                            })
-                            .tooltip_show_delay(crate::view::tooltip::delay())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.close_settings(cx);
-                            }))
-                            .child(Icon::Close.el(zpx(14.))),
-                    ),
+                icon_button("settings-done-btn", Icon::Close, t)
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::view::dotify_ui::Tip::new("Close (Esc)", t))
+                            .into()
+                    })
+                    .tooltip_show_delay(crate::view::tooltip::delay())
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.close_settings(cx);
+                    })),
             );
 
         // Skills manages its own virtualized list scroll, so it gets a
         // full-height non-scrolling flex container; all other tabs use a
-        // single clean vertical scroll area (though General/Notifications/
-        // Integrations fit in a single viewport).
+        // single vertical scroll area.
         let is_skills = tab == SettingsTab::Skills;
         let tab_body: gpui::Div = match tab {
             SettingsTab::General => self.render_general_tab(t, cx),
@@ -894,22 +715,29 @@ impl KeelWindow {
             SettingsTab::Integrations => self.render_integrations_tab(t, cx),
         };
 
-        let animated_body: AnyElement = if animating {
-            tab_body
-                .with_animation(
-                    ElementId::Name(format!("settings-pane-in-{tab_gen}").into()),
-                    gpui::Animation::new(crate::motion::BASE)
-                        .with_easing(crate::motion::ease_out_strong),
-                    move |el, delta| {
-                        el.opacity(delta)
-                            .relative()
-                            .top(zpx(6.0 * dir * (1.0 - delta)))
-                    },
-                )
-                .into_any_element()
-        } else {
-            tab_body.into_any_element()
-        };
+        // Opacity only. The generation id replays on a tab change and stays
+        // put for clicks inside the tab. Reduced motion snaps to opaque.
+        // The wrapper is always present: an animation element's id is part of
+        // its children's element path, so dropping it after the fade would
+        // reset every stateful child (the Skills uniform_list and its fade)
+        // and make the list blink. `animating` only gates the opacity.
+        let animated_body: AnyElement = tab_body
+            .with_animation(
+                ElementId::Name(format!("settings-pane-in-{tab_gen}").into()),
+                gpui::Animation::new(std::time::Duration::from_millis(120))
+                    .with_easing(crate::motion::ease_out),
+                move |el, delta| if animating { el.opacity(delta) } else { el },
+            )
+            .into_any_element();
+
+        let padded = div()
+            .w_full()
+            .px(zpx(24.))
+            .pt(zpx(16.))
+            .pb(zpx(24.))
+            .flex()
+            .flex_col()
+            .child(animated_body);
 
         let body_shell: AnyElement = if is_skills {
             div()
@@ -918,20 +746,7 @@ impl KeelWindow {
                 .w_full()
                 .flex()
                 .flex_col()
-                .items_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(zpx(DETAIL_MAX_WIDTH))
-                        .flex_1()
-                        .min_h_0()
-                        .px_6()
-                        .pt_4()
-                        .pb_4()
-                        .flex()
-                        .flex_col()
-                        .child(animated_body),
-                )
+                .child(padded.flex_1().min_h_0())
                 .into_any_element()
         } else {
             div()
@@ -952,18 +767,7 @@ impl KeelWindow {
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .items_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(zpx(DETAIL_MAX_WIDTH))
-                        .px_6()
-                        .pt_4()
-                        .pb_6()
-                        .flex()
-                        .flex_col()
-                        .child(animated_body),
-                )
+                .child(padded)
                 .into_any_element()
         };
 
@@ -983,13 +787,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mix_blends_each_channel() {
-        assert_eq!(controls::mix(0x000000FF, 0xFF8040FF, 0.), 0x000000FF);
-        assert_eq!(controls::mix(0x000000FF, 0xFF8040FF, 1.), 0xFF8040FF);
-        assert_eq!(controls::mix(0x000000FF, 0xFE8040FF, 0.5), 0x7F4020FF);
-    }
-
-    #[test]
     fn settings_tabs_have_monotonic_rail_positions() {
         let tabs = [
             SettingsTab::General,
@@ -1003,8 +800,21 @@ mod tests {
             assert!(pair[0].rail_y() < pair[1].rail_y());
             assert!(pair[0].index() < pair[1].index());
         }
-        assert_eq!(SettingsTab::from_name("notifications"), Some(SettingsTab::Notifications));
-        assert_eq!(SettingsTab::from_name("browser"), Some(SettingsTab::Integrations));
+        // 30px items, 2px apart, 12px between the two groups, no group labels.
+        assert_eq!(SettingsTab::General.rail_y(), 0.);
+        assert_eq!(SettingsTab::Notifications.rail_y(), 32.);
+        assert_eq!(SettingsTab::Accounts.rail_y(), 74.);
+        assert_eq!(SettingsTab::Skills.rail_y(), 106.);
+        assert_eq!(SettingsTab::Memory.rail_y(), 138.);
+        assert_eq!(SettingsTab::Integrations.rail_y(), 170.);
+        assert_eq!(
+            SettingsTab::from_name("notifications"),
+            Some(SettingsTab::Notifications)
+        );
+        assert_eq!(
+            SettingsTab::from_name("browser"),
+            Some(SettingsTab::Integrations)
+        );
     }
 
     #[test]

@@ -1949,15 +1949,13 @@ impl KeelWindow {
     }
 
     /// Centered Settings modal (⌘,) floating over the active workspace.
-    /// Scrim fades in/out over `BASE`/`FAST`; the modal card rises 10 px in
-    /// on `ease_out_strong` (180 ms) and drops 6 px out via `dismiss` (120 ms).
+    /// Scrim alpha 0.36. The card rises 8px over 180ms and drops 4px over 120ms.
     fn render_settings_modal(
         &mut self,
         t: Tokens,
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        use gpui::AnimationExt as _;
         if !self.browser_sites_synced {
             self.browser_sites_synced = true;
             let saved = self.state.ui_settings.browser_allowed_sites.join(", ");
@@ -1974,45 +1972,31 @@ impl KeelWindow {
             .max_w(gpui::relative(0.92))
             .h(zpx(600.))
             .max_h(gpui::relative(0.86))
-            .rounded(zpx(12.))
+            .rounded(crate::style::r_xl())
             .bg(c(t.window))
             .border_1()
             .border_color(c(t.border))
             .overflow_hidden()
             .occlude()
-            .shadow(vec![
-                gpui::BoxShadow {
-                    color: c(t.shadow).opacity(0.95),
-                    offset: gpui::point(zpx(0.), zpx(14.)),
-                    blur_radius: zpx(36.),
-                    spread_radius: zpx(-4.),
-                    inset: false,
-                },
-                gpui::BoxShadow {
-                    color: c(t.shadow).opacity(0.6),
-                    offset: gpui::point(zpx(0.), zpx(2.)),
-                    blur_radius: zpx(8.),
-                    spread_radius: zpx(0.),
-                    inset: false,
-                },
-            ])
+            .shadow(vec![gpui::BoxShadow {
+                color: c(t.shadow),
+                offset: gpui::point(zpx(0.), zpx(16.)),
+                blur_radius: zpx(40.),
+                spread_radius: zpx(-8.),
+                inset: false,
+            }])
             .flex()
             .flex_col()
             .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
             .child(self.render_settings(t, cx));
 
+        // Local motion: 8px rise in, 4px drop out. gpui snaps both when
+        // reduced motion is on. `dismiss` stays a 6px drop for the rest of the app.
         let card = if leaving {
-            crate::motion::dismiss(card, ("settings-modal-out", sheet as usize), reduced)
-        } else if reduced {
-            card.into_any_element()
+            super::settings::settings_close_motion(card, ("settings-modal-out", sheet as usize))
         } else {
-            card.with_animation(
-                ("settings-modal-in", sheet as usize),
-                gpui::Animation::new(std::time::Duration::from_millis(180))
-                    .with_easing(crate::motion::ease_out_strong),
-                |el, delta| el.opacity(delta).relative().top(zpx(10.0 * (1.0 - delta))),
-            )
-            .into_any_element()
+            super::settings::settings_open_motion(card, ("settings-modal-in", sheet as usize))
+                .into_any_element()
         };
 
         let backdrop = div()
@@ -2040,7 +2024,7 @@ impl KeelWindow {
                 },
                 sheet as usize,
             ),
-            0.52,
+            0.36,
             leaving,
             reduced,
         )

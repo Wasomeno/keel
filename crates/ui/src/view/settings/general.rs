@@ -6,12 +6,11 @@ use keel_proto::ThemeChoice;
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
-use super::super::sidebar::text_button;
 use super::controls::{
-    card_group_header, filled_button_owned, info_badge, setting_row_info, settings_card, toggle,
+    ButtonKind, button, card_group_header, setting_row_info, settings_card, toggle,
 };
 use crate::icons::Icon;
-use crate::style::{KeelStyled, RADIUS_MD, c, zpx};
+use crate::style::{KeelStyled, c, r_md, zpx};
 
 impl KeelWindow {
     pub(super) fn choose_background(&mut self, cx: &mut Context<Self>) {
@@ -69,7 +68,7 @@ impl KeelWindow {
         div()
             .flex()
             .flex_col()
-            .gap_5()
+            .gap(zpx(24.))
             .child(self.render_appearance_card(t, cx))
             .child(self.render_background_card(t, cx))
             .child(self.render_updates_section(t, cx))
@@ -106,28 +105,24 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Reduced motion",
-                Some("Replaces sliding and spring animations with instant transitions or gentle fades."),
-                toggle(
-                    "settings-motion".into(),
-                    is_reduced,
-                    self.recent_flip("settings-motion"),
-                    t,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let cur = this.state.effective_reduced_motion(this.os_reduced_motion);
-                    this.note_switch_flip("settings-motion");
-                    this.state.set_reduced_motion(Some(!cur));
-                    this.transcript.reduced_motion = !cur;
-                    cx.notify();
-                }))
-                .into_any_element(),
+                None,
+                toggle("settings-motion".into(), is_reduced, t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let cur = this.state.effective_reduced_motion(this.os_reduced_motion);
+                        let next = !cur;
+                        this.state.set_reduced_motion(Some(next));
+                        this.transcript.reduced_motion = next;
+                        cx.set_reduce_motion(next);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
             ),
         ];
 
         div()
             .flex()
             .flex_col()
-            .child(card_group_header("APPEARANCE", None, None, t))
+            .child(card_group_header("Appearance", None, None, t))
             .child(settings_card(rows, t))
     }
 
@@ -156,7 +151,7 @@ impl KeelWindow {
             .flex_none()
             .relative()
             .overflow_hidden()
-            .rounded(RADIUS_MD)
+            .rounded(r_md())
             .border_1()
             .border_color(c(t.border))
             .child(
@@ -177,26 +172,25 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap_4()
-            .py_3()
+            .gap(zpx(16.))
+            .py(zpx(10.))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap(zpx(12.))
                     .min_w_0()
                     .child(thumb)
                     .child(
                         div()
+                            .min_w_0()
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
+                            .flex_col()
+                            .gap(zpx(2.))
                             .child(
                                 div()
                                     .t_body()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(c(t.text))
                                     .child(if custom.is_some() {
                                         "Custom image"
@@ -204,11 +198,12 @@ impl KeelWindow {
                                         "Default landscape"
                                     }),
                             )
-                            .child(info_badge(
-                                "info-bg-formats",
-                                "Shown behind the new-chat screen. Accepts PNG, JPEG, HEIC, or WebP (stored locally at up to 2560 px).",
-                                t,
-                            )),
+                            .child(
+                                div()
+                                    .t_small()
+                                    .text_color(c(t.text_muted))
+                                    .child("Behind new chats. PNG, JPEG, HEIC or WebP."),
+                            ),
                     ),
             )
             .child(
@@ -216,17 +211,19 @@ impl KeelWindow {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1p5()
+                    .gap(zpx(6.))
                     .flex_none()
                     .when(custom.is_some(), |d| {
                         d.child(
-                            text_button("bg-reset-btn", "Reset", t).on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| this.reset_background(cx),
-                            )),
+                            button("bg-reset-btn", "Reset", ButtonKind::Ghost, true, t).on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.reset_background(cx)
+                                }),
+                            ),
                         )
                     })
                     .child(
-                        filled_button_owned("bg-choose-btn".into(), "Choose…", t).on_click(
+                        button("bg-choose-btn", "Choose…", ButtonKind::Primary, true, t).on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| this.choose_background(cx)),
                         ),
                     ),
@@ -235,7 +232,7 @@ impl KeelWindow {
         let dim_row = setting_row_info(
             t,
             "Dim",
-            Some("Darkens the background image to keep text legible."),
+            None,
             self.render_segmented_control(
                 "dim",
                 &[
@@ -261,35 +258,29 @@ impl KeelWindow {
         let glow_row = setting_row_info(
             t,
             "Chat glow",
-            Some("Adds a soft ambient glow of the background image beneath the composer."),
-            toggle(
-                "settings-chat-glow".into(),
-                glow_on,
-                self.recent_flip("settings-chat-glow"),
-                t,
-            )
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.note_switch_flip("settings-chat-glow");
-                this.state.ui_settings.chat_glow_off = !this.state.ui_settings.chat_glow_off;
-                this.state.save_settings();
-                cx.notify();
-            }))
-            .into_any_element(),
+            Some("A soft glow from the background under the composer."),
+            toggle("settings-chat-glow".into(), glow_on, t)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.state.ui_settings.chat_glow_off = !this.state.ui_settings.chat_glow_off;
+                    this.state.save_settings();
+                    cx.notify();
+                }))
+                .into_any_element(),
         );
 
         div()
             .flex()
             .flex_col()
-            .child(card_group_header("BACKGROUND", None, None, t))
+            .child(card_group_header("Background", None, None, t))
             .child(settings_card(vec![picture_row, dim_row, glow_row], t))
             .when_some(error, |d, err| {
                 d.child(
                     div()
-                        .pt_2()
+                        .pt(zpx(8.))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_1p5()
+                        .gap(zpx(6.))
                         .t_small()
                         .text_color(c(t.danger))
                         .child(Icon::Alert.el(zpx(12.)))

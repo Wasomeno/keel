@@ -373,11 +373,10 @@ pub struct KeelWindow {
     /// the exit; a newer open or close wins.
     settings_leaving: Option<u64>,
     settings_gen: u64,
-    /// Active category in the split-pane Settings layout, plus previous tab
-    /// and generation/timestamp for the sliding rail indicator and directional
-    /// content crossfade.
+    /// Active category in the split-pane Settings layout. The generation and
+    /// timestamp replay the tab body's opacity fade; the rail pill springs
+    /// on its own stable id.
     settings_tab: settings::SettingsTab,
-    settings_tab_prev: settings::SettingsTab,
     settings_tab_gen: u64,
     settings_tab_at: Option<std::time::Instant>,
     settings_gitlab_form_open: bool,
@@ -417,12 +416,8 @@ pub struct KeelWindow {
     dotify_desc: Entity<TextareaState>,
     connect_busy: bool,
     connect_error: Option<String>,
-    /// Switches flipped lately, for their slide: switch id → (flip number, when).
-    switch_flips: HashMap<String, (u64, std::time::Instant)>,
+    /// Monotonic id for account sign-in landings and API-key editor sequences.
     switch_gen: u64,
-    /// Segmented options flipped lately, for their sliding pill: control id → (from, to, gen, when).
-    segmented_flips: HashMap<String, (usize, usize, u64, std::time::Instant)>,
-    segmented_gen: u64,
     /// Settings → Skills, and the filter field on that drill-in.
     skills: settings::SkillsPage,
     skills_filter: Entity<InputState>,
@@ -720,6 +715,7 @@ impl KeelWindow {
         // Read once: the OS query is an Objective-C round trip.
         let os_reduced = os_reduced_motion();
         let reduced = state.effective_reduced_motion(os_reduced);
+        cx.set_reduce_motion(reduced);
         crate::style::set_zoom(state.ui_settings.zoom.unwrap_or(1.0));
 
         let composer = cx.new(|cx| {
@@ -918,6 +914,12 @@ impl KeelWindow {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 if this.window_active {
+                    this.os_reduced_motion = os_reduced_motion();
+                    let reduced = this
+                        .state
+                        .effective_reduced_motion(this.os_reduced_motion);
+                    this.transcript.reduced_motion = reduced;
+                    cx.set_reduce_motion(reduced);
                     this.mark_current_read(cx);
                 }
                 this.dotify_on_activation(cx);
@@ -1353,7 +1355,6 @@ impl KeelWindow {
             settings_leaving: None,
             settings_gen: 0,
             settings_tab: settings::SettingsTab::General,
-            settings_tab_prev: settings::SettingsTab::General,
             settings_tab_gen: 0,
             settings_tab_at: None,
             settings_gitlab_form_open: false,
@@ -1381,10 +1382,7 @@ impl KeelWindow {
             dotify_desc,
             connect_busy: false,
             connect_error: None,
-            switch_flips: HashMap::new(),
             switch_gen: 0,
-            segmented_flips: HashMap::new(),
-            segmented_gen: 0,
             skills: settings::SkillsPage::default(),
             skills_filter,
             memory: settings::MemoryPage::default(),
