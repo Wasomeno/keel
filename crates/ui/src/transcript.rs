@@ -5919,6 +5919,7 @@ pub const PROSE_LINE: f32 = 22.5;
 pub fn prose_max_w() -> f32 {
     f32::from(crate::style::column_content_max()) / crate::style::zoom()
 }
+
 /// Slack in a prose row's pre-layout height: the gap above it plus the row's
 /// own padding. Tracks the paragraph rhythm so an entrance isn't short.
 const PROSE_HEIGHT_FUDGE: f32 = 19.;
@@ -7220,6 +7221,12 @@ fn is_marker_label(label: &str) -> bool {
     (1..=3).contains(&inner.len()) && inner.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Horizontal padding inside an inline `[n]` marker.
+const MARKER_PAD_X: f32 = 3.5;
+/// How far attached punctuation is pulled toward the marker. Less than
+/// [`MARKER_PAD_X`], so the period sits just outside the badge, not over the fill.
+const MARKER_PUNCT_PULL: f32 = 2.0;
+
 /// Superscript-sized mono marker. Callers add the hover and click.
 fn marker_chip(
     id: impl Into<ElementId>,
@@ -7233,11 +7240,11 @@ fn marker_chip(
         // A few pixels above the baseline, so it reads as a superscript.
         .top(zpx(-3.))
         .h(zpx(13.))
-        .px(zpx(3.5))
+        .px(zpx(MARKER_PAD_X))
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
+        .rounded(RADIUS_SM)
         .border_1()
         .font_family(MONO)
         .text_size(zpx(9.5))
@@ -7366,6 +7373,97 @@ fn compact_link_chip(
 fn split_trailing_punct(word: &str) -> (&str, &str) {
     let trimmed = word.trim_end_matches(['.', ':', ';', '!', '?', ',']);
     (trimmed, &word[trimmed.len()..])
+}
+
+/// Leading punctuation after optional whitespace, and the rest of the string.
+/// Used to hang a period or comma on the preceding badge so `[4].` has no gap.
+fn leading_punctuation(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_start();
+    let n = trimmed
+        .chars()
+        .take_while(|&ch| matches!(ch, ',' | '.' | ':' | ';' | '!' | '?' | ')'))
+        .map(char::len_utf8)
+        .sum::<usize>();
+    (n > 0).then_some((&trimmed[..n], &trimmed[n..]))
+}
+
+/// One item in the citation-aware word flow. A badge keeps any immediately
+/// following punctuation in the same item, with no whitespace, so `[4].`
+/// cannot pick up the row's flex gap or a stray space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CitationLayoutItem {
+    Word(String),
+    Badge { id: usize, punct: String },
+}
+
+/// Layout model for a plain-text slice that may contain `[n]` citations.
+fn citation_layout(text: &str, cite_ids: &[usize]) -> Vec<CitationLayoutItem> {
+    let badges = crate::citations::find_citation_badges(text, cite_ids);
+    let mut chunks: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    let mut pos = 0usize;
+    for (range, id) in badges {
+        if range.start > pos {
+            chunks.push((pos, range.start, None));
+        }
+        chunks.push((range.start, range.end, Some(id)));
+        pos = range.end;
+    }
+    if pos < text.len() {
+        chunks.push((pos, text.len(), None));
+    }
+
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < chunks.len() {
+        let (start, end, cite) = chunks[i];
+        if let Some(id) = cite {
+            let mut punct = String::new();
+            if let Some((n_start, n_end, n_cite)) = chunks.get(i + 1).copied() {
+                if n_cite.is_none() {
+                    if let Some((mark, rest)) = leading_punctuation(&text[n_start..n_end]) {
+                        punct = mark.to_string();
+                        let consumed = (n_end - n_start) - rest.len();
+                        chunks[i + 1].0 = n_start + consumed;
+                        if chunks[i + 1].0 >= chunks[i + 1].1 {
+                            chunks.remove(i + 1);
+                        }
+                    }
+                }
+            }
+            items.push(CitationLayoutItem::Badge { id, punct });
+            i += 1;
+            continue;
+        }
+        for word in text[start..end].split_whitespace() {
+            items.push(CitationLayoutItem::Word(word.to_string()));
+        }
+        i += 1;
+    }
+    items
+}
+
+/// Hang `punct` on the last flex item. Pulled slightly toward the marker so
+/// the period sits just outside the pill's right edge, clear of the fill.
+fn attach_punctuation(elements: &mut Vec<AnyElement>, punct: &str, t: Tokens) {
+    let Some(prev) = elements.pop() else {
+        return;
+    };
+    elements.push(
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .child(prev)
+            .child(
+                div()
+                    .flex_none()
+                    .ml(zpx(-MARKER_PUNCT_PULL))
+                    .text_color(c(t.text).opacity(0.88))
+                    .child(punct.to_string()),
+            )
+            .into_any_element(),
+    );
 }
 
 fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
@@ -8112,114 +8210,109 @@ fn inline_text(
                 continue;
             }
 
-            let mut plain_chunks: Vec<(usize, usize, Option<usize>)> = Vec::new();
-            let badges = crate::citations::find_citation_badges(slice_str, &cite_ids);
-            let mut plain_pos = 0usize;
-            for (b_range, b_id) in badges {
-                if b_range.start > plain_pos {
-                    plain_chunks.push((plain_pos, b_range.start, None));
-                }
-                plain_chunks.push((b_range.start, b_range.end, Some(b_id)));
-                plain_pos = b_range.end;
-            }
-            if plain_pos < slice_str.len() {
-                plain_chunks.push((plain_pos, slice_str.len(), None));
-            }
-
-            for (chunk_ix, (c_start, c_end, cite_hit)) in plain_chunks.into_iter().enumerate() {
-                if let Some(cite_id) = cite_hit
-                    && let Some((_, cites)) = cite_ctx
-                    && let Some(cite) = cites.get(cite_id)
-                {
-                    let no_leading_space = if chunk_ix == 0 {
-                        hug_next && !slice_str.starts_with(char::is_whitespace)
-                    } else {
-                        c_start > 0 && !slice_str[..c_start].ends_with(char::is_whitespace)
-                    };
-                    let mut badge = citation_badge(
-                        &format!("{id}-{item_ix}"),
-                        cite,
-                        t,
-                        rc.on_action.clone(),
-                    );
-                    if no_leading_space {
-                        badge = badge.ml(zpx(-2.));
-                    }
-                    elements.push(badge.into_any_element());
-                    item_ix += 1;
-                    hug_next = true;
-                    continue;
-                }
-                let sub = &slice_str[c_start..c_end];
-                let mut first_word = true;
-                for word in sub.split_whitespace() {
-                    let is_bullet = word == "·" || word == "•" || word == "◦" || word == "▪";
-                    let is_punct = word == ","
-                        || word == "."
-                        || word == ":"
-                        || word == ";"
-                        || word == "!"
-                        || word == "?"
-                        || word == ")";
-                    let pull_punct = is_punct
-                        || (first_word
-                            && hug_next
-                            && !sub.starts_with(char::is_whitespace)
-                            && word.starts_with([',', '.', ':', ';', '!', '?', ')']));
-                    first_word = false;
-                    let (trimmed_word, trailing_punct) = split_trailing_punct(word);
-
-                    if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
-                        elements.push(
-                            file_inline_chip(
+            let layout = citation_layout(slice_str, &cite_ids);
+            for piece in layout {
+                match piece {
+                    CitationLayoutItem::Badge { id: cite_id, punct } => {
+                        if let Some((_, cites)) = cite_ctx
+                            && let Some(cite) = cites.get(cite_id)
+                        {
+                            let badge = citation_badge(
                                 &format!("{id}-{item_ix}"),
-                                &file_path,
+                                cite,
                                 t,
-                                chip_max,
                                 rc.on_action.clone(),
-                            )
-                            .into_any_element(),
-                        );
-                        item_ix += 1;
-                        if !trailing_punct.is_empty() {
+                            );
+                            elements.push(badge.into_any_element());
+                            item_ix += 1;
+                            if !punct.is_empty() {
+                                attach_punctuation(&mut elements, &punct, t);
+                            }
+                        } else {
+                            let mut word = format!("[{cite_id}]");
+                            word.push_str(&punct);
                             elements.push(
                                 div()
                                     .flex_none()
-                                    .ml(zpx(-4.))
+                                    .when(hug_next, |d| d.ml(zpx(-4.)))
                                     .text_color(c(t.text).opacity(0.88))
-                                    .child(trailing_punct.to_string())
+                                    .child(word)
                                     .into_any_element(),
                             );
                             item_ix += 1;
                         }
-                    } else if is_bullet {
-                        elements.push(
-                            div()
-                                .flex_none()
-                                .px(zpx(1.))
-                                .text_color(c(t.text_faint))
-                                .child(word.to_string())
+                    }
+                    CitationLayoutItem::Word(word) => {
+                        let mut word = word;
+                        if hug_next {
+                            if let Some((punct, rest)) = leading_punctuation(&word) {
+                                let punct = punct.to_string();
+                                let rest = rest.to_string();
+                                attach_punctuation(&mut elements, &punct, t);
+                                if rest.is_empty() {
+                                    hug_next = false;
+                                    continue;
+                                }
+                                word = rest;
+                            }
+                        }
+                        let is_bullet = word == "·"
+                            || word == "•"
+                            || word == "◦"
+                            || word == "▪";
+                        let is_punct = word == ","
+                            || word == "."
+                            || word == ":"
+                            || word == ";"
+                            || word == "!"
+                            || word == "?"
+                            || word == ")";
+                        let (trimmed_word, trailing_punct) = split_trailing_punct(&word);
+                        if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
+                            elements.push(
+                                file_inline_chip(
+                                    &format!("{id}-{item_ix}"),
+                                    &file_path,
+                                    t,
+                                    chip_max,
+                                    rc.on_action.clone(),
+                                )
                                 .into_any_element(),
-                        );
-                        item_ix += 1;
-                    } else {
-                        let el = div()
-                            .flex_none()
-                            .when(pull_punct, |d| d.ml(zpx(-4.)))
-                            .when(style.bold, |d| {
-                                d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(c(t.text))
-                            })
-                            .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
-                            .when(style.italic, |d| d.italic())
-                            .when(style.strike, |d| d.line_through())
-                            .child(word.to_string());
-                        elements.push(el.into_any_element());
-                        item_ix += 1;
+                            );
+                            item_ix += 1;
+                            if !trailing_punct.is_empty() {
+                                attach_punctuation(&mut elements, trailing_punct, t);
+                            }
+                        } else if is_bullet {
+                            elements.push(
+                                div()
+                                    .flex_none()
+                                    .px(zpx(1.))
+                                    .text_color(c(t.text_faint))
+                                    .child(word)
+                                    .into_any_element(),
+                            );
+                            item_ix += 1;
+                        } else {
+                            let el = div()
+                                .flex_none()
+                                .when(is_punct, |d| d.ml(zpx(-4.)))
+                                .when(style.bold, |d| {
+                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(c(t.text))
+                                })
+                                .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
+                                .when(style.italic, |d| d.italic())
+                                .when(style.strike, |d| d.line_through())
+                                .child(word);
+                            elements.push(el.into_any_element());
+                            item_ix += 1;
+                        }
                     }
                 }
-                hug_next = !sub.is_empty() && !sub.ends_with(char::is_whitespace);
+                hug_next = false;
             }
+            hug_next = !slice_str.is_empty() && !slice_str.ends_with(char::is_whitespace);
         }
     }
 
@@ -9765,6 +9858,68 @@ mod tests {
         assert!(!is_marker_label("[link]"));
         assert!(!is_marker_label("[1234]"));
         assert!(!is_marker_label(""));
+    }
+
+    #[test]
+    fn citation_layout_keeps_trailing_punct_on_the_badge() {
+        use CitationLayoutItem::{Badge, Word};
+        let items = citation_layout("changes [4]. X", &[4]);
+        assert_eq!(
+            items,
+            vec![
+                Word("changes".into()),
+                Badge {
+                    id: 4,
+                    punct: ".".into()
+                },
+                Word("X".into()),
+            ]
+        );
+        let Badge { punct, .. } = &items[1] else {
+            panic!("expected a badge");
+        };
+        assert!(!punct.contains(char::is_whitespace), "punct must have no whitespace, got {punct:?}");
+
+        // A space in the source still hangs the period on the badge.
+        assert_eq!(
+            citation_layout("changes [4] . X", &[4]),
+            vec![
+                Word("changes".into()),
+                Badge {
+                    id: 4,
+                    punct: ".".into()
+                },
+                Word("X".into()),
+            ]
+        );
+
+        // The source markdown keeps `[4].` as plain text, no injected space or link.
+        let blocks = crate::markdown::parse_markdown_blocks("m", "changes [4]. X");
+        let crate::markdown::TranscriptBlock::Paragraph { content, spans, .. } = &blocks[0]
+        else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(content, "changes [4]. X");
+        assert!(spans.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn leading_punctuation_peels_marks_even_after_a_space() {
+        assert_eq!(leading_punctuation("."), Some((".", "")));
+        assert_eq!(leading_punctuation(". X labels"), Some((".", " X labels")));
+        assert_eq!(leading_punctuation(" ."), Some((".", "")));
+        assert_eq!(leading_punctuation(".),"), Some((".),", "")));
+        assert_eq!(leading_punctuation(" next"), None);
+        assert_eq!(leading_punctuation(""), None);
+    }
+
+    #[test]
+    fn prose_measure_matches_the_composer_at_default_zoom() {
+        assert!((crate::style::zoom() - 1.0).abs() < 0.001);
+        let expected = f32::from(crate::style::TRANSCRIPT_MAX_WIDTH)
+            - crate::style::COLUMN_PAD * 2.;
+        assert!((prose_max_w() - expected).abs() < 0.01);
+        assert!((f32::from(crate::style::column_content_max()) - expected).abs() < 0.01);
     }
 
     #[test]
