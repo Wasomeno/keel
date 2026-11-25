@@ -365,8 +365,7 @@ pub struct KeelWindow {
     peek_closing: bool,
     peek_close: Option<Task<()>>,
     peek_gen: u64,
-    /// Settings page (⌘,): open, the agents' status as last checked, the
-    /// connected services, and the GitLab connect form.
+    /// Settings page (⌘,): open and the agents' status as last checked.
     settings_open: bool,
     last_settings_toggle: Option<std::time::Instant>,
     /// Still painted after close so the page can leave. The number names
@@ -379,8 +378,7 @@ pub struct KeelWindow {
     settings_tab: settings::SettingsTab,
     settings_tab_gen: u64,
     settings_tab_at: Option<std::time::Instant>,
-    settings_gitlab_form_open: bool,
-    /// The page on screen (0 chat, 1 Settings, 2 GitLab), the one before,
+    /// The page on screen (0 chat, 1 Settings, 3 project home), the one before,
     /// and when it changed: the new page glides in from its side.
     page_key: u8,
     page_from: u8,
@@ -402,20 +400,15 @@ pub struct KeelWindow {
     account_confirm_gen: u64,
     account_state_seq: HashMap<String, u64>,
     account_busy: Option<String>,
-    connections: Vec<settings::ConnectionRow>,
-    gitlab_host: Entity<InputState>,
     /// Settings → Browser: the allowed-sites list, and whether it has been
     /// filled from the saved list since Settings opened.
     browser_sites: Entity<InputState>,
     browser_sites_synced: bool,
-    gitlab_token: Entity<InputState>,
     /// Dotify: the timer pill's work clock (see `dotify.rs`).
     dotify: dotify::DotifyUi,
     dotify_token: Entity<InputState>,
     dotify_search: Entity<InputState>,
     dotify_desc: Entity<TextareaState>,
-    connect_busy: bool,
-    connect_error: Option<String>,
     /// Monotonic id for account sign-in landings and API-key editor sequences.
     switch_gen: u64,
     /// Settings → Skills, and the filter field on that drill-in.
@@ -427,10 +420,6 @@ pub struct KeelWindow {
     updates: updates::UpdateUi,
     memory_desc: Entity<InputState>,
     memory_body: Entity<TextareaState>,
-    /// GitLab page (sidebar): open, what it shows, and its project filter.
-    gitlab_open: bool,
-    gitlab: gitlab::GitlabPage,
-    gitlab_filter: Entity<InputState>,
     /// The `@` menu while a reference is being typed: where its `@` is, the
     /// text after it, and the highlighted row. Paths are fetched once per
     /// folder and kept.
@@ -732,10 +721,7 @@ impl KeelWindow {
         });
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Space name"));
         let chat_title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Chat title"));
-        let gitlab_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter projects"));
         let picker_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
-        let gitlab_host =
-            cx.new(|cx| InputState::new(window, cx).placeholder("https://gitlab.com"));
         let browser_sites = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Empty allows every site · e.g. github.com, localhost:3000")
@@ -747,11 +733,6 @@ impl KeelWindow {
             TextareaState::new(window, cx)
                 .auto_grow(6, 14)
                 .submit_on_enter(false)
-        });
-        let gitlab_token = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Personal access token")
-                .masked(true)
         });
         let dotify_token = cx.new(|cx| {
             InputState::new(window, cx)
@@ -825,10 +806,6 @@ impl KeelWindow {
                     _ => {}
                 },
             ),
-            // The project list filters as you type.
-            cx.subscribe_in(&gitlab_filter, window, |_, _, _: &InputEvent, _, cx| {
-                cx.notify()
-            }),
             cx.subscribe_in(
                 &skills_filter,
                 window,
@@ -1347,9 +1324,6 @@ impl KeelWindow {
             peek_closing: false,
             peek_close: None,
             peek_gen: 0,
-            gitlab_open: false,
-            gitlab: Default::default(),
-            gitlab_filter,
             settings_open: false,
             last_settings_toggle: None,
             settings_leaving: None,
@@ -1357,7 +1331,6 @@ impl KeelWindow {
             settings_tab: settings::SettingsTab::General,
             settings_tab_gen: 0,
             settings_tab_at: None,
-            settings_gitlab_form_open: false,
             page_key: 0,
             page_from: 0,
             page_at: None,
@@ -1371,17 +1344,12 @@ impl KeelWindow {
             account_confirm_gen: 0,
             account_state_seq: HashMap::new(),
             account_busy: None,
-            connections: Vec::new(),
-            gitlab_host,
             browser_sites,
             browser_sites_synced: false,
-            gitlab_token,
             dotify: Default::default(),
             dotify_token,
             dotify_search,
             dotify_desc,
-            connect_busy: false,
-            connect_error: None,
             switch_gen: 0,
             skills: settings::SkillsPage::default(),
             skills_filter,
@@ -2412,9 +2380,8 @@ impl KeelWindow {
     ) {
         use crate::notify::{NotifyEvent, should_alert, should_play_sound};
         let settings = self.state.ui_settings.notifications.clone();
-        let on_screen = self.current_chat.as_deref() == Some(chat_id.as_str())
-            && !self.settings_open
-            && !self.gitlab_open;
+        let on_screen =
+            self.current_chat.as_deref() == Some(chat_id.as_str()) && !self.settings_open;
         if !should_alert(event, &settings, on_screen, self.window_active) {
             return;
         }
@@ -2462,7 +2429,7 @@ impl KeelWindow {
 
     /// The open chat is read (when the window is in front to show it).
     pub(super) fn mark_current_read(&mut self, cx: &mut Context<Self>) {
-        if !self.window_active || self.settings_open || self.gitlab_open {
+        if !self.window_active || self.settings_open {
             return;
         }
         if let Some(id) = self.current_chat.clone()
@@ -2851,15 +2818,19 @@ impl KeelWindow {
                 chips
             }
         };
-        // Extract any FileChanges card so it is pinned at the end of the final response once finished.
+        // Extract any FileChanges and Citations cards so they stay pinned at the bottom after the reply.
         let mut file_changes = Vec::new();
-        rows.retain(|row| {
-            if matches!(row, TranscriptBlock::FileChanges { .. }) {
+        let mut citations = Vec::new();
+        rows.retain(|row| match row {
+            TranscriptBlock::FileChanges { .. } => {
                 file_changes.push(row.clone());
                 false
-            } else {
-                true
             }
+            TranscriptBlock::Citations { .. } => {
+                citations.push(row.clone());
+                false
+            }
+            _ => true,
         });
         for row in &mut file_changes {
             if let TranscriptBlock::FileChanges { id, expanded, .. } = row {
@@ -2901,13 +2872,19 @@ impl KeelWindow {
             rows.retain(|row| !is_trace_text(row));
         }
         if !streaming {
+            rows.extend(citations);
             if !file_changes.is_empty() {
                 rows.extend(file_changes);
             } else {
                 rows.extend(chips);
             }
-        } else if file_changes.is_empty() {
-            rows.extend(chips);
+        } else {
+            if rows.iter().any(is_trace_text) {
+                rows.extend(citations);
+            }
+            if file_changes.is_empty() {
+                rows.extend(chips);
+            }
         }
         let later = self.later_messages(&head);
         self.transcript
@@ -3201,6 +3178,21 @@ impl KeelWindow {
             }
         }
         self.show_file(path.to_string_lossy().to_string(), window, cx);
+    }
+
+    /// Open a cited file in the right Files pane, jumping to `line` (1-based) when given.
+    pub(super) fn open_file_at(
+        &mut self,
+        path: std::path::PathBuf,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if line.is_none() {
+            self.open_file_result(path, window, cx);
+            return;
+        }
+        self.show_file_at(path.to_string_lossy().to_string(), line, window, cx);
     }
 
     /// Open or close a folded row (`{message_id}#tools` / `#reasoning`).
@@ -4883,11 +4875,10 @@ impl KeelWindow {
         }
     }
 
-    /// Leave Settings / GitLab for the chat area. Settings stays painted
-    /// for one leave so it can exit; GitLab cuts.
+    /// Leave Settings / project home for the chat area. Settings stays painted
+    /// for one leave so it can exit.
     pub(super) fn close_pages(&mut self) {
         self.begin_settings_exit();
-        self.gitlab_open = false;
         self.projects.close_home();
         self.projects.folder_card = None;
     }
@@ -4947,6 +4938,7 @@ impl KeelWindow {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
+                this.projects.picked = None;
                 this.use_folder_for_new_chat(path.to_string_lossy().into_owned(), cx)
             });
         })
@@ -7184,6 +7176,72 @@ mod turn_tests {
             matches!(&rows[1], TranscriptBlock::Paragraph { content, .. } if content == "Done editing foo.rs.")
         );
         assert!(matches!(&rows[2], TranscriptBlock::FileChanges { expanded, .. } if !expanded));
+    }
+
+    #[test]
+    fn citations_are_pinned_at_the_end_after_the_final_response() {
+        use crate::citations::Citations;
+        use crate::markdown::{ToolEntry, TranscriptBlock};
+        let done_tool = ToolEntry {
+            tool_id: "t1".into(),
+            name: "read".into(),
+            summary: "read foo.rs".into(),
+            state: "done".into(),
+            started_ms: Some(100),
+            ended_ms: Some(200),
+            ..Default::default()
+        };
+        let cite_card = Citations::from_spec(&serde_json::json!({
+            "component": "citations",
+            "items": [{
+                "id": 1,
+                "kind": "file",
+                "label": "foo.rs:1",
+                "path": "src/foo.rs",
+                "lines": [1, 2],
+                "excerpt": "fn foo() {}"
+            }]
+        }))
+        .unwrap();
+
+        let mut rows = vec![
+            TranscriptBlock::ToolGroup {
+                id: "m#tools0".into(),
+                tools: vec![done_tool],
+                expanded: false,
+                overrides: Vec::new(),
+            },
+            TranscriptBlock::Citations {
+                id: "m#ui-cite".into(),
+                citations: cite_card,
+            },
+            TranscriptBlock::Paragraph {
+                id: "m#t1".into(),
+                content: "Explained foo [1].".into(),
+                spans: Vec::new(),
+            },
+        ];
+
+        let mut citations = Vec::new();
+        rows.retain(|row| {
+            if matches!(row, TranscriptBlock::Citations { .. }) {
+                citations.push(row.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        let summary = super::worked_summary(&rows, "m#worked".into(), false, false).unwrap();
+        rows = super::fold_turn_rows(rows, summary, false, false);
+        rows.extend(citations);
+
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(&rows[0], TranscriptBlock::TurnSummary { .. }));
+        assert!(
+            matches!(&rows[1], TranscriptBlock::Paragraph { content, .. } if content == "Explained foo [1].")
+        );
+        assert!(matches!(&rows[2], TranscriptBlock::Citations { .. }));
     }
 
     #[test]

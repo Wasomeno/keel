@@ -148,6 +148,8 @@ pub(super) struct FilesPanel {
     file: Option<OpenFile>,
     /// A file being read for the editor.
     opening: Option<String>,
+    /// 1-based line to jump to once `opening` finishes loading.
+    pending_line: Option<u32>,
     pub(super) focus: FocusHandle,
     /// The window, for replies that land with no frame running.
     handle: gpui::AnyWindowHandle,
@@ -172,6 +174,7 @@ impl FilesPanel {
             viewer: viewer::Viewer::new(),
             file: None,
             opening: None,
+            pending_line: None,
             focus: cx.focus_handle(),
             handle: window.window_handle(),
         }
@@ -536,6 +539,17 @@ impl KeelWindow {
 
     /// Open a file in the right side panel's File tab editor.
     pub(super) fn show_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_file_at(path, None, window, cx);
+    }
+
+    /// Open a file in the right side panel's File tab editor and jump to `line` (1-based) when given.
+    pub(super) fn show_file_at(
+        &mut self,
+        path: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.browser_allowed() {
             return;
         }
@@ -581,6 +595,22 @@ impl KeelWindow {
 
         self.files.tab = FilesTab::Files;
         self.open_right_tab(super::right_panel::RightTabKind::File, window, cx);
+        if let Some(target_line) = line
+            && let Some(open) = self.files.file.as_ref().filter(|f| f.path == rel)
+        {
+            let editor = open.editor.clone();
+            self.files.pending_line = None;
+            editor.update(cx, |s, cx| {
+                s.set_cursor_position(
+                    gpui_base::input::Position::new(target_line.saturating_sub(1), 0),
+                    window,
+                    cx,
+                );
+            });
+            cx.notify();
+            return;
+        }
+        self.files.pending_line = line;
         self.files_select(rel, window, cx);
         cx.notify();
     }
@@ -903,6 +933,7 @@ impl KeelWindow {
         let text = content.clone();
         // The extension names the grammar (`rs`, `json`, `tsx`…); none, plain.
         let lang = path.rsplit_once('.').map_or("", |(_, e)| e).to_string();
+        let target_line = self.files.pending_line.take();
         let editor = cx.new(|cx| {
             let mut s = EditorState::new(window, cx)
                 .line_number(true)
@@ -912,6 +943,13 @@ impl KeelWindow {
             crate::syntax::EditorHighlighter::attach(&mut s, cx);
             s.set_editor_style(style);
             s.set_value(text, window, cx);
+            if let Some(line) = target_line {
+                s.set_cursor_position(
+                    gpui_base::input::Position::new(line.saturating_sub(1), 0),
+                    window,
+                    cx,
+                );
+            }
             s
         });
         let sub = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {

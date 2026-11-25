@@ -85,7 +85,7 @@ impl SettingsTab {
             "accounts" | "providers" => Some(Self::Accounts),
             "skills" => Some(Self::Skills),
             "memory" => Some(Self::Memory),
-            "integrations" | "browser" | "connections" | "gitlab" => Some(Self::Integrations),
+            "integrations" | "browser" | "connections" => Some(Self::Integrations),
             _ => None,
         }
     }
@@ -173,15 +173,6 @@ impl Account {
     }
 }
 
-/// One connected service as `list_connections` reports it.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct ConnectionRow {
-    pub kind: String,
-    pub host: String,
-    pub username: String,
-    pub name: String,
-}
-
 impl HarnessStatus {
     pub(crate) fn parse(v: &serde_json::Value) -> Self {
         let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
@@ -205,18 +196,6 @@ impl HarnessStatus {
                     })
                     .collect()
             }),
-        }
-    }
-}
-
-impl ConnectionRow {
-    pub(super) fn parse(v: &serde_json::Value) -> Self {
-        let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
-        Self {
-            kind: s("kind"),
-            host: s("host"),
-            username: s("username"),
-            name: s("name"),
         }
     }
 }
@@ -443,7 +422,6 @@ impl KeelWindow {
         self.settings_tab_at = None;
         self.browser_sites_synced = false;
         self.load_agent_status(cx);
-        self.load_connections(cx);
         self.load_skills(cx);
         self.load_memory(cx);
         cx.notify();

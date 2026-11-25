@@ -69,7 +69,7 @@ const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIFF_SNAPSHOT_BYTES: u64 = 256 * 1024;
 
 /// Providers shown in Settings -> Accounts, ordered for display.
-const SETTINGS_PROVIDERS: [(&str, &str, &str, &str); 7] = [
+const SETTINGS_PROVIDERS: [(&str, &str, &str, &str); 5] = [
     (
         "anthropic",
         "Claude",
@@ -99,18 +99,6 @@ const SETTINGS_PROVIDERS: [(&str, &str, &str, &str); 7] = [
         "OpenCode",
         "OpenCode API key (OPENCODE_API_KEY)",
         "opencode",
-    ),
-    (
-        "minimax",
-        "MiniMax",
-        "MiniMax API key (MINIMAX_API_KEY)",
-        "minimax",
-    ),
-    (
-        "neuralwatt",
-        "NeuralWatt",
-        "NeuralWatt API key (NEURALWATT_API_KEY)",
-        "neuralwatt",
     ),
 ];
 
@@ -4862,6 +4850,7 @@ mod tests {
         assert!(!anthropic.supports_oauth);
         let xai = rows.iter().find(|r| r.id == "xai").unwrap();
         assert!(xai.supports_oauth);
+        assert!(!rows.iter().any(|r| matches!(r.id.as_str(), "minimax" | "neuralwatt")));
     }
 
     #[test]

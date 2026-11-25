@@ -168,7 +168,6 @@ impl KeelWindow {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.render_sidebar_nav(t, cx))
             .children(self.render_rename_prompt(t, cx))
             .child(self.render_chat_list(t, cx))
             .children(self.render_selection_bar(t, cx))
@@ -722,46 +721,6 @@ impl KeelWindow {
                                 })),
                         ),
                 ),
-        )
-    }
-
-    /// Pages above the chats: GitLab.
-    fn render_sidebar_nav(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.gitlab_open;
-        div().px_2().pb(zpx(SECTION_GAP)).flex().flex_col().child(
-            div()
-                .id("nav-gitlab")
-                .h(zpx(28.))
-                .pl_1()
-                .pr_2()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .rounded(RADIUS_MD)
-                .cursor_pointer()
-                .t_small()
-                .font_weight(if active {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::MEDIUM
-                })
-                .text_color(c(if active { t.text } else { t.text_muted }))
-                .when(active, |d| d.bg(c(t.selected)))
-                .when(!active, |d| {
-                    d.hover(|s| s.text_color(c(t.text))).hover_fade(c(t.hover), None)
-                })
-                .child(
-                    div()
-                        .size(zpx(16.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(Icon::GitLab.el(zpx(12.))),
-                )
-                .child("GitLab")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_gitlab(cx))),
         )
     }
 

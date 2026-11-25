@@ -370,7 +370,7 @@ pub fn renders(source: &str, t: &Tokens) -> bool {
 fn doc(source: &str, t: &Tokens) -> Option<Arc<Doc>> {
     let k = key(&[
         source,
-        &t.code.to_string(),
+        &t.floating.to_string(),
         &t.surface.to_string(),
         &t.text.to_string(),
     ]);
@@ -499,7 +499,7 @@ pub fn raster_region(source: &str, t: &Tokens, region: Region, view: &str) -> Ra
         return Raster::NONE;
     };
     let want = region.snapped();
-    let k = key(&[source, &t.code.to_string(), view]);
+    let k = key(&[source, &t.floating.to_string(), view]);
     RASTERS.with(|r| {
         let mut r = r.borrow_mut();
         let slot = r.entry(k).or_default();
@@ -531,7 +531,7 @@ pub fn raster_region(source: &str, t: &Tokens, region: Region, view: &str) -> Ra
 
 /// What `view` last drew, without asking for anything new (mid-gesture).
 pub fn shown(source: &str, t: &Tokens, view: &str) -> Option<(Region, Arc<RenderImage>)> {
-    let k = key(&[source, &t.code.to_string(), view]);
+    let k = key(&[source, &t.floating.to_string(), view]);
     RASTERS.with(|r| r.borrow().get(&k).and_then(|slot| slot.shown.clone()))
 }
 
@@ -580,7 +580,7 @@ pub fn png_job(
     t: &Tokens,
 ) -> Option<impl FnOnce() -> Option<Vec<u8>> + Send + 'static> {
     let doc = doc(source, t)?;
-    let bg = t.code;
+    let bg = t.floating;
     Some(move || {
         let pad = EXPORT_PAD;
         let total_w = doc.width + pad * 2.;
@@ -742,7 +742,7 @@ fn strip_init_directives(s: &str) -> String {
 
 /// Maps Keel's design tokens into Merman's native HostTheme presentation roles.
 fn host_theme(t: &Tokens) -> HostTheme {
-    let dark = luminance(t.text) > luminance(t.code);
+    let dark = luminance(t.text) > luminance(t.floating);
     let app = if dark {
         HostThemeAppearance::Dark
     } else {
@@ -757,23 +757,23 @@ fn host_theme(t: &Tokens) -> HostTheme {
         .try_with_font_size("13px")
         .unwrap_or_else(|_| HostTheme::new().with_appearance(app));
 
-    let hex = |v: u32| blend(v, t.code);
+    let hex = |v: u32| blend(v, t.floating);
     let roles = [
-        (ThemeRole::Canvas, hex(t.code)),
-        (ThemeRole::Surface, hex(t.floating)),
+        (ThemeRole::Canvas, hex(t.floating)),
+        (ThemeRole::Surface, hex(t.surface)),
         (ThemeRole::SurfaceAlt, hex(t.surface)),
-        (ThemeRole::SurfaceMuted, hex(t.code)),
+        (ThemeRole::SurfaceMuted, hex(t.floating)),
         (ThemeRole::Text, hex(t.text)),
         (ThemeRole::SubtleText, hex(t.text_muted)),
         (ThemeRole::Border, hex(t.border)),
         (ThemeRole::Line, hex(t.text_muted)),
-        (ThemeRole::EdgeLabelBackground, hex(t.code)),
+        (ThemeRole::EdgeLabelBackground, hex(t.floating)),
         (ThemeRole::ClusterBackground, hex(t.surface)),
         (ThemeRole::ClusterBorder, hex(t.border)),
         (ThemeRole::NoteBackground, hex(t.surface)),
         (ThemeRole::NoteBorder, hex(t.border)),
         (ThemeRole::NoteText, hex(t.text)),
-        (ThemeRole::ActorBackground, hex(t.floating)),
+        (ThemeRole::ActorBackground, hex(t.surface)),
         (ThemeRole::ActorBorder, hex(t.border)),
         (ThemeRole::ActorText, hex(t.text)),
     ];
@@ -870,23 +870,23 @@ fn post_process_svg(svg: String, t: Option<&Tokens>, source: &str) -> String {
         .replace("data-look=\"neo\"", "data-look=\"classic\"");
 
     if let Some(tokens) = t {
-        let dark = luminance(tokens.text) > luminance(tokens.code);
+        let dark = luminance(tokens.text) > luminance(tokens.floating);
         let group_bg = if dark {
-            blend(0xFFFFFF0F, tokens.code)
+            blend(0xFFFFFF0F, tokens.floating)
         } else {
-            blend(tokens.surface, tokens.code)
+            blend(0x1E1D1B0A, tokens.floating)
         };
         let node_bg = if dark {
-            blend(0xFFFFFF20, tokens.code)
+            blend(0xFFFFFF20, tokens.floating)
         } else {
-            blend(tokens.floating, tokens.code)
+            blend(tokens.surface, tokens.floating)
         };
-        let accent_bg = blend(tokens.accent, tokens.code);
+        let accent_bg = blend(tokens.accent, tokens.floating);
         let accent_text = blend(tokens.text_on_accent, tokens.accent);
-        let edge_ink = blend(mix(tokens.text, tokens.code, 0.35), tokens.code);
-        let card_bg = blend(tokens.code, tokens.code);
-        let text = blend(tokens.text, tokens.code);
-        let text_muted = blend(tokens.text_muted, tokens.code);
+        let edge_ink = blend(mix(tokens.text, tokens.floating, 0.35), tokens.floating);
+        let card_bg = blend(tokens.floating, tokens.floating);
+        let text = blend(tokens.text, tokens.floating);
+        let text_muted = blend(tokens.text_muted, tokens.floating);
 
         // Mark terminal node with node-accent class if found
         if let Some(terminal) = find_terminal_node(source) {

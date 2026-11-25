@@ -30,6 +30,8 @@ const MAX_POINTS: usize = 4;
 const MAX_CALLOUT: usize = 160;
 const MAX_FAILURES: usize = 6;
 const MAX_PLAN_STEPS: usize = 24;
+const MAX_CITATIONS: usize = 12;
+const MAX_CITATION_EXCERPT: usize = 1200;
 
 /// Words that make a command risky whatever the agent says.
 fn risky_words(command: &str) -> bool {
@@ -287,6 +289,41 @@ pub fn ui_tools() -> Value {
                 },
                 "required": ["title", "summary", "steps", "footer"]
             }
+        },
+        {
+            "name": "show_citations",
+            "description": "Attach verifiable evidence citations ([1], [2], …) for factual claims in this reply, pointing to exact file lines, diffs, command outputs, or URLs you actually read or ran. Reference them inline as [1], [2] in your prose. Never invent excerpts, line numbers, or sources.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer", "description": "1-based badge number matching [1], [2] in your reply"},
+                                "kind": {"type": "string", "enum": ["file", "diff", "command", "url"]},
+                                "label": {"type": "string", "description": "Short source label, e.g. transcript.rs:3856-3885 or cargo test"},
+                                "excerpt": {"type": "string", "description": "Exact quoted lines or output snippet supporting the claim"},
+                                "path": {"type": "string", "description": "Workspace-relative path for file or diff citations"},
+                                "lines": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "minItems": 2,
+                                    "maxItems": 2,
+                                    "description": "1-based [start, end] line range inside path"
+                                },
+                                "url": {"type": "string", "description": "Source URL for url citations"},
+                                "command": {"type": "string", "description": "Executed command for command citations"}
+                            },
+                            "required": ["kind", "label", "excerpt"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }
         }
     ])
 }
@@ -313,6 +350,7 @@ pub fn ui_call(name: &str, args: &Value) -> Option<Result<String, String>> {
         "show_diagram" => diagram_spec(args),
         "show_tests" => tests_spec(args),
         "show_plan" => plan_spec(args),
+        "show_citations" => citations_spec(args),
         _ => return None,
     };
     // The spec stays the last JSON line: the engine reads the card from it.
@@ -699,6 +737,110 @@ fn mr_call_spec(args: &Value) -> Result<Value, String> {
     Ok(mr_card(&mr, &json!({}), args["offer_merge"] == true))
 }
 
+fn citations_spec(args: &Value) -> Result<Value, String> {
+    let Some(raw) = args["items"].as_array() else {
+        return Err("citations need an items array".into());
+    };
+    let mut items = Vec::new();
+    let mut used_ids = std::collections::HashSet::new();
+    let mut next_id = 1usize;
+
+    for entry in raw.iter().take(MAX_CITATIONS) {
+        let kind = match entry["kind"].as_str().unwrap_or("").trim() {
+            "file" => "file",
+            "diff" => "diff",
+            "command" => "command",
+            "url" => "url",
+            _ => continue,
+        };
+        let label = entry["label"].as_str().unwrap_or("").trim().to_string();
+        if label.is_empty() {
+            continue;
+        }
+        let raw_excerpt = entry["excerpt"].as_str().unwrap_or("").trim();
+        let excerpt = if raw_excerpt.chars().count() > MAX_CITATION_EXCERPT {
+            let cut: String = raw_excerpt.chars().take(MAX_CITATION_EXCERPT).collect();
+            format!("{}…", cut.trim_end())
+        } else {
+            raw_excerpt.to_string()
+        };
+        let path = entry["path"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let url = entry["url"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| s.starts_with("https://") || s.starts_with("http://"))
+            .map(str::to_string);
+        let command = entry["command"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        if excerpt.is_empty() && url.is_none() {
+            continue;
+        }
+        if matches!(kind, "file" | "diff") && path.is_none() && excerpt.is_empty() {
+            continue;
+        }
+        if kind == "url" && url.is_none() && excerpt.is_empty() {
+            continue;
+        }
+
+        let lines = entry["lines"].as_array().and_then(|arr| {
+            let start = arr.first()?.as_u64()? as u32;
+            if start == 0 {
+                return None;
+            }
+            let end = arr.get(1).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(start);
+            Some([start, end.max(start)])
+        });
+
+        let requested_id = entry["id"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|&n| n >= 1 && !used_ids.contains(&n));
+        let id = match requested_id {
+            Some(id) => id,
+            None => {
+                while used_ids.contains(&next_id) {
+                    next_id += 1;
+                }
+                next_id
+            }
+        };
+        used_ids.insert(id);
+
+        let mut obj = json!({
+            "id": id,
+            "kind": kind,
+            "label": label,
+            "excerpt": excerpt,
+        });
+        if let Some(p) = path {
+            obj["path"] = json!(p);
+        }
+        if let Some(l) = lines {
+            obj["lines"] = json!(l);
+        }
+        if let Some(u) = url {
+            obj["url"] = json!(u);
+        }
+        if let Some(c) = command {
+            obj["command"] = json!(c);
+        }
+        items.push(obj);
+    }
+
+    if items.is_empty() {
+        return Err("each citation needs kind, label, and excerpt (or url)".into());
+    }
+    Ok(json!({ "component": "citations", "items": items }))
+}
+
 /// A figure as written (`41s`, `1,024`, `$3.50`, `12%`). Not a version or prose.
 fn number(cell: &str) -> Option<f64> {
     let s = cell.trim().trim_start_matches(['$', '€', '£', '~', '+']);
@@ -1038,5 +1180,46 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(!chart.contains("\"component\":\"plan\""));
+    }
+
+    #[test]
+    fn a_citations_call_normalizes_sources_and_lines() {
+        let spec = card(ui_call(
+            "show_citations",
+            &json!({
+                "items": [
+                    {
+                        "id": 1,
+                        "kind": "file",
+                        "label": "transcript.rs:3856–3865",
+                        "path": "crates/ui/src/transcript.rs",
+                        "lines": [3856, 3865],
+                        "excerpt": "let now_hovered = !menu_open && hb.is_hovered(window);"
+                    },
+                    {
+                        "kind": "command",
+                        "label": "cargo t",
+                        "command": "cargo t",
+                        "excerpt": "398 passed; 0 failed"
+                    },
+                    {
+                        "kind": "unknown",
+                        "label": "bad",
+                        "excerpt": "ignored"
+                    }
+                ]
+            }),
+        ));
+        assert_eq!(spec["component"], "citations");
+        assert_eq!(spec["items"].as_array().unwrap().len(), 2);
+        assert_eq!(spec["items"][0]["id"], 1);
+        assert_eq!(spec["items"][0]["lines"], json!([3856, 3865]));
+        assert_eq!(spec["items"][1]["id"], 2);
+        assert!(keel_proto::is_ui_tool("mcp__keel-ui__show_citations"));
+        assert!(
+            ui_call("show_citations", &json!({"items": [{"kind": "file", "label": " ", "excerpt": "x"}]}))
+                .unwrap()
+                .is_err()
+        );
     }
 }

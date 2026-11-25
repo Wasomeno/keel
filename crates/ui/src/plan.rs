@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
 use crate::motion::ease_out;
-use crate::style::{MONO, RADIUS_MD, RADIUS_SM, c, zpx};
+use crate::style::{MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, c, zpx};
 use crate::transcript::{OnRowAction, RowAction, TranscriptRowItem};
 
 pub const APPROVE_RUN: &str = "Approve and run";
@@ -722,8 +722,10 @@ pub fn render(
     div()
         .w_full()
         .my_2()
-        .rounded(RADIUS_MD)
-        .bg(c(t.code))
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(c(t.border))
+        .bg(c(t.floating))
         .flex()
         .flex_col()
         .child(inner)
@@ -884,9 +886,9 @@ fn step_body(
                 .font_family(MONO)
                 .text_size(zpx(11.))
                 .text_color(c(t.text_muted))
-                .bg(c(t.surface))
+                .bg(c(t.surface).opacity(0.75))
                 .border_1()
-                .border_color(c(t.border))
+                .border_color(c(t.border).opacity(0.6))
                 .cursor_pointer()
                 .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
                 .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new(full.clone(), t)).into())
@@ -911,9 +913,9 @@ fn step_body(
                     .font_family(MONO)
                     .text_size(zpx(11.))
                     .text_color(c(t.accent))
-                    .bg(c(t.surface))
+                    .bg(c(t.surface).opacity(0.75))
                     .border_1()
-                    .border_color(c(t.border))
+                    .border_color(c(t.border).opacity(0.6))
                     .cursor_pointer()
                     .hover(|s| s.bg(c(t.hover)))
                     .active(|s| s.opacity(0.85))
@@ -941,9 +943,9 @@ fn step_body(
                     .font_family(MONO)
                     .text_size(zpx(11.))
                     .text_color(c(t.text_faint))
-                    .bg(c(t.surface))
+                    .bg(c(t.surface).opacity(0.75))
                     .border_1()
-                    .border_color(c(t.border))
+                    .border_color(c(t.border).opacity(0.6))
                     .cursor_pointer()
                     .hover(|s| s.bg(c(t.hover)).text_color(c(t.text)))
                     .active(|s| s.opacity(0.85))

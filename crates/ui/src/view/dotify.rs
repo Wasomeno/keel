@@ -1723,7 +1723,6 @@ impl KeelWindow {
                                 this.dotify.connected_at = Some(Instant::now());
                                 this.dotify.demo_settings_disconnected = false;
                                 this.dotify_boot(cx);
-                                this.load_connections_pub(cx);
                             });
                         })
                         .detach();
@@ -1837,7 +1836,6 @@ impl KeelWindow {
                         this.dotify.tick = None;
                         this.dotify_set_conn(None, cx);
                         this.dotify.connected_at = Some(Instant::now());
-                        this.load_connections_pub(cx);
                     }
                     Err(err) => this.report("disconnect failed", err),
                 }

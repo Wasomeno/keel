@@ -33,7 +33,7 @@ pub use view::{
 };
 
 /// Tools the `keel-ui` MCP server advertises. A harness may prefix the name.
-pub const UI_TOOLS: [&str; 13] = [
+pub const UI_TOOLS: [&str; 14] = [
     "show_chart",
     "show_choices",
     "show_stats",
@@ -47,6 +47,7 @@ pub const UI_TOOLS: [&str; 13] = [
     "show_diagram",
     "show_tests",
     "show_plan",
+    "show_citations",
 ];
 
 /// Trims trailing dots and ellipses (`.`, `…`) from progress labels, keeping meaningful internal punctuation.

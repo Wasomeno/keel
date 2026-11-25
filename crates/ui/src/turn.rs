@@ -78,6 +78,11 @@ pub enum Step {
     Diagram { id: String, flow: crate::flow::Flow },
     /// An approvable plan card (a `ui` part with `component: "plan"`).
     PlanCard { id: String, plan: crate::plan::Plan },
+    /// Evidence & source citations (a `ui` part with `component: "citations"`).
+    Citations {
+        id: String,
+        citations: crate::citations::Citations,
+    },
     /// The agent's plan (a `plan` part); one per message, replaced whole.
     Plan(Vec<crate::trace::PlanItem>),
 }
@@ -136,6 +141,10 @@ pub enum DocStep {
         flow: crate::flow::Flow,
     },
     PlanCard { id: String, plan: crate::plan::Plan },
+    Citations {
+        id: String,
+        citations: crate::citations::Citations,
+    },
     Plan(Vec<crate::trace::PlanItem>),
 }
 
@@ -353,6 +362,11 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
                     out.push(DocStep::Diagram { id: s("id"), flow });
                 } else if let Some(plan) = crate::plan::Plan::from_spec(spec) {
                     out.push(DocStep::PlanCard { id: s("id"), plan });
+                } else if let Some(citations) = crate::citations::Citations::from_spec(spec) {
+                    out.push(DocStep::Citations {
+                        id: s("id"),
+                        citations,
+                    });
                 }
             }
             _ => {}
@@ -380,6 +394,7 @@ fn kind(step: &Step) -> u8 {
         Step::Compare { .. } => 14,
         Step::Diagram { .. } => 15,
         Step::PlanCard { .. } => 16,
+        Step::Citations { .. } => 17,
     }
 }
 
@@ -392,7 +407,7 @@ fn text_count(steps: &[Step]) -> usize {
 /// ordinal. Live steps past the doc's (it lags the stream) stay at the end.
 pub fn merge_doc(message_id: &str, old: Vec<Step>, doc: Vec<DocStep>) -> Vec<Step> {
     // Old steps by kind, in order.
-    let mut by_kind: [std::collections::VecDeque<Step>; 17] = Default::default();
+    let mut by_kind: [std::collections::VecDeque<Step>; 18] = Default::default();
     for step in old {
         by_kind[kind(&step) as usize].push_back(step);
     }
@@ -488,10 +503,14 @@ pub fn merge_doc(message_id: &str, old: Vec<Step>, doc: Vec<DocStep>) -> Vec<Ste
                 by_kind[16].pop_front();
                 Step::PlanCard { id, plan }
             }
+            DocStep::Citations { id, citations } => {
+                by_kind[17].pop_front();
+                Step::Citations { id, citations }
+            }
         });
     }
     // Live-only text and thinking (tools, subagents and charts only ever come from the doc).
-    let [texts, reasonings, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _] = by_kind;
+    let [texts, reasonings, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _] = by_kind;
     for step in reasonings.into_iter().chain(texts) {
         // A live step the doc already holds (a driver that glued it onto an
         // earlier part) is not shown twice.
@@ -768,6 +787,12 @@ pub fn push_rows(
                 out.push(TranscriptBlock::PlanCard {
                     id: format!("{message_id}#ui-{id}"),
                     plan: plan.clone(),
+                });
+            }
+            Step::Citations { id, citations } => {
+                out.push(TranscriptBlock::Citations {
+                    id: format!("{message_id}#ui-{id}"),
+                    citations: citations.clone(),
                 });
             }
             // Placed where its table was; one whose table isn't found goes last.

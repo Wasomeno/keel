@@ -281,11 +281,10 @@ impl BrowserPanel {
 
 impl KeelWindow {
     /// The pane belongs to an open chat session only: never the new-chat
-    /// screen, Settings, or GitLab. `was_hero` is this frame's hero state.
+    /// screen or Settings. `was_hero` is this frame's hero state.
     pub(super) fn browser_allowed(&self) -> bool {
         !self.was_hero
             && !self.settings_open
-            && !self.gitlab_open
             && self.confirming_delete_chats.is_none()
             && self.state.confirming_delete_space.is_none()
     }
@@ -1419,7 +1418,7 @@ impl KeelWindow {
             .border_1()
             .border_color(c(t.border))
             .overflow_hidden()
-            .bg(c(t.surface));
+            .bg(c(t.floating));
         if let Some(error) = self.browser.tab().error.clone() {
             return card.child(self.render_browser_empty(t, Some(error), cx));
         }
@@ -1587,13 +1586,15 @@ impl KeelWindow {
                 .items_center()
                 .rounded_full()
                 .border_1()
-                .border_color(c(t.border))
+                .border_color(c(t.border).opacity(0.65))
+                .bg(c(t.surface).opacity(0.75))
                 .t_small()
                 .font_family(crate::style::MONO)
                 .text_color(c(t.text_muted))
                 .cursor_pointer()
-                .hover(|s| s.text_color(c(t.text)))
-                .hover_fade(c(t.hover), None)
+                .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+                .hover_fade(c(t.surface), None)
+                .active(|s| s.bg(c(t.selected)).opacity(0.9))
                 .child(*addr)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     if let Some(url) = normalize_address(addr) {
