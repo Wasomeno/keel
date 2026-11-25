@@ -257,13 +257,13 @@ pub(crate) fn delay() -> Duration {
 /// A gpui tooltip's entrance: a short fade as it drops [`TIP_RISE`] onto
 /// its place, skipped for a warm switch or with reduced motion. Counts
 /// itself while it lives, for [`delay`].
-pub(super) struct Entrance {
+pub(crate) struct Entrance {
     born: Instant,
     animate: bool,
 }
 
 impl Entrance {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let now = Instant::now();
         let animate = !tips_warm(now) && !REDUCED.with(Cell::get);
         ALIVE.with(|a| a.set(a.get() + 1));
@@ -271,7 +271,7 @@ impl Entrance {
     }
 
     /// (opacity, y offset) now, and whether it's still moving.
-    pub(super) fn look(&self, now: Instant) -> (f32, f32, bool) {
+    pub(crate) fn look(&self, now: Instant) -> (f32, f32, bool) {
         let x = now.saturating_duration_since(self.born).as_secs_f32() * 1000. / TIP_IN;
         if !self.animate || x >= 1. {
             return (1., 0., false);

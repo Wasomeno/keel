@@ -2396,7 +2396,7 @@ impl KeelWindow {
                         format!("folder-{}", space.id),
                         t,
                         true,
-                        current.as_deref() == Some(&space.id),
+                        self.projects.picked.is_none() && current.as_deref() == Some(&space.id),
                     )
                     .child(
                         div()

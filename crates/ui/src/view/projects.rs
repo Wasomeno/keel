@@ -162,15 +162,6 @@ impl Projects {
         self.store.by_name(name)
     }
 
-    fn project_id_for_path(&self, path: &str) -> Option<String> {
-        let path = norm_path(path);
-        self.store
-            .projects
-            .iter()
-            .find(|p| p.folders.iter().any(|f| paths_eq(&f.path, &path)))
-            .map(|p| p.id.clone())
-    }
-
     /// The project a new chat in `cwd` should join, and the scope to store.
     /// Only joins a project when the project was explicitly picked for new chat
     /// or created from the project's home. A single folder chat session remains
@@ -259,23 +250,28 @@ impl Projects {
     }
 
     fn scope_project_id(&self, chat: Option<&str>, cwd: Option<&str>) -> Option<String> {
-        if let Some(chat) = chat
-            && let Some(link) = self.store.chats.get(chat)
-            && self.store.project(&link.project).is_some()
-        {
-            return Some(link.project.clone());
+        if let Some(chat) = chat {
+            return self
+                .store
+                .chats
+                .get(chat)
+                .map(|link| &link.project)
+                .filter(|id| self.store.project(id).is_some())
+                .cloned();
         }
         if let Some(id) = &self.home
             && self.store.project(id).is_some()
         {
             return Some(id.clone());
         }
-        if let Some(id) = cwd.and_then(|c| self.project_id_for_path(c)) {
-            return Some(id);
+        let id = self.picked.as_deref()?;
+        let project = self.store.project(id)?;
+        if let Some(cwd) = cwd
+            && !project.folders.iter().any(|f| paths_eq(&f.path, cwd))
+        {
+            return None;
         }
-        self.picked
-            .clone()
-            .filter(|id| self.store.project(id).is_some())
+        Some(id.to_string())
     }
 
     /// Absolute folder paths `@` should index, when this chat or the next
@@ -3315,6 +3311,55 @@ mod tests {
     fn an_unlinked_chat_has_no_project_label() {
         let projects = projects_with_resona("unlinked");
         assert_eq!(projects.chat_project_label("c1", "/r/web"), None);
+    }
+
+    #[test]
+    fn singular_folder_is_not_treated_as_a_project_for_scope_or_links() {
+        let mut projects = projects_with_resona("singular-scope");
+        link_chat(&mut projects, "linked", "p");
+
+        // Unpicked singular folder (even when its path belongs to a project):
+        // no scope chip, no project link, no multi-folder mention label.
+        assert_eq!(projects.scope_project_id(None, Some("/r/web")), None);
+        assert_eq!(projects.link_plan("/r/web"), None);
+        assert_eq!(projects.mention_label(None, Some("/r/web")), None);
+        assert_eq!(
+            projects.folder_chip(Some("/r/web"), "web".into()),
+            "web"
+        );
+
+        // Existing unlinked chat in that same folder stays a singular folder.
+        assert_eq!(
+            projects.scope_project_id(Some("unlinked-chat"), Some("/r/web")),
+            None
+        );
+
+        // Explicitly picking the project activates project scope, label, and link.
+        projects.picked = Some("p".into());
+        assert_eq!(
+            projects.scope_project_id(None, Some("/r/web")).as_deref(),
+            Some("p")
+        );
+        assert_eq!(projects.link_plan("/r/web"), Some(("p".into(), Vec::new())));
+        assert_eq!(
+            projects.mention_label(None, Some("/r/web")).as_deref(),
+            Some("Files across Resona")
+        );
+        assert_eq!(
+            projects.folder_chip(Some("/r/web"), "web".into()),
+            "Resona"
+        );
+
+        // Even with a project picked, an existing unlinked chat stays singular.
+        assert_eq!(
+            projects.scope_project_id(Some("unlinked-chat"), Some("/r/web")),
+            None
+        );
+        // Existing linked chat keeps its project scope.
+        assert_eq!(
+            projects.scope_project_id(Some("linked"), Some("/r/web")).as_deref(),
+            Some("p")
+        );
     }
 
     #[test]

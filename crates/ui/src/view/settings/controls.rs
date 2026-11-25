@@ -247,26 +247,6 @@ fn focus_ring(t: Tokens) -> Vec<gpui::BoxShadow> {
     }]
 }
 
-/// A labelled text field. The shell is [`INPUT_H`], hairline-bordered, and
-/// draws the focus ring when the shell itself is focused. The inner editor
-/// uses the same `focus` role through the base theme.
-pub(crate) fn field(t: Tokens, label: &'static str, input: AnyElement) -> gpui::Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(zpx(12.))
-        .child(
-            div()
-                .w(zpx(64.))
-                .flex_none()
-                .t_small()
-                .text_color(c(t.text_muted))
-                .child(label),
-        )
-        .child(input_shell(t).child(input))
-}
-
 pub(crate) fn input_shell(t: Tokens) -> gpui::Div {
     div()
         .flex_1()

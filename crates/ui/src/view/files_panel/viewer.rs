@@ -636,6 +636,8 @@ impl KeelWindow {
             bubble_max_w: None,
             plan_running: false,
             plan_cards: std::rc::Rc::new(std::collections::HashMap::new()),
+            citations: Default::default(),
+            current_citations: None,
             probe: None,
         });
         let items = md.items.clone();

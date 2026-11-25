@@ -74,13 +74,10 @@ impl Render for KeelWindow {
             for input in [
                 &self.rename_input,
                 &self.chat_title_input,
-                &self.gitlab_host,
                 &self.browser_sites,
-                &self.gitlab_token,
                 &self.dotify_token,
                 &self.api_key_input,
                 &self.dotify_search,
-                &self.gitlab_filter,
                 &self.skills_filter,
                 &self.memory_desc,
                 &self.browser.address,
@@ -131,8 +128,7 @@ impl Render for KeelWindow {
 
         // New-chat hero: on entry its animations replay; on exit the composer
         // drops from the middle to its dock while the transcript fills in.
-        let page = self.gitlab_open;
-        let hero = self.hero_visible() && !show_question && !page && !self.projects.home_open();
+        let hero = self.hero_visible() && !show_question && !self.projects.home_open();
         if hero != self.was_hero {
             self.hero_gen += 1;
             self.hero_exit = (!hero).then(|| (0., std::time::Instant::now()));
@@ -141,16 +137,10 @@ impl Render for KeelWindow {
             self.sync_right_panel_hero_transition(hero);
             self.was_hero = hero;
         }
-        // Page switch (chat ↔ GitLab): the arriving page glides 16 px in from
+        // Page switch (chat ↔ project home): the arriving page glides 16 px in from
         // its side and fades up; the sidebar holds still. Settings has its
         // own sheet. Instant under reduced motion.
-        let page_key = if self.gitlab_open {
-            2
-        } else if self.projects.home_open() {
-            3
-        } else {
-            0
-        };
+        let page_key = if self.projects.home_open() { 3 } else { 0 };
         if page_key != self.page_key {
             self.page_from = std::mem::replace(&mut self.page_key, page_key);
             self.page_at = (!reduced).then(|| (0., std::time::Instant::now()));
@@ -200,7 +190,7 @@ impl Render for KeelWindow {
 
         // The timer's corner layer: over the transcript when there is one
         // (so bottom corners clear the composer), else under the header.
-        let page_timer = (hero || page)
+        let page_timer = hero
             .then(|| self.render_timer_corners(t, HEADER_HEIGHT, cx))
             .flatten();
 
@@ -296,8 +286,7 @@ impl Render for KeelWindow {
                     .bg(c(t.window))
                     .when(
                         hero || exiting
-                            || (!page
-                                && !self.projects.home_open()
+                            || (!self.projects.home_open()
                                 && self.current_chat.is_some()
                                 && !self.state.ui_settings.chat_glow_off),
                         |d| {
@@ -318,10 +307,7 @@ impl Render for KeelWindow {
                                 d.opacity(opacity).left(zpx(dx))
                             })
                             .map(|d| {
-                                if self.gitlab_open {
-                                    d.child(self.render_gitlab(t, cx))
-                                        .child(self.render_header(t, window, true, false, false, cx))
-                                } else if self.projects.home_open() {
+                                if self.projects.home_open() {
                                     d.child(self.render_project_home(t, cx))
                                         .child(self.render_header(t, window, true, false, false, cx))
                                 } else if hero {
@@ -349,7 +335,7 @@ impl Render for KeelWindow {
                                 }
                             })
                             .children(page_timer)
-                            .when(!hero && !page && !self.projects.home_open(), |d| {
+                            .when(!hero && !self.projects.home_open(), |d| {
                                 self.sync_chat_timeline(t, cx);
                                 if self.subagent_open.is_some() || show_question {
                                     self.dock_h.set(0.);
@@ -411,7 +397,7 @@ impl Render for KeelWindow {
             .children(self.render_right_panel(t, t == keel_theme::Tokens::dark(), window, cx))
             // Last children: paint over the content.
             .children(self.render_sidebar_trigger(t, window, cx))
-            .children(self.render_right_panel_trigger(t, hero || page || self.projects.home_open(), cx))
+            .children(self.render_right_panel_trigger(t, hero || self.projects.home_open(), cx))
             .children(self.render_sidebar_peek(t, cx))
             .children(self.render_zoom_toast(t))
             .children(self.render_notice(t, cx))
@@ -1693,6 +1679,15 @@ impl KeelWindow {
                             });
                             return;
                         }
+                        if let RowAction::OpenFileAt { path, line } = action {
+                            let weak = weak.clone();
+                            cx.defer(move |cx| {
+                                let _ = handle.update(cx, |_, window, cx| {
+                                    weak.update(cx, |view, cx| view.open_file_at(path.into(), line, window, cx))
+                                });
+                            });
+                            return;
+                        }
                         if let RowAction::OpenFileDiff { path } = action {
                             let weak = weak.clone();
                             cx.defer(move |cx| {
@@ -1789,7 +1784,7 @@ impl KeelWindow {
                             RowAction::OpenFullOutput { title, content, error } => {
                                 view.open_lightbox(super::Lightbox::Output { title, content, error }, cx);
                             }
-                            RowAction::OpenFile { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } | RowAction::ResumeRetry | RowAction::ResumeStartFresh | RowAction::PlanApprove { .. } | RowAction::PlanEdit { .. } | RowAction::PlanAsk { .. } | RowAction::PlanDone { .. } | RowAction::PlanAdd { .. } | RowAction::PlanDelete { .. } | RowAction::PlanDrag { .. } | RowAction::PlanDrop { .. } | RowAction::PlanToggle { .. } | RowAction::PlanToggleTargets { .. } | RowAction::PlanToggleModeMenu { .. } | RowAction::PlanSetManual { .. } | RowAction::PlanSetMode { .. } => {}
+                            RowAction::OpenFile { .. } | RowAction::OpenFileAt { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } | RowAction::ResumeRetry | RowAction::ResumeStartFresh | RowAction::PlanApprove { .. } | RowAction::PlanEdit { .. } | RowAction::PlanAsk { .. } | RowAction::PlanDone { .. } | RowAction::PlanAdd { .. } | RowAction::PlanDelete { .. } | RowAction::PlanDrag { .. } | RowAction::PlanDrop { .. } | RowAction::PlanToggle { .. } | RowAction::PlanToggleTargets { .. } | RowAction::PlanToggleModeMenu { .. } | RowAction::PlanSetManual { .. } | RowAction::PlanSetMode { .. } => {}
                         });
                     }),
                     order: 0,
@@ -1816,6 +1811,8 @@ impl KeelWindow {
                     bubble_max_w: wrap_hold.map(|w| 0.85 * w),
                     plan_running: self.active_status() == Some(ChatStatus::Running),
                     plan_cards: std::rc::Rc::new(self.plan_cards.clone()),
+                    citations: self.transcript.citations_map(),
+                    current_citations: None,
                     probe: self.geo_trace.on.get().then(|| {
                         let tr = self.geo_trace.clone();
                         std::rc::Rc::new(move |which: crate::transcript::RowProbe| match which {

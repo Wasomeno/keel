@@ -18,7 +18,9 @@ use crate::motion::{reveal_on_hover, reveal_on_hover_curved};
 use crate::style::zpx;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 use gpui::{
     AnimationExt as _, AnyElement, Context, ElementId, FollowMode, Hsla, IntoElement, ListAlignment, ListState,
@@ -180,6 +182,10 @@ pub struct TranscriptState {
     user_points_cache: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<(usize, String)>>)>>,
     /// Cached check for a live `TurnSummary` row keyed by `items_gen`.
     live_turn_summary_cache: std::cell::Cell<Option<(u64, bool)>>,
+    /// Cached per-turn citations map keyed by `items_gen`.
+    citations_cache: std::cell::RefCell<
+        Option<(u64, std::rc::Rc<HashMap<String, std::rc::Rc<crate::citations::Citations>>>)>,
+    >,
     /// Shared mirror of `stick_to_bottom` for off-entity scroll handlers and timeline.
     stick_flag: std::rc::Rc<std::cell::Cell<bool>>,
     /// Shared flag telling scroll handlers whether `glide` is currently active.
@@ -269,10 +275,39 @@ impl TranscriptState {
             items_gen: 0,
             user_points_cache: std::cell::RefCell::new(None),
             live_turn_summary_cache: std::cell::Cell::new(None),
+            citations_cache: std::cell::RefCell::new(None),
             stick_flag: std::rc::Rc::new(std::cell::Cell::new(true)),
             glide_active: std::rc::Rc::new(std::cell::Cell::new(false)),
             has_motion: false,
         }
+    }
+
+    /// Map of assistant turn head `message_id` -> merged `Citations` across the turn.
+    pub fn citations_map(
+        &self,
+    ) -> std::rc::Rc<HashMap<String, std::rc::Rc<crate::citations::Citations>>> {
+        if let Some((cached_gen, cached)) = self.citations_cache.borrow().as_ref()
+            && *cached_gen == self.items_gen
+        {
+            return cached.clone();
+        }
+        let mut merged: HashMap<String, crate::citations::Citations> = HashMap::new();
+        for item in self.items.iter() {
+            if let TranscriptBlock::Citations { citations, .. } = &item.block {
+                merged
+                    .entry(item.message_id.clone())
+                    .and_modify(|existing| existing.extend_unique(citations))
+                    .or_insert_with(|| citations.clone());
+            }
+        }
+        let rc = std::rc::Rc::new(
+            merged
+                .into_iter()
+                .map(|(k, v)| (k, std::rc::Rc::new(v)))
+                .collect::<HashMap<_, _>>(),
+        );
+        *self.citations_cache.borrow_mut() = Some((self.items_gen, rc.clone()));
+        rc
     }
 
     pub fn items_gen(&self) -> u64 {
@@ -821,7 +856,17 @@ impl TranscriptState {
                     0.0
                 }),
             TranscriptBlock::Subagent { .. } => px(crate::trace_view::LINE_H),
-            TranscriptBlock::Chart { .. } => px(crate::chart::HEIGHT + 76.0),
+            TranscriptBlock::Chart { chart, .. } => {
+                let head = 40.0;
+                let headline = if chart.headline.is_some() { 32.0 } else { 0.0 };
+                let legend = if chart.series.len() > 1 { 30.0 } else { 0.0 };
+                let gap = if chart.headline.is_none() && chart.series.len() <= 1 {
+                    6.0
+                } else {
+                    0.0
+                };
+                px(crate::chart::HEIGHT + head + headline + legend + gap + 10.0)
+            }
             TranscriptBlock::Choices { choices, .. } => {
                 px(CHOICE_HEADER_H + CHOICE_ROW_H * choices.options.len() as f32 + 12.0)
             }
@@ -859,6 +904,7 @@ impl TranscriptState {
             TranscriptBlock::PlanCard { plan, .. } => {
                 px(36. + 20. + plan.steps.len() as f32 * 40. + 48.)
             }
+            TranscriptBlock::Citations { .. } => px(68.0),
         };
         self.height_memo.insert(row_id, content_len, width, height);
         height
@@ -882,6 +928,11 @@ pub enum RowAction {
     /// A file chip: preview in the browser pane, or open with the system app.
     OpenFile {
         path: String,
+    },
+    /// Open a workspace file in the right Files pane, scrolling to `line` (1-based) if given.
+    OpenFileAt {
+        path: String,
+        line: Option<u32>,
     },
     /// A changed file in FileChanges: open its diff in the right-side diffs panel.
     OpenFileDiff {
@@ -1063,6 +1114,10 @@ pub struct RowContext {
     pub plan_running: bool,
     /// Plan cards the user has edited, approved, or that a fixture set.
     pub plan_cards: std::rc::Rc<std::collections::HashMap<String, crate::plan::CardState>>,
+    /// Per-turn citations (`head_message_id` -> `Citations`), used to link `[1]` badges.
+    pub citations: std::rc::Rc<HashMap<String, std::rc::Rc<crate::citations::Citations>>>,
+    /// Resolved citations for the row currently being rendered.
+    pub current_citations: Option<(String, std::rc::Rc<crate::citations::Citations>)>,
 }
 
 /// Which row box a debug probe reads.
@@ -1126,7 +1181,9 @@ fn render_mermaid(
                 .id(ElementId::Name(format!("show-full-{}", item.row_id()).into()))
                 .h(zpx(34.))
                 .w_full()
-                .bg(c(t.code))
+                .border_t_1()
+                .border_color(c(t.border).opacity(0.65))
+                .bg(c(t.surface).opacity(0.55))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -1164,8 +1221,10 @@ fn render_mermaid(
         .group(group.clone())
         .w_full()
         .my_2()
-        .rounded(RADIUS_MD)
-        .bg(c(t.code))
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(c(t.border))
+        .bg(c(t.floating))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -1225,7 +1284,7 @@ fn render_diagram(
         .w_full()
         .my_2()
         .rounded(RADIUS_LG)
-        .bg(c(t.code))
+        .bg(c(t.floating))
         .border_1()
         .border_color(c(t.border))
         .overflow_hidden()
@@ -1353,7 +1412,8 @@ fn chart_bar(
     );
 
     div()
-        .h(zpx(36.))
+        .pt(zpx(10.))
+        .pb(zpx(2.))
         .px_4()
         .flex()
         .flex_row()
@@ -1542,8 +1602,8 @@ fn render_chart(
         };
         div()
             .px_4()
-            .pt_1()
-            .pb_1()
+            .pt(zpx(2.))
+            .pb(zpx(6.))
             .flex()
             .flex_row()
             .items_baseline()
@@ -1551,7 +1611,8 @@ fn render_chart(
             .child(
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_size(zpx(18.))
+                    .text_size(zpx(20.))
+                    .line_height(zpx(24.))
                     .text_color(c(t.text))
                     .child(h.value.clone()),
             )
@@ -1622,33 +1683,55 @@ fn render_chart(
             )
     });
 
+    let show_legend = chart.series.len() > 1;
+    let legend_row = show_legend.then(|| {
+        div()
+            .px(zpx(10.))
+            .pt(zpx(2.))
+            .pb(zpx(6.))
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(legend)
+    });
+
     let chart_clone = chart.clone();
     let row_id_clone = row_id.clone();
     let enter_at = item.enter;
     let reduced = rc.reduced;
+    let needs_top_gap = headline_row.is_none() && !show_legend;
     let content = div()
         .flex()
         .flex_col()
         .children(headline_row)
+        .children(legend_row)
         .child(
             div()
-                .px(zpx(10.))
-                .pt_1()
-                .pb_2()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .children(legend),
-        )
-        .child(
-            gpui::canvas(
-                |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-                move |bounds, hitbox, window, cx| {
-                    paint_chart(&chart_clone, &row_id_clone, menu_open, enter_at, bounds, &hitbox, &active_series, reduced, t, window, cx)
-                },
-            )
-            .w_full()
-            .h(px(crate::chart::HEIGHT)),
+                .when(needs_top_gap, |d| d.pt(zpx(6.)))
+                .child(
+                    gpui::canvas(
+                        |bounds, window, _| {
+                            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+                        },
+                        move |bounds, hitbox, window, cx| {
+                            paint_chart(
+                                &chart_clone,
+                                &row_id_clone,
+                                menu_open,
+                                enter_at,
+                                bounds,
+                                &hitbox,
+                                &active_series,
+                                reduced,
+                                t,
+                                window,
+                                cx,
+                            )
+                        },
+                    )
+                    .w_full()
+                    .h(px(crate::chart::HEIGHT)),
+                ),
         );
 
     let card = div()
@@ -1656,11 +1739,10 @@ fn render_chart(
         .relative()
         .hover_probe(group)
         .w_full()
-        .my_2()
-        .rounded(RADIUS_MD)
-        .bg(c(t.code))
+        .rounded(RADIUS_LG)
+        .bg(c(t.floating))
         .border_1()
-        .border_color(c(t.border).opacity(0.18))
+        .border_color(c(t.border))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -1688,7 +1770,7 @@ fn render_choices(
         .items_center()
         .gap_1p5()
         .border_b_1()
-        .border_color(c(t.border))
+        .border_color(c(t.border).opacity(0.65))
         .text_size(zpx(11.5))
         .text_color(c(t.text_muted))
         .child(
@@ -1733,7 +1815,9 @@ fn render_choices(
             .items_center()
             .gap_1()
             .rounded_full()
-            .bg(c(t.selected))
+            .border_1()
+            .border_color(c(t.border).opacity(0.6))
+            .bg(c(t.surface).opacity(0.75))
             .text_size(zpx(10.5))
             .text_color(c(t.text_muted))
             .child(Icon::StarFilled.el(zpx(9.)))
@@ -1755,7 +1839,9 @@ fn render_choices(
             .flex()
             .items_center()
             .gap_3()
-            .when(ix > 0, |d| d.border_t_1().border_color(c(t.border)))
+            .when(ix > 0, |d| {
+                d.border_t_1().border_color(c(t.border).opacity(0.65))
+            })
             .when(live, |d| d.hover_fade(c(t.hover), Some(c(t.selected))))
             .child(badge)
             .child(
@@ -1795,7 +1881,7 @@ fn render_choices(
             .rounded(RADIUS_LG)
             .border_1()
             .border_color(c(t.border))
-            .bg(c(t.surface))
+            .bg(c(t.floating))
             .overflow_hidden()
             .when(!live, |d| d.opacity(0.6))
             .child(header)
@@ -1889,7 +1975,7 @@ fn render_tests(
     let failures = (!run.failures.is_empty()).then(|| {
         div()
             .border_t_1()
-            .border_color(c(t.border))
+            .border_color(c(t.border).opacity(0.65))
             .px_3()
             .py(px(6.))
             .flex()
@@ -1930,7 +2016,7 @@ fn render_tests(
         .rounded(RADIUS_LG)
         .border_1()
         .border_color(c(t.border))
-        .bg(c(t.surface))
+        .bg(c(t.floating))
         .overflow_hidden()
         .child(summary)
         .children(failures);
@@ -2709,7 +2795,7 @@ fn render_steps(
         .items_center()
         .gap_1p5()
         .border_b_1()
-        .border_color(c(t.border))
+        .border_color(c(t.border).opacity(0.65))
         .text_size(zpx(11.5))
         .text_color(c(t.text_muted))
         .child(Icon::ListChecks.el(zpx(12.)))
@@ -2760,7 +2846,9 @@ fn render_steps(
             .flex()
             .items_center()
             .gap_3()
-            .when(ix > 0, |d| d.border_t_1().border_color(c(t.border)))
+            .when(ix > 0, |d| {
+                d.border_t_1().border_color(c(t.border).opacity(0.65))
+            })
             .when(state == "later", |d| d.opacity(0.55))
             .child(badge)
             .child(
@@ -2793,7 +2881,7 @@ fn render_steps(
             .rounded(RADIUS_LG)
             .border_1()
             .border_color(c(t.border))
-            .bg(c(t.surface))
+            .bg(c(t.floating))
             .overflow_hidden()
             .child(header)
             .children(rows),
@@ -2823,7 +2911,7 @@ fn render_callout(
         .rounded(RADIUS_LG)
         .border_1()
         .border_color(c(t.border))
-        .bg(c(t.surface))
+        .bg(c(t.floating))
         .child(
             div()
                 .flex()
@@ -2843,6 +2931,201 @@ fn render_callout(
     div().w_full().py_1().child(crate::motion::appear(
         card,
         format!("callout-{}", item.row_id()),
+        crate::motion::BASE,
+        4.,
+        rc.reduced,
+    ))
+}
+
+/// Action triggered when clicking an evidence citation pill or inline `[1]` badge.
+fn citation_open_action(cite: &crate::citations::CitationItem) -> Option<RowAction> {
+    use crate::citations::CitationKind;
+    match cite.kind {
+        CitationKind::File => {
+            if let Some(path) = &cite.path {
+                Some(RowAction::OpenFileAt {
+                    path: path.clone(),
+                    line: cite.lines.map(|(s, _)| s),
+                })
+            } else if !cite.excerpt.is_empty() {
+                Some(RowAction::OpenFullOutput {
+                    title: Some(cite.label.clone()),
+                    content: cite.excerpt.clone(),
+                    error: false,
+                })
+            } else {
+                None
+            }
+        }
+        CitationKind::Diff => {
+            if let Some(path) = &cite.path {
+                Some(RowAction::OpenFileDiff { path: path.clone() })
+            } else if !cite.excerpt.is_empty() {
+                Some(RowAction::OpenFullOutput {
+                    title: Some(cite.label.clone()),
+                    content: cite.excerpt.clone(),
+                    error: false,
+                })
+            } else {
+                None
+            }
+        }
+        CitationKind::Url => cite
+            .url
+            .clone()
+            .map(|url| RowAction::OpenUrl { url })
+            .or_else(|| {
+                (!cite.excerpt.is_empty()).then(|| RowAction::OpenFullOutput {
+                    title: Some(cite.label.clone()),
+                    content: cite.excerpt.clone(),
+                    error: false,
+                })
+            }),
+        CitationKind::Command => (!cite.excerpt.is_empty()).then(|| RowAction::OpenFullOutput {
+            title: cite.command.clone().or_else(|| Some(cite.label.clone())),
+            content: cite.excerpt.clone(),
+            error: false,
+        }),
+    }
+}
+
+/// Evidence & source citations card: sleek strip of directly clickable source pills.
+fn render_citations(
+    item: &TranscriptRowItem,
+    citations: &crate::citations::Citations,
+    rc: &RowContext,
+) -> gpui::Div {
+    use crate::citations::CitationKind;
+    let t = rc.tokens;
+    let row_id = item.row_id().to_string();
+
+    let kind_icon = |item: &crate::citations::CitationItem| -> Icon {
+        match item.kind {
+            CitationKind::File => item
+                .path
+                .as_deref()
+                .map(|p| crate::files::FileKind::of(std::path::Path::new(p)).icon())
+                .unwrap_or(Icon::File),
+            CitationKind::Diff => Icon::GitCompare,
+            CitationKind::Command => Icon::Tool,
+            CitationKind::Url => Icon::Globe,
+        }
+    };
+
+    let pills = citations.items.iter().map(|cite| {
+        let tip_item = cite.clone();
+        let on_action = rc.on_action.clone();
+        let click_action = citation_open_action(cite);
+        let cite_id = cite.id;
+        div()
+            .id(ElementId::Name(
+                format!("cite-pill-{row_id}-{cite_id}").into(),
+            ))
+            .max_w(zpx(240.))
+            .h(zpx(26.))
+            .px(zpx(8.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(zpx(5.))
+            .rounded_full()
+            .border_1()
+            .bg(c(t.surface).opacity(0.75))
+            .border_color(c(t.border).opacity(0.65))
+            .text_color(c(t.text_muted))
+            .when(click_action.is_some(), |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+                    .hover_fade(c(t.surface), None)
+                    .active(|s| s.opacity(0.85))
+            })
+            .tooltip_show_delay(
+                crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)),
+            )
+            .tooltip(move |_, cx| {
+                let item = tip_item.clone();
+                cx.new(move |_| CitationTip {
+                    item,
+                    tokens: t,
+                    entrance: crate::view::tooltip::Entrance::new(),
+                })
+                .into()
+            })
+            .when_some(click_action, |d, action| {
+                d.on_click(move |_, _, cx| {
+                    on_action(action.clone(), cx);
+                })
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(MONO)
+                    .text_size(zpx(11.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(t.text_faint))
+                    .child(format!("[{cite_id}]")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(c(t.text_muted))
+                    .child(kind_icon(cite).el(zpx(11.5))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(zpx(12.))
+                    .child(cite.label.clone()),
+            )
+    });
+
+    let card = div()
+        .w_full()
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(c(t.border))
+        .bg(c(t.floating))
+        .overflow_hidden()
+        .child(
+            div()
+                .w_full()
+                .px_3()
+                .py(px(9.))
+                .flex()
+                .flex_col()
+                .gap(px(7.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .text_size(zpx(11.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(t.text_muted))
+                        .child(Icon::File.el(zpx(12.)))
+                        .child("Evidence & sources")
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py(px(1.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(c(t.border).opacity(0.6))
+                                .bg(c(t.surface).opacity(0.75))
+                                .font_family(MONO)
+                                .text_size(zpx(10.5))
+                                .text_color(c(t.text_faint))
+                                .child(format!("{}", citations.items.len())),
+                        ),
+                )
+                .child(div().flex().flex_row().flex_wrap().gap_1p5().children(pills)),
+        );
+
+    div().w_full().py_1().child(crate::motion::appear(
+        card,
+        format!("citations-{}", item.row_id()),
         crate::motion::BASE,
         4.,
         rc.reduced,
@@ -2892,8 +3175,12 @@ fn render_compare(
             .gap_1()
             .rounded(RADIUS_LG)
             .border_1()
-            .border_color(c(if col.recommended { t.accent } else { t.border }))
-            .bg(c(t.surface))
+            .border_color(if col.recommended {
+                c(t.accent).opacity(0.45)
+            } else {
+                c(t.border)
+            })
+            .bg(c(t.floating))
             .hover_fade(c(t.hover), None)
             .child(
                 div()
@@ -2920,7 +3207,9 @@ fn render_compare(
                                 .flex()
                                 .items_center()
                                 .rounded_full()
-                                .bg(c(t.selected))
+                                .border_1()
+                                .border_color(c(t.border).opacity(0.6))
+                                .bg(c(t.surface).opacity(0.75))
                                 .text_size(zpx(10.5))
                                 .text_color(c(t.text_muted))
                                 .child("Recommended"),
@@ -2972,7 +3261,7 @@ fn render_stats(
                 .rounded(RADIUS_LG)
                 .border_1()
                 .border_color(c(t.border))
-                .bg(c(t.surface))
+                .bg(c(t.floating))
                 .hover(|s| s.border_color(c(t.focus)))
                 .child(
                     div()
@@ -3146,7 +3435,7 @@ fn render_file_changes(
                 .rounded(RADIUS_LG)
                 .border_1()
                 .border_color(c(t.border))
-                .bg(c(t.surface))
+                .bg(c(t.floating))
                 .overflow_hidden()
                 .child(single_row),
         );
@@ -3288,7 +3577,7 @@ fn render_file_changes(
         .flex()
         .flex_col()
         .border_t_1()
-        .border_color(c(t.border))
+        .border_color(c(t.border).opacity(0.65))
         .children(rows)
         .children(more);
     let body_height =
@@ -3300,7 +3589,7 @@ fn render_file_changes(
             .rounded(RADIUS_LG)
             .border_1()
             .border_color(c(t.border))
-            .bg(c(t.surface))
+            .bg(c(t.floating))
             .overflow_hidden()
             .child(head)
             .children(body_animated),
@@ -3392,6 +3681,40 @@ impl ChartTween {
 }
 
 #[derive(Clone)]
+struct ChartLabelCache {
+    axis_bits: (u64, u64, u64),
+    muted_color: u32,
+    labels: Vec<String>,
+    every: usize,
+    max_tick_w: f32,
+    y_ticks: Vec<(f64, String, gpui::ShapedLine)>,
+    x_labels: Vec<(usize, gpui::ShapedLine)>,
+}
+
+struct CachedTipRow {
+    si: usize,
+    raw_name: String,
+    fitted_name: String,
+    value_text: String,
+    highlight: bool,
+    name_line: gpui::ShapedLine,
+    value_line: gpui::ShapedLine,
+    value_w: f32,
+}
+
+struct ChartTipCache {
+    ix: usize,
+    max_w_bits: u32,
+    text_color: u32,
+    muted_color: u32,
+    head_text: String,
+    head_line: gpui::ShapedLine,
+    rows: Vec<CachedTipRow>,
+    target_wide: f32,
+    high: f32,
+}
+
+#[derive(Clone)]
 struct ChartState {
     entry_origin: Option<Instant>,
     prev_bounds: (f64, f64),
@@ -3399,9 +3722,6 @@ struct ChartState {
     axis_start: Instant,
     hovered_group: Option<usize>,
     dev_hovered: Option<Option<usize>>,
-    first_hover_at: Option<Instant>,
-    tip_last_hidden_at: Option<Instant>,
-    tip_is_visible: bool,
     tip_last_group: Option<usize>,
     tip_x: ChartTween,
     tip_w: ChartTween,
@@ -3412,6 +3732,8 @@ struct ChartState {
     group_focus: Vec<ChartTween>,
     keyboard_focused: bool,
     last_pointer: Option<gpui::Point<Pixels>>,
+    label_cache: Option<std::rc::Rc<ChartLabelCache>>,
+    tip_cache: Option<std::rc::Rc<ChartTipCache>>,
 }
 
 impl ChartState {
@@ -3429,24 +3751,23 @@ impl ChartState {
             axis_start: now,
             hovered_group: None,
             dev_hovered: None,
-            first_hover_at: None,
-            tip_last_hidden_at: None,
-            tip_is_visible: false,
             tip_last_group: None,
-            tip_x: ChartTween::new(0.0, now, 0.12, 0.12),
-            tip_w: ChartTween::new(0.0, now, 0.12, 0.12),
-            tip_opacity: ChartTween::new(0.0, now, 0.15, 0.10),
-            guide_x: ChartTween::new(0.0, now, 0.12, 0.12),
-            hover_dim: ChartTween::new(1.0, now, 0.10, 0.12),
+            tip_x: ChartTween::new(0.0, now, 0.10, 0.10),
+            tip_w: ChartTween::new(0.0, now, 0.10, 0.10),
+            tip_opacity: ChartTween::new(0.0, now, 0.12, 0.08),
+            guide_x: ChartTween::new(0.0, now, 0.09, 0.09),
+            hover_dim: ChartTween::new(1.0, now, 0.09, 0.08),
             series_vis: active_series
                 .iter()
                 .map(|&a| ChartTween::new(if a { 1.0 } else { 0.0 }, now, 0.20, 0.20))
                 .collect(),
             group_focus: (0..n_groups)
-                .map(|_| ChartTween::new(0.0, now, 0.12, 0.10))
+                .map(|_| ChartTween::new(0.0, now, 0.09, 0.08))
                 .collect(),
             keyboard_focused: false,
             last_pointer: None,
+            label_cache: None,
+            tip_cache: None,
         }
     }
 
@@ -3494,7 +3815,7 @@ impl ChartState {
         }
         if self.group_focus.len() != n_groups {
             self.group_focus = (0..n_groups)
-                .map(|_| ChartTween::new(0.0, now, 0.12, 0.10))
+                .map(|_| ChartTween::new(0.0, now, 0.09, 0.08))
                 .collect();
         }
     }
@@ -3509,7 +3830,6 @@ fn apply_dev_hover(state: &mut ChartState, group: Option<Option<usize>>, now: In
     state.dev_hovered = group;
     match group {
         Some(Some(ix)) => {
-            state.tip_is_visible = true;
             state.tip_last_group = Some(ix);
             state.tip_opacity.snap(1.0, now);
             state.hover_dim.snap(0.50, now);
@@ -3518,7 +3838,6 @@ fn apply_dev_hover(state: &mut ChartState, group: Option<Option<usize>>, now: In
             }
         }
         Some(None) => {
-            state.tip_is_visible = false;
             state.hovered_group = None;
             state.tip_last_group = None;
             state.tip_opacity.snap(0.0, now);
@@ -3646,7 +3965,7 @@ fn paint_chart(
     let now = Instant::now();
     let origin = bounds.origin;
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-    let (left, top, plot_w, plot_h) = crate::chart::plot_box(w, h);
+    let (_, top, _, plot_h) = crate::chart::plot_box(w, h);
     let any_active = active_series.iter().any(|&a| a);
     let (target_lo, target_hi, target_step) = chart.axis_for(active_series);
     let n = chart.labels.len();
@@ -3692,12 +4011,86 @@ fn paint_chart(
         needs_refresh = true;
     }
 
+    // Align the Y-tick column's left edge with the card's 16px horizontal padding
+    // (`px_4`), leaving a consistent 10px gap before the horizontal gridlines.
+    // Cache shaped Y-ticks, X-labels, and `max_tick_w` so hover/animation frames avoid re-shaping.
+    let axis_bits = (
+        state.target_axis.0.to_bits(),
+        state.target_axis.1.to_bits(),
+        state.target_axis.2.to_bits(),
+    );
+    let shape_muted = |text: &str, window: &mut gpui::Window| -> gpui::ShapedLine {
+        let mut font = gpui::font(crate::style::SANS);
+        font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
+        let run = TextRun {
+            len: text.len(),
+            font,
+            color: c(t.text_muted),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(SharedString::from(text.to_string()), px(11.), &[run], None)
+    };
+    let y_valid = state.label_cache.as_ref().is_some_and(|c_cache| {
+        c_cache.axis_bits == axis_bits
+            && c_cache.muted_color == t.text_muted
+            && c_cache.labels == chart.labels
+    });
+    let mut label_cache = if y_valid {
+        state.label_cache.as_ref().unwrap().as_ref().clone()
+    } else {
+        let mut max_tick_w = 0.0_f32;
+        let mut y_ticks = Vec::new();
+        let mut tick_probe = state.target_axis.0;
+        let hi_probe = state.target_axis.1 + step * 0.1;
+        while tick_probe <= hi_probe {
+            let tick_str = chart.format_tick(tick_probe);
+            let shaped = if tick_str.is_empty() {
+                shape_muted("", window)
+            } else {
+                let line = shape_muted(&tick_str, window);
+                max_tick_w = max_tick_w.max(f32::from(line.width));
+                line
+            };
+            y_ticks.push((tick_probe, tick_str, shaped));
+            tick_probe += step;
+        }
+        ChartLabelCache {
+            axis_bits,
+            muted_color: t.text_muted,
+            labels: chart.labels.clone(),
+            every: 0,
+            max_tick_w,
+            y_ticks,
+            x_labels: Vec::new(),
+        }
+    };
+    let left = (16.0 + label_cache.max_tick_w + 10.0).max(48.0);
+    let plot_w = (w - left - 16.0).max(20.0);
+    let slot = plot_w / n.max(1) as f32;
+    let every = (60. / slot).ceil().max(1.) as usize;
+    if label_cache.every != every {
+        label_cache.every = every;
+        label_cache.x_labels = chart
+            .labels
+            .iter()
+            .enumerate()
+            .step_by(every)
+            .map(|(ix, name)| (ix, shape_muted(name, window)))
+            .collect();
+    }
+    let label_cache = std::rc::Rc::new(label_cache);
+    state.label_cache = Some(label_cache.clone());
+
     let pointer = window.mouse_position();
     let is_hovered = !menu_open && hitbox.is_hovered(window);
     let pointer_hover = is_hovered
         .then(|| {
             let x = f32::from(pointer.x - origin.x) - left;
-            crate::chart::category_at(chart, plot_w, x)
+            crate::chart::category_at_len(n, plot_w, x)
         })
         .flatten();
 
@@ -3705,10 +4098,22 @@ fn paint_chart(
         window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
     }
 
+    let view = window.current_view();
     let r_id_move = row_id.to_string();
     let hb = hitbox.clone();
-    window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, _| {
-        if phase == gpui::DispatchPhase::Bubble && hb.is_hovered(window) {
+    window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, cx| {
+        if phase != gpui::DispatchPhase::Bubble {
+            return;
+        }
+        let now_hovered = !menu_open && hb.is_hovered(window);
+        let next_cat = now_hovered
+            .then(|| {
+                let x = f32::from(ev.position.x - origin.x) - left;
+                crate::chart::category_at_len(n, plot_w, x)
+            })
+            .flatten();
+        let mut wake = now_hovered != is_hovered || next_cat != pointer_hover;
+        if now_hovered {
             CHART_STATES.with(|states| {
                 if let Some(st) = states.borrow_mut().get_mut(&r_id_move) {
                     let moved = st.last_pointer.is_none_or(|p| {
@@ -3716,22 +4121,21 @@ fn paint_chart(
                             || f32::from(ev.position.y - p.y).abs() > 1.0
                     });
                     st.last_pointer = Some(ev.position);
-                    if moved {
+                    if moved && st.keyboard_focused {
                         st.keyboard_focused = false;
+                        wake = true;
                     }
                 }
             });
-            window.refresh();
+        }
+        if wake {
+            cx.notify(view);
         }
     });
 
-    let was_hovering = state.hovered_group.is_some();
-
-    // Track hover transitions, warm tooltip re-entry, and 100ms initial delay
+    // Immediate hover tracking (zero artificial delay so pointer tracking & exit feel crisp)
     let effective_hover = if menu_open || !any_series_visible {
         state.hovered_group = None;
-        state.first_hover_at = None;
-        state.tip_is_visible = false;
         state.tip_opacity.snap(0.0, now);
         state.hover_dim.snap(1.0, now);
         for f in &mut state.group_focus {
@@ -3742,25 +4146,13 @@ fn paint_chart(
         match state.dev_hovered {
             Some(forced) => {
                 state.hovered_group = forced;
-                if forced.is_none() {
-                    state.first_hover_at = None;
-                    state.tip_is_visible = false;
-                }
                 forced
             }
             None => {
                 if pointer_hover.is_some() {
-                    if state.hovered_group.is_none() && state.first_hover_at.is_none() {
-                        state.first_hover_at = Some(now);
-                    }
                     state.hovered_group = pointer_hover;
                 } else if !state.keyboard_focused {
-                    if was_hovering {
-                        state.tip_last_hidden_at = Some(now);
-                    }
                     state.hovered_group = None;
-                    state.first_hover_at = None;
-                    state.tip_is_visible = false;
                 }
                 state.hovered_group
             }
@@ -3771,7 +4163,7 @@ fn paint_chart(
         state.tip_last_group = Some(ix);
     }
 
-    // Hover dimming (120ms enter, 100ms exit) and per-group slot focus
+    // Hover dimming (80ms enter, 90ms exit) and per-group slot focus (90ms enter, 80ms exit)
     let target_dim = if !menu_open && effective_hover.is_some() {
         0.50
     } else {
@@ -3798,24 +4190,8 @@ fn paint_chart(
         group_focus_vals.push(v);
     }
 
-    // Tooltip entrance (150ms) and exit (100ms), skipping delay when warm
-    let tip_warm = state.tip_is_visible
-        || state.tip_opacity.value(now).0 > 0.05
-        || state
-            .tip_last_hidden_at
-            .is_some_and(|at| now.saturating_duration_since(at) < Duration::from_millis(350));
-    let delay_passed = !menu_open
-        && effective_hover.is_some()
-        && (tip_warm
-            || matches!(state.dev_hovered, Some(Some(_)))
-            || state.keyboard_focused
-            || state
-                .first_hover_at
-                .is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_millis(100)));
-    if delay_passed {
-        state.tip_is_visible = true;
-    }
-    let target_opacity = if !menu_open && state.tip_is_visible && effective_hover.is_some() {
+    // Tooltip entrance (120ms) and exit (80ms) starting immediately on hover
+    let target_opacity = if !menu_open && effective_hover.is_some() {
         1.0
     } else {
         0.0
@@ -3835,7 +4211,7 @@ fn paint_chart(
 
     // Entry animation (only when the row arrived live)
     let total_entry_ms = match chart.kind {
-        crate::chart::Kind::Bar => 180.0 + (n.saturating_sub(1) as f32 * 20.0).min(100.0),
+        crate::chart::Kind::Bar => 200.0 + (n.saturating_sub(1) as f32 * 30.0).min(120.0),
         crate::chart::Kind::Line => 240.0,
     };
     let entry_elapsed_ms = state
@@ -3870,17 +4246,15 @@ fn paint_chart(
             states.borrow_mut().insert(row_id.to_string(), state);
         });
         if needs_refresh {
-            window.refresh();
+            window.request_animation_frame();
         }
         return;
     }
 
     // Paint Gridlines and Y-axis Ticks against clean target_step multiples
     let y_of = |v: f64| top + plot_h * (1. - ((v - lo) / (hi - lo).max(1e-6)) as f32);
-    let mut tick = state.target_axis.0;
-    let hi_bound = state.target_axis.1 + step * 0.1;
-    while tick <= hi_bound {
-        let y = y_of(tick);
+    for (tick, tick_str, shaped) in &label_cache.y_ticks {
+        let y = y_of(*tick);
         if y >= top - 4. && y <= top + plot_h + 4. {
             let edge_fade = if axis_moving {
                 let in_plot = (y >= top && y <= top + plot_h) as u8 as f32;
@@ -3894,39 +4268,36 @@ fn paint_chart(
                 gpui::Bounds::new(shift(origin, left, y.round()), gpui::size(px(plot_w), px(1.))),
                 c(t.text).opacity(grid_alpha),
             ));
-            let tick_str = chart.format_tick(tick);
-            paint_chart_tick(
-                &tick_str,
-                origin,
-                left - 8.,
-                y - 6.,
-                true,
-                c(t.text_muted).opacity(edge_fade),
-                window,
-                cx,
-            );
+            if !tick_str.is_empty() {
+                if (edge_fade - 1.0).abs() <= 1e-4 {
+                    let draw_x = (left - 10.) - f32::from(shaped.width);
+                    let _ = shaped.paint(
+                        shift(origin, draw_x, y - 6.),
+                        px(14.),
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                } else {
+                    paint_chart_tick(
+                        tick_str,
+                        origin,
+                        left - 10.,
+                        y - 6.,
+                        true,
+                        c(t.text_muted).opacity(edge_fade),
+                        window,
+                        cx,
+                    );
+                }
+            }
         }
-        tick += step;
     }
 
     // Paint X-axis Category Labels
-    let slot = plot_w / n as f32;
-    let every = (60. / slot).ceil().max(1.) as usize;
-    for (ix, name) in chart.labels.iter().enumerate().step_by(every) {
-        let x = left + slot * (ix as f32 + 0.5);
-        let mut font = gpui::font(crate::style::SANS);
-        font.features = gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
-        let run = TextRun {
-            len: name.len(),
-            font,
-            color: c(t.text_muted),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let line = window
-            .text_system()
-            .shape_line(SharedString::from(name.to_string()), px(11.), &[run], None);
+    for (ix, line) in &label_cache.x_labels {
+        let x = left + slot * (*ix as f32 + 0.5);
         let line_w = f32::from(line.width);
         let _ = line.paint(
             shift(origin, x - line_w / 2., top + plot_h + 8.),
@@ -3944,36 +4315,50 @@ fn paint_chart(
         crate::chart::Kind::Bar => {
             let spans = bar_group_spans(slot, &series_alphas);
             if spans.iter().any(|(_, w)| *w > 0.25) {
+                let mut min_span_x = f32::INFINITY;
+                let mut max_span_x = f32::NEG_INFINITY;
+                for (si, &(rel_x, bar_w)) in spans.iter().enumerate() {
+                    if series_alphas[si] > 0.005 && bar_w > 0.25 {
+                        min_span_x = min_span_x.min(rel_x);
+                        max_span_x = max_span_x.max(rel_x + bar_w);
+                    }
+                }
+                let group_w = if max_span_x > min_span_x {
+                    max_span_x - min_span_x
+                } else {
+                    0.0
+                };
+                let max_wash = (slot - 4.0).max(24.0);
+                let wash_w = (group_w + 24.0).max(56.0).min(max_wash);
                 for (ix, _) in chart.labels.iter().enumerate() {
+                    let slot_center = left + slot * (ix as f32 + 0.5);
                     let focus = group_focus_vals.get(ix).copied().unwrap_or(0.0);
                     if focus > 0.005 {
-                        let slot_x = left + slot * ix as f32 + 2.0;
-                        let slot_w = (slot - 4.0).max(4.0);
+                        let wash_x = slot_center - wash_w * 0.5;
                         window.paint_quad(
                             gpui::fill(
-                                gpui::Bounds::new(shift(origin, slot_x, top), gpui::size(px(slot_w), px(plot_h))),
+                                gpui::Bounds::new(shift(origin, wash_x, top), gpui::size(px(wash_w), px(plot_h))),
                                 c(t.text).opacity(0.035 * focus),
                             )
-                            .corner_radii(px(4.)),
+                            .corner_radii(px(6.)),
                         );
                     }
 
                     let (entry_h, entry_op) = match entry_elapsed_ms {
                         Some(elapsed) if !reduced => {
-                            let stagger = (ix as f32 * 20.0).min(100.0);
+                            let stagger = (ix as f32 * 30.0).min(120.0);
                             if elapsed < stagger {
                                 continue;
                             }
                             let p = crate::motion::ease_out_strong(
-                                ((elapsed - stagger) / 180.0).clamp(0.0, 1.0),
+                                ((elapsed - stagger) / 200.0).clamp(0.0, 1.0),
                             );
-                            (0.08 + 0.92 * p, 0.12 + 0.88 * p)
+                            (0.06 + 0.94 * p, p)
                         }
                         _ => (1.0, 1.0),
                     };
 
                     let dim = 1.0 - (1.0 - global_dim) * (1.0 - focus);
-                    let slot_center = left + slot * (ix as f32 + 0.5);
 
                     for (si, &(rel_x, bar_w)) in spans.iter().enumerate() {
                         let series_alpha = series_alphas[si];
@@ -3994,7 +4379,7 @@ fn paint_chart(
                         };
                         let h = (full_h * entry_h * (0.80 + 0.20 * series_alpha)).max(1.0);
                         let top_y = if *v >= 0. { raw_bot - h } else { zero_y };
-                        let r = (bar_w * 0.5).min(h * 0.5).min(4.0);
+                        let r = (bar_w * 0.5).min(h * 0.5).min(3.0);
                         let corners = if *v >= 0. {
                             gpui::Corners {
                                 top_left: px(r),
@@ -4028,7 +4413,9 @@ fn paint_chart(
                 }
                 _ => 1.0,
             };
-            let max_reveal_x = left + plot_w * line_reveal_progress;
+            let first_x = left + slot * 0.5;
+            let last_x = (left + plot_w - slot * 0.5).max(first_x);
+            let max_reveal_x = first_x + (last_x - first_x) * line_reveal_progress;
 
             let mut series_splines: Vec<(usize, Vec<Vec<(f32, f32)>>)> = Vec::new();
             for (si, series) in chart.series.iter().enumerate() {
@@ -4065,7 +4452,10 @@ fn paint_chart(
                             area.line_to(shift(origin, clipped.last().unwrap().0, zero_y));
                             area.close();
                             if let Ok(p) = area.build() {
-                                window.paint_path(p, base_color.opacity(0.06 * series_alpha));
+                                window.paint_path(
+                                    p,
+                                    base_color.opacity(0.06 * series_alpha * line_reveal_progress),
+                                );
                             }
                         }
 
@@ -4153,7 +4543,7 @@ fn paint_chart(
 
     // Keyboard support: Left/Right to step between groups (instant, no animation)
     let r_id = row_id.to_string();
-    window.on_key_event(move |event: &gpui::KeyDownEvent, phase, window, _| {
+    window.on_key_event(move |event: &gpui::KeyDownEvent, phase, _window, cx| {
         if phase != gpui::DispatchPhase::Bubble {
             return;
         }
@@ -4176,13 +4566,12 @@ fn paint_chart(
                         state.keyboard_focused = true;
                         state.hovered_group = Some(next);
                         state.dev_hovered = None;
-                        state.tip_is_visible = true;
                         state.tip_last_group = Some(next);
                         state.tip_opacity.snap(1.0, now);
                         state.tip_x.snap(state.tip_x.target, now);
                         state.tip_w.snap(state.tip_w.target, now);
                         state.guide_x.snap(state.guide_x.target, now);
-                        window.refresh();
+                        cx.notify(view);
                     }
                 }
             });
@@ -4191,7 +4580,7 @@ fn paint_chart(
 
     let r_id_mouse = row_id.to_string();
     let hb_mouse = hitbox.clone();
-    window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, window, _| {
+    window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, window, cx| {
         if phase != gpui::DispatchPhase::Bubble {
             return;
         }
@@ -4200,11 +4589,11 @@ fn paint_chart(
             if let Some(state) = states.borrow_mut().get_mut(&r_id_mouse) {
                 if inside {
                     state.keyboard_focused = true;
-                    window.refresh();
+                    cx.notify(view);
                 } else if state.keyboard_focused {
                     state.keyboard_focused = false;
                     state.hovered_group = None;
-                    window.refresh();
+                    cx.notify(view);
                 }
             }
         });
@@ -4253,7 +4642,7 @@ fn paint_chart(
     });
 
     if needs_refresh {
-        window.refresh();
+        window.request_animation_frame();
     }
 }
 
@@ -4309,36 +4698,94 @@ fn paint_chart_tip(
     };
 
     let max_w = (plot_w - 16.).max(130.);
-    let value_w = rows
-        .iter()
-        .map(|(_, _, v, _)| f32::from(shape(v, 11.5, c(t.text), true, window).width))
-        .fold(0., f32::max);
-    let name_room = max_w - 2. * PAD_X - SWATCH - 6. - GAP - value_w;
+    let max_w_bits = max_w.to_bits();
+    let tip_cache_valid = state.tip_cache.as_ref().is_some_and(|c_tip| {
+        c_tip.ix == ix
+            && c_tip.max_w_bits == max_w_bits
+            && c_tip.text_color == t.text
+            && c_tip.muted_color == t.text_muted
+            && c_tip.head_text == name
+            && c_tip.rows.len() == rows.len()
+            && c_tip
+                .rows
+                .iter()
+                .zip(rows)
+                .all(|(a, (si, n, v, hi))| {
+                    a.si == *si && a.raw_name == *n && a.value_text == *v && a.highlight == *hi
+                })
+    });
 
-    let fit = |text: &str, window: &mut gpui::Window| -> String {
-        if f32::from(shape(text, 11.5, c(t.text_muted), false, window).width) <= name_room {
-            return text.to_string();
-        }
-        let mut cut: String = text.to_string();
-        while !cut.is_empty() {
-            cut.pop();
-            let candidate = format!("{}…", cut.trim_end());
-            if f32::from(shape(&candidate, 11.5, c(t.text_muted), false, window).width) <= name_room {
-                return candidate;
+    let tip_cache = if tip_cache_valid {
+        state.tip_cache.as_ref().unwrap().clone()
+    } else {
+        let value_lines: Vec<gpui::ShapedLine> = rows
+            .iter()
+            .map(|(_, _, v, _)| shape(v, 11.5, c(t.text), true, window))
+            .collect();
+        let value_w = value_lines
+            .iter()
+            .map(|line| f32::from(line.width))
+            .fold(0., f32::max);
+        let name_room = max_w - 2. * PAD_X - SWATCH - 6. - GAP - value_w;
+
+        let fit = |text: &str, window: &mut gpui::Window| -> (String, gpui::ShapedLine) {
+            let full = shape(text, 11.5, c(t.text_muted), false, window);
+            if f32::from(full.width) <= name_room {
+                return (text.to_string(), full);
             }
+            let mut cut: String = text.to_string();
+            while !cut.is_empty() {
+                cut.pop();
+                let candidate = format!("{}…", cut.trim_end());
+                let shaped = shape(&candidate, 11.5, c(t.text_muted), false, window);
+                if f32::from(shaped.width) <= name_room {
+                    return (candidate, shaped);
+                }
+            }
+            let ellipsis = "…".to_string();
+            let shaped = shape(&ellipsis, 11.5, c(t.text_muted), false, window);
+            (ellipsis, shaped)
+        };
+
+        let mut name_w = 0.0_f32;
+        let mut cached_rows = Vec::with_capacity(rows.len());
+        for ((si, raw_name, value_text, highlight), value_line) in rows.iter().zip(value_lines) {
+            let (fitted_name, name_line) = fit(raw_name, window);
+            name_w = name_w.max(f32::from(name_line.width));
+            let value_w = f32::from(value_line.width);
+            cached_rows.push(CachedTipRow {
+                si: *si,
+                raw_name: raw_name.clone(),
+                fitted_name,
+                value_text: value_text.clone(),
+                highlight: *highlight,
+                name_line,
+                value_line,
+                value_w,
+            });
         }
-        "…".to_string()
+        let head_line = shape(name, 12., c(t.text), true, window);
+        let head_w = f32::from(head_line.width);
+        let body_w = SWATCH + 6. + name_w + GAP + value_w;
+        let target_wide = (head_w.max(body_w) + 2. * PAD_X).clamp(130., max_w);
+        let high = PAD_Y * 2. + ROW * (rows.len() + 1) as f32;
+        let rc = std::rc::Rc::new(ChartTipCache {
+            ix,
+            max_w_bits,
+            text_color: t.text,
+            muted_color: t.text_muted,
+            head_text: name.to_string(),
+            head_line,
+            rows: cached_rows,
+            target_wide,
+            high,
+        });
+        state.tip_cache = Some(rc.clone());
+        rc
     };
 
-    let names: Vec<String> = rows.iter().map(|(_, n, _, _)| fit(n, window)).collect();
-    let name_w = names
-        .iter()
-        .map(|n| f32::from(shape(n, 11.5, c(t.text_muted), false, window).width))
-        .fold(0., f32::max);
-    let head_w = f32::from(shape(name, 12., c(t.text), true, window).width);
-    let body_w = SWATCH + 6. + name_w + GAP + value_w;
-    let target_wide = (head_w.max(body_w) + 2. * PAD_X).clamp(130., max_w);
-    let high = PAD_Y * 2. + ROW * (rows.len() + 1) as f32;
+    let target_wide = tip_cache.target_wide;
+    let high = tip_cache.high;
 
     let at = left + slot * (ix as f32 + 0.5);
     let mut target_x = at + 12.;
@@ -4382,26 +4829,40 @@ fn paint_chart_tip(
         .corner_radii(px(9.)),
     );
 
-    // Solid surface one tone step up (c(t.surface)), no border, radius 8px
+    // Solid surface one tone step up (`c(t.surface)`) with a hairline border, radius 8px
     window.paint_quad(
         gpui::fill(
             gpui::Bounds::new(shift(origin, x, y), gpui::size(px(wide), px(high))),
             c(t.surface).opacity(tip_alpha),
         )
-        .corner_radii(px(8.)),
+        .corner_radii(px(8.))
+        .border_widths(px(1.))
+        .border_color(c(t.border).opacity(0.6 * tip_alpha)),
     );
 
+    let resting_alpha = tip_alpha >= 0.995;
     let line_y = |row: usize| y + PAD_Y + row as f32 * ROW;
-    let _ = shape(name, 12., c(t.text).opacity(tip_alpha), true, window).paint(
-        shift(origin, x + PAD_X, line_y(0)),
-        px(ROW),
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
+    if resting_alpha {
+        let _ = tip_cache.head_line.paint(
+            shift(origin, x + PAD_X, line_y(0)),
+            px(ROW),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    } else {
+        let _ = shape(name, 12., c(t.text).opacity(tip_alpha), true, window).paint(
+            shift(origin, x + PAD_X, line_y(0)),
+            px(ROW),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
 
-    for (row, ((si, _, value, highlight), label)) in rows.iter().zip(&names).enumerate() {
+    for (row, r) in tip_cache.rows.iter().enumerate() {
         let ly = line_y(row + 1);
         window.paint_quad(
             gpui::fill(
@@ -4409,28 +4870,48 @@ fn paint_chart_tip(
                     shift(origin, x + PAD_X, ly + (ROW - SWATCH) / 2.),
                     gpui::size(px(SWATCH), px(SWATCH)),
                 ),
-                series_color(t, *si, *highlight).opacity(tip_alpha),
+                series_color(t, r.si, r.highlight).opacity(tip_alpha),
             )
             .corner_radii(px(2.)),
         );
-        let _ = shape(label, 11.5, c(t.text_muted).opacity(tip_alpha), false, window).paint(
-            shift(origin, x + PAD_X + SWATCH + 6., ly),
-            px(ROW),
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
-        let v = shape(value, 11.5, c(t.text).opacity(tip_alpha), true, window);
-        let vx = x + wide - PAD_X - f32::from(v.width);
-        let _ = v.paint(
-            shift(origin, vx, ly),
-            px(ROW),
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
+        if resting_alpha {
+            let _ = r.name_line.paint(
+                shift(origin, x + PAD_X + SWATCH + 6., ly),
+                px(ROW),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            let vx = x + wide - PAD_X - r.value_w;
+            let _ = r.value_line.paint(
+                shift(origin, vx, ly),
+                px(ROW),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        } else {
+            let _ = shape(&r.fitted_name, 11.5, c(t.text_muted).opacity(tip_alpha), false, window)
+                .paint(
+                    shift(origin, x + PAD_X + SWATCH + 6., ly),
+                    px(ROW),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            let vx = x + wide - PAD_X - r.value_w;
+            let _ = shape(&r.value_text, 11.5, c(t.text).opacity(tip_alpha), true, window).paint(
+                shift(origin, vx, ly),
+                px(ROW),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
     }
 }
 
@@ -5469,8 +5950,14 @@ pub fn render_row(
     rc: &RowContext,
 ) -> AnyElement {
     let reduced = rc.reduced;
+    let current_citations = rc
+        .citations
+        .get(&item.message_id)
+        .cloned()
+        .map(|c| (item.message_id.clone(), c));
     let rc = &RowContext {
         order: (ix as u64) << 20,
+        current_citations,
         ..rc.clone()
     };
     let gap = row_gap(prev, item);
@@ -5874,7 +6361,7 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
         TranscriptBlock::List { items, .. } => prose(div())
             .flex()
             .flex_col()
-            .gap(zpx(4.))
+            .gap(zpx(6.))
             .children(items.iter().enumerate().map(|(ix, it)| {
                 let marker = match it.task {
                     Some(checked) => div()
@@ -5980,6 +6467,7 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             rc.on_action.clone(),
             rc.tokens,
         ),
+        TranscriptBlock::Citations { citations, .. } => render_citations(item, citations, rc),
         TranscriptBlock::Files { items, .. } => div()
             .w_full()
             .py_1()
@@ -6911,6 +7399,249 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
     None
 }
 
+/// Animated hover popup for inline `[1]` badges & citation pills, showing exact cited lines.
+struct CitationTip {
+    item: crate::citations::CitationItem,
+    tokens: Tokens,
+    entrance: crate::view::tooltip::Entrance,
+}
+
+impl Render for CitationTip {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::citations::CitationKind;
+        let t = self.tokens;
+        let (opacity, dy, moving) = self.entrance.look(std::time::Instant::now());
+        if moving {
+            window.request_animation_frame();
+        }
+        let icon = match self.item.kind {
+            CitationKind::File => self
+                .item
+                .path
+                .as_deref()
+                .map(|p| crate::files::FileKind::of(std::path::Path::new(p)).icon())
+                .unwrap_or(Icon::File),
+            CitationKind::Diff => Icon::GitCompare,
+            CitationKind::Command => Icon::Tool,
+            CitationKind::Url => Icon::Globe,
+        };
+        const MAX_TIP_LINES: usize = 8;
+        let total_lines = self.item.excerpt.lines().count();
+        let start_line = self.item.lines.map(|(s, _)| s);
+        let code_rows: Vec<AnyElement> = self
+            .item
+            .excerpt
+            .lines()
+            .take(MAX_TIP_LINES)
+            .enumerate()
+            .map(|(ix, line_text)| {
+                let trimmed_line = if line_text.chars().count() > 96 {
+                    let cut: String = line_text.chars().take(95).collect();
+                    format!("{cut}…")
+                } else {
+                    line_text.to_string()
+                };
+                let line_color = if self.item.kind == CitationKind::Diff {
+                    if line_text.starts_with('+') && !line_text.starts_with("+++") {
+                        t.success
+                    } else if line_text.starts_with('-') && !line_text.starts_with("---") {
+                        t.danger
+                    } else {
+                        t.text
+                    }
+                } else {
+                    t.text
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(zpx(8.))
+                    .when_some(start_line, |d, start| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .min_w(zpx(28.))
+                                .text_right()
+                                .font_family(MONO)
+                                .text_size(zpx(10.5))
+                                .text_color(c(t.text_faint))
+                                .child(format!("{}", start + ix as u32)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .font_family(MONO)
+                            .text_size(zpx(11.5))
+                            .line_height(zpx(16.))
+                            .text_color(c(line_color))
+                            .child(trimmed_line),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let hint = match self.item.kind {
+            CitationKind::File => "Click to open in Files panel",
+            CitationKind::Diff => "Click to view diff in Changes",
+            CitationKind::Command => "Click to open full output",
+            CitationKind::Url => "Click to open source URL",
+        };
+
+        div()
+            .relative()
+            .top(zpx(dy))
+            .opacity(opacity)
+            .min_w(zpx(240.))
+            .max_w(zpx(460.))
+            .rounded(RADIUS_LG)
+            .border_1()
+            .border_color(c(t.border))
+            .bg(c(t.floating))
+            .floating_surface(t)
+            .overflow_hidden()
+            .child(
+                div()
+                    .px(zpx(10.))
+                    .py(zpx(7.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(6.))
+                    .border_b_1()
+                    .border_color(c(t.border).opacity(0.65))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(zpx(5.))
+                            .py(px(1.))
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(c(t.border).opacity(0.7))
+                            .bg(c(t.surface))
+                            .font_family(MONO)
+                            .text_size(zpx(10.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(t.text))
+                            .child(format!("[{}]", self.item.id)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(c(t.text_muted))
+                            .child(icon.el(zpx(12.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(zpx(11.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(c(t.text))
+                            .child(self.item.location_text()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(zpx(10.5))
+                            .text_color(c(t.text_faint))
+                            .child(self.item.kind.label()),
+                    ),
+            )
+            .when(!code_rows.is_empty(), |d| {
+                d.child(
+                    div()
+                        .bg(c(t.code))
+                        .px(zpx(10.))
+                        .py(zpx(7.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .children(code_rows)
+                        .when(total_lines > MAX_TIP_LINES, |d| {
+                            d.child(
+                                div()
+                                    .pt(px(3.))
+                                    .text_size(zpx(10.5))
+                                    .text_color(c(t.text_faint))
+                                    .child(format!(
+                                        "+{} more lines — click to open",
+                                        total_lines - MAX_TIP_LINES
+                                    )),
+                            )
+                        }),
+                )
+            })
+            .child(
+                div()
+                    .px(zpx(10.))
+                    .py(zpx(5.))
+                    .border_t_1()
+                    .border_color(c(t.border).opacity(0.55))
+                    .t_caption()
+                    .text_color(c(t.text_faint))
+                    .child(hint),
+            )
+    }
+}
+
+/// Tactile inline `[1]` badge placed in prose; hovering previews exact source lines,
+/// and clicking opens the file/diff/output/URL directly.
+fn citation_badge(
+    id_key: &str,
+    cite: &crate::citations::CitationItem,
+    t: Tokens,
+    on_action: OnRowAction,
+) -> gpui::Stateful<gpui::Div> {
+    let tip_item = cite.clone();
+    let cite_id = cite.id;
+    let click_action = citation_open_action(cite);
+    div()
+        .id(ElementId::Name(format!("cite-badge-{id_key}").into()))
+        .flex_none()
+        .h(zpx(16.))
+        .px(zpx(4.5))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .font_family(MONO)
+        .text_size(zpx(10.5))
+        .line_height(zpx(14.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .bg(c(t.surface).opacity(0.85))
+        .border_color(c(t.border).opacity(0.6))
+        .text_color(c(t.text_muted))
+        .when(click_action.is_some(), |d| {
+            d.cursor_pointer()
+                .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+                .hover_fade(c(t.selected), None)
+                .active(|s| s.opacity(0.82))
+        })
+        .tooltip_show_delay(
+            crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)),
+        )
+        .tooltip(move |_, cx| {
+            let item = tip_item.clone();
+            cx.new(move |_| CitationTip {
+                item,
+                tokens: t,
+                entrance: crate::view::tooltip::Entrance::new(),
+            })
+            .into()
+        })
+        .when_some(click_action, |d, action| {
+            d.on_click(move |_, _, cx| {
+                on_action(action.clone(), cx);
+            })
+        })
+        .child(format!("[{cite_id}]"))
+}
+
 struct FileTip {
     path: String,
     tokens: Tokens,
@@ -7032,10 +7763,15 @@ fn file_inline_chip(
         })
 }
 
-/// Whether a paragraph needs the chip layout (links or file paths).
+/// Whether a paragraph needs the chip layout (links, file paths, or inline citations).
 /// Path-like tokens inside a multi-word code span do not count: inline code
 /// stays one text run unless the whole span is a file path.
+#[cfg(test)]
 fn needs_inline_chips(text: &str, spans: &[InlineSpan]) -> bool {
+    needs_inline_chips_with(text, spans, &[])
+}
+
+fn needs_inline_chips_with(text: &str, spans: &[InlineSpan], cite_ids: &[usize]) -> bool {
     if spans.iter().any(|s| s.link.is_some()) {
         return true;
     }
@@ -7049,9 +7785,10 @@ fn needs_inline_chips(text: &str, spans: &[InlineSpan]) -> bool {
     for span in spans {
         if span.range.start > cursor {
             let plain = &text[cursor..span.range.start];
-            if plain
-                .split_whitespace()
-                .any(|w| looks_like_file_path(w, false).is_some())
+            if !crate::citations::find_citation_badges(plain, cite_ids).is_empty()
+                || plain
+                    .split_whitespace()
+                    .any(|w| looks_like_file_path(w, false).is_some())
             {
                 return true;
             }
@@ -7060,9 +7797,10 @@ fn needs_inline_chips(text: &str, spans: &[InlineSpan]) -> bool {
     }
     if cursor < text.len() {
         let plain = &text[cursor..];
-        if plain
-            .split_whitespace()
-            .any(|w| looks_like_file_path(w, false).is_some())
+        if !crate::citations::find_citation_badges(plain, cite_ids).is_empty()
+            || plain
+                .split_whitespace()
+                .any(|w| looks_like_file_path(w, false).is_some())
         {
             return true;
         }
@@ -7097,8 +7835,10 @@ fn inline_text(
 ) -> AnyElement {
     let t = rc.tokens;
     let chip_max = inline_chip_max_w(rc);
+    let cite_ctx = rc.current_citations.as_ref();
+    let cite_ids: Vec<usize> = cite_ctx.map(|(_, c)| c.ids()).unwrap_or_default();
 
-    if !needs_inline_chips(text, spans) {
+    if !needs_inline_chips_with(text, spans, &cite_ids) {
         let key = format!("sel-{id}");
         if spans.is_empty() {
             return selectable(
@@ -7162,6 +7902,7 @@ fn inline_text(
 
     let mut elements: Vec<AnyElement> = Vec::new();
     let mut item_ix = 0;
+    let mut hug_next = false;
     for (range, style, link) in slices {
         if let Some(url) = link {
             let label = &text[range];
@@ -7178,6 +7919,7 @@ fn inline_text(
                     .into_any_element(),
                 );
                 item_ix += 1;
+                hug_next = true;
                 continue;
             }
             let host = url_host(&url);
@@ -7195,6 +7937,7 @@ fn inline_text(
                 .into_any_element(),
             );
             item_ix += 1;
+            hug_next = true;
         } else {
             let slice_str = &text[range];
             if style.code {
@@ -7210,86 +7953,138 @@ fn inline_text(
                         .into_any_element(),
                     );
                     item_ix += 1;
+                    hug_next = true;
                     continue;
                 }
-                // Multi-word (or non-path) inline code stays one mono run.
-                elements.push(
-                    div()
-                        .flex_none()
-                        .max_w_full()
-                        .min_w_0()
-                        .px(zpx(4.))
-                        .py(zpx(0.5))
-                        .rounded(RADIUS_SM)
-                        .bg(c(t.code))
-                        .text_color(c(t.text))
-                        .font_family(crate::style::MONO)
-                        .text_size(zpx(12.))
-                        .child(slice_str.to_string())
-                        .into_any_element(),
-                );
-                item_ix += 1;
-                continue;
-            }
-
-            for word in slice_str.split_whitespace() {
-                let is_bullet = word == "·" || word == "•" || word == "◦" || word == "▪";
-                let is_punct = word == ","
-                    || word == "."
-                    || word == ":"
-                    || word == ";"
-                    || word == "!"
-                    || word == "?";
-                let (trimmed_word, trailing_punct) = split_trailing_punct(word);
-
-                if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
-                    elements.push(
-                        file_inline_chip(
-                            &format!("{id}-{item_ix}"),
-                            &file_path,
-                            t,
-                            chip_max,
-                            rc.on_action.clone(),
-                        )
-                        .into_any_element(),
-                    );
-                    item_ix += 1;
-                    if !trailing_punct.is_empty() {
-                        elements.push(
-                            div()
-                                .flex_none()
-                                .ml(zpx(-3.))
-                                .text_color(c(t.text).opacity(0.88))
-                                .child(trailing_punct.to_string())
-                                .into_any_element(),
-                        );
-                        item_ix += 1;
-                    }
-                } else if is_bullet {
+                // Match `StyledText` inline code: clean medium monospace without line-tall slabs.
+                let mut first_in_code = true;
+                for code_word in slice_str.split_whitespace() {
+                    let pull = first_in_code && hug_next && !slice_str.starts_with(char::is_whitespace);
+                    first_in_code = false;
                     elements.push(
                         div()
                             .flex_none()
-                            .px(zpx(1.))
-                            .text_color(c(t.text_faint))
-                            .child(word.to_string())
+                            .when(pull, |d| d.ml(zpx(-4.)))
+                            .text_color(c(t.text))
+                            .font_family(crate::style::MONO)
+                            .text_size(zpx(13.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(code_word.to_string())
                             .into_any_element(),
                     );
                     item_ix += 1;
-                } else {
-                    let el = div()
-                        .flex_none()
-                        .when(is_punct, |d| d.ml(zpx(-3.)))
-                        .when(style.bold, |d| {
-                            d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(c(t.text))
-                        })
-                        .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
-                        .when(style.italic, |d| d.italic())
-                        .when(style.strike, |d| d.line_through())
-                        .child(word.to_string());
-                    elements.push(el.into_any_element());
-                    item_ix += 1;
                 }
+                hug_next = !slice_str.ends_with(char::is_whitespace);
+                continue;
+            }
+
+            let mut plain_chunks: Vec<(usize, usize, Option<usize>)> = Vec::new();
+            let badges = crate::citations::find_citation_badges(slice_str, &cite_ids);
+            let mut plain_pos = 0usize;
+            for (b_range, b_id) in badges {
+                if b_range.start > plain_pos {
+                    plain_chunks.push((plain_pos, b_range.start, None));
+                }
+                plain_chunks.push((b_range.start, b_range.end, Some(b_id)));
+                plain_pos = b_range.end;
+            }
+            if plain_pos < slice_str.len() {
+                plain_chunks.push((plain_pos, slice_str.len(), None));
+            }
+
+            for (chunk_ix, (c_start, c_end, cite_hit)) in plain_chunks.into_iter().enumerate() {
+                if let Some(cite_id) = cite_hit
+                    && let Some((_, cites)) = cite_ctx
+                    && let Some(cite) = cites.get(cite_id)
+                {
+                    let no_leading_space = if chunk_ix == 0 {
+                        hug_next && !slice_str.starts_with(char::is_whitespace)
+                    } else {
+                        c_start > 0 && !slice_str[..c_start].ends_with(char::is_whitespace)
+                    };
+                    let mut badge = citation_badge(
+                        &format!("{id}-{item_ix}"),
+                        cite,
+                        t,
+                        rc.on_action.clone(),
+                    );
+                    if no_leading_space {
+                        badge = badge.ml(zpx(-2.));
+                    }
+                    elements.push(badge.into_any_element());
+                    item_ix += 1;
+                    hug_next = true;
+                    continue;
+                }
+                let sub = &slice_str[c_start..c_end];
+                let mut first_word = true;
+                for word in sub.split_whitespace() {
+                    let is_bullet = word == "·" || word == "•" || word == "◦" || word == "▪";
+                    let is_punct = word == ","
+                        || word == "."
+                        || word == ":"
+                        || word == ";"
+                        || word == "!"
+                        || word == "?"
+                        || word == ")";
+                    let pull_punct = is_punct
+                        || (first_word
+                            && hug_next
+                            && !sub.starts_with(char::is_whitespace)
+                            && word.starts_with([',', '.', ':', ';', '!', '?', ')']));
+                    first_word = false;
+                    let (trimmed_word, trailing_punct) = split_trailing_punct(word);
+
+                    if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
+                        elements.push(
+                            file_inline_chip(
+                                &format!("{id}-{item_ix}"),
+                                &file_path,
+                                t,
+                                chip_max,
+                                rc.on_action.clone(),
+                            )
+                            .into_any_element(),
+                        );
+                        item_ix += 1;
+                        if !trailing_punct.is_empty() {
+                            elements.push(
+                                div()
+                                    .flex_none()
+                                    .ml(zpx(-4.))
+                                    .text_color(c(t.text).opacity(0.88))
+                                    .child(trailing_punct.to_string())
+                                    .into_any_element(),
+                            );
+                            item_ix += 1;
+                        }
+                    } else if is_bullet {
+                        elements.push(
+                            div()
+                                .flex_none()
+                                .px(zpx(1.))
+                                .text_color(c(t.text_faint))
+                                .child(word.to_string())
+                                .into_any_element(),
+                        );
+                        item_ix += 1;
+                    } else {
+                        let el = div()
+                            .flex_none()
+                            .when(pull_punct, |d| d.ml(zpx(-4.)))
+                            .when(style.bold, |d| {
+                                d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                            })
+                            .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
+                            .when(style.italic, |d| d.italic())
+                            .when(style.strike, |d| d.line_through())
+                            .child(word.to_string());
+                        elements.push(el.into_any_element());
+                        item_ix += 1;
+                    }
+                }
+                hug_next = !sub.is_empty() && !sub.ends_with(char::is_whitespace);
             }
         }
     }
@@ -7301,8 +8096,8 @@ fn inline_text(
         .flex_row()
         .flex_wrap()
         .items_center()
-        .gap_x(zpx(5.))
-        .gap_y(zpx(4.))
+        .gap_x(zpx(4.))
+        .gap_y(zpx(0.))
         .children(elements);
 
     flow.into_any_element()

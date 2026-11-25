@@ -8,6 +8,7 @@ pub mod browser_trace;
 pub mod callout;
 pub mod chart;
 pub mod choices;
+pub mod citations;
 pub mod code_block;
 pub mod compare;
 pub mod composer;

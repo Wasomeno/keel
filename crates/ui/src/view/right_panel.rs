@@ -1149,7 +1149,7 @@ impl KeelWindow {
                         .t_small()
                         .map(|d| {
                             if active {
-                                d.bg(c(t.surface))
+                                d.bg(c(t.floating))
                                     .border_color(c(t.border))
                                     .text_color(c(t.text))
                                     .font_weight(FontWeight::MEDIUM)

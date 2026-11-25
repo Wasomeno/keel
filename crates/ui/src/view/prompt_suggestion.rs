@@ -33,7 +33,6 @@ impl KeelWindow {
         } else if self.suggestion_key.is_none()
             && self.composer.read(cx).value().is_empty()
             && !self.settings_open
-            && !self.gitlab_open
             && self.subagent_open.is_none()
             && let (Some(client), Some(chat)) = (self.client.clone(), self.current_chat.clone())
         {
@@ -93,7 +92,6 @@ impl KeelWindow {
             )
             && !self.awaiting_first_output
             && !self.settings_open
-            && !self.gitlab_open
             && self.subagent_open.is_none()
             && self.composer.read(cx).value().is_empty()
             && self.pending_images.is_empty()

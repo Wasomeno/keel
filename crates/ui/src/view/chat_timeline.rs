@@ -267,6 +267,32 @@ fn active_timeline_index(points: &[TimelinePoint], top_ix: usize, at_bottom: boo
         .unwrap_or(0)
 }
 
+fn latest_tick_style(
+    t: Tokens,
+    active: f32,
+    hover: f32,
+    neighbor: f32,
+    emphasis: f32,
+    running: bool,
+    pressed: bool,
+) -> (f32, gpui::Hsla) {
+    // Reaching the bottom only changes color. Using the current fade value
+    // for both colors keeps the first frame continuous when it retargets.
+    let width = 14.0 + 6.0 * hover.max(neighbor) - if pressed { 1.5 } else { 0.0 };
+    let base_alpha = (0.55 + 0.23 * active + emphasis).min(1.0);
+    let alpha = base_alpha + (0.95_f32.max(base_alpha) - base_alpha) * hover;
+    let color = if pressed {
+        c(t.accent)
+    } else if running {
+        c(t.text)
+            .blend(c(t.accent).opacity(1.0 - active))
+            .opacity(1.0 + (alpha - 1.0) * active)
+    } else {
+        c(t.text).opacity(alpha)
+    };
+    (width, color)
+}
+
 struct TimelineState {
     rail_fade: Fade,
     scroll_fade: Fade,
@@ -553,8 +579,7 @@ impl Element for ChatTimelineRail {
             );
         }
 
-        // Bottom "Latest" line: matches the ruler uniformly with no extra arrow
-        // icon; clicking glides back to the bottom.
+        // Bottom "Latest" line: matches the ruler with no extra arrow icon.
         let latest_ix = self.points.len();
         let latest_t = tick_ts.get(latest_ix).copied().unwrap_or(0.0);
         let latest_active_t = active_ts.get(latest_ix).copied().unwrap_or(0.0);
@@ -562,24 +587,16 @@ impl Element for ChatTimelineRail {
             .filter(|&h| h != latest_ix && h.abs_diff(latest_ix) == 1)
             .map(|h| tick_ts.get(h).copied().unwrap_or(0.0) * 0.45)
             .unwrap_or(0.0);
-        let latest_focus = latest_t.max(latest_neighbor_t);
         let latest_pressed = !leaving && pressed_ix == Some(latest_ix);
-        let away = !eff_at_bottom;
-        let away_t = if away { 1.0 } else { latest_active_t };
-        let rest_w = 10.0 + 4.0 * away_t;
-        let hover_w = 20.0;
-        let press_nudge = if latest_pressed { 1.5 } else { 0.0 };
-        let line_w = (rest_w + (hover_w - rest_w) * latest_focus - press_nudge).max(7.0);
-        let line_h = if away_t > 0.5 || latest_t > 0.5 { 2.0 } else { 1.5 };
-        let color = if latest_pressed || (away && self.running_since.is_some()) {
-            c(t.accent)
-        } else if latest_t > 0.25 {
-            c(t.text).opacity(0.60 + 0.35 * latest_t)
-        } else if away_t > 0.15 {
-            c(t.text).opacity(0.55 + 0.23 * latest_active_t + 0.16 * wake + 0.12 * rail_t)
-        } else {
-            c(t.text_faint).opacity((0.40 + 0.24 * wake + 0.24 * rail_t).min(0.92))
-        };
+        let (line_w, color) = latest_tick_style(
+            t,
+            latest_active_t,
+            latest_t,
+            latest_neighbor_t,
+            0.16 * wake + 0.12 * rail_t,
+            self.running_since.is_some(),
+            latest_pressed,
+        );
         let on_latest = self.on_jump_latest.clone();
         tick_rows.push(
             div()
@@ -593,7 +610,7 @@ impl Element for ChatTimelineRail {
                 .justify_end()
                 .cursor_pointer()
                 .on_click(move |_: &ClickEvent, window, cx| on_latest(window, cx))
-                .child(div().w(zpx(line_w)).h(zpx(line_h)).rounded_full().bg(color))
+                .child(div().w(zpx(line_w)).h(zpx(2.0)).rounded_full().bg(color))
                 .into_any_element(),
         );
 
@@ -874,6 +891,41 @@ mod tests {
         assert_eq!(active_timeline_index(&pts, 4, false), 1);
         assert_eq!(active_timeline_index(&pts, 9, false), 1);
         assert_eq!(active_timeline_index(&pts, 12, false), 2);
+    }
+
+    #[test]
+    fn latest_tick_keeps_its_width_as_active_color_fades() {
+        for dark in [false, true] {
+            let t = keel_theme::resolve_theme(None, dark);
+            let mut state = TimelineState::default();
+            state.ensure_ticks(4, 2);
+            let fade = &mut state.active_fades[3];
+            let now = Instant::now();
+            let style =
+                |active, running| latest_tick_style(t, active, 0.0, 0.0, 0.16, running, false);
+            let away = fade.value(now).0;
+            fade.set(true, now, false);
+            let first = fade.value(now).0;
+            let mid = fade.value(now + Duration::from_millis(50)).0;
+            let end = fade.value(now + Duration::from_millis(150)).0;
+            for running in [false, true] {
+                assert_eq!(style(away, running), style(first, running));
+                for active in [first, mid, end] {
+                    assert_eq!(style(active, running).0, 14.0);
+                }
+                assert_ne!(style(first, running).1, style(mid, running).1);
+                assert_ne!(style(mid, running).1, style(end, running).1);
+            }
+            assert!(style(first, false).1.a < style(mid, false).1.a);
+            assert!(style(mid, false).1.a < style(end, false).1.a);
+            assert_eq!(style(first, true).1, c(t.accent));
+            assert_eq!(style(end, true), style(end, false));
+            fade.set(false, now + Duration::from_millis(150), true);
+            assert_eq!(
+                style(fade.value(now + Duration::from_millis(150)).0, false),
+                style(away, false)
+            );
+        }
     }
 
     #[test]

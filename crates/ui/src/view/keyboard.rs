@@ -109,9 +109,6 @@ impl KeelWindow {
                         this.toggle_right_panel_expand(cx);
                     } else if this.settings_open {
                         this.close_settings(cx);
-                    } else if this.gitlab_open {
-                        this.close_pages();
-                        cx.notify();
                     } else {
                         cx.propagate();
                     }

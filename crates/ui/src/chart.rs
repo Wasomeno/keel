@@ -349,9 +349,9 @@ impl Chart {
         let plot_w = width - plot_l - pad;
         let plot_h = 180.0_f32;
 
-        let bg_hex = token_rgb_hex(t.code);
+        let bg_hex = token_rgb_hex(t.floating);
         let border_hex = token_rgb_hex(t.border);
-        let border_op = token_alpha(t.border) * 0.18;
+        let border_op = token_alpha(t.border);
         let ink_hex = token_rgb_hex(t.text);
         let muted_hex = token_rgb_hex(t.text_muted);
         let faint_hex = token_rgb_hex(t.text_faint);
@@ -839,8 +839,8 @@ fn nice_step(raw: f64) -> f64 {
 pub fn plot_box(width: f32, height: f32) -> (f32, f32, f32, f32) {
     const LEFT: f32 = 48.;
     const RIGHT: f32 = 16.;
-    const TOP: f32 = 12.;
-    const BOTTOM: f32 = 32.;
+    const TOP: f32 = 14.;
+    const BOTTOM: f32 = 34.;
     (
         LEFT,
         TOP,
@@ -849,13 +849,17 @@ pub fn plot_box(width: f32, height: f32) -> (f32, f32, f32, f32) {
     )
 }
 
-/// The category under a pointer in the plot, if any.
-pub fn category_at(chart: &Chart, plot_w: f32, x: f32) -> Option<usize> {
-    let n = chart.labels.len();
+/// The category under a pointer in the plot for `n` categories, if any.
+pub fn category_at_len(n: usize, plot_w: f32, x: f32) -> Option<usize> {
     if n == 0 || x < 0. || x >= plot_w {
         return None;
     }
     Some(((x / plot_w) * n as f32) as usize).filter(|&ix| ix < n)
+}
+
+/// The category under a pointer in the plot, if any.
+pub fn category_at(chart: &Chart, plot_w: f32, x: f32) -> Option<usize> {
+    category_at_len(chart.labels.len(), plot_w, x)
 }
 
 /// What a hover shows: category name and each series' exact value.
@@ -1102,16 +1106,16 @@ mod tests {
         .expect("chart");
         let tokens = Tokens::dark();
         let svg = chart.to_svg(&tokens);
-        assert!(svg.contains("#1b1b1e"), "expected dark card bg, got: {svg}");
-        assert!(!svg.contains("#1b1eff"), "must not shift alpha byte into RGB");
+        assert!(svg.contains("#1c1c1e"), "expected dark card bg, got: {svg}");
+        assert!(!svg.contains("#1c1eff"), "must not shift alpha byte into RGB");
         assert!(svg.contains("Build &amp; Lint Time"));
         assert!(svg.contains("Fastest package"));
 
         let png_bytes = chart.png_job(&tokens).expect("job")().expect("png");
         let img = image::load_from_memory(&png_bytes).expect("decode png").to_rgba8();
-        // Top-center padding pixel is pure card background (#1b1b1e), not blue!
+        // Top-center padding pixel is pure card background (#1c1c1e), not blue!
         let px = img.get_pixel(img.width() / 2, 10);
-        assert_eq!(px.0, [0x1b, 0x1b, 0x1e, 0xff]);
+        assert_eq!(px.0, [0x1c, 0x1c, 0x1e, 0xff]);
 
         // Also test negative bars + line chart rendering succeeds
         chart.series[0].values[0] = Some(-10.0);

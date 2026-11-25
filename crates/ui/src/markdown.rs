@@ -487,6 +487,11 @@ pub enum TranscriptBlock {
         id: String,
         plan: crate::plan::Plan,
     },
+    /// Evidence & source citations linked to inline `[1]`, `[2]` badges.
+    Citations {
+        id: String,
+        citations: crate::citations::Citations,
+    },
     /// Narration the agent wrote between steps (a paragraph, list, heading
     /// or quote), shown muted inside an open turn fold. It keeps the inner
     /// row's id, so text moving into the fold stays the same row.
@@ -520,7 +525,8 @@ impl TranscriptBlock {
             | Self::Steps { id, .. }
             | Self::Callout { id, .. }
             | Self::Compare { id, .. }
-            | Self::PlanCard { id, .. } => id,
+            | Self::PlanCard { id, .. }
+            | Self::Citations { id, .. } => id,
             Self::Interim(inner) => inner.id(),
         }
     }
@@ -551,7 +557,8 @@ impl TranscriptBlock {
             | Self::Steps { id, .. }
             | Self::Callout { id, .. }
             | Self::Compare { id, .. }
-            | Self::PlanCard { id, .. } => *id = new_id,
+            | Self::PlanCard { id, .. }
+            | Self::Citations { id, .. } => *id = new_id,
             Self::Interim(inner) => inner.set_id(new_id),
         }
     }
@@ -639,6 +646,7 @@ impl TranscriptBlock {
                     + plan.footer.len()
                     + plan.steps.iter().map(|s| s.title.len() + 1).sum::<usize>()
             }
+            Self::Citations { citations, .. } => citations.content_len(),
         }
     }
 }
