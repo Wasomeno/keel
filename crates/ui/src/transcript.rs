@@ -4,8 +4,10 @@
 //! Block rows with stable `{message_id}#{block_id}` identifiers; a message's rows
 //! are contiguous and upserted by row id, so live rows and the persisted message
 //! with the same id merge instead of duplicating.
-//! Height memoization by `(row_id, content_len, width)`: a row is remeasured only
-//! when its memo key (content) changes; width changes are handled by the list.
+//! Height memoization by `(row_id, content_len, width, prose measure)`: an estimate
+//! is reused only when that key matches. The list remeasures when its own width
+//! changes. The prose measure is part of the key because text wraps inside the
+//! column, and zoom clears the memo the same way (the list width does not move).
 //! Stick-to-bottom with user-scroll interrupt:
 //! - Wheel-up breaks stickiness.
 //! - Re-engages when within 70 px of the bottom, or immediately on user's own send.
@@ -35,12 +37,15 @@ use crate::markdown::TranscriptBlock;
 use crate::markdown::{ColumnAlign, ImageRef, Inline, InlineSpan, ToolEntry};
 use crate::style::{KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, READING, c};
 
-/// Height memo key: (row_id, content_len, width_in_pixels_rounded).
+/// Height memo key: row, content length, container width, and the prose measure.
+/// The measure is design pixels (`prose_max_w()`). A narrower reading column wraps
+/// to a different height at the same container width, so the old entry misses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HeightMemoKey {
     pub row_id: String,
     pub content_len: usize,
     pub width: u32,
+    pub measure: u32,
 }
 
 /// Memoized row heights to avoid re-measuring unchanged rows.
@@ -59,6 +64,7 @@ impl HeightMemo {
             row_id: row_id.to_string(),
             content_len,
             width: f32::from(width).round() as u32,
+            measure: prose_max_w().round() as u32,
         }
     }
 
@@ -797,11 +803,11 @@ impl TranscriptState {
             }),
             TranscriptBlock::Paragraph { content, .. } => {
                 let lines = content.lines().count().max(1);
-                px((lines as f32) * f32::from(Self::prose_line_height()) + 12.0)
+                px((lines as f32) * f32::from(Self::prose_line_height()) + PROSE_HEIGHT_FUDGE)
             }
             TranscriptBlock::List { items, .. } => px((items.len().max(1) as f32)
                 * (f32::from(Self::prose_line_height()) + 4.0)
-                + 12.0),
+                + PROSE_HEIGHT_FUDGE),
             TranscriptBlock::Heading { level, .. } => px(match level {
                 1 => 52.0,
                 2 => 44.0,
@@ -1102,8 +1108,12 @@ pub struct RowContext {
     pub open_lines: std::rc::Rc<HashMap<String, bool>>,
     /// Natural heights of rows mid entrance or exit (`TranscriptState::row_heights`).
     pub row_heights: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
-    /// Maximum width for prose blocks (paragraphs, lists, headings).
+    /// Maximum width for prose blocks (paragraphs, lists, headings, quotes),
+    /// design pixels. Code, tables, and trace rows are not capped by this.
     pub prose_max_w: f32,
+    /// Uncapped column content width, in the same unit as `prose_max_w`.
+    /// Diagrams scale to this so they keep the full column.
+    pub column_w: f32,
     /// Mid-slide: the widest a user bubble may wrap at, in px. Rows follow
     /// the column's gliding width (their edges and right-aligned icons move
     /// with it), while text wraps once at the narrower end and keeps it.
@@ -1162,7 +1172,7 @@ fn render_mermaid(
 ) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
     let row_id = item.row_id().to_string();
-    let col = rc.prose_max_w;
+    let col = rc.column_w;
     let swapped = crate::mermaid::maybe_swap_direction(content, col);
     let source = swapped.into_owned();
     let size = crate::mermaid::size(&source).unwrap_or((1., 1.));
@@ -5903,14 +5913,21 @@ fn flow(block: &TranscriptBlock) -> Flow {
 
 /// Prose line height (px at zoom 1): 22.5 on the 14 px body, about 1.6.
 pub const PROSE_LINE: f32 = 22.5;
-/// Prose stops at a comfortable measure (about 85 characters); code,
-/// tables and trace lines still use the whole column.
-pub const PROSE_MAX_W: f32 = 660.;
-pub const PROSE_COLLAPSED_MAX_W: f32 = 740.;
+/// Reading measure for prose, in design pixels: the docked composer's width
+/// (the reading column less `px_4` on each side). Code, tables, and trace
+/// rows still use the whole column.
+pub fn prose_max_w() -> f32 {
+    f32::from(crate::style::column_content_max()) / crate::style::zoom()
+}
 
-/// Space above a row, from what comes before it: paragraphs ~0.8em apart,
-/// headings with more room above than below, trace lines tight among
-/// themselves but clear of the text around them.
+/// Slack in a prose row's pre-layout height: the gap above it plus the row's
+/// own padding. Tracks the paragraph rhythm so an entrance isn't short.
+const PROSE_HEIGHT_FUDGE: f32 = 19.;
+
+/// Space above a row, from what comes before it. Paragraphs and lists sit
+/// about 0.8 of a line apart; code and tables a little further. Headings keep
+/// more room above than below, scaled with that paragraph gap. Trace lines
+/// stay tight among themselves and clear of the text around them.
 pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32 {
     if cur.role == "user" {
         return 12.;
@@ -5923,22 +5940,27 @@ pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32
         && flow(&prev.block) != Flow::Trace
         && flow(&cur.block) != Flow::Trace;
     match (flow(&prev.block), flow(&cur.block)) {
+        // 18/11 of the previous steps (26, 22, 18, 14 and 10, 8, 6), so the
+        // heading rhythm stays in proportion to the wider paragraph gap.
         (_, Flow::Heading(level)) => match level {
-            1 => 26.,
-            2 => 22.,
-            3 => 18.,
-            _ => 14.,
+            1 => 43.,
+            2 => 36.,
+            3 => 29.,
+            _ => 23.,
         },
         (Flow::Heading(level), _) => match level {
-            1 => 10.,
-            2 => 8.,
-            _ => 6.,
+            1 => 16.,
+            2 => 13.,
+            _ => 10.,
         },
         (Flow::Trace, Flow::Trace) => 2.,
         // Narration sits in the step list: a little air around it, tighter
         // than between paragraphs of the answer.
         (Flow::Trace | Flow::Note, Flow::Note) | (Flow::Note, Flow::Trace) => 6.,
-        (Flow::Text, Flow::Text) if !first => 11.,
+        (Flow::Text, Flow::Text) if !first => 18.,
+        (Flow::Text, Flow::Block) | (Flow::Block, Flow::Text) => 20.,
+        // A new message's prose reads as its own block, a step past paragraphs.
+        (Flow::Text, Flow::Text) => 22.,
         _ => 14.,
     }
 }
@@ -6022,11 +6044,11 @@ pub fn render_row(
             TranscriptBlock::TurnSummary { .. } => Some(crate::trace_view::LINE_H),
             TranscriptBlock::Paragraph { content, .. } => {
                 let lines = content.lines().count().max(1);
-                Some((lines as f32) * 22.0 + 12.0)
+                Some((lines as f32) * PROSE_LINE + PROSE_HEIGHT_FUDGE)
             }
             TranscriptBlock::Interim(inner) => match inner.as_ref() {
                 TranscriptBlock::Paragraph { content, .. } => {
-                    Some((content.lines().count().max(1) as f32) * 22.0 + 12.0)
+                    Some((content.lines().count().max(1) as f32) * PROSE_LINE + PROSE_HEIGHT_FUDGE)
                 }
                 _ => None,
             },
@@ -7190,7 +7212,52 @@ impl Render for UrlTip {
     }
 }
 
+/// A short `[n]` label: the same marker as an inline citation, not a favicon chip.
+fn is_marker_label(label: &str) -> bool {
+    let label = label.trim();
+    let Some(inner) = label.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return false;
+    };
+    (1..=3).contains(&inner.len()) && inner.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Horizontal padding inside an inline `[n]` marker.
+const MARKER_PAD_X: f32 = 3.5;
+/// How far attached punctuation is pulled toward the marker. Less than
+/// [`MARKER_PAD_X`], so the period sits just outside the badge, not over the fill.
+const MARKER_PUNCT_PULL: f32 = 2.0;
+
+/// Superscript-sized mono marker. Callers add the hover and click.
+fn marker_chip(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id.into())
+        .flex_none()
+        .relative()
+        // A few pixels above the baseline, so it reads as a superscript.
+        .top(zpx(-3.))
+        .h(zpx(13.))
+        .px(zpx(MARKER_PAD_X))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(RADIUS_SM)
+        .border_1()
+        .font_family(MONO)
+        .text_size(zpx(9.5))
+        .line_height(zpx(12.))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .bg(c(t.surface).opacity(0.85))
+        .border_color(c(t.border).opacity(0.6))
+        .text_color(c(t.text_muted))
+        .child(label.into())
+}
+
 /// A sleek clickable link chip with favicon icon, text, and rich URL tooltip.
+/// A short `[n]` label uses the citation marker instead of the favicon chip.
 fn link_chip(
     id: &str,
     text: &str,
@@ -7198,6 +7265,9 @@ fn link_chip(
     t: Tokens,
     on_action: OnRowAction,
 ) -> gpui::Stateful<gpui::Div> {
+    if is_marker_label(text) {
+        return compact_link_chip(id, text, url, t, on_action);
+    }
     let url_click = url.to_string();
     let tip_url = url.to_string();
     let tip_text = text.to_string();
@@ -7259,9 +7329,141 @@ fn link_chip(
         })
 }
 
+/// `[n]`(url) as a superscript marker: no favicon, no external icon. The
+/// tooltip and click are the same as the full chip.
+fn compact_link_chip(
+    id: &str,
+    text: &str,
+    url: &str,
+    t: Tokens,
+    on_action: OnRowAction,
+) -> gpui::Stateful<gpui::Div> {
+    let url_click = url.to_string();
+    let tip_url = url.to_string();
+    let tip_text = text.trim().to_string();
+    marker_chip(
+        ElementId::Name(format!("link-chip-{id}").into()),
+        tip_text.clone(),
+        t,
+    )
+    .cursor_pointer()
+    .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+    .hover_fade(c(t.hover), Some(c(t.selected)))
+    .tooltip(move |_, cx| {
+        cx.new(|cx| {
+            UrlTip::new(
+                &tip_url,
+                (!tip_text.is_empty()).then(|| tip_text.clone()),
+                t,
+                cx,
+            )
+        })
+        .into()
+    })
+    .on_click(move |_, _, cx| {
+        on_action(
+            RowAction::OpenUrl {
+                url: url_click.clone(),
+            },
+            cx,
+        );
+    })
+}
+
 fn split_trailing_punct(word: &str) -> (&str, &str) {
     let trimmed = word.trim_end_matches(['.', ':', ';', '!', '?', ',']);
     (trimmed, &word[trimmed.len()..])
+}
+
+/// Leading punctuation after optional whitespace, and the rest of the string.
+/// Used to hang a period or comma on the preceding badge so `[4].` has no gap.
+fn leading_punctuation(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_start();
+    let n = trimmed
+        .chars()
+        .take_while(|&ch| matches!(ch, ',' | '.' | ':' | ';' | '!' | '?' | ')'))
+        .map(char::len_utf8)
+        .sum::<usize>();
+    (n > 0).then_some((&trimmed[..n], &trimmed[n..]))
+}
+
+/// One item in the citation-aware word flow. A badge keeps any immediately
+/// following punctuation in the same item, with no whitespace, so `[4].`
+/// cannot pick up the row's flex gap or a stray space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CitationLayoutItem {
+    Word(String),
+    Badge { id: usize, punct: String },
+}
+
+/// Layout model for a plain-text slice that may contain `[n]` citations.
+fn citation_layout(text: &str, cite_ids: &[usize]) -> Vec<CitationLayoutItem> {
+    let badges = crate::citations::find_citation_badges(text, cite_ids);
+    let mut chunks: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    let mut pos = 0usize;
+    for (range, id) in badges {
+        if range.start > pos {
+            chunks.push((pos, range.start, None));
+        }
+        chunks.push((range.start, range.end, Some(id)));
+        pos = range.end;
+    }
+    if pos < text.len() {
+        chunks.push((pos, text.len(), None));
+    }
+
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < chunks.len() {
+        let (start, end, cite) = chunks[i];
+        if let Some(id) = cite {
+            let mut punct = String::new();
+            if let Some((n_start, n_end, n_cite)) = chunks.get(i + 1).copied() {
+                if n_cite.is_none() {
+                    if let Some((mark, rest)) = leading_punctuation(&text[n_start..n_end]) {
+                        punct = mark.to_string();
+                        let consumed = (n_end - n_start) - rest.len();
+                        chunks[i + 1].0 = n_start + consumed;
+                        if chunks[i + 1].0 >= chunks[i + 1].1 {
+                            chunks.remove(i + 1);
+                        }
+                    }
+                }
+            }
+            items.push(CitationLayoutItem::Badge { id, punct });
+            i += 1;
+            continue;
+        }
+        for word in text[start..end].split_whitespace() {
+            items.push(CitationLayoutItem::Word(word.to_string()));
+        }
+        i += 1;
+    }
+    items
+}
+
+/// Hang `punct` on the last flex item. Pulled slightly toward the marker so
+/// the period sits just outside the pill's right edge, clear of the fill.
+fn attach_punctuation(elements: &mut Vec<AnyElement>, punct: &str, t: Tokens) {
+    let Some(prev) = elements.pop() else {
+        return;
+    };
+    elements.push(
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .child(prev)
+            .child(
+                div()
+                    .flex_none()
+                    .ml(zpx(-MARKER_PUNCT_PULL))
+                    .text_color(c(t.text).opacity(0.88))
+                    .child(punct.to_string()),
+            )
+            .into_any_element(),
+    );
 }
 
 fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
@@ -7599,29 +7801,17 @@ fn citation_badge(
     let tip_item = cite.clone();
     let cite_id = cite.id;
     let click_action = citation_open_action(cite);
-    div()
-        .id(ElementId::Name(format!("cite-badge-{id_key}").into()))
-        .flex_none()
-        .h(zpx(16.))
-        .px(zpx(4.5))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        .font_family(MONO)
-        .text_size(zpx(10.5))
-        .line_height(zpx(14.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .bg(c(t.surface).opacity(0.85))
-        .border_color(c(t.border).opacity(0.6))
-        .text_color(c(t.text_muted))
-        .when(click_action.is_some(), |d| {
-            d.cursor_pointer()
-                .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
-                .hover_fade(c(t.selected), None)
-                .active(|s| s.opacity(0.82))
-        })
+    marker_chip(
+        ElementId::Name(format!("cite-badge-{id_key}").into()),
+        format!("[{cite_id}]"),
+        t,
+    )
+    .when(click_action.is_some(), |d| {
+        d.cursor_pointer()
+            .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+            .hover_fade(c(t.selected), None)
+            .active(|s| s.opacity(0.82))
+    })
         .tooltip_show_delay(
             crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)),
         )
@@ -7639,7 +7829,6 @@ fn citation_badge(
                 on_action(action.clone(), cx);
             })
         })
-        .child(format!("[{cite_id}]"))
 }
 
 struct FileTip {
@@ -7822,10 +8011,71 @@ fn inline_chip_max_w(rc: &RowContext) -> gpui::Pixels {
     px(from_bubble.min(from_prose).min(HARD_CAP * crate::style::zoom()))
 }
 
+/// Inline code matches the sentence: mono, normal weight, no brighter than
+/// the body, and no background. A fill paints a full line-height slab.
+const INLINE_CODE_PX: f32 = 13.;
+
+fn inline_code_color(t: Tokens) -> Hsla {
+    c(t.text_muted)
+}
+
+fn inline_highlight(style: &crate::markdown::InlineStyle, t: Tokens) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        // Code stays at the body's weight. Bold still leads; code does not.
+        font_weight: if style.code {
+            None
+        } else {
+            style.bold.then_some(gpui::FontWeight::SEMIBOLD)
+        },
+        font_style: style.italic.then_some(gpui::FontStyle::Italic),
+        strikethrough: style.strike.then(|| gpui::StrikethroughStyle {
+            thickness: px(1.),
+            color: None,
+        }),
+        color: if style.code {
+            Some(inline_code_color(t))
+        } else if style.bold {
+            Some(c(t.text))
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+/// Styled text for `text`, which is `full[origin..origin+text.len()]`.
+/// Code ranges switch to `MONO`. HighlightStyle cannot change family, so the
+/// family override is a second pass on the same ranges. gpui only applies an
+/// override when the whole run sits inside it, and highlights are what split
+/// the runs, so every code span is also a highlight.
+fn styled_prose(text: &str, spans: &[InlineSpan], origin: usize, t: Tokens) -> gpui::StyledText {
+    let end = origin + text.len();
+    let mut highlights = Vec::new();
+    let mut families = Vec::new();
+    for span in spans {
+        let start = span.range.start.max(origin);
+        let stop = span.range.end.min(end);
+        if start >= stop || span.link.is_some() {
+            continue;
+        }
+        let local = (start - origin)..(stop - origin);
+        highlights.push((local.clone(), inline_highlight(&span.style, t)));
+        if span.style.code {
+            families.push((local, gpui::SharedString::from(MONO)));
+        }
+    }
+    let mut styled = gpui::StyledText::new(text.to_string());
+    if !highlights.is_empty() {
+        styled = styled.with_highlights(highlights);
+    }
+    if !families.is_empty() {
+        styled = styled.with_font_family_overrides(families);
+    }
+    styled
+}
+
 /// Text with its inline styles: bold, italic, strikethrough, inline code,
-/// links, and clickable file chips. Inline code stays in the text run, a
-/// step heavier than the sentence. A code-block fill here is a line-tall
-/// slab, so a short span reads as a highlighter.
+/// links, and clickable file chips.
 fn inline_text(
     id: String,
     text: &str,
@@ -7850,35 +8100,16 @@ fn inline_text(
                 gpui::StyledText::new(text.to_string()),
             );
         }
-        let highlights = spans.iter().map(|span| {
-            let style = gpui::HighlightStyle {
-                font_weight: if span.style.bold {
-                    Some(gpui::FontWeight::SEMIBOLD)
-                } else if span.style.code {
-                    Some(gpui::FontWeight::MEDIUM)
-                } else {
-                    None
-                },
-                font_style: span.style.italic.then_some(gpui::FontStyle::Italic),
-                strikethrough: span.style.strike.then(|| gpui::StrikethroughStyle {
-                    thickness: px(1.),
-                    color: None,
-                }),
-                // Bold and code lead by brightness as much as weight (body text is dimmer).
-                color: if span.style.code || span.style.bold {
-                    Some(c(t.text))
-                } else {
-                    None
-                },
-                ..Default::default()
-            };
-            (span.range.clone(), style)
-        });
-        let styled = gpui::StyledText::new(text.to_string()).with_highlights(highlights);
+        let styled = styled_prose(text, spans, 0, t);
         return selectable(key, text, order, rc, |s| s.into_any_element(), styled);
     }
 
-    // Paragraphs with links or file chips render as a cohesive inline flow of words and sleek chips
+    // A citation or link still breaks the paragraph into words. gpui's Display
+    // is Flex, Block, or Grid: a StyledText run is one flex item, and once it
+    // wraps its box is as wide as the measure, so a marker after the run starts
+    // on the next line instead of in the leftover space of the last one.
+    // HighlightStyle cannot shrink a run or shift its baseline, so the marker
+    // cannot live inside the text either. Words keep the marker in the sentence.
     let mut slices: Vec<(Range<usize>, crate::markdown::InlineStyle, Option<String>)> = Vec::new();
     let mut cursor = 0;
     for span in spans {
@@ -7956,7 +8187,8 @@ fn inline_text(
                     hug_next = true;
                     continue;
                 }
-                // Match `StyledText` inline code: clean medium monospace without line-tall slabs.
+                // Same mono as the StyledText path, at a size that matches the
+                // 14px body. No fill: a background paints a line-tall slab.
                 let mut first_in_code = true;
                 for code_word in slice_str.split_whitespace() {
                     let pull = first_in_code && hug_next && !slice_str.starts_with(char::is_whitespace);
@@ -7965,10 +8197,10 @@ fn inline_text(
                         div()
                             .flex_none()
                             .when(pull, |d| d.ml(zpx(-4.)))
-                            .text_color(c(t.text))
-                            .font_family(crate::style::MONO)
-                            .text_size(zpx(13.))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(inline_code_color(t))
+                            .font_family(MONO)
+                            .text_size(zpx(INLINE_CODE_PX))
+                            .font_weight(gpui::FontWeight::NORMAL)
                             .child(code_word.to_string())
                             .into_any_element(),
                     );
@@ -7978,114 +8210,109 @@ fn inline_text(
                 continue;
             }
 
-            let mut plain_chunks: Vec<(usize, usize, Option<usize>)> = Vec::new();
-            let badges = crate::citations::find_citation_badges(slice_str, &cite_ids);
-            let mut plain_pos = 0usize;
-            for (b_range, b_id) in badges {
-                if b_range.start > plain_pos {
-                    plain_chunks.push((plain_pos, b_range.start, None));
-                }
-                plain_chunks.push((b_range.start, b_range.end, Some(b_id)));
-                plain_pos = b_range.end;
-            }
-            if plain_pos < slice_str.len() {
-                plain_chunks.push((plain_pos, slice_str.len(), None));
-            }
-
-            for (chunk_ix, (c_start, c_end, cite_hit)) in plain_chunks.into_iter().enumerate() {
-                if let Some(cite_id) = cite_hit
-                    && let Some((_, cites)) = cite_ctx
-                    && let Some(cite) = cites.get(cite_id)
-                {
-                    let no_leading_space = if chunk_ix == 0 {
-                        hug_next && !slice_str.starts_with(char::is_whitespace)
-                    } else {
-                        c_start > 0 && !slice_str[..c_start].ends_with(char::is_whitespace)
-                    };
-                    let mut badge = citation_badge(
-                        &format!("{id}-{item_ix}"),
-                        cite,
-                        t,
-                        rc.on_action.clone(),
-                    );
-                    if no_leading_space {
-                        badge = badge.ml(zpx(-2.));
-                    }
-                    elements.push(badge.into_any_element());
-                    item_ix += 1;
-                    hug_next = true;
-                    continue;
-                }
-                let sub = &slice_str[c_start..c_end];
-                let mut first_word = true;
-                for word in sub.split_whitespace() {
-                    let is_bullet = word == "·" || word == "•" || word == "◦" || word == "▪";
-                    let is_punct = word == ","
-                        || word == "."
-                        || word == ":"
-                        || word == ";"
-                        || word == "!"
-                        || word == "?"
-                        || word == ")";
-                    let pull_punct = is_punct
-                        || (first_word
-                            && hug_next
-                            && !sub.starts_with(char::is_whitespace)
-                            && word.starts_with([',', '.', ':', ';', '!', '?', ')']));
-                    first_word = false;
-                    let (trimmed_word, trailing_punct) = split_trailing_punct(word);
-
-                    if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
-                        elements.push(
-                            file_inline_chip(
+            let layout = citation_layout(slice_str, &cite_ids);
+            for piece in layout {
+                match piece {
+                    CitationLayoutItem::Badge { id: cite_id, punct } => {
+                        if let Some((_, cites)) = cite_ctx
+                            && let Some(cite) = cites.get(cite_id)
+                        {
+                            let badge = citation_badge(
                                 &format!("{id}-{item_ix}"),
-                                &file_path,
+                                cite,
                                 t,
-                                chip_max,
                                 rc.on_action.clone(),
-                            )
-                            .into_any_element(),
-                        );
-                        item_ix += 1;
-                        if !trailing_punct.is_empty() {
+                            );
+                            elements.push(badge.into_any_element());
+                            item_ix += 1;
+                            if !punct.is_empty() {
+                                attach_punctuation(&mut elements, &punct, t);
+                            }
+                        } else {
+                            let mut word = format!("[{cite_id}]");
+                            word.push_str(&punct);
                             elements.push(
                                 div()
                                     .flex_none()
-                                    .ml(zpx(-4.))
+                                    .when(hug_next, |d| d.ml(zpx(-4.)))
                                     .text_color(c(t.text).opacity(0.88))
-                                    .child(trailing_punct.to_string())
+                                    .child(word)
                                     .into_any_element(),
                             );
                             item_ix += 1;
                         }
-                    } else if is_bullet {
-                        elements.push(
-                            div()
-                                .flex_none()
-                                .px(zpx(1.))
-                                .text_color(c(t.text_faint))
-                                .child(word.to_string())
+                    }
+                    CitationLayoutItem::Word(word) => {
+                        let mut word = word;
+                        if hug_next {
+                            if let Some((punct, rest)) = leading_punctuation(&word) {
+                                let punct = punct.to_string();
+                                let rest = rest.to_string();
+                                attach_punctuation(&mut elements, &punct, t);
+                                if rest.is_empty() {
+                                    hug_next = false;
+                                    continue;
+                                }
+                                word = rest;
+                            }
+                        }
+                        let is_bullet = word == "·"
+                            || word == "•"
+                            || word == "◦"
+                            || word == "▪";
+                        let is_punct = word == ","
+                            || word == "."
+                            || word == ":"
+                            || word == ";"
+                            || word == "!"
+                            || word == "?"
+                            || word == ")";
+                        let (trimmed_word, trailing_punct) = split_trailing_punct(&word);
+                        if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
+                            elements.push(
+                                file_inline_chip(
+                                    &format!("{id}-{item_ix}"),
+                                    &file_path,
+                                    t,
+                                    chip_max,
+                                    rc.on_action.clone(),
+                                )
                                 .into_any_element(),
-                        );
-                        item_ix += 1;
-                    } else {
-                        let el = div()
-                            .flex_none()
-                            .when(pull_punct, |d| d.ml(zpx(-4.)))
-                            .when(style.bold, |d| {
-                                d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(c(t.text))
-                            })
-                            .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
-                            .when(style.italic, |d| d.italic())
-                            .when(style.strike, |d| d.line_through())
-                            .child(word.to_string());
-                        elements.push(el.into_any_element());
-                        item_ix += 1;
+                            );
+                            item_ix += 1;
+                            if !trailing_punct.is_empty() {
+                                attach_punctuation(&mut elements, trailing_punct, t);
+                            }
+                        } else if is_bullet {
+                            elements.push(
+                                div()
+                                    .flex_none()
+                                    .px(zpx(1.))
+                                    .text_color(c(t.text_faint))
+                                    .child(word)
+                                    .into_any_element(),
+                            );
+                            item_ix += 1;
+                        } else {
+                            let el = div()
+                                .flex_none()
+                                .when(is_punct, |d| d.ml(zpx(-4.)))
+                                .when(style.bold, |d| {
+                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(c(t.text))
+                                })
+                                .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
+                                .when(style.italic, |d| d.italic())
+                                .when(style.strike, |d| d.line_through())
+                                .child(word);
+                            elements.push(el.into_any_element());
+                            item_ix += 1;
+                        }
                     }
                 }
-                hug_next = !sub.is_empty() && !sub.ends_with(char::is_whitespace);
+                hug_next = false;
             }
+            hug_next = !slice_str.is_empty() && !slice_str.ends_with(char::is_whitespace);
         }
     }
 
@@ -8095,7 +8322,7 @@ fn inline_text(
         .flex()
         .flex_row()
         .flex_wrap()
-        .items_center()
+        .items_baseline()
         .gap_x(zpx(4.))
         .gap_y(zpx(0.))
         .children(elements);
@@ -9322,6 +9549,10 @@ mod tests {
         let note = TranscriptBlock::Interim(Box::new(para("a#0", text)));
         assert_eq!(note.id(), "a#0");
         assert_eq!(transcript.compute_block_height(&note, px(600.)), plain);
+        assert_eq!(
+            plain,
+            px(2. * f32::from(TranscriptState::prose_line_height()) + PROSE_HEIGHT_FUDGE)
+        );
         // Copy gives the answer, not the trace's narration.
         assert_eq!(block_markdown(&note), None);
     }
@@ -9347,22 +9578,62 @@ mod tests {
         let h2 = row("a", "assistant", h(2));
         let tg = row("a", "assistant", tools());
         let tg2 = row("a", "assistant", tools());
-        // Paragraphs ~0.8em apart; a heading has more room above than below.
-        assert_eq!(row_gap(Some(&p1), &p2), 11.);
+        // Paragraphs about 0.8 line apart; a heading has more room above than below.
+        assert_eq!(row_gap(Some(&p1), &p2), 18.);
+        assert_eq!(row_gap(Some(&p1), &h2), 36.);
+        assert_eq!(row_gap(Some(&h2), &p2), 13.);
         assert!(row_gap(Some(&p1), &h2) > row_gap(Some(&h2), &p2) * 2.);
+        // Lists take the same air as paragraphs against the surrounding prose.
+        let list = row(
+            "a",
+            "assistant",
+            TranscriptBlock::List {
+                id: "l".into(),
+                items: vec![crate::markdown::ListItem {
+                    marker: "•".into(),
+                    depth: 0,
+                    text: "item".into(),
+                    spans: Vec::new(),
+                    task: None,
+                }],
+            },
+        );
+        assert_eq!(row_gap(Some(&p1), &list), 18.);
+        assert_eq!(row_gap(Some(&list), &p2), 18.);
+        // Code and tables sit further from prose than one paragraph from the next.
+        let code = row(
+            "a",
+            "assistant",
+            TranscriptBlock::Code {
+                id: "c".into(),
+                language: None,
+                content: "x".into(),
+                line_count: 1,
+                spans: Vec::new(),
+                closed: true,
+                run: None,
+            },
+        );
+        assert_eq!(row_gap(Some(&p1), &code), 20.);
+        assert_eq!(row_gap(Some(&code), &p2), 20.);
         // Text never butts against trace lines; trace lines stay tight together.
         assert!(row_gap(Some(&p1), &tg) >= 14.);
         assert!(row_gap(Some(&tg), &p2) >= 14.);
         assert_eq!(row_gap(Some(&tg), &tg2), 2.);
         // Narration inside an open fold sits among the trace lines, closer
         // than paragraphs; the answer after the trace still gets its room.
-        let note = row("a", "assistant", TranscriptBlock::Interim(Box::new(para("a#2", "next"))));
+        let note = row(
+            "a",
+            "assistant",
+            TranscriptBlock::Interim(Box::new(para("a#2", "next"))),
+        );
         assert_eq!(row_gap(Some(&tg), &note), 6.);
         assert_eq!(row_gap(Some(&note), &tg2), 6.);
         assert!(row_gap(Some(&note), &p2) >= 14.);
         // A new message's text after another's reads as a new block.
         let next = row("b", "assistant", para("b#0", "three"));
         assert!(row_gap(Some(&p2), &next) > row_gap(Some(&p1), &p2));
+        assert_eq!(row_gap(Some(&p2), &next), 22.);
         assert_eq!(list_marker("•", 1), "◦");
         assert_eq!(list_marker("3.", 1), "3.");
     }
@@ -9576,6 +9847,102 @@ mod tests {
             link: Some("https://example.com".into()),
         };
         assert!(needs_inline_chips("here", &[linked]));
+    }
+
+    #[test]
+    fn short_bracket_labels_use_the_citation_marker() {
+        assert!(is_marker_label("[1]"));
+        assert!(is_marker_label(" [12] "));
+        assert!(is_marker_label("[123]"));
+        assert!(!is_marker_label("docs"));
+        assert!(!is_marker_label("[link]"));
+        assert!(!is_marker_label("[1234]"));
+        assert!(!is_marker_label(""));
+    }
+
+    #[test]
+    fn citation_layout_keeps_trailing_punct_on_the_badge() {
+        use CitationLayoutItem::{Badge, Word};
+        let items = citation_layout("changes [4]. X", &[4]);
+        assert_eq!(
+            items,
+            vec![
+                Word("changes".into()),
+                Badge {
+                    id: 4,
+                    punct: ".".into()
+                },
+                Word("X".into()),
+            ]
+        );
+        let Badge { punct, .. } = &items[1] else {
+            panic!("expected a badge");
+        };
+        assert!(!punct.contains(char::is_whitespace), "punct must have no whitespace, got {punct:?}");
+
+        // A space in the source still hangs the period on the badge.
+        assert_eq!(
+            citation_layout("changes [4] . X", &[4]),
+            vec![
+                Word("changes".into()),
+                Badge {
+                    id: 4,
+                    punct: ".".into()
+                },
+                Word("X".into()),
+            ]
+        );
+
+        // The source markdown keeps `[4].` as plain text, no injected space or link.
+        let blocks = crate::markdown::parse_markdown_blocks("m", "changes [4]. X");
+        let crate::markdown::TranscriptBlock::Paragraph { content, spans, .. } = &blocks[0]
+        else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(content, "changes [4]. X");
+        assert!(spans.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn leading_punctuation_peels_marks_even_after_a_space() {
+        assert_eq!(leading_punctuation("."), Some((".", "")));
+        assert_eq!(leading_punctuation(". X labels"), Some((".", " X labels")));
+        assert_eq!(leading_punctuation(" ."), Some((".", "")));
+        assert_eq!(leading_punctuation(".),"), Some((".),", "")));
+        assert_eq!(leading_punctuation(" next"), None);
+        assert_eq!(leading_punctuation(""), None);
+    }
+
+    #[test]
+    fn prose_measure_matches_the_composer_at_default_zoom() {
+        assert!((crate::style::zoom() - 1.0).abs() < 0.001);
+        let expected = f32::from(crate::style::TRANSCRIPT_MAX_WIDTH)
+            - crate::style::COLUMN_PAD * 2.;
+        assert!((prose_max_w() - expected).abs() < 0.01);
+        assert!((f32::from(crate::style::column_content_max()) - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn inline_code_is_muted_and_not_heavier_than_body() {
+        let t = keel_theme::Tokens::dark();
+        let code = crate::markdown::InlineStyle {
+            code: true,
+            bold: true,
+            ..Default::default()
+        };
+        let hl = inline_highlight(&code, t);
+        assert_eq!(hl.font_weight, None, "code stays at the body's weight");
+        assert_eq!(hl.color, Some(c(t.text_muted)));
+        assert!(hl.background_color.is_none());
+        let bold = inline_highlight(
+            &crate::markdown::InlineStyle {
+                bold: true,
+                ..Default::default()
+            },
+            t,
+        );
+        assert_eq!(bold.font_weight, Some(gpui::FontWeight::SEMIBOLD));
+        assert_eq!(bold.color, Some(c(t.text)));
     }
 
     #[test]

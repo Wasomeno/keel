@@ -1648,8 +1648,13 @@ impl KeelWindow {
                 let handle = window.window_handle();
                 // Wrap width for prose/bubbles: the reading column's width, so
                 // inline file chips get a real pixel cap (not only relative).
-                let rem = 2. * f32::from(window.rem_size());
+                let rem = f32::from(crate::style::column_gutter());
                 let wrap_hold = Some((f32::from(self.column_max()) - rem).max(200.));
+                // Design pixels. Prose matches the docked composer; diagrams
+                // keep this full content width.
+                let content_w = wrap_hold.map_or(f32::from(crate::style::TRANSCRIPT_MAX_WIDTH), |w| {
+                    w / crate::style::zoom()
+                });
                 self.measure_step_line(window);
                 self.mr_hydrate_cards(cx);
                 let open_lines = self.open_lines_rc();
@@ -1807,7 +1812,8 @@ impl KeelWindow {
                     row_heights: self.transcript.row_heights.clone(),
                     // Mid-slide the text wraps once, at the narrower end
                     // of the slide (inside a row's px_4), and holds it.
-                    prose_max_w: wrap_hold.map_or(crate::transcript::PROSE_MAX_W, |w| crate::transcript::PROSE_MAX_W.min(w / crate::style::zoom())),
+                    prose_max_w: content_w.min(crate::transcript::prose_max_w()),
+                    column_w: content_w,
                     bubble_max_w: wrap_hold.map(|w| 0.85 * w),
                     plan_running: self.active_status() == Some(ChatStatus::Running),
                     plan_cards: std::rc::Rc::new(self.plan_cards.clone()),

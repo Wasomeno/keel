@@ -223,7 +223,7 @@ impl KeelWindow {
                 let row_id = arg.to_string();
                 if let Some(item) = self.transcript.items.iter().find(|i| i.row_id() == row_id) {
                     if let crate::markdown::TranscriptBlock::Code { content, .. } = &item.block {
-                        let col = crate::transcript::PROSE_MAX_W;
+                        let col = f32::from(crate::style::TRANSCRIPT_MAX_WIDTH);
                         let swapped = crate::mermaid::maybe_swap_direction(content, col).into_owned();
                         let view = std::rc::Rc::new(std::cell::RefCell::new(crate::mermaid_viewer::Viewport::default()));
                         self.open_lightbox(super::Lightbox::Diagram { row_id: row_id.clone(), source: swapped, view }, cx);
