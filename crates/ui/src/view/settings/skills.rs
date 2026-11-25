@@ -366,7 +366,6 @@ impl KeelWindow {
                     let path = skill.path.clone();
                     let name = skill.name.clone();
                     let author = skill.author.clone();
-                    let insert = skill.insert.clone();
                     let description = skill.description.clone();
                     let scope = skill.scope.clone();
                     let enabled = skill.enabled;
@@ -380,6 +379,7 @@ impl KeelWindow {
 
                     let card = div()
                         .id(ElementId::Name(format!("skill-card-{path}").into()))
+                        .group("skill-row")
                         .h(zpx(SKILL_ROW_H))
                         .w_full()
                         .px(zpx(16.))
@@ -397,7 +397,7 @@ impl KeelWindow {
                                 this.open_skill_modal(&skill, cx);
                             });
                         })
-                        // Left: Puzzle Icon + Name/Author/Slug + 1-line Description
+                        // Left: puzzle icon, name and author, one-line description
                         .child(
                             div()
                                 .flex_1()
@@ -446,47 +446,13 @@ impl KeelWindow {
                                                 .when(!author.is_empty(), |d| {
                                                     d.child(
                                                         div()
-                                                            .id(ElementId::Name(
-                                                                format!("skill-row-author-{path}")
-                                                                    .into(),
-                                                            ))
-                                                            .flex()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .px(zpx(6.))
-                                                            .h(zpx(17.))
-                                                            .rounded(r_sm())
-                                                            .bg(c(t.window))
-                                                            .border_1()
-                                                            .border_color(c(t.border))
-                                                            .child(
-                                                                div()
-                                                                    .t_caption()
-                                                                    .text_color(c(t.text_muted))
-                                                                    .child(format!("by {author}")),
-                                                            ),
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .t_small()
+                                                            .text_color(c(t.text_faint))
+                                                            .child(format!("by {author}")),
                                                     )
-                                                })
-                                                .child(
-                                                    div()
-                                                        .px(zpx(6.))
-                                                        .h(zpx(17.))
-                                                        .flex()
-                                                        .items_center()
-                                                        .rounded(r_sm())
-                                                        .bg(c(t.window))
-                                                        .border_1()
-                                                        .border_color(c(t.border))
-                                                        .font_family(MONO)
-                                                        .t_caption()
-                                                        .text_color(c(t.text_muted))
-                                                        .child(
-                                                            insert
-                                                                .strip_prefix("/skill:")
-                                                                .map(|n| format!("/{n}"))
-                                                                .unwrap_or_else(|| insert.clone()),
-                                                        ),
-                                                ),
+                                                }),
                                         )
                                         .child(
                                             div()
@@ -498,7 +464,7 @@ impl KeelWindow {
                                         ),
                                 ),
                         )
-                        // Right: Error dot (if any) + "Instructions" button + Toggle Switch
+                        // Right: error label (if any), instructions icon, switch
                         .child(
                             div()
                                 .flex_none()
@@ -517,27 +483,27 @@ impl KeelWindow {
                                             .child("Error"),
                                     )
                                 })
+                                // Opens the same modal as the row; faint until the row is hovered.
                                 .child(
                                     div()
                                         .id(ElementId::Name(format!("skill-row-btn-{path}").into()))
+                                        .size(zpx(crate::style::CONTROL_H))
                                         .flex()
-                                        .flex_row()
                                         .items_center()
-                                        .gap(zpx(6.))
-                                        .px(zpx(10.))
-                                        .h(zpx(crate::style::CONTROL_H))
+                                        .justify_center()
                                         .rounded(r_md())
+                                        .text_color(c(t.text_faint))
+                                        .group_hover("skill-row", |s| s.text_color(c(t.text_muted)))
                                         .hover_fade(c(t.hover), None)
                                         .active(|s| s.opacity(0.8))
-                                        .t_small()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(c(t.text))
-                                        .child(
-                                            Icon::ScrollText
-                                                .el(zpx(12.))
-                                                .text_color(c(t.text_faint)),
-                                        )
-                                        .child("Instructions"),
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| {
+                                                crate::view::dotify_ui::Tip::new("Instructions", t)
+                                            })
+                                            .into()
+                                        })
+                                        .tooltip_show_delay(crate::view::tooltip::delay())
+                                        .child(Icon::ScrollText.el(zpx(14.))),
                                 )
                                 .child(if packaged {
                                     div()
@@ -630,127 +596,172 @@ impl KeelWindow {
             })
     }
 
+    /// One row: search, the creator menu, and the status filter.
     fn render_skill_controls(
         &mut self,
         authors: &[(String, usize)],
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let author_filter = self.skills.author_filter.clone();
         let status_filter = self.skills.status_filter;
 
         div()
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_center()
             .gap(zpx(8.))
-            .pb(zpx(8.))
+            .pb(zpx(4.))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(zpx(INPUT_H))
+                    .px(zpx(8.))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(zpx(12.))
-                    // Search box
+                    .gap(zpx(8.))
+                    .rounded(r_md())
+                    .border_1()
+                    .border_color(c(t.border))
+                    .t_body()
+                    .text_color(c(t.text_muted))
+                    .child(Icon::Search.el(zpx(14.)).text_color(c(t.text_faint)))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .h(zpx(INPUT_H))
-                            .px(zpx(8.))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(8.))
-                            .rounded(r_md())
-                            .bg(c(t.input))
-                            .border_1()
-                            .border_color(c(t.border))
-                            .t_body()
-                            .text_color(c(t.text_muted))
-                            .child(Icon::Search.el(zpx(14.)).text_color(c(t.text_faint)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.skills_filter.clone().into_any_element()),
-                            ),
-                    )
-                    // Status segmented control
-                    .child(self.render_segmented_control(
-                        "skill-status",
-                        &[
-                            ("All", SkillStatusFilter::All),
-                            ("Enabled", SkillStatusFilter::Enabled),
-                            ("Disabled", SkillStatusFilter::Disabled),
-                        ],
-                        status_filter,
-                        66.0,
-                        t,
-                        cx,
-                        |this, mode, _| {
-                            this.skills.status_filter = mode;
-                            this.skills.filter_epoch = this.skills.filter_epoch.wrapping_add(1);
-                        },
-                    )),
+                            .child(self.skills_filter.clone().into_any_element()),
+                    ),
             )
-            // Author / Provenance pills
-            .when(!authors.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .flex_wrap()
-                        .gap(zpx(6.))
-                        .pb(zpx(4.))
-                        .child(
-                            button(
-                                "skill-author-all",
-                                "All Creators",
-                                if author_filter.is_none() {
-                                    ButtonKind::Secondary
-                                } else {
-                                    ButtonKind::Ghost
-                                },
-                                true,
-                                t,
-                            )
-                            .on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| {
-                                    this.skills.author_filter = None;
-                                    this.skills.filter_epoch =
-                                        this.skills.filter_epoch.wrapping_add(1);
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                        .children(authors.iter().map(|(author, count)| {
-                            let is_sel = author_filter.as_deref() == Some(author);
-                            let author_val = author.clone();
-                            button(
-                                format!("skill-author-{author}"),
-                                format!("{author} ({count})"),
-                                if is_sel {
-                                    ButtonKind::Secondary
-                                } else {
-                                    ButtonKind::Ghost
-                                },
-                                true,
-                                t,
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                if this.skills.author_filter.as_deref() == Some(&author_val) {
-                                    this.skills.author_filter = None;
-                                } else {
-                                    this.skills.author_filter = Some(author_val.clone());
-                                }
-                                this.skills.filter_epoch = this.skills.filter_epoch.wrapping_add(1);
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                        })),
-                )
+            .when(authors.len() > 1, |d| {
+                d.child(self.render_creator_menu(authors, t, cx))
             })
+            .child(self.render_segmented_control(
+                "skill-status",
+                &[
+                    ("All", SkillStatusFilter::All),
+                    ("Enabled", SkillStatusFilter::Enabled),
+                    ("Disabled", SkillStatusFilter::Disabled),
+                ],
+                status_filter,
+                66.0,
+                t,
+                cx,
+                |this, mode, _| {
+                    this.skills.status_filter = mode;
+                    this.skills.filter_epoch = this.skills.filter_epoch.wrapping_add(1);
+                },
+            ))
+    }
+
+    /// The creator filter: a quiet trigger naming the current creator, and a
+    /// floating menu of creators with their counts.
+    fn render_creator_menu(
+        &mut self,
+        authors: &[(String, usize)],
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        const MENU_ID: &str = "skill-creator-menu";
+        let author_filter = self.skills.author_filter.clone();
+        let open = self.skills.creator_menu_open;
+        let bounds_cell = self.skills.creator_btn_bounds.clone();
+        let label = author_filter.clone().unwrap_or_else(|| "All creators".to_string());
+
+        let menu = open.then(|| {
+            let total: usize = authors.iter().map(|(_, n)| n).sum();
+            let pick = |this: &mut Self, value: Option<String>, cx: &mut Context<Self>| {
+                this.skills.author_filter = value;
+                this.skills.creator_menu_open = false;
+                this.skills.filter_epoch = this.skills.filter_epoch.wrapping_add(1);
+                cx.notify();
+            };
+            let mut items = vec![
+                super::super::menu_item("skill-creator-all", t, true, author_filter.is_none())
+                    .child(div().flex_1().child("All creators"))
+                    .child(div().flex_none().text_color(c(t.text_faint)).child(total.to_string()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, None, cx)))
+                    .into_any_element(),
+            ];
+            items.extend(authors.iter().map(|(author, count)| {
+                let value = author.clone();
+                super::super::menu_item(
+                    format!("skill-creator-{author}"),
+                    t,
+                    true,
+                    author_filter.as_deref() == Some(author.as_str()),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(author.clone()))
+                .child(div().flex_none().text_color(c(t.text_faint)).child(count.to_string()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    pick(this, Some(value.clone()), cx)
+                }))
+                .into_any_element()
+            }));
+            let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                this.note_menu_dismissed(MENU_ID);
+                this.skills.creator_menu_open = false;
+                cx.notify();
+            });
+            let at = self
+                .skills
+                .creator_btn_bounds
+                .get()
+                .map(|b| gpui::point(b.right(), b.bottom()));
+            super::super::floating_menu_positioned(
+                MENU_ID,
+                t,
+                220.,
+                gpui::Anchor::TopRight,
+                at,
+                false,
+                None,
+                self.reduced(),
+                dismiss,
+                items,
+            )
+        });
+
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                gpui::canvas(move |bounds, _, _| bounds_cell.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .children(menu)
+            .child(
+                div()
+                    .id("skill-creator-btn")
+                    .h(zpx(crate::style::CONTROL_H))
+                    .max_w(zpx(180.))
+                    .pl(zpx(10.))
+                    .pr(zpx(8.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(6.))
+                    .rounded(r_md())
+                    .border_1()
+                    .border_color(c(t.border))
+                    .t_small()
+                    .text_color(c(if author_filter.is_some() { t.text } else { t.text_muted }))
+                    .cursor_pointer()
+                    .when(open, |d| d.bg(c(t.selected)))
+                    .hover_fade(c(t.hover), None)
+                    .active(|s| s.opacity(0.8))
+                    .child(div().min_w_0().truncate().child(label))
+                    .child(Icon::ChevronDown.el(zpx(12.)).text_color(c(t.text_faint)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if this.menu_just_dismissed(MENU_ID) {
+                            return;
+                        }
+                        this.skills.creator_menu_open = !this.skills.creator_menu_open;
+                        cx.notify();
+                    })),
+            )
     }
 
     pub(super) fn render_skill_modal(

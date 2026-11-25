@@ -90,12 +90,30 @@ impl KeelWindow {
                 },
             ));
 
-        let muted_line = |text: &'static str| {
+        // Centered in the space under the scope switch: icon, title, one line.
+        let empty_state = |title: &'static str, line: &'static str| {
             div()
-                .py(zpx(12.))
-                .t_body()
-                .text_color(c(t.text_muted))
-                .child(text)
+                .pt(zpx(96.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(zpx(8.))
+                .child(Icon::Brain.el(zpx(24.)).text_color(c(t.text_faint)))
+                .child(
+                    div()
+                        .t_body()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(t.text))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .max_w(zpx(380.))
+                        .text_center()
+                        .t_small()
+                        .text_color(c(t.text_muted))
+                        .child(line),
+                )
         };
         let scope: Result<Option<MemoryScopeView>, String> = match tab {
             MemoryTab::You => match &self.memory.user {
@@ -127,9 +145,16 @@ impl KeelWindow {
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_memory(cx))),
                 )
                 .into_any_element(),
-            Ok(None) => muted_line("Open a chat that has a folder to see its project notes.")
-                .into_any_element(),
-            Ok(Some(scope)) if scope.notes.is_empty() => muted_line("None yet.").into_any_element(),
+            Ok(None) => empty_state(
+                "No project open",
+                "Open a chat that has a folder to see its project notes.",
+            )
+            .into_any_element(),
+            Ok(Some(scope)) if scope.notes.is_empty() => empty_state(
+                "No memories yet",
+                "Notes the agent saves to remember across chats show up here.",
+            )
+            .into_any_element(),
             Ok(Some(scope)) => {
                 let warning = scope.truncated.then(|| {
                     div()
@@ -582,13 +607,11 @@ impl KeelWindow {
                             !busy && !loading,
                             t,
                         )
-                        .on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
-                                if !loading {
-                                    this.memory_modal_action(None, cx)
-                                }
-                            },
-                        )),
+                        .when(!busy && !loading, |b| {
+                            b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.memory_modal_action(None, cx)
+                            }))
+                        }),
                     ),
             );
 

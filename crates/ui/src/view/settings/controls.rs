@@ -10,7 +10,6 @@ use gpui::{
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
-use super::super::tooltip::InfoTip;
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
 use crate::style::{CONTROL_H, INPUT_H, KeelStyled, ROW_MIN_H, c, r_lg, r_md, r_sm, zpx};
@@ -61,8 +60,14 @@ pub(crate) fn button(
         .font_weight(gpui::FontWeight::MEDIUM)
         .map(|d| {
             if !enabled {
+                // A disabled ghost stays chromeless; the rest keep their outline.
+                let edge = if kind == ButtonKind::Ghost {
+                    gpui::transparent_black()
+                } else {
+                    c(t.border)
+                };
                 return d
-                    .border_color(c(t.border))
+                    .border_color(edge)
                     .text_color(c(t.text_faint))
                     .cursor_default();
             }
@@ -89,6 +94,7 @@ pub(crate) fn button(
                     .border_color(c(t.danger))
                     .text_color(c(t.danger))
                     .cursor_pointer()
+                    .hover_fade(c(t.hover), None)
                     .active(|s| s.opacity(PRESS)),
             }
         })
@@ -117,7 +123,8 @@ pub(crate) fn icon_button(
         .child(icon.el(zpx(14.)))
 }
 
-/// Sentence-case group label, 8px above its card.
+/// Sentence-case group label, 8px above its card. `info` is a one-line
+/// caption under the label, for context the rows don't already give.
 pub(crate) fn card_group_header(
     title: &'static str,
     info: Option<&'static str>,
@@ -133,10 +140,10 @@ pub(crate) fn card_group_header(
         .pb(zpx(8.))
         .child(
             div()
+                .min_w_0()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(zpx(6.))
+                .flex_col()
+                .gap(zpx(2.))
                 .child(
                     div()
                         .t_small()
@@ -144,7 +151,9 @@ pub(crate) fn card_group_header(
                         .text_color(c(t.text_muted))
                         .child(title),
                 )
-                .children(info.map(|tip| info_badge(format!("card-info-{title}"), tip, t))),
+                .children(
+                    info.map(|text| div().t_caption().text_color(c(t.text_faint)).child(text)),
+                ),
         )
         .children(right)
 }
@@ -175,7 +184,7 @@ pub(in crate::view) fn settings_list(rows: Vec<gpui::Div>, t: Tokens) -> gpui::D
     settings_card(rows, t)
 }
 
-/// Legacy section header kept for `updates.rs`. The subtitle stays a tooltip.
+/// Legacy section header kept for `updates.rs`. The subtitle is a caption.
 pub(in crate::view) fn section_header(
     title: &'static str,
     subtitle: &'static str,
@@ -186,34 +195,12 @@ pub(in crate::view) fn section_header(
     card_group_header(title, tip, right, t)
 }
 
-/// A 14px borderless `?` that reveals a wrapped [`InfoTip`] on hover.
-pub(crate) fn info_badge(
-    id: impl Into<String>,
-    tip: &'static str,
-    t: Tokens,
-) -> gpui::Stateful<gpui::Div> {
-    let id = id.into();
-    div()
-        .id(ElementId::Name(id.into()))
-        .flex_none()
-        .size(zpx(14.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .t_caption()
-        .text_color(c(t.text_faint))
-        .cursor_default()
-        .hover(|s| s.text_color(c(t.text)))
-        .child("?")
-        .tooltip(move |_, cx| cx.new(|_| InfoTip::new(tip, t)).into())
-}
-
-/// Label on the left, control on the right. `hint` sits under the label.
+/// Label on the left, control on the right. `hint` sits under the label in
+/// muted small type; leave it out when the label says enough.
 pub(crate) fn setting_row(
     t: Tokens,
     label: &'static str,
     hint: Option<&'static str>,
-    info: Option<&'static str>,
     control: AnyElement,
 ) -> gpui::Div {
     div()
@@ -232,15 +219,7 @@ pub(crate) fn setting_row(
                 .flex_col()
                 .justify_center()
                 .gap(zpx(2.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(zpx(6.))
-                        .child(div().t_body().text_color(c(t.text)).child(label))
-                        .children(info.map(|tip| info_badge(format!("info-{label}"), tip, t))),
-                )
+                .child(div().t_body().text_color(c(t.text)).child(label))
                 .when_some(hint, |d, hint| {
                     d.child(div().t_small().text_color(c(t.text_muted)).child(hint))
                 }),
@@ -248,30 +227,14 @@ pub(crate) fn setting_row(
         .child(control)
 }
 
-/// [`setting_row`] with a tooltip and no visible hint.
+/// [`setting_row`] under its older name; `hint` is the line under the label.
 pub(crate) fn setting_row_info(
     t: Tokens,
     label: &'static str,
-    info: Option<&'static str>,
+    hint: Option<&'static str>,
     control: AnyElement,
 ) -> gpui::Div {
-    setting_row(t, label, None, info, control)
-}
-
-/// Compact status badge.
-pub(crate) fn status_pill(label: impl Into<gpui::SharedString>, fg: u32, t: Tokens) -> gpui::Div {
-    div()
-        .flex_none()
-        .px(zpx(8.))
-        .h(zpx(18.))
-        .flex()
-        .items_center()
-        .rounded(r_sm())
-        .bg(c(t.hover))
-        .t_caption()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(c(fg))
-        .child(label.into())
+    setting_row(t, label, hint, control)
 }
 
 fn focus_ring(t: Tokens) -> Vec<gpui::BoxShadow> {
@@ -284,7 +247,7 @@ fn focus_ring(t: Tokens) -> Vec<gpui::BoxShadow> {
     }]
 }
 
-/// A labelled text field. The shell is [`INPUT_H`], filled, bordered, and
+/// A labelled text field. The shell is [`INPUT_H`], hairline-bordered, and
 /// draws the focus ring when the shell itself is focused. The inner editor
 /// uses the same `focus` role through the base theme.
 pub(crate) fn field(t: Tokens, label: &'static str, input: AnyElement) -> gpui::Div {
@@ -313,7 +276,6 @@ pub(crate) fn input_shell(t: Tokens) -> gpui::Div {
         .flex()
         .items_center()
         .rounded(r_md())
-        .bg(c(t.input))
         .border_1()
         .border_color(c(t.border))
         .focus(|s| s.border_color(c(t.focus)).shadow(focus_ring(t)))
@@ -331,20 +293,38 @@ fn raised_shadow(t: Tokens) -> Vec<gpui::BoxShadow> {
     }]
 }
 
-/// White on a light canvas, `text_on_accent` when white would blow out on
-/// `window` (contrast above 7, i.e. a dark theme).
-fn knob_fill(t: Tokens) -> gpui::Hsla {
-    if keel_theme::contrast(0xFFFF_FFFF, t.window) > 7.0 {
-        c(t.text_on_accent)
+/// White would blow out on `window` (contrast above 7): a dark theme.
+fn is_dark(t: Tokens) -> bool {
+    keel_theme::contrast(0xFFFF_FFFF, t.window) > 7.0
+}
+
+/// Toggle knob colors, off then on. Light: white both ways. Dark: a light
+/// gray on the dark off track, `text_on_accent` on the light accent track.
+fn knob_fills(t: Tokens) -> (gpui::Hsla, gpui::Hsla) {
+    if is_dark(t) {
+        (c(t.text_muted), c(t.text_on_accent))
     } else {
-        gpui::hsla(0., 0., 1., 1.)
+        let white = gpui::hsla(0., 0., 1., 1.);
+        (white, white)
     }
 }
 
+/// Soft halo a toggle gains on hover.
+fn hover_halo(t: Tokens) -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: c(t.hover),
+        offset: gpui::point(zpx(0.), zpx(0.)),
+        blur_radius: zpx(0.),
+        spread_radius: zpx(3.),
+        inset: false,
+    }]
+}
+
 impl KeelWindow {
-    /// Segmented control. The track is the input fill at [`CONTROL_H`] with
-    /// 2px of padding. The selected pill is a raised window surface, not an
-    /// accent fill. Its left edge springs per group.
+    /// Segmented control. The track is the input fill at [`CONTROL_H`]; the
+    /// selected pill sits 1px inside its border on every side. The pill is a
+    /// raised, hairline-bordered surface (window in light, a lifted overlay
+    /// in dark), not an accent fill. Its left edge springs per group.
     pub(crate) fn render_segmented_control<T: Copy + PartialEq + 'static, F>(
         &self,
         group_id: &'static str,
@@ -363,18 +343,23 @@ impl KeelWindow {
             .position(|(_, val)| *val == current)
             .unwrap_or(0);
         let count = options.len();
-        const PAD: f32 = 2.;
-        let pill_h = CONTROL_H - PAD * 2.;
-        let total_w = PAD * 2. + item_w * count as f32;
+        // Absolute children are placed inside the track's 1px border.
+        const BORDER: f32 = 1.;
+        const PAD: f32 = 1.;
+        let pill_h = CONTROL_H - BORDER * 2. - PAD * 2.;
+        let total_w = BORDER * 2. + PAD * 2. + item_w * count as f32;
         let left = PAD + current_ix as f32 * item_w;
+        let pill_fill = if is_dark(t) { c(t.selected) } else { c(t.window) };
 
         let pill = div()
             .absolute()
             .top(zpx(PAD))
             .w(zpx(item_w))
             .h(zpx(pill_h))
-            .rounded(r_md())
-            .bg(c(t.window))
+            .rounded(r_sm())
+            .bg(pill_fill)
+            .border_1()
+            .border_color(c(t.border))
             .shadow(raised_shadow(t))
             .with_spring(
                 ElementId::Name(format!("settings-seg-{group_id}").into()),
@@ -400,7 +385,7 @@ impl KeelWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(r_md())
+                    .rounded(r_sm())
                     .cursor_pointer()
                     .t_small()
                     .font_weight(if selected {
@@ -436,10 +421,12 @@ impl KeelWindow {
 pub(in crate::view) fn toggle(id: String, on: bool, t: Tokens) -> gpui::Stateful<gpui::Div> {
     const TRACK_W: f32 = 30.;
     const TRACK_H: f32 = 18.;
+    const BORDER: f32 = 1.;
     const KNOB: f32 = 14.;
-    const INSET: f32 = 2.;
+    // Knob gap inside the border: 16px inner height - 14px knob = 1px a side.
+    const INSET: f32 = 1.;
     let spring_id = id.clone();
-    let knob = knob_fill(t);
+    let (knob_off, knob_on) = knob_fills(t);
     let off_fill = c(t.input);
     let on_fill = c(t.accent);
     let off_edge = c(t.border);
@@ -457,7 +444,10 @@ pub(in crate::view) fn toggle(id: String, on: bool, t: Tokens) -> gpui::Stateful
             ElementId::Name(format!("settings-toggle-{spring_id}").into()),
             SpringAnimation::new(KNOB_SPRING).to(on),
             move |el, phase| {
-                let left = phase.interpolate(zpx(INSET), zpx(TRACK_W - KNOB - INSET));
+                let left = phase.interpolate(
+                    zpx(INSET),
+                    zpx(TRACK_W - BORDER * 2. - KNOB - INSET),
+                );
                 el.bg(phase.interpolate_clamped(off_fill, on_fill))
                     .border_color(phase.interpolate_clamped(off_edge, on_edge))
                     .child(
@@ -467,7 +457,7 @@ pub(in crate::view) fn toggle(id: String, on: bool, t: Tokens) -> gpui::Stateful
                             .left(left)
                             .size(zpx(KNOB))
                             .rounded_full()
-                            .bg(knob)
+                            .bg(phase.interpolate_clamped(knob_off, knob_on))
                             .shadow(shadow.clone()),
                     )
             },
@@ -478,6 +468,7 @@ pub(in crate::view) fn toggle(id: String, on: bool, t: Tokens) -> gpui::Stateful
         .flex_none()
         .rounded_full()
         .cursor_pointer()
+        .hover(|s| s.shadow(hover_halo(t)))
         .child(track)
 }
 

@@ -586,9 +586,7 @@ impl KeelWindow {
         let auto_row = setting_row_info(
             t,
             "Check automatically",
-            Some(
-                "Checks once a day on launch. Downloads in the background and installs only when you relaunch.",
-            ),
+            Some("Daily on launch. Installs when you relaunch."),
             toggle("updates-auto".into(), auto, t).on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
                     let on = this.state.ui_settings.auto_update == Some(false);
@@ -605,7 +603,7 @@ impl KeelWindow {
             .flex_col()
             .child(section_header(
                 "Updates",
-                "New versions of Keel, signed and verified before they install.",
+                "",
                 None,
                 t,
             ))

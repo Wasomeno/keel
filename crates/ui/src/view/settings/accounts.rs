@@ -5,12 +5,14 @@ use gpui::{AnyElement, ClickEvent, Context, ElementId, IntoElement, div, prelude
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
-use super::controls::{
-    ButtonKind, button, card_group_header, icon_button, settings_card, status_pill,
-};
+use super::controls::{ButtonKind, button, card_group_header, icon_button, settings_card};
 use super::{Account, ApiKeyEditState, HarnessStatus, SignInUi};
 use crate::icons::Icon;
 use crate::style::{INPUT_H, KeelStyled, MONO, c, r_md, zpx};
+
+/// Caption under the "Model providers" label.
+const PROVIDERS_CAPTION: &str =
+    "Sign-in opens in your browser. Kept for Keel only, apart from your own Pi.";
 
 impl KeelWindow {
     /// Keel's Pi and which providers it is signed in to.
@@ -411,7 +413,7 @@ impl KeelWindow {
         else {
             return div().flex().flex_col().child(card_group_header(
                 "Model providers",
-                Some("Sign-in opens in your browser and is kept for Keel only, separate from your own Pi."),
+                Some(PROVIDERS_CAPTION),
                 None,
                 t,
             ));
@@ -448,8 +450,13 @@ impl KeelWindow {
                 ));
         }
 
-        let version_pill = (!h.version.is_empty())
-            .then(|| status_pill(format!("Pi {}", h.version), t.text_faint, t).into_any_element());
+        let version = (!h.version.is_empty()).then(|| {
+            div()
+                .t_caption()
+                .text_color(c(t.text_faint))
+                .child(format!("Pi {}", h.version))
+                .into_any_element()
+        });
 
         let rows: Vec<gpui::Div> = h
             .accounts
@@ -465,8 +472,8 @@ impl KeelWindow {
             .flex_col()
             .child(card_group_header(
                 "Model providers",
-                Some("Sign-in opens in your browser and is stored for Keel only, separate from your own Pi."),
-                version_pill,
+                Some(PROVIDERS_CAPTION),
+                version,
                 t,
             ))
             .child(settings_card(rows, t))
@@ -820,7 +827,7 @@ impl KeelWindow {
                     )
                     .into_any_element()
             } else {
-                small_button(format!("apikey-add-{}", account.id), "Add API key", true)
+                small_button(format!("apikey-add-{}", account.id), "Add API key", false)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.open_api_key_edit(id.clone(), false, window, cx)
                     }))
@@ -828,8 +835,29 @@ impl KeelWindow {
             }
         };
 
-        let hint_tip = (!account.hint.is_empty()).then(|| account.hint.clone());
-        let provider_id = account.id.clone();
+        // The provider's own hint fills the second line when nothing more
+        // urgent (sign-in progress, an error) needs it.
+        if subline.is_none() && !account.signed_in && !account.hint.is_empty() {
+            subline = Some((account.hint.clone(), t.text_muted));
+        }
+        let logo = Icon::provider(&account.id);
+        let mark: AnyElement = if matches!(logo, Icon::Agent) {
+            // No logo for this provider: its initial, not a generic robot.
+            div()
+                .t_small()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(
+                    account
+                        .name
+                        .chars()
+                        .next()
+                        .map(|ch| ch.to_uppercase().to_string())
+                        .unwrap_or_default(),
+                )
+                .into_any_element()
+        } else {
+            logo.el(zpx(15.)).into_any_element()
+        };
 
         let header = div()
             .flex()
@@ -852,7 +880,7 @@ impl KeelWindow {
                     } else {
                         t.text_muted
                     }))
-                    .child(Icon::provider(&account.id).el(zpx(15.))),
+                    .child(mark),
             )
             .child(
                 div()
@@ -862,40 +890,9 @@ impl KeelWindow {
                     .flex_col()
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.))
-                            .child(
-                                div()
-                                    .t_body()
-                                    .text_color(c(t.text))
-                                    .child(account.name.clone()),
-                            )
-                            .when_some(hint_tip, |d, tip| {
-                                d.child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("acct-hint-{provider_id}").into(),
-                                        ))
-                                        .flex_none()
-                                        .size(zpx(14.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .t_caption()
-                                        .text_color(c(t.text_faint))
-                                        .hover(|s| s.text_color(c(t.text)))
-                                        .cursor_default()
-                                        .child("?")
-                                        .tooltip(move |_, cx| {
-                                            cx.new(|_| {
-                                                super::super::tooltip::InfoTip::new(tip.clone(), t)
-                                            })
-                                            .into()
-                                        }),
-                                )
-                            }),
+                            .t_body()
+                            .text_color(c(t.text))
+                            .child(account.name.clone()),
                     )
                     .when_some(subline, |d, (text, color)| {
                         d.child(
@@ -923,6 +920,7 @@ impl KeelWindow {
                 },
                 t,
             )
+            .size(zpx(22.))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.toggle_api_key_revealed(window, cx)
             }));
@@ -933,7 +931,6 @@ impl KeelWindow {
                 .pl(zpx(8.))
                 .pr(zpx(4.))
                 .rounded(r_md())
-                .bg(c(t.input))
                 .border_1()
                 .border_color(c(if has_error { t.danger } else { t.border }))
                 .flex()
@@ -949,16 +946,19 @@ impl KeelWindow {
                         .child(self.api_key_input.clone()),
                 )
                 .child(eye);
+            let can_save = !edit.saving && has_text;
             let save_btn = button(
                 format!("apikey-save-{}", account.id),
                 if edit.saving { "Saving…" } else { "Save" },
                 ButtonKind::Primary,
-                !edit.saving && has_text,
+                can_save,
                 t,
             )
-            .on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.save_api_key(window, cx)),
-            );
+            .when(can_save, |b| {
+                b.on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.save_api_key(window, cx)),
+                )
+            });
             let cancel_btn =
                 outline_button(format!("apikey-cancel-{}", account.id), "Cancel", false).on_click(
                     cx.listener(|this, _: &ClickEvent, window, cx| {

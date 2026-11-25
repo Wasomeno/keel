@@ -7,7 +7,7 @@ use keel_theme::Tokens;
 
 use super::super::KeelWindow;
 use super::controls::{
-    ButtonKind, button, card_group_header, info_badge, setting_row_info, settings_card, toggle,
+    ButtonKind, button, card_group_header, setting_row_info, settings_card, toggle,
 };
 use crate::icons::Icon;
 use crate::style::{KeelStyled, c, r_md, zpx};
@@ -105,9 +105,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Reduced motion",
-                Some(
-                    "Replaces sliding and spring animations with instant transitions or gentle fades.",
-                ),
+                None,
                 toggle("settings-motion".into(), is_reduced, t)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cur = this.state.effective_reduced_motion(this.os_reduced_motion);
@@ -186,10 +184,10 @@ impl KeelWindow {
                     .child(thumb)
                     .child(
                         div()
+                            .min_w_0()
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.))
+                            .flex_col()
+                            .gap(zpx(2.))
                             .child(
                                 div()
                                     .t_body()
@@ -200,11 +198,12 @@ impl KeelWindow {
                                         "Default landscape"
                                     }),
                             )
-                            .child(info_badge(
-                                "info-bg-formats",
-                                "Shown behind the new-chat screen. Accepts PNG, JPEG, HEIC, or WebP (stored locally at up to 2560 px).",
-                                t,
-                            )),
+                            .child(
+                                div()
+                                    .t_small()
+                                    .text_color(c(t.text_muted))
+                                    .child("Behind new chats. PNG, JPEG, HEIC or WebP."),
+                            ),
                     ),
             )
             .child(
@@ -233,7 +232,7 @@ impl KeelWindow {
         let dim_row = setting_row_info(
             t,
             "Dim",
-            Some("Darkens the background image to keep text legible."),
+            None,
             self.render_segmented_control(
                 "dim",
                 &[
@@ -259,7 +258,7 @@ impl KeelWindow {
         let glow_row = setting_row_info(
             t,
             "Chat glow",
-            Some("Adds a soft ambient glow of the background image beneath the composer."),
+            Some("A soft glow from the background under the composer."),
             toggle("settings-chat-glow".into(), glow_on, t)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.state.ui_settings.chat_glow_off = !this.state.ui_settings.chat_glow_off;

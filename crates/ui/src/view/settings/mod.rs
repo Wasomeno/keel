@@ -44,6 +44,7 @@ pub(super) enum SettingsTab {
 }
 
 impl SettingsTab {
+    #[cfg(test)]
     pub(super) fn index(self) -> usize {
         match self {
             Self::General => 0,
@@ -74,18 +75,6 @@ impl SettingsTab {
             Self::Skills => Icon::Puzzle,
             Self::Memory => Icon::Brain,
             Self::Integrations => Icon::Globe,
-        }
-    }
-
-    pub(super) fn info_tip(self) -> Option<&'static str> {
-        match self {
-            Self::Skills => Some(
-                "Reusable instructions Keel can load across chats. Click any skill to inspect its SKILL.md.",
-            ),
-            Self::Memory => {
-                Some("Notes the agent saves for future chats. Edit, archive, or delete them here.")
-            }
-            _ => None,
         }
     }
 
@@ -312,6 +301,9 @@ pub(super) struct SkillsPage {
     pub modal_leaving: Option<(u64, SkillRow)>,
     pub modal_gen: u64,
     pub modal_scroll: gpui::ScrollHandle,
+    /// The creator filter menu next to the search.
+    pub creator_menu_open: bool,
+    pub creator_btn_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl Default for SkillsPage {
@@ -338,6 +330,8 @@ impl Default for SkillsPage {
             modal_leaving: None,
             modal_gen: 0,
             modal_scroll: gpui::ScrollHandle::default(),
+            creator_menu_open: false,
+            creator_btn_bounds: Default::default(),
         }
     }
 }
@@ -384,10 +378,6 @@ impl MemoryScopeView {
             notes,
             truncated: v["truncated"].as_bool().unwrap_or(false),
         })
-    }
-
-    pub(crate) fn indexed(&self) -> usize {
-        self.notes.iter().filter(|n| !n.unindexed).count()
     }
 }
 
@@ -699,17 +689,7 @@ impl KeelWindow {
             .justify_between()
             .border_b_1()
             .border_color(c(t.border))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(8.))
-                    .child(div().t_title().text_color(c(t.text)).child(tab.label()))
-                    .children(tab.info_tip().map(|tip| {
-                        controls::info_badge(format!("tab-info-{}", tab.label()), tip, t)
-                    })),
-            )
+            .child(div().t_title().text_color(c(t.text)).child(tab.label()))
             .child(
                 icon_button("settings-done-btn", Icon::Close, t)
                     .tooltip(move |_, cx| {

@@ -106,7 +106,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Needs your input",
-                Some("Alerts when an agent asks a question or requests permission."),
+                None,
                 switch("notify-input", n.on_needs_input)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.notify_toggle(|n| n.on_needs_input = !n.on_needs_input);
@@ -117,7 +117,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Turn error",
-                Some("Alerts if a turn fails or is cut off unexpectedly."),
+                None,
                 switch("notify-error", n.on_error)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.notify_toggle(|n| n.on_error = !n.on_error);
@@ -181,7 +181,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Badge",
-                Some("Shown on the Dock icon and sidebar chats."),
+                Some("On the Dock icon and sidebar chats."),
                 self.render_segmented_control(
                     "badge",
                     &[
@@ -202,7 +202,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Bounce Dock icon",
-                Some("Bounces once when an agent needs your input."),
+                None,
                 switch("notify-bounce", n.bounce)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.notify_toggle(|n| n.bounce = !n.bounce);
@@ -213,7 +213,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "macOS banner",
-                Some("Shows a native macOS notification banner. Click it to jump to the chat."),
+                Some("Click a banner to jump to its chat."),
                 switch("notify-banner", n.banner)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.notify_toggle(|n| n.banner = !n.banner);
@@ -429,7 +429,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Sound",
-                Some("Played when an agent finishes or needs attention."),
+                None,
                 sound_control.into_any_element(),
             ),
             setting_row_info(
@@ -458,7 +458,7 @@ impl KeelWindow {
             setting_row_info(
                 t,
                 "Background only",
-                Some("Only play sounds when Keel is not the active window."),
+                Some("Only while Keel isn't the active window."),
                 switch("notify-sound-bg", n.sound_in_background_only)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.notify_toggle(|n| {
@@ -480,7 +480,7 @@ impl KeelWindow {
                     .flex_col()
                     .child(card_group_header(
                         "Notify when",
-                        Some("Triggers for chats you aren't currently viewing."),
+                        Some("For chats you aren't looking at."),
                         None,
                         t,
                     ))

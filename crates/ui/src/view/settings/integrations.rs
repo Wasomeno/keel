@@ -1,14 +1,12 @@
 //! Settings → Integrations: Browser allowed sites and connected external
-//! services (GitLab, Dotify), using compact cards and hover info badges.
+//! services (GitLab, Dotify), using compact cards.
 
 use gpui::{ClickEvent, Context, IntoElement, div, prelude::*};
 use keel_theme::Tokens;
 
 use super::super::KeelWindow;
 use super::ConnectionRow;
-use super::controls::{
-    ButtonKind, button, card_group_header, field, info_badge, settings_card, status_pill,
-};
+use super::controls::{ButtonKind, button, card_group_header, field, settings_card};
 use crate::icons::Icon;
 use crate::style::{INPUT_H, KeelStyled, ROW_MIN_H, c, r_md, zpx};
 
@@ -113,13 +111,17 @@ impl KeelWindow {
             crate::browser::agent::parse_sites(&self.browser_sites.read(cx).value().to_string());
         let dirty = typed != saved;
 
-        let pill = if saved.is_empty() {
-            status_pill("Any site", t.text_muted, t)
-        } else if saved.len() == 1 {
-            status_pill(format!("1 host: {}", saved[0]), t.accent, t)
-        } else {
-            status_pill(format!("{} hosts allowed", saved.len()), t.accent, t)
-        };
+        let status = div()
+            .flex_none()
+            .t_small()
+            .text_color(c(t.text_muted))
+            .child(if saved.is_empty() {
+                "Any site".to_string()
+            } else if saved.len() == 1 {
+                format!("Only {}", saved[0])
+            } else {
+                format!("{} hosts", saved.len())
+            });
 
         let row = div()
             .flex()
@@ -135,23 +137,24 @@ impl KeelWindow {
                     .gap(zpx(8.))
                     .child(
                         div()
+                            .min_w_0()
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.))
+                            .flex_col()
+                            .gap(zpx(2.))
                             .child(
                                 div()
                                     .t_body()
                                     .text_color(c(t.text))
                                     .child("Allowed sites"),
                             )
-                            .child(info_badge(
-                                "info-browser-sites",
-                                "Comma-separated hosts agents may open in Keel's browser pane. A host includes its subdomains; *.example.com matches subdomains only. Leave empty to allow any site. Your own browsing is never restricted.",
-                                t,
-                            )),
+                            .child(
+                                div()
+                                    .t_small()
+                                    .text_color(c(t.text_muted))
+                                    .child("Hosts agents may open in the browser pane."),
+                            ),
                     )
-                    .child(pill),
+                    .child(status),
             )
             .child(
                 div()
@@ -168,7 +171,6 @@ impl KeelWindow {
                             .flex()
                             .items_center()
                             .rounded(r_md())
-                            .bg(c(t.input))
                             .border_1()
                             .border_color(c(t.border))
                             .t_body()
@@ -182,21 +184,18 @@ impl KeelWindow {
                             dirty,
                             t,
                         )
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        .when(dirty, |b| {
+                            b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.save_browser_sites(cx)
-                            })),
+                            }))
+                        }),
                     ),
             );
 
         div()
             .flex()
             .flex_col()
-            .child(card_group_header(
-                "Browser",
-                Some("Controls which sites agents can load in the built-in browser pane."),
-                None,
-                t,
-            ))
+            .child(card_group_header("Browser", None, None, t))
             .child(settings_card(vec![row], t))
     }
 
@@ -290,20 +289,18 @@ impl KeelWindow {
                         .justify_between()
                         .child(
                             div()
+                                .min_w_0()
                                 .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(zpx(6.))
+                                .flex_col()
+                                .gap(zpx(2.))
                                 .child(
                                     div()
                                         .t_body()
                                         .text_color(c(t.text))
                                         .child("Connect GitLab"),
                                 )
-                                .child(info_badge(
-                                    "info-gitlab-token",
-                                    "Supports gitlab.com or self-hosted instances. Create a personal access token with the read_api scope under User settings → Access tokens.",
-                                    t,
+                                .child(div().t_small().text_color(c(t.text_muted)).child(
+                                    "gitlab.com or self-hosted. Use a token with the read_api scope.",
                                 )),
                         )
                         .when(has_conns, |d| {
@@ -406,16 +403,21 @@ impl KeelWindow {
         div()
             .flex()
             .flex_col()
-            .gap(zpx(24.))
             .child(card_group_header(
                 "Connections",
-                Some("External services Keel can talk to. Tokens stay local on this Mac, readable only by you."),
+                Some("Tokens stay on this Mac, readable only by you."),
                 None,
                 t,
             ))
-            .when(self.dotify_visible(), |s| {
-                s.child(self.render_dotify_settings_card(t, cx))
-            })
-            .child(settings_card(rows, t))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(zpx(12.))
+                    .when(self.dotify_visible(), |s| {
+                        s.child(self.render_dotify_settings_card(t, cx))
+                    })
+                    .child(settings_card(rows, t)),
+            )
     }
 }
