@@ -880,7 +880,7 @@ impl KeelWindow {
         // so the composer never hits the left gutter and squeezes only its right
         // edge near the end of the motion.
         let dropping = !hero && self.hero_exiting();
-        let cap = f32::from(self.column_max() - zpx(32.));
+        let cap = f32::from(self.column_max() - crate::style::column_gutter());
         let max = if hero {
             HERO_COMPOSER_WIDTH
         } else if dropping {
@@ -893,7 +893,7 @@ impl KeelWindow {
             } else {
                 0.
             };
-            let gutters = f32::from(zpx(32.));
+            let gutters = f32::from(crate::style::column_gutter());
             let closed_avail = viewport - sidebar - gutters;
             let open_avail = viewport - sidebar - right_full - gutters;
             px(crate::motion::composer_slide_max_w(

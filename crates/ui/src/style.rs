@@ -76,6 +76,8 @@ pub const HEADER_HEIGHT: Pixels = px(40.);
 /// Space the macOS traffic lights take at the left of the title bar.
 pub const TRAFFIC_LIGHTS_WIDTH: Pixels = px(78.);
 pub const TRANSCRIPT_MAX_WIDTH: Pixels = px(760.);
+/// Horizontal padding on each side of the reading column (`px_4`).
+pub const COLUMN_PAD: f32 = 16.;
 
 /// UI zoom (⌘+ / ⌘- / ⌘0): a factor every fixed size goes through via
 /// [`zpx`]. Process-wide, set from the view and `ui-settings.json`.
@@ -114,6 +116,17 @@ pub fn zoom_step(current: f32, up: bool) -> f32 {
 /// measured positions and sizes stay in plain `px`.
 pub fn zpx(n: f32) -> Pixels {
     px(n * zoom())
+}
+
+/// Both sides of [`COLUMN_PAD`], in logical pixels at the current zoom.
+pub fn column_gutter() -> Pixels {
+    zpx(COLUMN_PAD * 2.)
+}
+
+/// The docked composer's max width, and the transcript prose measure, in
+/// logical pixels: the reading column less `px_4` on each side.
+pub fn column_content_max() -> Pixels {
+    TRANSCRIPT_MAX_WIDTH - column_gutter()
 }
 
 /// One step of the type ramp: size, line height, weight.

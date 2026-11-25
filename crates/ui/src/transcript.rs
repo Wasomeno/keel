@@ -38,7 +38,7 @@ use crate::markdown::{ColumnAlign, ImageRef, Inline, InlineSpan, ToolEntry};
 use crate::style::{KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, READING, c};
 
 /// Height memo key: row, content length, container width, and the prose measure.
-/// The measure is design pixels (`PROSE_MAX_W`). A narrower reading column wraps
+/// The measure is design pixels (`prose_max_w()`). A narrower reading column wraps
 /// to a different height at the same container width, so the old entry misses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HeightMemoKey {
@@ -64,7 +64,7 @@ impl HeightMemo {
             row_id: row_id.to_string(),
             content_len,
             width: f32::from(width).round() as u32,
-            measure: PROSE_MAX_W.round() as u32,
+            measure: prose_max_w().round() as u32,
         }
     }
 
@@ -5913,9 +5913,12 @@ fn flow(block: &TranscriptBlock) -> Flow {
 
 /// Prose line height (px at zoom 1): 22.5 on the 14 px body, about 1.6.
 pub const PROSE_LINE: f32 = 22.5;
-/// Reading measure for prose (about 65–75 characters at 14 px). Code,
-/// tables, and trace rows still use the whole column.
-pub const PROSE_MAX_W: f32 = 540.;
+/// Reading measure for prose, in design pixels: the docked composer's width
+/// (the reading column less `px_4` on each side). Code, tables, and trace
+/// rows still use the whole column.
+pub fn prose_max_w() -> f32 {
+    f32::from(crate::style::column_content_max()) / crate::style::zoom()
+}
 /// Slack in a prose row's pre-layout height: the gap above it plus the row's
 /// own padding. Tracks the paragraph rhythm so an entrance isn't short.
 const PROSE_HEIGHT_FUDGE: f32 = 19.;

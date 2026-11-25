@@ -633,7 +633,7 @@ impl KeelWindow {
             viewport_h: f32::from(window.viewport_size().height),
             open_lines: Rc::new(HashMap::new()),
             row_heights: Rc::new(std::cell::RefCell::new(HashMap::new())),
-            prose_max_w: crate::transcript::PROSE_MAX_W.min(content_w),
+            prose_max_w: crate::transcript::prose_max_w().min(content_w),
             column_w: content_w,
             bubble_max_w: None,
             plan_running: false,
