@@ -803,11 +803,11 @@ impl TranscriptState {
             }),
             TranscriptBlock::Paragraph { content, .. } => {
                 let lines = content.lines().count().max(1);
-                px((lines as f32) * f32::from(Self::prose_line_height()) + 12.0)
+                px((lines as f32) * f32::from(Self::prose_line_height()) + PROSE_HEIGHT_FUDGE)
             }
             TranscriptBlock::List { items, .. } => px((items.len().max(1) as f32)
                 * (f32::from(Self::prose_line_height()) + 4.0)
-                + 12.0),
+                + PROSE_HEIGHT_FUDGE),
             TranscriptBlock::Heading { level, .. } => px(match level {
                 1 => 52.0,
                 2 => 44.0,
@@ -5916,10 +5916,14 @@ pub const PROSE_LINE: f32 = 22.5;
 /// Reading measure for prose (about 65–75 characters at 14 px). Code,
 /// tables, and trace rows still use the whole column.
 pub const PROSE_MAX_W: f32 = 540.;
+/// Slack in a prose row's pre-layout height: the gap above it plus the row's
+/// own padding. Tracks the paragraph rhythm so an entrance isn't short.
+const PROSE_HEIGHT_FUDGE: f32 = 19.;
 
-/// Space above a row, from what comes before it: paragraphs ~0.8em apart,
-/// headings with more room above than below, trace lines tight among
-/// themselves but clear of the text around them.
+/// Space above a row, from what comes before it. Paragraphs and lists sit
+/// about 0.8 of a line apart; code and tables a little further. Headings keep
+/// more room above than below, scaled with that paragraph gap. Trace lines
+/// stay tight among themselves and clear of the text around them.
 pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32 {
     if cur.role == "user" {
         return 12.;
@@ -5932,22 +5936,27 @@ pub fn row_gap(prev: Option<&TranscriptRowItem>, cur: &TranscriptRowItem) -> f32
         && flow(&prev.block) != Flow::Trace
         && flow(&cur.block) != Flow::Trace;
     match (flow(&prev.block), flow(&cur.block)) {
+        // 18/11 of the previous steps (26, 22, 18, 14 and 10, 8, 6), so the
+        // heading rhythm stays in proportion to the wider paragraph gap.
         (_, Flow::Heading(level)) => match level {
-            1 => 26.,
-            2 => 22.,
-            3 => 18.,
-            _ => 14.,
+            1 => 43.,
+            2 => 36.,
+            3 => 29.,
+            _ => 23.,
         },
         (Flow::Heading(level), _) => match level {
-            1 => 10.,
-            2 => 8.,
-            _ => 6.,
+            1 => 16.,
+            2 => 13.,
+            _ => 10.,
         },
         (Flow::Trace, Flow::Trace) => 2.,
         // Narration sits in the step list: a little air around it, tighter
         // than between paragraphs of the answer.
         (Flow::Trace | Flow::Note, Flow::Note) | (Flow::Note, Flow::Trace) => 6.,
-        (Flow::Text, Flow::Text) if !first => 11.,
+        (Flow::Text, Flow::Text) if !first => 18.,
+        (Flow::Text, Flow::Block) | (Flow::Block, Flow::Text) => 20.,
+        // A new message's prose reads as its own block, a step past paragraphs.
+        (Flow::Text, Flow::Text) => 22.,
         _ => 14.,
     }
 }
@@ -6031,11 +6040,11 @@ pub fn render_row(
             TranscriptBlock::TurnSummary { .. } => Some(crate::trace_view::LINE_H),
             TranscriptBlock::Paragraph { content, .. } => {
                 let lines = content.lines().count().max(1);
-                Some((lines as f32) * 22.0 + 12.0)
+                Some((lines as f32) * PROSE_LINE + PROSE_HEIGHT_FUDGE)
             }
             TranscriptBlock::Interim(inner) => match inner.as_ref() {
                 TranscriptBlock::Paragraph { content, .. } => {
-                    Some((content.lines().count().max(1) as f32) * 22.0 + 12.0)
+                    Some((content.lines().count().max(1) as f32) * PROSE_LINE + PROSE_HEIGHT_FUDGE)
                 }
                 _ => None,
             },
@@ -9331,6 +9340,10 @@ mod tests {
         let note = TranscriptBlock::Interim(Box::new(para("a#0", text)));
         assert_eq!(note.id(), "a#0");
         assert_eq!(transcript.compute_block_height(&note, px(600.)), plain);
+        assert_eq!(
+            plain,
+            px(2. * f32::from(TranscriptState::prose_line_height()) + PROSE_HEIGHT_FUDGE)
+        );
         // Copy gives the answer, not the trace's narration.
         assert_eq!(block_markdown(&note), None);
     }
@@ -9356,22 +9369,62 @@ mod tests {
         let h2 = row("a", "assistant", h(2));
         let tg = row("a", "assistant", tools());
         let tg2 = row("a", "assistant", tools());
-        // Paragraphs ~0.8em apart; a heading has more room above than below.
-        assert_eq!(row_gap(Some(&p1), &p2), 11.);
+        // Paragraphs about 0.8 line apart; a heading has more room above than below.
+        assert_eq!(row_gap(Some(&p1), &p2), 18.);
+        assert_eq!(row_gap(Some(&p1), &h2), 36.);
+        assert_eq!(row_gap(Some(&h2), &p2), 13.);
         assert!(row_gap(Some(&p1), &h2) > row_gap(Some(&h2), &p2) * 2.);
+        // Lists take the same air as paragraphs against the surrounding prose.
+        let list = row(
+            "a",
+            "assistant",
+            TranscriptBlock::List {
+                id: "l".into(),
+                items: vec![crate::markdown::ListItem {
+                    marker: "•".into(),
+                    depth: 0,
+                    text: "item".into(),
+                    spans: Vec::new(),
+                    task: None,
+                }],
+            },
+        );
+        assert_eq!(row_gap(Some(&p1), &list), 18.);
+        assert_eq!(row_gap(Some(&list), &p2), 18.);
+        // Code and tables sit further from prose than one paragraph from the next.
+        let code = row(
+            "a",
+            "assistant",
+            TranscriptBlock::Code {
+                id: "c".into(),
+                language: None,
+                content: "x".into(),
+                line_count: 1,
+                spans: Vec::new(),
+                closed: true,
+                run: None,
+            },
+        );
+        assert_eq!(row_gap(Some(&p1), &code), 20.);
+        assert_eq!(row_gap(Some(&code), &p2), 20.);
         // Text never butts against trace lines; trace lines stay tight together.
         assert!(row_gap(Some(&p1), &tg) >= 14.);
         assert!(row_gap(Some(&tg), &p2) >= 14.);
         assert_eq!(row_gap(Some(&tg), &tg2), 2.);
         // Narration inside an open fold sits among the trace lines, closer
         // than paragraphs; the answer after the trace still gets its room.
-        let note = row("a", "assistant", TranscriptBlock::Interim(Box::new(para("a#2", "next"))));
+        let note = row(
+            "a",
+            "assistant",
+            TranscriptBlock::Interim(Box::new(para("a#2", "next"))),
+        );
         assert_eq!(row_gap(Some(&tg), &note), 6.);
         assert_eq!(row_gap(Some(&note), &tg2), 6.);
         assert!(row_gap(Some(&note), &p2) >= 14.);
         // A new message's text after another's reads as a new block.
         let next = row("b", "assistant", para("b#0", "three"));
         assert!(row_gap(Some(&p2), &next) > row_gap(Some(&p1), &p2));
+        assert_eq!(row_gap(Some(&p2), &next), 22.);
         assert_eq!(list_marker("•", 1), "◦");
         assert_eq!(list_marker("3.", 1), "3.");
     }
