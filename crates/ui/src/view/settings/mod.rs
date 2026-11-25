@@ -717,18 +717,18 @@ impl KeelWindow {
 
         // Opacity only. The generation id replays on a tab change and stays
         // put for clicks inside the tab. Reduced motion snaps to opaque.
-        let animated_body: AnyElement = if animating {
-            tab_body
-                .with_animation(
-                    ElementId::Name(format!("settings-pane-in-{tab_gen}").into()),
-                    gpui::Animation::new(std::time::Duration::from_millis(120))
-                        .with_easing(crate::motion::ease_out),
-                    |el, delta| el.opacity(delta),
-                )
-                .into_any_element()
-        } else {
-            tab_body.into_any_element()
-        };
+        // The wrapper is always present: an animation element's id is part of
+        // its children's element path, so dropping it after the fade would
+        // reset every stateful child (the Skills uniform_list and its fade)
+        // and make the list blink. `animating` only gates the opacity.
+        let animated_body: AnyElement = tab_body
+            .with_animation(
+                ElementId::Name(format!("settings-pane-in-{tab_gen}").into()),
+                gpui::Animation::new(std::time::Duration::from_millis(120))
+                    .with_easing(crate::motion::ease_out),
+                move |el, delta| if animating { el.opacity(delta) } else { el },
+            )
+            .into_any_element();
 
         let padded = div()
             .w_full()
