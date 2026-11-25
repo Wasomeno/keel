@@ -7208,7 +7208,46 @@ impl Render for UrlTip {
     }
 }
 
+/// A short `[n]` label: the same marker as an inline citation, not a favicon chip.
+fn is_marker_label(label: &str) -> bool {
+    let label = label.trim();
+    let Some(inner) = label.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return false;
+    };
+    (1..=3).contains(&inner.len()) && inner.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Superscript-sized mono marker. Callers add the hover and click.
+fn marker_chip(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id.into())
+        .flex_none()
+        .relative()
+        // A few pixels above the baseline, so it reads as a superscript.
+        .top(zpx(-3.))
+        .h(zpx(13.))
+        .px(zpx(3.5))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .font_family(MONO)
+        .text_size(zpx(9.5))
+        .line_height(zpx(12.))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .bg(c(t.surface).opacity(0.85))
+        .border_color(c(t.border).opacity(0.6))
+        .text_color(c(t.text_muted))
+        .child(label.into())
+}
+
 /// A sleek clickable link chip with favicon icon, text, and rich URL tooltip.
+/// A short `[n]` label uses the citation marker instead of the favicon chip.
 fn link_chip(
     id: &str,
     text: &str,
@@ -7216,6 +7255,9 @@ fn link_chip(
     t: Tokens,
     on_action: OnRowAction,
 ) -> gpui::Stateful<gpui::Div> {
+    if is_marker_label(text) {
+        return compact_link_chip(id, text, url, t, on_action);
+    }
     let url_click = url.to_string();
     let tip_url = url.to_string();
     let tip_text = text.to_string();
@@ -7275,6 +7317,47 @@ fn link_chip(
                 cx,
             );
         })
+}
+
+/// `[n]`(url) as a superscript marker: no favicon, no external icon. The
+/// tooltip and click are the same as the full chip.
+fn compact_link_chip(
+    id: &str,
+    text: &str,
+    url: &str,
+    t: Tokens,
+    on_action: OnRowAction,
+) -> gpui::Stateful<gpui::Div> {
+    let url_click = url.to_string();
+    let tip_url = url.to_string();
+    let tip_text = text.trim().to_string();
+    marker_chip(
+        ElementId::Name(format!("link-chip-{id}").into()),
+        tip_text.clone(),
+        t,
+    )
+    .cursor_pointer()
+    .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+    .hover_fade(c(t.hover), Some(c(t.selected)))
+    .tooltip(move |_, cx| {
+        cx.new(|cx| {
+            UrlTip::new(
+                &tip_url,
+                (!tip_text.is_empty()).then(|| tip_text.clone()),
+                t,
+                cx,
+            )
+        })
+        .into()
+    })
+    .on_click(move |_, _, cx| {
+        on_action(
+            RowAction::OpenUrl {
+                url: url_click.clone(),
+            },
+            cx,
+        );
+    })
 }
 
 fn split_trailing_punct(word: &str) -> (&str, &str) {
@@ -7617,29 +7700,17 @@ fn citation_badge(
     let tip_item = cite.clone();
     let cite_id = cite.id;
     let click_action = citation_open_action(cite);
-    div()
-        .id(ElementId::Name(format!("cite-badge-{id_key}").into()))
-        .flex_none()
-        .h(zpx(16.))
-        .px(zpx(4.5))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        .font_family(MONO)
-        .text_size(zpx(10.5))
-        .line_height(zpx(14.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .bg(c(t.surface).opacity(0.85))
-        .border_color(c(t.border).opacity(0.6))
-        .text_color(c(t.text_muted))
-        .when(click_action.is_some(), |d| {
-            d.cursor_pointer()
-                .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
-                .hover_fade(c(t.selected), None)
-                .active(|s| s.opacity(0.82))
-        })
+    marker_chip(
+        ElementId::Name(format!("cite-badge-{id_key}").into()),
+        format!("[{cite_id}]"),
+        t,
+    )
+    .when(click_action.is_some(), |d| {
+        d.cursor_pointer()
+            .hover(|s| s.text_color(c(t.text)).border_color(c(t.border)))
+            .hover_fade(c(t.selected), None)
+            .active(|s| s.opacity(0.82))
+    })
         .tooltip_show_delay(
             crate::view::tooltip::delay().min(std::time::Duration::from_millis(180)),
         )
@@ -7657,7 +7728,6 @@ fn citation_badge(
                 on_action(action.clone(), cx);
             })
         })
-        .child(format!("[{cite_id}]"))
 }
 
 struct FileTip {
@@ -7933,7 +8003,12 @@ fn inline_text(
         return selectable(key, text, order, rc, |s| s.into_any_element(), styled);
     }
 
-    // Paragraphs with links or file chips render as a cohesive inline flow of words and sleek chips
+    // A citation or link still breaks the paragraph into words. gpui's Display
+    // is Flex, Block, or Grid: a StyledText run is one flex item, and once it
+    // wraps its box is as wide as the measure, so a marker after the run starts
+    // on the next line instead of in the leftover space of the last one.
+    // HighlightStyle cannot shrink a run or shift its baseline, so the marker
+    // cannot live inside the text either. Words keep the marker in the sentence.
     let mut slices: Vec<(Range<usize>, crate::markdown::InlineStyle, Option<String>)> = Vec::new();
     let mut cursor = 0;
     for span in spans {
@@ -8151,7 +8226,7 @@ fn inline_text(
         .flex()
         .flex_row()
         .flex_wrap()
-        .items_center()
+        .items_baseline()
         .gap_x(zpx(4.))
         .gap_y(zpx(0.))
         .children(elements);
@@ -9676,6 +9751,17 @@ mod tests {
             link: Some("https://example.com".into()),
         };
         assert!(needs_inline_chips("here", &[linked]));
+    }
+
+    #[test]
+    fn short_bracket_labels_use_the_citation_marker() {
+        assert!(is_marker_label("[1]"));
+        assert!(is_marker_label(" [12] "));
+        assert!(is_marker_label("[123]"));
+        assert!(!is_marker_label("docs"));
+        assert!(!is_marker_label("[link]"));
+        assert!(!is_marker_label("[1234]"));
+        assert!(!is_marker_label(""));
     }
 
     #[test]
