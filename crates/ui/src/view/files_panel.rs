@@ -1115,17 +1115,20 @@ impl KeelWindow {
                 })
                 .tooltip_show_delay(crate::view::tooltip::delay())
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    // A manual refresh re-reads open folders too.
-                    let open: Vec<String> = this.files.dirs.keys().cloned().collect();
-                    for rel in open {
-                        this.files_load_dir(rel, cx);
-                    }
-                    // And every diff already loaded.
-                    this.files.stack.reload_all = true;
-                    this.files_refresh(cx);
+                    this.files_refresh_all(cx);
                 }))
                 .into_any_element()
         }
+    }
+
+    /// Re-reads open directories and reloads all diffs in the right-panel files/changes tabs.
+    pub(super) fn files_refresh_all(&mut self, cx: &mut Context<Self>) {
+        let open: Vec<String> = self.files.dirs.keys().cloned().collect();
+        for rel in open {
+            self.files_load_dir(rel, cx);
+        }
+        self.files.stack.reload_all = true;
+        self.files_refresh(cx);
     }
 
     /// Changes tab body for the unified right side panel.

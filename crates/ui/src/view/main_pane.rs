@@ -7,12 +7,53 @@ use gpui::{
     WindowAppearance, div, prelude::*, px,
 };
 use keel_proto::ChatStatus;
-use keel_theme::{Tokens, resolve_syntax_theme};
+use keel_theme::{SyntaxPaintMap, Tokens, resolve_syntax_theme};
+
+/// Snapshot of every input that [`super::transcript_list::TranscriptListView`] and
+/// [`crate::transcript::RowContext`] depend on. When the transcript is idle and
+/// nothing in this key changed, [`KeelWindow`] skips rebuilding `RowContext` and
+/// skips writing `transcript_list`, keeping GPUI-Fast view retention and list scroll layers warm.
+#[derive(PartialEq)]
+pub(super) struct TranscriptSyncKey {
+    items_gen: u64,
+    tokens: Tokens,
+    syntax: SyntaxPaintMap,
+    reduced: bool,
+    diagram_menu: Option<String>,
+    diagram_menu_ix: usize,
+    diagram_menu_keyboard: bool,
+    fold_gen: u64,
+    copied: Option<(String, std::time::Instant)>,
+    live_choices: Option<String>,
+    merges: std::collections::HashMap<String, crate::transcript::MergeUi>,
+    mr_fetches: std::collections::HashMap<String, crate::transcript::CardFetchUi>,
+    armed_runs: std::collections::HashSet<String>,
+    run_at: Option<std::time::Instant>,
+    step_shown: Option<String>,
+    tool_lines_len: usize,
+    clock_epoch: std::time::Instant,
+    viewport_h_bits: u32,
+    column_bits: u32,
+    dock_h_bits: u32,
+    prose_max_w_bits: u32,
+    column_w_bits: u32,
+    bubble_max_w_bits: Option<u32>,
+    open_lines_ptr: usize,
+    plan_running: bool,
+    plan_cards: std::collections::HashMap<String, crate::plan::CardState>,
+    citations_ptr: usize,
+    subagents: std::collections::BTreeMap<String, serde_json::Value>,
+    geo_trace_on: bool,
+    loader_row: Option<usize>,
+    loader_seed: (std::time::Instant, usize),
+    loader_verbs_ptr: usize,
+    loader_look: Option<crate::motion::RowLook>,
+}
 
 use super::{KeelWindow, drag_region, editor_style, icon_button};
 use crate::icons::Icon;
 use crate::style::{
-    HEADER_HEIGHT, KeelStyled, MONO, RADIUS_MD, RADIUS_SM, SANS, apply_base_theme, c,
+    HEADER_HEIGHT, KeelStyled, RADIUS_MD, RADIUS_SM, SANS, apply_base_theme, c,
 };
 use crate::transcript::{RowAction, RowContext};
 
@@ -128,7 +169,9 @@ impl Render for KeelWindow {
 
         // New-chat hero: on entry its animations replay; on exit the composer
         // drops from the middle to its dock while the transcript fills in.
-        let hero = self.hero_visible() && !show_question && !self.projects.home_open();
+        let skills_open = self.skills.open;
+        let hero =
+            self.hero_visible() && !show_question && !self.projects.home_open() && !skills_open;
         if hero != self.was_hero {
             self.hero_gen += 1;
             self.hero_exit = (!hero).then(|| (0., std::time::Instant::now()));
@@ -137,10 +180,16 @@ impl Render for KeelWindow {
             self.sync_right_panel_hero_transition(hero);
             self.was_hero = hero;
         }
-        // Page switch (chat ↔ project home): the arriving page glides 16 px in from
+        // Page switch (chat ↔ project home ↔ skills): the arriving page glides 16 px in from
         // its side and fades up; the sidebar holds still. Settings has its
         // own sheet. Instant under reduced motion.
-        let page_key = if self.projects.home_open() { 3 } else { 0 };
+        let page_key = if self.projects.home_open() {
+            3
+        } else if skills_open {
+            4
+        } else {
+            0
+        };
         if page_key != self.page_key {
             self.page_from = std::mem::replace(&mut self.page_key, page_key);
             self.page_at = (!reduced).then(|| (0., std::time::Instant::now()));
@@ -287,6 +336,7 @@ impl Render for KeelWindow {
                     .when(
                         hero || exiting
                             || (!self.projects.home_open()
+                                && !skills_open
                                 && self.current_chat.is_some()
                                 && !self.state.ui_settings.chat_glow_off),
                         |d| {
@@ -310,6 +360,9 @@ impl Render for KeelWindow {
                                 if self.projects.home_open() {
                                     d.child(self.render_project_home(t, cx))
                                         .child(self.render_header(t, window, true, false, false, cx))
+                                } else if skills_open {
+                                    d.child(self.render_skills_page(t, cx))
+                                        .child(self.render_header(t, window, true, false, false, cx))
                                 } else if hero {
                                     let composer = self
                                         .render_composer(t, window, true, cx)
@@ -317,11 +370,7 @@ impl Render for KeelWindow {
                                     d.child(self.render_hero_center(composer, hero_gen, reduced))
                                         .child(self.render_header(t, window, true, false, false, cx))
                                 } else {
-                                    d.child(if self.subagent_open.is_some() {
-                                            self.render_subagent_session(t, cx)
-                                        } else {
-                                            self.render_transcript(t, window, cx).into_any_element()
-                                        })
+                                    d.child(self.render_transcript(t, window, cx).into_any_element())
                                         // The loader rides inline after the newest row; with
                                         // no rows yet there is nothing to sit under.
                                         .children(
@@ -335,16 +384,12 @@ impl Render for KeelWindow {
                                 }
                             })
                             .children(page_timer)
-                            .when(!hero && !self.projects.home_open(), |d| {
+                            .when(!hero && !self.projects.home_open() && !skills_open, |d| {
                                 self.sync_chat_timeline(t, cx);
-                                if self.subagent_open.is_some() || show_question {
+                                if show_question {
                                     self.dock_h.set(0.);
                                     return d
-                                        .child(if show_question {
-                                            self.render_question_panel(t, window, cx).into_any_element()
-                                        } else {
-                                            self.render_subagent_note(t)
-                                        })
+                                        .child(self.render_question_panel(t, window, cx).into_any_element())
                                         .child(self.timeline_view.clone());
                                 }
                                 let composer = self
@@ -389,7 +434,6 @@ impl Render for KeelWindow {
                                 )
                                 .child(self.timeline_view.clone())
                             })
-                            .children(self.render_subagent_menu(t, cx))
                             .children(self.render_chat_menu(t, cx))
                             .children(self.render_lightbox(t, window, cx)),
                     ),
@@ -397,7 +441,11 @@ impl Render for KeelWindow {
             .children(self.render_right_panel(t, t == keel_theme::Tokens::dark(), window, cx))
             // Last children: paint over the content.
             .children(self.render_sidebar_trigger(t, window, cx))
-            .children(self.render_right_panel_trigger(t, hero || self.projects.home_open(), cx))
+            .children(self.render_right_panel_trigger(
+                t,
+                hero || self.projects.home_open() || skills_open,
+                cx,
+            ))
             .children(self.render_sidebar_peek(t, cx))
             .children(self.render_zoom_toast(t))
             .children(self.render_notice(t, cx))
@@ -421,7 +469,89 @@ impl Render for KeelWindow {
             .children(self.render_update_confirm(t, cx))
             .children(self.render_project_modal(t, window, cx))
             .children(self.render_delete_projects_modal(t, cx))
+            .children(self.render_app_refresh_bar(t, window))
             .children(probe_end)
+    }
+}
+
+impl KeelWindow {
+    /// Sleek non-blocking hairline sweep along the top edge of the window when
+    /// the user triggers ⌘R (`RefreshApp`). Fast ease-out-strong travel with a
+    /// luminous leading edge that dissolves smoothly before settling.
+    fn render_app_refresh_bar(&mut self, t: Tokens, window: &mut Window) -> Option<gpui::AnyElement> {
+        let (started, _gen) = self.app_refresh?;
+        let elapsed_ms = started.elapsed().as_secs_f32() * 1000.;
+        let reduced = self.reduced();
+        let total_ms = if reduced { 200. } else { 460. };
+        if elapsed_ms >= total_ms {
+            self.app_refresh = None;
+            return None;
+        }
+        window.request_animation_frame();
+
+        let (width_frac, opacity) = if reduced {
+            let u = (elapsed_ms / total_ms).clamp(0., 1.);
+            (1.0, (1.0 - crate::motion::ease_out(u)) * 0.85)
+        } else {
+            let sweep_u = (elapsed_ms / 320.).clamp(0., 1.);
+            let width = crate::motion::ease_out_strong(sweep_u);
+            let fade_u = ((elapsed_ms - 240.) / 220.).clamp(0., 1.);
+            let alpha = 1.0 - crate::motion::ease_out(fade_u);
+            (width, alpha)
+        };
+
+        if opacity <= 0.004 {
+            return None;
+        }
+
+        let accent = c(t.accent);
+        let tip = gpui::hsla(
+            accent.h,
+            (accent.s * 0.85).clamp(0., 1.),
+            (accent.l + 0.18).min(0.96),
+            opacity,
+        );
+        let tail = gpui::hsla(accent.h, accent.s, accent.l, opacity * 0.72);
+        let soft = gpui::hsla(accent.h, accent.s, accent.l, opacity * 0.22);
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(3.))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .relative()
+                        .h(px(2.))
+                        .w(gpui::relative(width_frac.max(0.02)))
+                        .rounded_r(px(2.))
+                        .bg(gpui::linear_gradient(
+                            90.,
+                            gpui::linear_color_stop(soft, 0.),
+                            gpui::linear_color_stop(tail, 0.72),
+                        ))
+                        .when(!reduced, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(px(56.))
+                                    .rounded_r(px(2.))
+                                    .bg(gpui::linear_gradient(
+                                        90.,
+                                        gpui::linear_color_stop(gpui::transparent_black(), 0.),
+                                        gpui::linear_color_stop(tip, 1.),
+                                    )),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -1025,41 +1155,6 @@ impl KeelWindow {
         } else {
             f32::from(zpx(8.)) + (f32::from(zpx(30.)) - right_spacer_w).max(0.)
         };
-        let show_subagents_btn = !hero && !self.subagents.is_empty();
-        let right_controls = show_subagents_btn.then(|| {
-            let running = self.subagents.values().any(|sub| {
-                sub.get("status").and_then(|v| v.as_str()) == Some("running")
-            });
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(
-                    icon_button("subagents-btn", Icon::Brain, t)
-                        .when(self.show_subagent_menu, |b| {
-                            b.bg(c(t.selected)).text_color(c(t.text))
-                        })
-                        // A dot while any subagent is still running.
-                        .when(running, |b| {
-                            b.relative().child(
-                                div()
-                                    .absolute()
-                                    .top(zpx(5.))
-                                    .right(zpx(5.))
-                                    .size(zpx(6.))
-                                    .rounded_full()
-                                    .bg(c(t.accent)),
-                            )
-                        })
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            // The press that closed it from outside is not a reopen.
-                            if !this.menu_just_dismissed("subagent-menu") {
-                                this.toggle_subagent_menu(cx)
-                            }
-                        })),
-                )
-        });
         let chat_title = (!bare && !hero)
             .then(|| self.render_chat_title(t, cx))
             .flatten();
@@ -1081,12 +1176,10 @@ impl KeelWindow {
                 .pl(px(left_pad))
                 .children(timer)
                 .child(drag_region("header-drag"))
-                .children(right_controls)
                 .into_any_element();
         }
         // Align the left-most header item (workspace context, or title when scratch)
-        // with the centered reading column, while keeping `subagents-btn` clear of
-        // the fixed top-right panel trigger.
+        // with the centered reading column.
         let pane_w = self.pane_width(window).unwrap_or(1100.);
         let col_w = f32::from(self.column_max()).min(pane_w);
         let col_left = (pane_w - col_w) * 0.5 + f32::from(zpx(16.));
@@ -1137,7 +1230,6 @@ impl KeelWindow {
                     .children(chat_title),
             )
             .child(drag_region("header-drag-right"))
-            .children(right_controls)
             .into_any_element()
     }
 
@@ -1614,10 +1706,9 @@ impl KeelWindow {
         if self.transcript.advance_glide(pill_now) {
             window.request_animation_frame();
         }
-        // Rows entering or leaving live: frames only while one moves.
-        if self.transcript.reap(pill_now) {
-            window.request_animation_frame();
-        }
+        // Rows entering or leaving live: reap once leaving rows expire (TranscriptListView
+        // drives the VSync animation frames cleanly in isolation).
+        let _transcript_moving = self.transcript.reap(pill_now);
         if self.geo_trace.on.get() {
             let top = self.transcript.list_state.logical_scroll_top();
             self.geo_trace.push(serde_json::json!({
@@ -1646,200 +1737,306 @@ impl KeelWindow {
                 let items = self.transcript.items.clone();
                 let weak = cx.entity().downgrade();
                 let handle = window.window_handle();
-                // Wrap width for prose/bubbles: the reading column's width, so
-                // inline file chips get a real pixel cap (not only relative).
+                // Wrap width for prose/bubbles: the reading column's actual width
+                // (clamped to the current center pane width), so diagrams and
+                // inline file chips stay within the visible column when side
+                // panels narrow the chat pane.
                 let rem = f32::from(crate::style::column_gutter());
-                let wrap_hold = Some((f32::from(self.column_max()) - rem).max(200.));
+                let col_w = self
+                    .pane_width(window)
+                    .map_or(f32::from(self.column_max()), |w| {
+                        w.min(f32::from(self.column_max()))
+                    })
+                    .round();
+                let wrap_hold = Some((col_w - rem).max(120.));
                 // Design pixels. Prose matches the docked composer; diagrams
                 // keep this full content width.
                 let content_w = wrap_hold.map_or(f32::from(crate::style::TRANSCRIPT_MAX_WIDTH), |w| {
                     w / crate::style::zoom()
                 });
-                self.measure_step_line(window);
                 self.mr_hydrate_cards(cx);
+                let items_gen = self.transcript.items_gen();
+                let diagram_menu = if self.lightbox.is_some() {
+                    None
+                } else {
+                    self.diagram_menu.clone()
+                };
+                let live_choices = self.live_choices();
+                let plan_running = self.active_status() == Some(ChatStatus::Running);
+                let run_at = running.then_some(self.loader_seed.0);
+                let viewport_h = f32::from(window.viewport_size().height);
+                let prose_max_w = content_w.min(crate::transcript::prose_max_w());
+                let column_w = content_w;
+                let bubble_max_w = wrap_hold.map(|w| 0.85 * w);
+                let column = self.column_max();
                 let open_lines = self.open_lines_rc();
-                let rc = std::rc::Rc::new(RowContext {
+                let citations = self.transcript.citations_map();
+                let sync_key = TranscriptSyncKey {
+                    items_gen,
                     tokens: t,
                     syntax,
-                    reduced: self.reduced(),
-                    diagram_menu: if self.lightbox.is_some() {
-                        None
-                    } else {
-                        self.diagram_menu.clone()
-                    },
+                    reduced,
+                    diagram_menu: diagram_menu.clone(),
                     diagram_menu_ix: self.diagram_menu_ix,
                     diagram_menu_keyboard: self.diagram_menu_keyboard,
-                    toggles: std::rc::Rc::new(self.fold_toggles.clone()),
-                    copied: self.copied.as_ref().map(|(row, _)| row.clone()),
-                    copied_at: self.copied.as_ref().map(|(_, at)| *at),
-                    on_action: std::rc::Rc::new(move |action, cx| {
-                        // Opening a file needs the window (the browser pane);
-                        // the click is still dispatching, so do it right after.
-                        if let RowAction::OpenFile { path } = action {
-                            let weak = weak.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    weak.update(cx, |view, cx| view.open_file_result(path.into(), window, cx))
-                                });
-                            });
-                            return;
-                        }
-                        if let RowAction::OpenFileAt { path, line } = action {
-                            let weak = weak.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    weak.update(cx, |view, cx| view.open_file_at(path.into(), line, window, cx))
-                                });
-                            });
-                            return;
-                        }
-                        if let RowAction::OpenFileDiff { path } = action {
-                            let weak = weak.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    weak.update(cx, |view, cx| view.show_file_diff(path, window, cx))
-                                });
-                            });
-                            return;
-                        }
-                        // Run and a diagram node also need the window (the
-                        // terminal panel, the composer).
-                        if let RowAction::Run { .. }
-                            | RowAction::InsertInTerminal { .. }
-                            | RowAction::AskAbout { .. }
-                            | RowAction::ResumeRetry
-                            | RowAction::ResumeStartFresh
-                            | RowAction::PlanApprove { .. }
-                            | RowAction::PlanEdit { .. }
-                            | RowAction::PlanAsk { .. }
-                            | RowAction::PlanDone { .. }
-                            | RowAction::PlanAdd { .. }
-                            | RowAction::PlanDelete { .. }
-                            | RowAction::PlanDrag { .. }
-                            | RowAction::PlanDrop { .. }
-                            | RowAction::PlanToggle { .. }
-                            | RowAction::PlanToggleTargets { .. }
-                            | RowAction::PlanToggleModeMenu { .. }
-                            | RowAction::PlanSetManual { .. }
-                            | RowAction::PlanSetMode { .. } = &action
-                        {
-                            let weak = weak.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    weak.update(cx, |view, cx| match action {
-                                        RowAction::Run { row_id, command, risky } => view.run_command(row_id, command, risky, window, cx),
-                                        RowAction::InsertInTerminal { text } => view.insert_in_terminal(text, window, cx),
-                                        RowAction::AskAbout { label } => view.ask_about(&label, window, cx),
-                                        RowAction::ResumeRetry => view.retry_last_prompt(window, cx),
-                                        RowAction::ResumeStartFresh => view.start_fresh_prompt(window, cx),
-                                        other => view.plan_action(other, window, cx),
-                                    })
-                                });
-                            });
-                            return;
-                        }
-                        let _ = weak.update(cx, |view, cx| match action {
-                            RowAction::Toggle { row_id } => view.toggle_row(&row_id, cx),
-                            RowAction::Copy { row_id, content } => {
-                                view.diagram_menu = None;
-                                view.copy_code(row_id, content, cx);
-                            }
-                            RowAction::OpenImage { path } => view.open_lightbox(super::Lightbox::Image(path.into()), cx),
-                            RowAction::OpenDiagram { row_id, source } => {
-                                let view_state = Default::default();
-                                view.open_lightbox(super::Lightbox::Diagram { row_id, source, view: view_state }, cx);
-                            }
-                            RowAction::CopyImage { row_id, source, tokens } => {
-                                view.diagram_menu = None;
-                                view.copy_image(row_id, source, tokens, cx);
-                                cx.notify();
-                            }
-                            RowAction::CopyChartImage { row_id, chart, tokens } => {
-                                view.diagram_menu = None;
-                                view.copy_chart_image(row_id, *chart, tokens, cx);
-                                cx.notify();
-                            }
-                            RowAction::ToggleDiagramMenu { row_id } => {
-                                if !view.menu_just_dismissed("inline-diagram-menu") {
-                                    if view.diagram_menu.as_deref() == Some(&row_id) {
-                                        view.diagram_menu = None;
-                                    } else {
-                                        view.diagram_menu_ix = 0;
-                                        view.diagram_menu_keyboard = false;
-                                        view.diagram_menu = Some(row_id);
-                                    }
-                                    cx.notify();
-                                }
-                            }
-                            RowAction::CloseDiagramMenu => {
-                                if view.diagram_menu.is_some() {
-                                    view.diagram_menu = None;
-                                    view.note_menu_dismissed("inline-diagram-menu");
-                                    cx.notify();
-                                }
-                            }
-                            RowAction::OpenSubagent { subagent_id } => view.open_subagent_session(&subagent_id, cx),
-                            RowAction::Choose { text } => view.choose(text, cx),
-                            RowAction::OpenUrl { url } => cx.open_url(&url),
-                            RowAction::Merge { row_id, message_id, part_id } => view.merge_mr(row_id, message_id, part_id, cx),
-                            RowAction::RefreshMr { row_id, message_id, part_id } => {
-                                view.refresh_mr_card(row_id, message_id, part_id, cx);
-                                cx.notify();
-                            }
-                            RowAction::OpenFullOutput { title, content, error } => {
-                                view.open_lightbox(super::Lightbox::Output { title, content, error }, cx);
-                            }
-                            RowAction::OpenFile { .. } | RowAction::OpenFileAt { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } | RowAction::ResumeRetry | RowAction::ResumeStartFresh | RowAction::PlanApprove { .. } | RowAction::PlanEdit { .. } | RowAction::PlanAsk { .. } | RowAction::PlanDone { .. } | RowAction::PlanAdd { .. } | RowAction::PlanDelete { .. } | RowAction::PlanDrag { .. } | RowAction::PlanDrop { .. } | RowAction::PlanToggle { .. } | RowAction::PlanToggleTargets { .. } | RowAction::PlanToggleModeMenu { .. } | RowAction::PlanSetManual { .. } | RowAction::PlanSetMode { .. } => {}
-                        });
-                    }),
-                    order: 0,
-                    live_choices: self.live_choices(),
-                    merges: std::rc::Rc::new(self.mr_merges.clone()),
-                    mr_fetches: std::rc::Rc::new(self.mr_fetches.clone()),
-                    armed_runs: std::rc::Rc::new(self.armed_runs.clone()),
-                    run_at: (self.active_status() == Some(ChatStatus::Running) || self.dev_live)
-                        .then_some(self.loader_seed.0),
-                    step_from: self.step_line.as_ref().and_then(|line| line.from.clone()),
-                    tool_from: std::rc::Rc::new(self.tool_lines.iter()
-                        .filter_map(|(id, line)| line.from.clone().filter(|swap| swap.running(std::time::Instant::now()))
-                            .map(|swap| (id.clone(), swap))).collect()),
-                    muted: false,
-                    now: std::time::Instant::now(),
-                    now_ms: crate::trace_view::now_ms(),
+                    fold_gen: self.fold_gen,
+                    copied: self.copied.clone(),
+                    live_choices: live_choices.clone(),
+                    merges: self.mr_merges.clone(),
+                    mr_fetches: self.mr_fetches.clone(),
+                    armed_runs: self.armed_runs.clone(),
+                    run_at,
+                    step_shown: self.step_line.as_ref().map(|l| l.shown.clone()),
+                    tool_lines_len: self.tool_lines.len(),
                     clock_epoch: self.clock_epoch,
-                    viewport_h: f32::from(window.viewport_size().height),
-                    open_lines,
-                    row_heights: self.transcript.row_heights.clone(),
-                    // Mid-slide the text wraps once, at the narrower end
-                    // of the slide (inside a row's px_4), and holds it.
-                    prose_max_w: content_w.min(crate::transcript::prose_max_w()),
-                    column_w: content_w,
-                    bubble_max_w: wrap_hold.map(|w| 0.85 * w),
-                    plan_running: self.active_status() == Some(ChatStatus::Running),
-                    plan_cards: std::rc::Rc::new(self.plan_cards.clone()),
-                    citations: self.transcript.citations_map(),
-                    current_citations: None,
-                    probe: self.geo_trace.on.get().then(|| {
-                        let tr = self.geo_trace.clone();
-                        std::rc::Rc::new(move |which: crate::transcript::RowProbe| match which {
-                            crate::transcript::RowProbe::Code => super::dev::GeoTrace::probe(&tr, |g| &g.code),
-                            crate::transcript::RowProbe::Tool => super::dev::GeoTrace::probe(&tr, |g| &g.tool),
-                        }) as std::rc::Rc<dyn Fn(crate::transcript::RowProbe) -> Option<gpui::AnyElement>>
-                    }),
-                });
-                let column = self.column_max();
-                let list_state = self.transcript.list_state.clone();
-                self.transcript_list.update(cx, |view, _| {
-                    view.props = Some(super::transcript_list::TranscriptListProps {
-                        list_state,
-                        items,
-                        rc,
-                        column,
-                        dock_h,
-                        loader_row,
-                        loader,
+                    viewport_h_bits: viewport_h.to_bits(),
+                    column_bits: f32::from(column).to_bits(),
+                    dock_h_bits: dock_h.to_bits(),
+                    prose_max_w_bits: prose_max_w.to_bits(),
+                    column_w_bits: column_w.to_bits(),
+                    bubble_max_w_bits: bubble_max_w.map(f32::to_bits),
+                    open_lines_ptr: std::rc::Rc::as_ptr(&open_lines) as usize,
+                    plan_running,
+                    plan_cards: self.plan_cards.clone(),
+                    citations_ptr: std::rc::Rc::as_ptr(&citations) as usize,
+                    subagents: self.subagents.clone(),
+                    geo_trace_on: self.geo_trace.on.get(),
+                    loader_row,
+                    loader_seed: self.loader_seed,
+                    loader_verbs_ptr: self.loader_verbs.as_ptr() as usize,
+                    loader_look: look,
+                };
+                let frame_now = std::time::Instant::now();
+                let transcript_animating = look.is_some() || loader_row.is_some();
+                let needs_sync = transcript_animating
+                    || self.transcript_sync_key.as_ref() != Some(&sync_key)
+                    || self.transcript_list.read(cx).props.is_none();
+                if needs_sync {
+                    self.transcript_sync_key = (!transcript_animating).then_some(sync_key);
+                    self.measure_step_line(window);
+                    let rc = std::rc::Rc::new(RowContext {
+                        tokens: t,
+                        syntax,
+                        reduced,
+                        diagram_menu,
+                        diagram_menu_ix: self.diagram_menu_ix,
+                        diagram_menu_keyboard: self.diagram_menu_keyboard,
+                        toggles: std::rc::Rc::new(self.fold_toggles.clone()),
+                        copied: self.copied.as_ref().map(|(row, _)| row.clone()),
+                        copied_at: self.copied.as_ref().map(|(_, at)| *at),
+                        on_action: std::rc::Rc::new(move |action, cx| {
+                            // Opening a file needs the window (the browser pane);
+                            // the click is still dispatching, so do it right after.
+                            if let RowAction::OpenFile { path } = action {
+                                let weak = weak.clone();
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        weak.update(cx, |view, cx| view.open_file_result(path.into(), window, cx))
+                                    });
+                                });
+                                return;
+                            }
+                            if let RowAction::OpenFileAt { path, line } = action {
+                                let weak = weak.clone();
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        weak.update(cx, |view, cx| view.open_file_at(path.into(), line, window, cx))
+                                    });
+                                });
+                                return;
+                            }
+                            if let RowAction::OpenFileDiff { path } = action {
+                                let weak = weak.clone();
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        weak.update(cx, |view, cx| view.show_file_diff(path, window, cx))
+                                    });
+                                });
+                                return;
+                            }
+                            // Run and a diagram node also need the window (the
+                            // terminal panel, the composer).
+                            if let RowAction::Run { .. }
+                                | RowAction::InsertInTerminal { .. }
+                                | RowAction::AskAbout { .. }
+                                | RowAction::ResumeRetry
+                                | RowAction::ResumeStartFresh
+                                | RowAction::PlanApprove { .. }
+                                | RowAction::PlanEdit { .. }
+                                | RowAction::PlanAsk { .. }
+                                | RowAction::PlanDone { .. }
+                                | RowAction::PlanAdd { .. }
+                                | RowAction::PlanDelete { .. }
+                                | RowAction::PlanDrag { .. }
+                                | RowAction::PlanDrop { .. }
+                                | RowAction::PlanToggle { .. }
+                                | RowAction::PlanToggleTargets { .. }
+                                | RowAction::PlanToggleModeMenu { .. }
+                                | RowAction::PlanSetManual { .. }
+                                | RowAction::PlanSetMode { .. }
+                                | RowAction::OpenSubagent { .. } = &action
+                            {
+                                let weak = weak.clone();
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        weak.update(cx, |view, cx| match action {
+                                            RowAction::Run { row_id, command, risky } => view.run_command(row_id, command, risky, window, cx),
+                                            RowAction::InsertInTerminal { text } => view.insert_in_terminal(text, window, cx),
+                                            RowAction::AskAbout { label } => view.ask_about(&label, window, cx),
+                                            RowAction::ResumeRetry => view.retry_last_prompt(window, cx),
+                                            RowAction::ResumeStartFresh => view.start_fresh_prompt(window, cx),
+                                            RowAction::OpenSubagent { subagent_id } => view.open_subagent_in_panel(&subagent_id, window, cx),
+                                            other => view.plan_action(other, window, cx),
+                                        })
+                                    });
+                                });
+                                return;
+                            }
+                            let _ = weak.update(cx, |view, cx| match action {
+                                RowAction::Toggle { row_id } => view.toggle_row(&row_id, cx),
+                                RowAction::Copy { row_id, content } => {
+                                    view.diagram_menu = None;
+                                    view.copy_code(row_id, content, cx);
+                                }
+                                RowAction::OpenImage { path } => view.open_inline_image(&path, cx),
+                                RowAction::OpenImageGallery { paths, index } => {
+                                    let resolved = paths.iter().map(|p| view.resolve_image_path(p)).collect();
+                                    view.open_image_gallery(resolved, index, cx);
+                                }
+                                RowAction::OpenDiagram { row_id, source } => {
+                                    let view_state = Default::default();
+                                    view.open_lightbox(super::Lightbox::Diagram { row_id, source, view: view_state }, cx);
+                                }
+                                RowAction::CopyImage { row_id, source, tokens } => {
+                                    view.diagram_menu = None;
+                                    view.copy_image(row_id, source, tokens, cx);
+                                    cx.notify();
+                                }
+                                RowAction::CopyChartImage { row_id, chart, tokens } => {
+                                    view.diagram_menu = None;
+                                    view.copy_chart_image(row_id, *chart, tokens, cx);
+                                    cx.notify();
+                                }
+                                RowAction::ToggleDiagramMenu { row_id } => {
+                                    if !view.menu_just_dismissed("inline-diagram-menu") {
+                                        if view.diagram_menu.as_deref() == Some(&row_id) {
+                                            view.diagram_menu = None;
+                                        } else {
+                                            view.diagram_menu_ix = 0;
+                                            view.diagram_menu_keyboard = false;
+                                            view.diagram_menu = Some(row_id);
+                                        }
+                                        cx.notify();
+                                    }
+                                }
+                                RowAction::CloseDiagramMenu => {
+                                    if view.diagram_menu.is_some() {
+                                        view.diagram_menu = None;
+                                        view.note_menu_dismissed("inline-diagram-menu");
+                                        cx.notify();
+                                    }
+                                }
+                                RowAction::OpenSubagent { .. } => {}
+                                RowAction::Choose { text } => view.choose(text, cx),
+                                RowAction::OpenUrl { url } => cx.open_url(&url),
+                                RowAction::Merge { row_id, message_id, part_id } => view.merge_mr(row_id, message_id, part_id, cx),
+                                RowAction::RefreshMr { row_id, message_id, part_id } => {
+                                    view.refresh_mr_card(row_id, message_id, part_id, cx);
+                                    cx.notify();
+                                }
+                                RowAction::OpenFullOutput { title, content, error } => {
+                                    view.open_lightbox(super::Lightbox::Output { title, content, error }, cx);
+                                }
+                                RowAction::OpenFile { .. } | RowAction::OpenFileAt { .. } | RowAction::OpenFileDiff { .. } | RowAction::Run { .. } | RowAction::InsertInTerminal { .. } | RowAction::AskAbout { .. } | RowAction::ResumeRetry | RowAction::ResumeStartFresh | RowAction::PlanApprove { .. } | RowAction::PlanEdit { .. } | RowAction::PlanAsk { .. } | RowAction::PlanDone { .. } | RowAction::PlanAdd { .. } | RowAction::PlanDelete { .. } | RowAction::PlanDrag { .. } | RowAction::PlanDrop { .. } | RowAction::PlanToggle { .. } | RowAction::PlanToggleTargets { .. } | RowAction::PlanToggleModeMenu { .. } | RowAction::PlanSetManual { .. } | RowAction::PlanSetMode { .. } => {}
+                            });
+                        }),
+                        order: 0,
+                        live_choices,
+                        merges: std::rc::Rc::new(self.mr_merges.clone()),
+                        mr_fetches: std::rc::Rc::new(self.mr_fetches.clone()),
+                        armed_runs: std::rc::Rc::new(self.armed_runs.clone()),
+                        run_at,
+                        step_from: self.step_line.as_ref().and_then(|line| line.from.clone()),
+                        tool_from: std::rc::Rc::new(self.tool_lines.iter()
+                            .filter_map(|(id, line)| line.from.clone().filter(|swap| swap.running(frame_now))
+                                .map(|swap| (id.clone(), swap))).collect()),
+                        muted: false,
+                        now: frame_now,
+                        now_ms: crate::trace_view::now_ms(),
+                        clock_epoch: self.clock_epoch,
+                        viewport_h,
+                        open_lines,
+                        row_heights: self.transcript.row_heights.clone(),
+                        // Mid-slide the text wraps once, at the narrower end
+                        // of the slide (inside a row's px_4), and holds it.
+                        prose_max_w,
+                        column_w,
+                        bubble_max_w,
+                        plan_running,
+                        plan_cards: std::rc::Rc::new(self.plan_cards.clone()),
+                        citations,
+                        current_citations: None,
+                        subagent_info: std::rc::Rc::new(
+                            self.subagents
+                                .iter()
+                                .map(|(id, sub)| {
+                                    (
+                                        id.clone(),
+                                        crate::transcript::SubagentInlineInfo {
+                                            description: sub
+                                                .get("description")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                            active_tool: sub
+                                                .get("active_tool")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                            turns: sub
+                                                .get("turns")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0) as u32,
+                                            duration_ms: sub
+                                                .get("duration_ms")
+                                                .and_then(|v| v.as_u64()),
+                                            read_only: sub
+                                                .get("read_only")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(false),
+                                            worktree_branch: sub
+                                                .get("worktree_branch")
+                                                .and_then(|v| v.as_str())
+                                                .filter(|s| !s.is_empty())
+                                                .map(str::to_string),
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        probe: self.geo_trace.on.get().then(|| {
+                            let tr = self.geo_trace.clone();
+                            std::rc::Rc::new(move |which: crate::transcript::RowProbe| match which {
+                                crate::transcript::RowProbe::Code => super::dev::GeoTrace::probe(&tr, |g| &g.code),
+                                crate::transcript::RowProbe::Tool => super::dev::GeoTrace::probe(&tr, |g| &g.tool),
+                            }) as std::rc::Rc<dyn Fn(crate::transcript::RowProbe) -> Option<gpui::AnyElement>>
+                        }),
                     });
-                });
+                    let list_state = self.transcript.list_state.clone();
+                    self.transcript_list.update(cx, |view, cx| {
+                        view.props = Some(super::transcript_list::TranscriptListProps {
+                            list_state,
+                            items,
+                            items_gen,
+                            rc,
+                            column,
+                            dock_h,
+                            loader_row,
+                            loader,
+                        });
+                        cx.notify();
+                    });
+                }
                 d.flex().flex_row().overflow_hidden().child(
                     // Full-height list so scrolled rows travel under the overlaid
                     // header; row 0 carries `HEADER_HEIGHT + pt_6` top padding.
@@ -2236,10 +2433,12 @@ impl KeelWindow {
         let look = self.lightbox_fx.look_at(now);
         let live = !self.lightbox_fx.leaving(now);
         let content = match self.lightbox.clone()? {
-            super::Lightbox::Image(path) => gpui::img(path)
-                .size_full()
-                .object_fit(gpui::ObjectFit::Contain)
-                .into_any_element(),
+            super::Lightbox::Images {
+                items,
+                index,
+                nav_gen,
+                nav_dir,
+            } => self.render_images_lightbox(t, &items, index, nav_gen, nav_dir, cx),
             super::Lightbox::Diagram {
                 row_id,
                 source,
@@ -2299,6 +2498,396 @@ impl KeelWindow {
             )
             .with_priority(2),
         )
+    }
+
+    /// Full-window image viewer modal with filename header, actions (Copy / Open / Close),
+    /// left/right arrow navigation, and a clickable bottom thumbnail strip.
+    fn render_images_lightbox(
+        &self,
+        t: Tokens,
+        items: &[std::path::PathBuf],
+        index: usize,
+        nav_gen: u64,
+        nav_dir: i8,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui::AnimationExt as _;
+        let total = items.len();
+        let current_ix = index.min(total.saturating_sub(1));
+        let Some(current) = items.get(current_ix).cloned() else {
+            return div().into_any_element();
+        };
+        let name = current
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| current.to_string_lossy().into_owned());
+        let reduced = self.reduced();
+        let copied = self.copied.as_ref().map(|(row, _)| row.as_str()) == Some("lightbox-image");
+        let can_prev = current_ix > 0;
+        let can_next = current_ix + 1 < total;
+
+        let pill_shadow = vec![gpui::BoxShadow {
+            color: crate::style::c(t.shadow).opacity(0.28),
+            offset: gpui::point(zpx(0.), zpx(4.)),
+            blur_radius: zpx(12.),
+            spread_radius: zpx(-2.),
+            inset: false,
+        }];
+
+        let title_pill = div()
+            .id("lightbox-image-title")
+            .occlude()
+            .max_w(zpx(480.))
+            .h(zpx(34.))
+            .px_3()
+            .rounded_full()
+            .bg(crate::style::c(t.floating))
+            .border_1()
+            .border_color(crate::style::c(t.border).opacity(0.25))
+            .shadow(pill_shadow.clone())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(crate::style::c(t.accent))
+                    .child(Icon::Image.el(zpx(13.))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(zpx(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(crate::style::c(t.text))
+                    .child(name.clone()),
+            )
+            .when(total > 1, |d| {
+                d.child(div().h(zpx(13.)).w_px().bg(crate::style::c(t.border)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(zpx(11.5))
+                            .font_family(crate::style::MONO)
+                            .text_color(crate::style::c(t.text_muted))
+                            .child(format!("{} / {}", current_ix + 1, total)),
+                    )
+            });
+
+        let copy_path = current.clone();
+        let copy_btn = div()
+            .id("lightbox-image-copy")
+            .h(zpx(26.))
+            .px_2p5()
+            .rounded_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_color(crate::style::c(if copied { t.success } else { t.text_muted }))
+            .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+            .hover(move |s| s.text_color(crate::style::c(if copied { t.success } else { t.text })))
+            .active(|s| s.opacity(0.85))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.copy_local_image_file("lightbox-image".into(), copy_path.clone(), cx);
+                cx.stop_propagation();
+            }))
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Copy image", t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(if copied { Icon::Check.el(zpx(12.)) } else { Icon::Copy.el(zpx(12.)) })
+            .child(if copied { "Copied" } else { "Copy" });
+
+        let open_path = current.clone();
+        let open_btn = div()
+            .id("lightbox-image-open")
+            .h(zpx(26.))
+            .px_2p5()
+            .rounded_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_color(crate::style::c(t.text_muted))
+            .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+            .hover(move |s| s.text_color(crate::style::c(t.text)))
+            .active(|s| s.opacity(0.85))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.close_lightbox(cx);
+                this.open_file_result(open_path.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Open in Files", t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(Icon::External.el(zpx(12.)))
+            .child("Open");
+
+        let close_btn = div()
+            .id("lightbox-image-close")
+            .size(zpx(26.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(crate::style::c(t.text_muted))
+            .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+            .hover(move |s| s.text_color(crate::style::c(t.text)))
+            .active(|s| s.opacity(0.85))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.close_lightbox(cx);
+                cx.stop_propagation();
+            }))
+            .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new("Close (Esc)", t)).into())
+            .tooltip_show_delay(crate::view::tooltip::delay())
+            .child(Icon::Close.el(zpx(13.)));
+
+        let actions_pill = div()
+            .id("lightbox-image-actions")
+            .occlude()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .rounded_full()
+            .bg(crate::style::c(t.floating))
+            .border_1()
+            .border_color(crate::style::c(t.border).opacity(0.25))
+            .shadow(pill_shadow.clone())
+            .t_caption()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(copy_btn)
+            .child(open_btn)
+            .child(div().h(zpx(14.)).w_px().bg(crate::style::c(t.border)))
+            .child(close_btn);
+
+        let header = div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(title_pill)
+            .child(actions_pill);
+
+        let nav_button = |id: &'static str, enabled: bool, turn: f32, tip: &'static str, delta: isize| {
+            let btn = div()
+                .id(id)
+                .occlude()
+                .size(zpx(40.))
+                .flex_none()
+                .rounded_full()
+                .bg(crate::style::c(t.floating))
+                .border_1()
+                .border_color(crate::style::c(t.border).opacity(0.25))
+                .shadow(pill_shadow.clone())
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Icon::ChevronDown
+                        .el(zpx(16.))
+                        .with_transformation(gpui::Transformation::rotate(gpui::percentage(turn))),
+                );
+            if enabled {
+                btn.cursor_pointer()
+                    .text_color(crate::style::c(t.text))
+                    .hover_fade(crate::style::c(t.hover), Some(crate::style::c(t.selected)))
+                    .active(|s| s.opacity(0.82))
+                    .tooltip(move |_, cx| cx.new(|_| crate::view::Tip::new(tip, t)).into())
+                    .tooltip_show_delay(crate::view::tooltip::delay())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.lightbox_step(delta, cx);
+                        cx.stop_propagation();
+                    }))
+            } else {
+                btn.opacity(0.32)
+                    .text_color(crate::style::c(t.text_faint))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+            }
+        };
+
+        let img_el = gpui::img(current.clone())
+            .size_full()
+            .object_fit(gpui::ObjectFit::Contain)
+            .with_fallback(move || {
+                div()
+                    .px_6()
+                    .py_4()
+                    .rounded(crate::style::RADIUS_LG)
+                    .bg(crate::style::c(t.surface))
+                    .border_1()
+                    .border_color(crate::style::c(t.border))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(crate::style::c(t.text_muted))
+                    .child(Icon::Image.el(zpx(24.)))
+                    .child(div().t_small().child(name.clone()))
+                    .into_any_element()
+            });
+
+        let stage_image = div()
+            .id("lightbox-image-frame")
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(img_el);
+
+        let stage_image = if nav_gen > 0 {
+            stage_image
+                .with_animation(
+                    ElementId::Name(format!("lightbox-img-swap-{nav_gen}").into()),
+                    gpui::Animation::new(std::time::Duration::from_millis(140))
+                        .with_easing(crate::motion::ease_out_strong),
+                    move |el, d| {
+                        let offset = if reduced {
+                            0.
+                        } else {
+                            10. * nav_dir as f32 * (1. - d)
+                        };
+                        el.opacity(0.35 + 0.65 * d).left(zpx(offset))
+                    },
+                )
+                .into_any_element()
+        } else {
+            stage_image.into_any_element()
+        };
+
+        let stage = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .when(total > 1, |d| {
+                d.child(nav_button(
+                    "lightbox-image-prev",
+                    can_prev,
+                    0.25,
+                    "Previous (←)",
+                    -1,
+                ))
+            })
+            .child(stage_image)
+            .when(total > 1, |d| {
+                d.child(nav_button(
+                    "lightbox-image-next",
+                    can_next,
+                    0.75,
+                    "Next (→)",
+                    1,
+                ))
+            });
+
+        let thumb_px = 48.0 * crate::style::zoom();
+        let strip = (total > 1).then(|| {
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("lightbox-image-strip")
+                        .occlude()
+                        .max_w_full()
+                        .overflow_x_scroll()
+                        .p(zpx(6.))
+                        .rounded(crate::style::RADIUS_LG)
+                        .bg(crate::style::c(t.floating))
+                        .border_1()
+                        .border_color(crate::style::c(t.border).opacity(0.25))
+                        .shadow(pill_shadow)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(zpx(6.))
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(items.iter().enumerate().map(|(ix, path)| {
+                            let active = ix == current_ix;
+                            let thumb_name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                            div()
+                                .id(ElementId::Name(format!("lightbox-thumb-{ix}").into()))
+                                .size(zpx(48.))
+                                .flex_none()
+                                .rounded(crate::style::RADIUS_MD)
+                                .overflow_hidden()
+                                .bg(crate::style::c(t.surface))
+                                .cursor_pointer()
+                                .when(active, |d| {
+                                    d.border_2()
+                                        .border_color(crate::style::c(t.focus))
+                                        .opacity(1.0)
+                                })
+                                .when(!active, |d| {
+                                    d.border_1()
+                                        .border_color(crate::style::c(t.border))
+                                        .opacity(0.55)
+                                        .hover(|s| {
+                                            s.opacity(0.92)
+                                                .border_color(crate::style::c(t.focus).opacity(0.6))
+                                        })
+                                })
+                                .active(|s| s.opacity(0.85))
+                                .tooltip(move |_, cx| {
+                                    let label = thumb_name.clone();
+                                    cx.new(move |_| crate::view::Tip::new(label, t)).into()
+                                })
+                                .tooltip_show_delay(crate::view::tooltip::delay())
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.lightbox_select(ix, cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    gpui::img(crate::thumbs::source(
+                                        path.clone(),
+                                        thumb_px,
+                                        thumb_px,
+                                        true,
+                                    ))
+                                    .size_full()
+                                    .object_fit(gpui::ObjectFit::Cover),
+                                )
+                        })),
+                )
+        });
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(header)
+            .child(stage)
+            .children(strip)
+            .into_any_element()
     }
 
     /// Zoom and copy controls floating over the expanded diagram.
@@ -2973,365 +3562,6 @@ impl KeelWindow {
         )
     }
 
-    /// The open subagent's session, in place of the transcript: its own
-    /// transcript (the engine's `subagents.{id}` view) under a header with
-    /// status. The takeover composer is the docked bar below.
-    fn render_subagent_session(&mut self, t: Tokens, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(record) = self.open_subagent().cloned() else {
-            return div().flex_1().min_h_0().into_any_element();
-        };
-        let name = record
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("subagent")
-            .to_string();
-        let description = record
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let status = record
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("running")
-            .to_string();
-        let blocked = record
-            .get("blocked_question")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let (color, label) = subagent_status(&status, t);
-
-        let parts = record
-            .get("parts")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let rows: Vec<gpui::AnyElement> = parts
-            .iter()
-            .filter_map(|part| {
-                let kind = part.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                match kind {
-                    "text" => {
-                        let body = part
-                            .get("body")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        (!body.trim().is_empty()).then(|| {
-                            div()
-                                .t_body()
-                                .text_color(c(t.text))
-                                .child(body.to_string())
-                                .into_any_element()
-                        })
-                    }
-                    "reasoning" => {
-                        let body = part
-                            .get("body")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        (!body.trim().is_empty()).then(|| {
-                            div()
-                                .t_small()
-                                .text_color(c(t.text_muted))
-                                .border_l_1()
-                                .border_color(c(t.border))
-                                .pl_3()
-                                .child(body.to_string())
-                                .into_any_element()
-                        })
-                    }
-                    "tool" => {
-                        let name = part.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                        let state = part.get("state").and_then(|v| v.as_str()).unwrap_or("done");
-                        let summary = part
-                            .get("summary")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        let dot = match state {
-                            "error" => t.danger,
-                            "running" => t.accent,
-                            _ => t.success,
-                        };
-                        Some(
-                            div()
-                                .h(zpx(24.))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .t_small()
-                                .child(div().size(zpx(6.)).flex_none().rounded_full().bg(c(dot)))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_family(MONO)
-                                        .text_color(c(t.text))
-                                        .child(name.to_string()),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_color(c(t.text_muted))
-                                        .child(summary.to_string()),
-                                )
-                                .into_any_element(),
-                        )
-                    }
-                    _ => None,
-                }
-            })
-            .collect();
-
-        div()
-            .id("subagent-session")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_none()
-                    .px_4()
-                    .pt(HEADER_HEIGHT + zpx(12.))
-                    .pb_2()
-                    .w_full()
-                    .max_w(self.column_max())
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .id("subagent-back")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .t_small()
-                            .text_color(c(t.text_muted))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(c(t.text)))
-                            .child(Icon::Back.el(zpx(13.)))
-                            .child("Back to chat")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.close_subagent_session(cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .t_title()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(c(t.text))
-                                    .child(name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .px_1p5()
-                                    .rounded(RADIUS_SM)
-                                    .bg(c(color & 0xFFFF_FF00 | 0x1A))
-                                    .t_caption()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(c(color))
-                                    .child(label),
-                            ),
-                    )
-                    .when(!description.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .t_small()
-                                .text_color(c(t.text_faint))
-                                .child(description),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .pb_4()
-                    .w_full()
-                    .max_w(self.column_max())
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(rows)
-                    .when(!blocked.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .rounded(RADIUS_MD)
-                                .bg(c(t.surface))
-                                .border_1()
-                                .border_color(c(t.warning))
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .t_small()
-                                .text_color(c(t.text))
-                                .child(
-                                    div()
-                                        .text_color(c(t.warning))
-                                        .child(Icon::Alert.el(zpx(13.))),
-                                )
-                                .child(format!("Waiting for input: {blocked}")),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// In the composer slot while a subagent session is open: where it
-    /// stands. Subagents take no input of their own.
-    fn render_subagent_note(&self, t: Tokens) -> gpui::AnyElement {
-        let note = |text: &str| {
-            div()
-                .px_4()
-                .pb_3()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .t_small()
-                        .text_color(c(t.text_faint))
-                        .child(text.to_string()),
-                )
-                .into_any_element()
-        };
-        let Some(record) = self.open_subagent() else {
-            return note("This subagent is gone.");
-        };
-        if record
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("running")
-            != "running"
-        {
-            return note("This subagent has ended.");
-        }
-        note("This subagent is working. Go back to the chat to reply.")
-    }
-
-    /// The header button's dropdown: every subagent of the chat with its
-    /// status; click one to open its session.
-    fn render_subagent_menu(
-        &mut self,
-        t: Tokens,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let open = self.show_subagent_menu && self.current_chat.is_some();
-        // Stays mounted through its exit, like the other floating menus.
-        let leaving = self.menu_phase("subagent-menu", open, cx)?;
-        let rows: Vec<gpui::AnyElement> = self
-            .subagent_list()
-            .into_iter()
-            .map(|sub| {
-                let id = sub
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let name = sub
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("subagent")
-                    .to_string();
-                let status = sub
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("running")
-                    .to_string();
-                let (color, label) = subagent_status(&status, t);
-                div()
-                    .id(ElementId::Name(format!("subagent-menu-{id}").into()))
-                    .h(zpx(30.))
-                    .px_2()
-                    .rounded(RADIUS_SM)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .t_small()
-                    .cursor_pointer()
-                    .hover_fade(c(t.hover), None)
-                    .child(div().size(zpx(7.)).flex_none().rounded_full().bg(c(color)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(c(t.text))
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .t_caption()
-                            .text_color(c(color))
-                            .child(label),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.open_subagent_session(&id, cx)
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let panel = div()
-            .id("subagent-menu")
-            .w(zpx(300.))
-            .max_h(zpx(360.))
-            .overflow_y_scroll()
-            .p_1p5()
-            .flex()
-            .flex_col()
-            .gap(zpx(2.))
-            .floating_surface(t)
-            .child(
-                div()
-                    .px_2()
-                    .pt_1()
-                    .t_caption()
-                    .text_color(c(t.text_faint))
-                    .child("SUBAGENTS"),
-            )
-            .children(rows)
-            .when(leaving.is_none(), |d| {
-                d.on_mouse_down_out(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
-                    if this.show_subagent_menu {
-                        this.show_subagent_menu = false;
-                        this.note_menu_dismissed("subagent-menu");
-                        cx.notify();
-                    }
-                }))
-            });
-        let panel = super::menu_motion(panel, "subagent-menu", false, leaving, self.reduced());
-        Some(
-            div()
-                .absolute()
-                .top(HEADER_HEIGHT + zpx(6.))
-                .right(zpx(8.))
-                .child(panel)
-                .into_any_element(),
-        )
-    }
-
     fn render_chat_menu(
         &mut self,
         t: Tokens,
@@ -3497,14 +3727,36 @@ const FADE_BANDS: usize = 14;
 const HERO_PATH_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A subagent status's color and label, shared by the indicator row, the
-/// menu, and the session header.
-fn subagent_status(status: &str, t: Tokens) -> (u32, String) {
+/// side panel, and the session header.
+pub(super) fn subagent_status(status: &str, t: Tokens) -> (u32, String) {
     match status {
         "running" => (t.accent, "running".to_string()),
+        "done" | "completed" => (t.success, "done".to_string()),
         "blocked" => (t.warning, "waiting for input".to_string()),
         "error" => (t.danger, "failed".to_string()),
         "interrupted" => (t.text_muted, "stopped".to_string()),
         other => (t.text_muted, other.to_string()),
+    }
+}
+
+pub(super) fn format_subagent_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let secs = ms / 1_000;
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+pub(super) fn format_compact_tokens(n: u64) -> String {
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{:.2}M", n as f64 / 1_000_000.0)
     }
 }
 

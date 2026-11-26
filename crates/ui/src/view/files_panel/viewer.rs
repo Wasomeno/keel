@@ -612,7 +612,11 @@ impl KeelWindow {
                         view.copy_code(row_id, content, cx)
                     }
                     crate::transcript::RowAction::OpenImage { path } => {
-                        view.open_lightbox(crate::view::Lightbox::Image(path.into()), cx)
+                        view.open_lightbox(crate::view::Lightbox::single_image(path.into()), cx)
+                    }
+                    crate::transcript::RowAction::OpenImageGallery { paths, index } => {
+                        let resolved = paths.iter().map(|p| view.resolve_image_path(p)).collect();
+                        view.open_image_gallery(resolved, index, cx);
                     }
                     crate::transcript::RowAction::OpenUrl { url } => cx.open_url(&url),
                     _ => {}
@@ -640,6 +644,7 @@ impl KeelWindow {
             plan_cards: std::rc::Rc::new(std::collections::HashMap::new()),
             citations: Default::default(),
             current_citations: None,
+            subagent_info: Default::default(),
             probe: None,
         });
         let items = md.items.clone();

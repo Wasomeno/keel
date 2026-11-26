@@ -14,9 +14,9 @@ use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
 use crate::style::{CONTROL_H, INPUT_H, KeelStyled, ROW_MIN_H, c, r_lg, r_md, r_sm, zpx};
 
-/// Rail and segmented pills. Critically damped (ζ = 1): stiffness 900,
-/// damping 60, mass 1 settles to 0.1% in about 0.3s.
-pub(crate) const PILL_SPRING: SpringConfig = SpringConfig::new(900., 60., 1.);
+/// Rail and segmented pills. Critically damped (ζ = 1): stiffness 1400,
+/// damping 74.8, mass 1 settles to 0.1% in about 0.2s.
+pub(crate) const PILL_SPRING: SpringConfig = SpringConfig::new(1400., 74.8, 1.);
 /// Toggle knob. Critically damped, about 0.2s: ω ≈ sqrt(2100), damping = 2ω.
 pub(crate) const KNOB_SPRING: SpringConfig = SpringConfig::new(2100., 91.6, 1.);
 
@@ -374,7 +374,7 @@ impl KeelWindow {
                         gpui::FontWeight::NORMAL
                     })
                     .text_color(c(if selected { t.text } else { t.text_muted }))
-                    .when(!selected, |d| d.hover_fade(c(t.hover), None))
+                    .hover_fade_when(!selected, c(t.hover), None)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         on_select(this, val, cx);
                         cx.notify();

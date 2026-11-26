@@ -2,10 +2,18 @@
 //! and arrows; otherwise the fence goes to mermaid (`crate::mermaid`) or stays
 //! a code block. Layout is a rank assignment plus a left-to-right sweep.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
+const DIAGRAM_CACHE_CAP: usize = 64;
+
+thread_local! {
+    static PARSED_DIAGRAMS: RefCell<HashMap<String, Option<Diagram>>> = RefCell::new(HashMap::new());
+    static PLACED_DIAGRAMS: RefCell<HashMap<(Diagram, u32), Placed>> = RefCell::new(HashMap::new());
+}
+
 /// A node the painter can place. `x`/`y` are rank and order, not pixels.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Node {
     pub id: String,
     pub label: String,
@@ -13,7 +21,7 @@ pub struct Node {
     pub y: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Dir {
     Right,
     Down,
@@ -21,7 +29,7 @@ pub enum Dir {
     Up,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Edge {
     pub from: String,
     pub to: String,
@@ -30,7 +38,7 @@ pub struct Edge {
 }
 
 /// A diagram that fits the painter. `down` is top-to-bottom flow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diagram {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -46,11 +54,22 @@ pub fn parse(language: Option<&str>, source: &str) -> Option<Diagram> {
     if language?.trim() != "diagram" {
         return None;
     }
-    let diagram = parse_boxes(source)?;
-    (diagram.nodes.len() <= MAX_NODES
-        && diagram.edges.len() <= MAX_EDGES
-        && faithful(&diagram, source))
-    .then_some(diagram)
+    if let Some(hit) = PARSED_DIAGRAMS.with(|c| c.borrow().get(source).cloned()) {
+        return hit;
+    }
+    let parsed = parse_boxes(source).filter(|diagram| {
+        diagram.nodes.len() <= MAX_NODES
+            && diagram.edges.len() <= MAX_EDGES
+            && faithful(diagram, source)
+    });
+    PARSED_DIAGRAMS.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= DIAGRAM_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(source.to_string(), parsed.clone());
+    });
+    parsed
 }
 
 /// Characters of a label the painter draws; longer labels are cut.
@@ -473,6 +492,7 @@ const GAP_X: f32 = 56.;
 const GAP_Y: f32 = 28.;
 
 /// Where each node sits, in pixels relative to the canvas origin.
+#[derive(Clone)]
 pub struct Placed {
     pub nodes: HashMap<String, (f32, f32, f32, f32)>,
 }
@@ -480,6 +500,22 @@ pub struct Placed {
 /// Place nodes inside `width`. A left-to-right graph that does not fit is
 /// drawn top to bottom instead of running off the right edge.
 pub fn place(diagram: &Diagram, width: f32) -> Placed {
+    let key = (diagram.clone(), width.round().max(0.) as u32);
+    if let Some(hit) = PLACED_DIAGRAMS.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let placed = place_uncached(diagram, width);
+    PLACED_DIAGRAMS.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= DIAGRAM_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, placed.clone());
+    });
+    placed
+}
+
+fn place_uncached(diagram: &Diagram, width: f32) -> Placed {
     let mut nodes = HashMap::new();
     let down = flows_down(diagram, width);
     let ranks = diagram.nodes.iter().map(|n| n.x).max().unwrap_or(0);

@@ -87,6 +87,7 @@ const CACHE_CAP: usize = 128;
 thread_local! {
     static SIZES: RefCell<HashMap<u64, Option<(f32, f32)>>> = RefCell::default();
     static DOCS: RefCell<HashMap<u64, Option<Arc<Doc>>>> = RefCell::default();
+    static NODES: RefCell<HashMap<u64, Option<Vec<(String, f32, f32, f32, f32)>>>> = RefCell::default();
     static RASTERS: RefCell<HashMap<u64, Slot>> = RefCell::default();
 }
 
@@ -398,6 +399,16 @@ const NODE_IDS: [&str; 4] = ["flowchart-", "state-", "classId-", "entity-"];
 /// The diagram's nodes, for clicks: each node's label and box, in the
 /// diagram's own units (as [`size`]).
 pub fn nodes(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
+    let k = key(&[
+        source,
+        &t.floating.to_string(),
+        &t.surface.to_string(),
+        &t.text.to_string(),
+    ]);
+    cached(&NODES, k, || Some(nodes_uncached(source, t))).unwrap_or_default()
+}
+
+fn nodes_uncached(source: &str, t: &Tokens) -> Vec<(String, f32, f32, f32, f32)> {
     type Rect = resvg::tiny_skia::Rect;
     fn shape(group: &resvg::usvg::Group) -> Option<Rect> {
         group

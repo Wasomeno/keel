@@ -2,6 +2,7 @@
 
 mod browser_panel;
 mod chat_timeline;
+mod composer_todo;
 mod composer_view;
 mod dev;
 mod dotify;
@@ -68,6 +69,28 @@ struct MsgEntry {
     steps: Vec<crate::turn::Step>,
     /// Images on a user message, shown above its text.
     images: Vec<ImageRef>,
+}
+
+impl MsgEntry {
+    fn standalone_rows(&self) -> Vec<TranscriptBlock> {
+        let id = &self.blocks.message_id;
+        let mut rows = Vec::new();
+        if !self.images.is_empty() {
+            rows.push(TranscriptBlock::Images {
+                id: format!("{id}#images"),
+                items: self.images.clone(),
+            });
+        }
+        rows.extend(self.blocks.all_blocks());
+        if self.role == "user" && !rows.is_empty() {
+            return vec![TranscriptBlock::UserMessage {
+                id: format!("{id}#bubble"),
+                text: self.blocks.full_text.clone(),
+                blocks: rows,
+            }];
+        }
+        rows
+    }
 }
 
 use transcript_list::RowHover;
@@ -161,8 +184,15 @@ pub struct KeelWindow {
     // shows of them.
     subagents: BTreeMap<String, serde_json::Value>,
     subagent_open: Option<String>,
+    /// Active directional drill-in or back-out animation: `(started_at, leaving, id)`.
+    subagent_drill: Option<(std::time::Instant, bool, String)>,
+    /// Floating composer running-subagents pill enter/exit animation: `(started_at, leaving, count)`.
+    /// Floating composer subagent pill presence: `(started_at, entering, from_progress)`.
+    subagent_pill_anim: Option<(std::time::Instant, bool, f32)>,
+    /// Per-creature enter/exit slots inside the composer subagent pill:
+    /// `(id, name, status, entering, started_at, from_progress)`.
+    subagent_pill_slots: Vec<(String, String, String, bool, std::time::Instant, f32)>,
     subagent_caps: keel_proto::SubagentCaps,
-    show_subagent_menu: bool,
     /// Dev demo (`KEEL_TEST_CARD` / `KEEL_DEMO_PERMISSION`): the folded
     /// receipt stays in the slot instead of giving way to the composer.
     demo_hold_exit: bool,
@@ -239,6 +269,7 @@ pub struct KeelWindow {
     composer_fit_at: Option<std::time::Instant>,
     composer_panel_w: std::rc::Rc<std::cell::Cell<f32>>,
     composer_ctrl_w: std::rc::Rc<std::cell::RefCell<[f32; 3]>>,
+    todo_state: composer_todo::TodoTrayState,
     /// Its label now and before the last change, with their widths, and
     /// the change count that names the roll animation.
     branch_label: crate::motion::RollingLabel,
@@ -280,6 +311,10 @@ pub struct KeelWindow {
     timeline_sync_key: Option<chat_timeline::TimelineSyncKey>,
     timeline_scroll_until: std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>>,
     transcript_list: Entity<transcript_list::TranscriptListView>,
+    transcript_sync_key: Option<main_pane::TranscriptSyncKey>,
+    mr_hydrated_for: Option<(String, u64)>,
+    composer_was_empty: bool,
+    composer_was_blank: bool,
     pub(super) last_sent_prompt: Option<(String, String)>,
     pub(super) pending_composer_restore: Option<(String, String)>,
     /// Sent, and nothing visible has come back yet: show the thinking row.
@@ -591,6 +626,9 @@ pub struct KeelWindow {
     sound_preview_epoch: u64,
     /// Settings → Background / sound import: the last failure.
     import_error: Option<String>,
+    /// Non-blocking top-edge sweep triggered by ⌘R (`RefreshApp`).
+    app_refresh: Option<(std::time::Instant, u64)>,
+    app_refresh_gen: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -814,6 +852,15 @@ impl KeelWindow {
                         this.skills
                             .list_scroll
                             .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                        this.skills
+                            .catalog_list_scroll
+                            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                        this.skills
+                            .installed_scroll
+                            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+                        this.skills
+                            .catalog_scroll
+                            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
                     }
                     cx.notify()
                 },
@@ -952,6 +999,38 @@ impl KeelWindow {
             let mut commands = crate::dev_control::commands();
             cx.spawn_in(window, async move |this, cx| {
                 while let Some(command) = commands.recv().await {
+                    if let Some(arg) = command.line.strip_prefix("browser_key ") {
+                        let arg = arg.trim().to_string();
+                        let focused_change = this.update_in(cx, |this, window, cx| {
+                            if !this.browser.focus.is_focused(window) {
+                                window.focus(&this.browser.focus, cx);
+                                cx.notify();
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        let Ok(focused_change) = focused_change else { break };
+                        if focused_change {
+                            #[cfg(target_os = "macos")]
+                            crate::dev_control::redraw();
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(25))
+                                .await;
+                        }
+                        let dispatched = cx.update(|window, cx| {
+                            let Ok(ks) =
+                                gpui::Keystroke::parse_with_os(&arg, cx.platform_info().os)
+                            else {
+                                return format!("error: bad keystroke {arg:?}");
+                            };
+                            let handled = window.dispatch_keystroke(ks, cx);
+                            format!("ok (handled={handled})")
+                        });
+                        let Ok(answer) = dispatched else { break };
+                        let _ = command.reply.send(answer);
+                        continue;
+                    }
                     let answer = this.update_in(cx, |this, window, cx| {
                         this.dev_command(&command.line, window, cx)
                     });
@@ -1192,6 +1271,7 @@ impl KeelWindow {
             suggestion_key: None,
             suggestion_task: None,
             composer_placeholder: "Do anything…".to_string(),
+            todo_state: Default::default(),
             chat_summaries: HashMap::new(),
             summary_hover: Default::default(),
             question_panels: HashMap::new(),
@@ -1206,8 +1286,10 @@ impl KeelWindow {
             armed_runs: Default::default(),
             subagents: BTreeMap::new(),
             subagent_open: None,
+            subagent_drill: None,
+            subagent_pill_anim: None,
+            subagent_pill_slots: Vec::new(),
             subagent_caps: keel_proto::SubagentCaps::default(),
-            show_subagent_menu: false,
             demo_hold_exit: false,
             rename_input,
             chat_title_input,
@@ -1284,6 +1366,10 @@ impl KeelWindow {
             timeline_sync_key: None,
             timeline_scroll_until,
             transcript_list,
+            transcript_sync_key: None,
+            mr_hydrated_for: None,
+            composer_was_empty: true,
+            composer_was_blank: true,
             last_sent_prompt: None,
             pending_composer_restore: None,
             awaiting_first_output: false,
@@ -1452,6 +1538,8 @@ impl KeelWindow {
             system_sounds: Vec::new(),
             sound_preview_epoch: 0,
             import_error: None,
+            app_refresh: None,
+            app_refresh_gen: 0,
             _subscriptions: subscriptions,
         };
         this.start_registry_subscription(cx);
@@ -1826,6 +1914,45 @@ impl KeelWindow {
         cx.notify();
     }
 
+    /// ⌘R: non-blocking in-place refresh of the app state (registry, active
+    /// chat stream, git stats, right-panel files, and harnesses) paired with a
+    /// hairline top-edge sweep.
+    pub(super) fn refresh_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.app_refresh_gen = self.app_refresh_gen.wrapping_add(1);
+        let seq = self.app_refresh_gen;
+        self.app_refresh = Some((std::time::Instant::now(), seq));
+
+        if let Some(client) = self.client.clone() {
+            cx.spawn(async move |_, _| {
+                if let Err(err) = client.subscribe_registry().await {
+                    tracing::warn!("refresh subscribe_registry failed: {err}");
+                }
+            })
+            .detach();
+        }
+
+        if let Some(chat_id) = self.current_chat.clone() {
+            self.transcript.height_memo.clear();
+            self.transcript.list_state.remeasure();
+            self.transcript_sync_key = None;
+            self.mr_hydrated_for = None;
+            self.mr_auto_hydrated.clear();
+            self.subscribe_chat(chat_id.clone(), cx);
+            self.fetch_subagent_caps(chat_id, cx);
+            self.refresh_git_stats(cx);
+        }
+
+        self.load_harnesses(cx);
+        if self.settings_open {
+            self.load_skills(cx);
+        }
+
+        self.files_refresh_all(cx);
+
+        window.refresh();
+        cx.notify();
+    }
+
     /// Open or close the sidebar; the render animates the width.
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_peek = false;
@@ -1994,6 +2121,7 @@ impl KeelWindow {
         self.chat_stream = None;
         self.pending_events.clear();
         self.messages.clear();
+        self.todo_state.reset();
         self.step_line = None;
         self.tool_lines.clear();
         self.msg_order.clear();
@@ -2007,12 +2135,16 @@ impl KeelWindow {
         self.hovered_row.clear();
         self.timeline_view.update(cx, |v, _| v.cut());
         self.timeline_sync_key = None;
+        self.transcript_sync_key = None;
+        self.mr_hydrated_for = None;
         self.timeline_scroll_until.set(None);
         self.awaiting_first_output = false;
         self.invalidate_suggestion();
         self.subagents.clear();
         self.subagent_open = None;
-        self.show_subagent_menu = false;
+        self.subagent_drill = None;
+        self.subagent_pill_anim = None;
+        self.subagent_pill_slots.clear();
         self.subagent_caps = keel_proto::SubagentCaps::default();
         self.renaming_chat = None;
         self.show_chat_menu = false;
@@ -2025,6 +2157,11 @@ impl KeelWindow {
             s.set_value(draft, window, cx);
             s.focus(window, cx);
         });
+        {
+            let value = self.composer.read(cx).value();
+            self.composer_was_empty = value.is_empty();
+            self.composer_was_blank = value.trim().is_empty();
+        }
 
         let Some(chat_id) = want else {
             self.apply_harness_prefs();
@@ -2241,25 +2378,56 @@ impl KeelWindow {
         self.subagents.values().collect()
     }
 
-    /// The open subagent's record, if it is still around.
-    pub(super) fn open_subagent(&self) -> Option<&serde_json::Value> {
-        let id = self.subagent_open.as_deref()?;
-        self.subagents.get(id)
+    /// Active (running or blocked — never sleeping/done) subagents for the active chat:
+    /// `(id, name, status)`, oldest first.
+    pub(super) fn active_subagents(&self) -> Vec<(String, String, String)> {
+        self.subagents
+            .values()
+            .filter_map(|sub| {
+                let status = sub.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if status != "running" && status != "blocked" {
+                    return None;
+                }
+                let id = sub
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let name = sub
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("subagent")
+                    .to_string();
+                Some((id, name, status.to_string()))
+            })
+            .collect()
+    }
+
+    /// Number of subagents currently in `"running"` state for the active chat.
+    pub(super) fn running_subagent_count(&self) -> usize {
+        self.subagents
+            .values()
+            .filter(|sub| sub.get("status").and_then(|v| v.as_str()) == Some("running"))
+            .count()
     }
 
     pub(super) fn open_subagent_session(&mut self, subagent_id: &str, cx: &mut Context<Self>) {
+        if self.subagent_open.is_none() && !self.reduced() {
+            self.subagent_drill = Some((std::time::Instant::now(), false, subagent_id.to_string()));
+        } else if self.subagent_open.as_deref() != Some(subagent_id) {
+            self.subagent_drill = None;
+        }
         self.subagent_open = Some(subagent_id.to_string());
-        self.show_subagent_menu = false;
         cx.notify();
     }
 
     pub(super) fn close_subagent_session(&mut self, cx: &mut Context<Self>) {
-        self.subagent_open = None;
-        cx.notify();
-    }
-
-    pub(super) fn toggle_subagent_menu(&mut self, cx: &mut Context<Self>) {
-        self.show_subagent_menu = !self.show_subagent_menu;
+        if let Some(prev) = self.subagent_open.take() {
+            self.subagent_drill =
+                (!self.reduced()).then(|| (std::time::Instant::now(), true, prev));
+        } else {
+            self.subagent_drill = None;
+        }
         cx.notify();
     }
 
@@ -2589,6 +2757,7 @@ impl KeelWindow {
                         false => main_pane::WORKING_VERBS,
                     };
                 }
+                AgentEvent::SubagentMeta { .. } => {}
                 // The registry row carries the totals; its diff redraws the meter.
                 AgentEvent::Usage { .. } => {}
                 AgentEvent::Question {
@@ -2731,14 +2900,7 @@ impl KeelWindow {
         self.transcript.animate_new = self.active_status() == Some(ChatStatus::Running)
             || std::mem::take(&mut self.row_motion_once);
         if entry.role != "assistant" {
-            let mut rows = Vec::new();
-            if !entry.images.is_empty() {
-                rows.push(TranscriptBlock::Images {
-                    id: format!("{id}#images"),
-                    items: entry.images.clone(),
-                });
-            }
-            rows.extend(entry.blocks.all_blocks());
+            let rows = entry.standalone_rows();
             let role = entry.role.clone();
             let later = self.later_messages(id);
             self.transcript
@@ -2777,6 +2939,7 @@ impl KeelWindow {
             // Thinking, tools and text interleaved, in the order they streamed.
             crate::turn::push_rows(m, &entry.steps, &expanded, &mut rows);
         }
+        self.resolve_reply_images(turn, &mut rows);
         #[cfg(debug_assertions)]
         if self.dev_live && last_turn {
             if self.dev_step.as_deref() == Some("") {
@@ -2962,14 +3125,30 @@ impl KeelWindow {
                     return;
                 }
                 this.turn_gen += 1;
-                for id in this.msg_order.clone() {
+                let mut turn_heads = Vec::new();
+                let mut in_assistant_turn = false;
+                for id in &this.msg_order {
                     if this
                         .messages
-                        .get(&id)
+                        .get(id)
                         .is_some_and(|e| e.role == "assistant")
                     {
-                        this.publish_rows(&id);
+                        if !in_assistant_turn {
+                            in_assistant_turn = true;
+                            if this
+                                .turn_chips
+                                .get(id)
+                                .is_some_and(|(_, chips)| chips.is_some())
+                            {
+                                turn_heads.push(id.clone());
+                            }
+                        }
+                    } else {
+                        in_assistant_turn = false;
                     }
+                }
+                for head in turn_heads {
+                    this.publish_rows(&head);
                 }
                 cx.notify();
             });
@@ -2982,122 +3161,27 @@ impl KeelWindow {
     /// candidate files, so `publish_rows` caches the result per turn.
     fn scan_turn_chips(&mut self, turn: Vec<String>, head: &str) -> Option<TranscriptBlock> {
         let root = self.mention_root().unwrap_or_default();
-        let root_path = std::path::Path::new(&root);
-
-        // Files the turn wrote: named by finished write tools or by an answer
-        // line that says it created one. Kept only if they exist.
-        let mut written: Vec<String> = Vec::new();
-        // In-memory diff line counts from tools in this turn (0ms, pure memory)
-        let mut in_memory_stats: std::collections::HashMap<
-            String,
-            (char, Option<u32>, Option<u32>),
-        > = std::collections::HashMap::new();
-
-        for m in &turn {
-            let Some(entry) = self.messages.get(m) else {
-                continue;
-            };
-            written.extend(crate::files::candidates_in_text(&entry.blocks.full_text));
-            for step in &entry.steps {
-                let crate::turn::Step::Tools(tools) = step else {
-                    continue;
-                };
-                for tool in tools {
-                    written.extend(crate::files::candidates_in_tool(
-                        &tool.name,
-                        &tool.state,
-                        &tool.summary,
-                    ));
-                    // A screenshot the tool returned gets a chip too.
-                    written.extend(tool.images.iter().cloned());
-
-                    if let Some(diff) = &tool.diff {
-                        let (mut add, mut rem) = (0u32, 0u32);
-                        let old_str = diff.old_text.as_deref().unwrap_or("");
-                        for (variant, _) in crate::code_block::diff_lines(old_str, &diff.new_text) {
-                            match variant {
-                                crate::code_block::LineVariant::Added => add += 1,
-                                crate::code_block::LineVariant::Removed => rem += 1,
-                                _ => {}
-                            }
-                        }
-                        let status = if diff.old_text.is_none() { 'A' } else { 'M' };
-                        let rel = std::path::Path::new(&diff.path)
-                            .strip_prefix(root_path)
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| diff.path.clone());
-                        let val = {
-                            let stats_entry = in_memory_stats.entry(rel.clone()).or_insert((
-                                'M',
-                                Some(0),
-                                Some(0),
-                            ));
-                            if let Some(cur_add) = stats_entry.1.as_mut() {
-                                *cur_add += add;
-                            }
-                            if let Some(cur_rem) = stats_entry.2.as_mut() {
-                                *cur_rem += rem;
-                            }
-                            if status == 'A' {
-                                stats_entry.0 = 'A';
-                            }
-                            *stats_entry
-                        };
-                        if rel != diff.path {
-                            in_memory_stats.insert(diff.path.clone(), val);
-                        }
-                    }
-                }
-            }
-        }
         let roots = self.file_roots();
-        let files = if written.is_empty() {
-            Vec::new()
-        } else {
-            crate::files::resolve_all(written, &roots)
-        };
-        if files.is_empty() {
-            return None;
-        }
-
-        // Check static cache without blocking UI thread
         let cached_stats = if !root.is_empty() {
             GIT_DIFF_CACHE.lock().unwrap().get(&root).cloned()
         } else {
             None
         };
-
-        let changes: Vec<crate::file_changes::FileChange> = files
-            .into_iter()
-            .map(|f| {
-                let rel = std::path::Path::new(&f.path)
-                    .strip_prefix(root_path)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or(f.path.clone());
-                let (status, added, removed) = if let Some(git) = &cached_stats {
-                    git.get(&rel).copied().unwrap_or_else(|| {
-                        in_memory_stats
-                            .get(&rel)
-                            .or_else(|| in_memory_stats.get(&f.path))
-                            .copied()
-                            .unwrap_or(('M', None, None))
-                    })
-                } else if let Some(&(s, a, r)) = in_memory_stats
-                    .get(&rel)
-                    .or_else(|| in_memory_stats.get(&f.path))
-                {
-                    (s, a, r)
-                } else {
-                    ('M', None, None)
-                };
-                crate::file_changes::FileChange {
-                    path: rel,
-                    status,
-                    added,
-                    removed,
-                }
-            })
+        let entries: Vec<&MsgEntry> = turn
+            .iter()
+            .filter_map(|m| self.messages.get(m))
             .collect();
+        let is_git_repo = !root.is_empty() && std::path::Path::new(&root).join(".git").exists();
+        let changes = collect_turn_file_changes(
+            &entries,
+            &root,
+            &roots,
+            is_git_repo,
+            cached_stats.as_deref(),
+        );
+        if changes.is_empty() {
+            return None;
+        }
 
         let id = format!("{head}#files");
         let expanded = self.expanded_tools.contains(&id);
@@ -3282,15 +3366,20 @@ impl KeelWindow {
         self.motion_ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 let Ok(frame) = this.update(cx, |this, cx| {
-                    let folding = !this.reduced() && this
-                        .fold_toggles
-                        .values()
-                        .any(|(_, at)| at.elapsed() < Duration::from_millis(900));
-                    let running = !this.reduced() && this
-                        .transcript
-                        .items
-                        .iter()
-                        .any(crate::trace_view::row_animating);
+                    let external_fold_host =
+                        this.right_panel_open() || this.lightbox.is_some();
+                    let folding = external_fold_host
+                        && !this.reduced()
+                        && this
+                            .fold_toggles
+                            .values()
+                            .any(|(_, at)| at.elapsed() < Duration::from_millis(360));
+                    let running = !this.reduced()
+                        && this
+                            .transcript
+                            .items
+                            .iter()
+                            .any(crate::trace_view::row_animating);
                     // The model picker's skeleton, and its crossfade into rows.
                     let picker = this.show_model_picker
                         && (this.demo_model_loader
@@ -3301,24 +3390,25 @@ impl KeelWindow {
                                 .is_some_and(|at| {
                                     at.elapsed() < Duration::from_millis(MODEL_FADE_MS + 40)
                                 }));
-                    let step_fade = this.step_line.as_ref().is_some_and(|line| {
-                        line.from
-                            .as_ref()
-                            .is_some_and(|swap| swap.running(std::time::Instant::now()))
-                    });
-                    let tool_fade = this.tool_lines.values().any(|line| {
-                        line.from.as_ref().is_some_and(|swap| swap.running(std::time::Instant::now()))
-                    });
-                    let folding = folding || (!this.reduced() && picker) || step_fade || tool_fade
-                        || (!this.reduced() && this.model_menu_animating());
-                    if !folding && !running {
+                    let chrome_animating = folding
+                        || (!this.reduced() && picker)
+                        || (!this.reduced() && this.model_menu_animating())
+                        || this.todo_state.animating(std::time::Instant::now(), this.reduced());
+                    let reap_pending = this.transcript.has_motion();
+                    if !chrome_animating && !running && !reap_pending {
                         this.motion_ticker = None;
                         return None;
                     }
                     if cx.active_window().is_some() {
                         cx.notify();
                     }
-                    Some(if folding { 16 } else { 33 })
+                    Some(if chrome_animating {
+                        16
+                    } else if running {
+                        33
+                    } else {
+                        220
+                    })
                 }) else {
                     return;
                 };
@@ -3374,6 +3464,39 @@ impl KeelWindow {
         };
         cx.spawn(async move |this, cx| {
             let Some(png) = cx.background_spawn(async move { job() }).await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png);
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                this.mark_copied(row_id, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Copies a local image file (PNG/JPEG/WebP/GIF) to the clipboard as PNG.
+    pub(super) fn copy_local_image_file(
+        &mut self,
+        row_id: String,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let png = cx
+                .background_spawn(async move {
+                    let bytes = std::fs::read(&path).ok()?;
+                    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                        return Some(bytes);
+                    }
+                    let img = image::load_from_memory(&bytes).ok()?;
+                    let mut out = Vec::new();
+                    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                        .ok()?;
+                    Some(out)
+                })
+                .await;
+            let Some(png) = png else {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
@@ -3527,9 +3650,17 @@ impl KeelWindow {
     // ── Composer ────────────────────────────────────────────────────────
 
     fn on_composer_changed(&mut self, cx: &mut Context<Self>) {
+        let prev_mention = self.mention.clone();
         self.update_mention(cx);
+        let text = self.composer.read(cx).value().to_string();
+        let now_empty = text.is_empty();
+        let now_blank = text.trim().is_empty();
+        let ui_changed = self.mention != prev_mention
+            || now_empty != self.composer_was_empty
+            || now_blank != self.composer_was_blank;
+        self.composer_was_empty = now_empty;
+        self.composer_was_blank = now_blank;
         if let Some(chat) = self.current_chat.clone() {
-            let text = self.composer.read(cx).value().to_string();
             self.draft_save = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(400))
@@ -3537,7 +3668,9 @@ impl KeelWindow {
                 let _ = this.update(cx, |this, _| this.state.set_draft(&chat, &text));
             }));
         }
-        cx.notify();
+        if ui_changed {
+            cx.notify();
+        }
     }
 
     /// Open, update or close the `@` menu from the text before the caret.
@@ -4523,11 +4656,16 @@ impl KeelWindow {
         .detach();
     }
 
-    /// Hydrates any unloaded MR cards (`snap.state` empty) in the active chat once.
+    /// Hydrates any unloaded MR cards (`snap.state` empty) in the active chat once per transcript revision.
     pub(super) fn mr_hydrate_cards(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.current_chat.clone() else {
             return;
         };
+        let items_gen = self.transcript.items_gen();
+        if self.mr_hydrated_for.as_ref() == Some(&(chat_id.clone(), items_gen)) {
+            return;
+        }
+        self.mr_hydrated_for = Some((chat_id.clone(), items_gen));
         let pending: Vec<(String, String, String)> = self
             .transcript
             .items
@@ -4875,12 +5013,17 @@ impl KeelWindow {
         }
     }
 
-    /// Leave Settings / project home for the chat area. Settings stays painted
+    /// Leave Settings / project home / skills page for the chat area. Settings stays painted
     /// for one leave so it can exit.
     pub(super) fn close_pages(&mut self) {
         self.begin_settings_exit();
         self.projects.close_home();
         self.projects.folder_card = None;
+        self.skills.open = false;
+        self.skills.modal_skill = None;
+        self.skills.modal_catalog = None;
+        self.skills.creator_menu_open = false;
+        self.skills.category_menu_open = false;
     }
 
     pub(super) fn begin_settings_exit(&mut self) {
@@ -6329,7 +6472,7 @@ fn is_image_path(path: &std::path::Path) -> bool {
 }
 
 /// The `@` reference being typed in the composer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Mention {
     pub at: usize,
     pub query: String,
@@ -6443,6 +6586,144 @@ impl MentionItem {
 
 /// The run of consecutive messages around `pos` that `same` accepts:
 /// one assistant turn. `pos` itself is assumed to be in it.
+/// Collects changed files for a single assistant turn without fabricating `'M'`
+/// rows for untouched files merely mentioned in read-only or planning prose.
+fn collect_turn_file_changes(
+    entries: &[&MsgEntry],
+    root: &str,
+    roots: &[std::path::PathBuf],
+    is_git_repo: bool,
+    cached_stats: Option<&GitFileStats>,
+) -> Vec<crate::file_changes::FileChange> {
+    let root_path = std::path::Path::new(root);
+    let mut tool_written: Vec<String> = Vec::new();
+    let mut ran_mutating_tool = false;
+    let mut in_memory_stats: GitFileStats = HashMap::new();
+
+    for entry in entries {
+        for step in &entry.steps {
+            let crate::turn::Step::Tools(tools) = step else {
+                continue;
+            };
+            for tool in tools {
+                if crate::files::may_write_files(&tool.name, &tool.state) {
+                    ran_mutating_tool = true;
+                }
+                tool_written.extend(crate::files::candidates_in_tool(
+                    &tool.name,
+                    &tool.state,
+                    &tool.summary,
+                ));
+                // A screenshot the tool returned gets a chip too.
+                tool_written.extend(tool.images.iter().cloned());
+
+                if let Some(diff) = &tool.diff {
+                    if tool.state == "done" {
+                        tool_written.push(diff.path.clone());
+                    }
+                    let (mut add, mut rem) = (0u32, 0u32);
+                    let old_str = diff.old_text.as_deref().unwrap_or("");
+                    for (variant, _) in crate::code_block::diff_lines(old_str, &diff.new_text) {
+                        match variant {
+                            crate::code_block::LineVariant::Added => add += 1,
+                            crate::code_block::LineVariant::Removed => rem += 1,
+                            _ => {}
+                        }
+                    }
+                    let status = if diff.old_text.is_none() { 'A' } else { 'M' };
+                    let rel = std::path::Path::new(&diff.path)
+                        .strip_prefix(root_path)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| diff.path.clone());
+                    let val = {
+                        let stats_entry =
+                            in_memory_stats
+                                .entry(rel.clone())
+                                .or_insert(('M', Some(0), Some(0)));
+                        if let Some(cur_add) = stats_entry.1.as_mut() {
+                            *cur_add += add;
+                        }
+                        if let Some(cur_rem) = stats_entry.2.as_mut() {
+                            *cur_rem += rem;
+                        }
+                        if status == 'A' {
+                            stats_entry.0 = 'A';
+                        }
+                        *stats_entry
+                    };
+                    if rel != diff.path {
+                        in_memory_stats.insert(diff.path.clone(), val);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut text_written: Vec<String> = Vec::new();
+    if ran_mutating_tool {
+        for entry in entries {
+            text_written.extend(crate::files::candidates_in_text(&entry.blocks.full_text));
+        }
+    }
+
+    if tool_written.is_empty() && text_written.is_empty() {
+        return Vec::new();
+    }
+
+    let explicit_files = crate::files::resolve_all(tool_written.iter().cloned(), roots);
+    let explicit_paths: HashSet<String> = explicit_files.iter().map(|f| f.path.clone()).collect();
+    let files = crate::files::resolve_all(tool_written.into_iter().chain(text_written), roots);
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let canonical_root = (!root.is_empty()).then(|| {
+        root_path
+            .canonicalize()
+            .unwrap_or_else(|_| root_path.to_path_buf())
+    });
+
+    files
+        .into_iter()
+        .filter_map(|f| {
+            let is_explicit = explicit_paths.contains(&f.path);
+            let f_path = std::path::Path::new(&f.path);
+            let rel = f_path
+                .strip_prefix(root_path)
+                .ok()
+                .or_else(|| {
+                    canonical_root
+                        .as_deref()
+                        .and_then(|cr| f_path.strip_prefix(cr).ok())
+                })
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| f.path.clone());
+            let git_stat = cached_stats.and_then(|git| git.get(&rel).copied());
+            let mem_stat = in_memory_stats
+                .get(&rel)
+                .or_else(|| in_memory_stats.get(&f.path))
+                .copied();
+
+            let (status, added, removed) = if is_explicit {
+                git_stat.or(mem_stat).unwrap_or(('M', None, None))
+            } else if is_git_repo {
+                // Prose-only mentions in a git workspace count only when git
+                // confirms the file is actually modified, added, or untracked.
+                git_stat?
+            } else {
+                mem_stat.unwrap_or(('M', None, None))
+            };
+
+            Some(crate::file_changes::FileChange {
+                path: rel,
+                status,
+                added,
+                removed,
+            })
+        })
+        .collect()
+}
+
 fn turn_span(order: &[String], pos: usize, same: impl Fn(&String) -> bool) -> (usize, usize) {
     let mut start = pos;
     while start > 0 && same(&order[start - 1]) {
@@ -6458,6 +6739,124 @@ fn turn_span(order: &[String], pos: usize, same: impl Fn(&String) -> bool) -> (u
 #[cfg(test)]
 mod turn_tests {
     use super::turn_span;
+
+    #[test]
+    fn multiline_user_prompt_has_one_transcript_row_after_echo_and_reload() {
+        use super::{MessageBlockState, MsgEntry, TranscriptBlock, TranscriptState};
+
+        let prompt = "Inspect this repo:\n\nRead `src/main.rs`.\nRead `src/lib.rs`.";
+        let make_entry = || MsgEntry {
+            role: "user".into(),
+            blocks: MessageBlockState::new("prompt".into()),
+            steps: Vec::new(),
+            images: Vec::new(),
+        };
+        let mut echo = make_entry();
+        echo.blocks.set_text(prompt);
+        echo.blocks.reparse_tail();
+        let rows = echo.standalone_rows();
+        let [TranscriptBlock::UserMessage { id, blocks, .. }] = rows.as_slice() else {
+            panic!("expected one bubble for the entire user message");
+        };
+        assert_eq!(id, "prompt#bubble");
+        assert!(matches!(blocks.as_slice(), [
+            TranscriptBlock::Paragraph { .. },
+            TranscriptBlock::Paragraph { content, .. },
+        ] if content == "Read src/main.rs.\nRead src/lib.rs."));
+
+        let mut history = make_entry();
+        history.blocks.set_text(prompt);
+        history.blocks.reparse_tail();
+        assert_eq!(history.standalone_rows(), rows);
+        let mut transcript = TranscriptState::new(true);
+        transcript.upsert_message("prompt", "user", rows);
+        assert_eq!(transcript.items.len(), 1);
+        assert_eq!(
+            crate::transcript::message_text(&transcript.items, 0).as_deref(),
+            Some(prompt)
+        );
+        assert_eq!(transcript.user_points().len(), 1);
+    }
+
+    #[test]
+    fn read_only_or_clean_prose_mentions_never_emit_false_file_changes() {
+        use super::{GitFileStats, MessageBlockState, MsgEntry, collect_turn_file_changes};
+        use crate::markdown::ToolEntry;
+        use crate::turn::Step;
+        use std::collections::HashMap;
+
+        let dir = std::env::temp_dir().join(format!("keel-turn-files-{}", std::process::id()));
+        let util_dir = dir.join("src/utils");
+        std::fs::create_dir_all(&util_dir).unwrap();
+        let file = util_dir.join("format-currency.ts");
+        std::fs::write(&file, "export function formatCurrency() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let roots = vec![dir.clone()];
+
+        // 1. Read-only turn mentioning existing file alongside words like "changed" / "added"
+        let mut ro_entry = MsgEntry {
+            role: "assistant".into(),
+            blocks: MessageBlockState::new("a1".into()),
+            steps: vec![Step::Tools(vec![ToolEntry {
+                tool_id: "t1".into(),
+                name: "read".into(),
+                summary: "src/utils/format-currency.ts".into(),
+                state: "done".into(),
+                ..Default::default()
+            }])],
+            images: Vec::new(),
+        };
+        ro_entry.blocks.set_text(
+            "## What changes\n1. Added zero-amount handling in `src/utils/format-currency.ts`.",
+        );
+        assert!(
+            collect_turn_file_changes(&[&ro_entry], &root, &roots, true, None).is_empty(),
+            "read-only turns must not render FileChanges"
+        );
+
+        // 2. Shell command ran (e.g. curl/glab), prose mentions an untouched tracked file, git is clean
+        let mut bash_clean = MsgEntry {
+            role: "assistant".into(),
+            blocks: MessageBlockState::new("a2".into()),
+            steps: vec![Step::Tools(vec![ToolEntry {
+                tool_id: "t2".into(),
+                name: "bash".into(),
+                summary: "glab issue view 944".into(),
+                state: "done".into(),
+                ..Default::default()
+            }])],
+            images: Vec::new(),
+        };
+        bash_clean
+            .blocks
+            .set_text("Updated plan for `src/utils/format-currency.ts`.");
+        let empty_git: GitFileStats = HashMap::new();
+        assert!(
+            collect_turn_file_changes(&[&bash_clean], &root, &roots, true, Some(&empty_git))
+                .is_empty(),
+            "clean git files mentioned only in prose must not be fabricated as 'M'"
+        );
+
+        // 3. Explicit edit tool always surfaces the edited file immediately
+        let edit_entry = MsgEntry {
+            role: "assistant".into(),
+            blocks: MessageBlockState::new("a3".into()),
+            steps: vec![Step::Tools(vec![ToolEntry {
+                tool_id: "t3".into(),
+                name: "edit".into(),
+                summary: "src/utils/format-currency.ts".into(),
+                state: "done".into(),
+                ..Default::default()
+            }])],
+            images: Vec::new(),
+        };
+        let changes = collect_turn_file_changes(&[&edit_entry], &root, &roots, true, None);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "src/utils/format-currency.ts");
+        assert_eq!(changes[0].status, 'M');
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_turn_runs_between_user_messages() {
@@ -7348,12 +7747,257 @@ impl KeelWindow {
         cx.notify();
         true
     }
+
+    pub(super) fn open_image_gallery(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let mut items: Vec<std::path::PathBuf> = Vec::with_capacity(paths.len());
+        let mut mapped_index = 0usize;
+        for (ix, path) in paths.into_iter().enumerate() {
+            if let Some(pos) = items.iter().position(|p| p == &path) {
+                if ix == index {
+                    mapped_index = pos;
+                }
+            } else {
+                if ix == index {
+                    mapped_index = items.len();
+                }
+                items.push(path);
+            }
+        }
+        if items.is_empty() {
+            return;
+        }
+        let clamped = mapped_index.min(items.len().saturating_sub(1));
+        self.open_lightbox(
+            Lightbox::Images {
+                items,
+                index: clamped,
+                nav_gen: 0,
+                nav_dir: 0,
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn lightbox_step(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some(Lightbox::Images {
+            items,
+            index,
+            nav_gen,
+            nav_dir,
+        }) = &mut self.lightbox
+        else {
+            return false;
+        };
+        if items.len() <= 1 {
+            return false;
+        }
+        let next = (*index as isize + delta).clamp(0, items.len() as isize - 1) as usize;
+        if next != *index {
+            *nav_dir = if next > *index { 1 } else { -1 };
+            *index = next;
+            *nav_gen = nav_gen.wrapping_add(1).max(1);
+            cx.notify();
+        }
+        true
+    }
+
+    pub(super) fn lightbox_select(&mut self, target: usize, cx: &mut Context<Self>) {
+        let Some(Lightbox::Images {
+            items,
+            index,
+            nav_gen,
+            nav_dir,
+        }) = &mut self.lightbox
+        else {
+            return;
+        };
+        if target >= items.len() || target == *index {
+            return;
+        }
+        *nav_dir = if target > *index { 1 } else { -1 };
+        *index = target;
+        *nav_gen = nav_gen.wrapping_add(1).max(1);
+        cx.notify();
+    }
+
+    /// Resolve an image path (possibly relative or basename of a chat screenshot)
+    /// against workspace roots and known screenshots in this chat.
+    pub(super) fn resolve_image_path(&self, raw: &str) -> std::path::PathBuf {
+        let roots = self.file_roots();
+        let (dir_hints, known_images) = self.chat_image_context(&[]);
+        resolve_image_candidate(raw, &roots, &dir_hints, &known_images)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+    }
+
+    /// Open a clicked inline image chip or link in the modal, including sibling
+    /// images from the same reply gallery when present.
+    pub(super) fn open_inline_image(&mut self, raw: &str, cx: &mut Context<Self>) {
+        let resolved = self.resolve_image_path(raw);
+        let resolved_str = resolved.to_string_lossy();
+        for item in self.transcript.items.iter() {
+            if let TranscriptBlock::Shots { id, paths } = &item.block
+                && !id.contains("#tools")
+                && let Some(ix) = paths.iter().position(|p| {
+                    p == resolved_str.as_ref()
+                        || p == raw
+                        || self.resolve_image_path(p) == resolved
+                })
+            {
+                let gallery: Vec<std::path::PathBuf> =
+                    paths.iter().map(|p| self.resolve_image_path(p)).collect();
+                self.open_image_gallery(gallery, ix, cx);
+                return;
+            }
+        }
+        self.open_lightbox(Lightbox::single_image(resolved), cx);
+    }
+
+    fn chat_image_context(&self, extra_turn: &[String]) -> (Vec<String>, Vec<String>) {
+        let mut dir_hints: Vec<String> = Vec::new();
+        let mut known_images: Vec<String> = Vec::new();
+        let mut push_dir = |d: String| {
+            let d = d.trim().trim_end_matches('/').to_string();
+            if !d.is_empty() && !dir_hints.contains(&d) {
+                dir_hints.push(d);
+            }
+        };
+        for id in &self.msg_order {
+            let Some(entry) = self.messages.get(id) else {
+                continue;
+            };
+            for step in &entry.steps {
+                if let crate::turn::Step::Tools(tools) = step {
+                    for tool in tools {
+                        for img in &tool.images {
+                            if !known_images.contains(img) {
+                                known_images.push(img.clone());
+                            }
+                            if let Some(parent) = std::path::Path::new(img).parent() {
+                                push_dir(parent.to_string_lossy().into_owned());
+                            }
+                        }
+                        if let Some(diff) = &tool.diff
+                            && let Some(parent) = std::path::Path::new(&diff.path).parent()
+                        {
+                            push_dir(parent.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+            if extra_turn.is_empty() || extra_turn.contains(id) {
+                for tok in entry.blocks.full_text.split_whitespace() {
+                    let tok = tok.trim_matches(|c: char| {
+                        matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';')
+                    });
+                    let tok = tok.trim_end_matches(['.', ':', '!', '?']);
+                    if tok.contains('/') && !tok.contains("://") {
+                        if let Some(parent) = std::path::Path::new(tok).parent() {
+                            push_dir(parent.to_string_lossy().into_owned());
+                        }
+                        if !is_image_path(std::path::Path::new(tok)) {
+                            push_dir(tok.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        (dir_hints, known_images)
+    }
+
+    /// Resolve relative image paths in reply `Shots` blocks and synthesize inline
+    /// image squares for reply prose/lists that reference real local image files.
+    fn resolve_reply_images(&self, turn: &[String], rows: &mut Vec<TranscriptBlock>) {
+        let roots = self.file_roots();
+        let (dir_hints, known_images) = self.chat_image_context(turn);
+        let mut shown: HashSet<String> = HashSet::new();
+
+        for row in rows.iter_mut() {
+            if let TranscriptBlock::Shots { id, paths } = row
+                && !id.contains("#tools")
+            {
+                let mut resolved_paths = Vec::with_capacity(paths.len());
+                for p in paths.iter() {
+                    let resolved = resolve_image_candidate(p, &roots, &dir_hints, &known_images)
+                        .unwrap_or_else(|| p.clone());
+                    if !resolved_paths.contains(&resolved) {
+                        shown.insert(resolved.clone());
+                        resolved_paths.push(resolved);
+                    }
+                }
+                *paths = resolved_paths;
+            }
+        }
+
+        let reply_start = rows
+            .iter()
+            .rposition(is_step_row)
+            .map_or(0, |ix| ix + 1);
+        let mut out: Vec<TranscriptBlock> = Vec::with_capacity(rows.len() + 2);
+        for (ix, row) in rows.drain(..).enumerate() {
+            let block_id = row.id().to_string();
+            let extra = if ix >= reply_start {
+                extract_block_image_paths(&row, &roots, &dir_hints, &known_images, &mut shown)
+            } else {
+                Vec::new()
+            };
+            if let TranscriptBlock::Shots { id, paths } = row {
+                if !id.contains("#tools")
+                    && let Some(TranscriptBlock::Shots {
+                        id: prev_id,
+                        paths: prev_paths,
+                    }) = out.last_mut()
+                    && !prev_id.contains("#tools")
+                {
+                    for p in paths {
+                        if !prev_paths.contains(&p) {
+                            prev_paths.push(p);
+                        }
+                    }
+                } else {
+                    out.push(TranscriptBlock::Shots { id, paths });
+                }
+            } else {
+                out.push(row);
+            }
+            if !extra.is_empty() {
+                if let Some(TranscriptBlock::Shots {
+                    id: prev_id,
+                    paths: prev_paths,
+                }) = out.last_mut()
+                    && !prev_id.contains("#tools")
+                {
+                    for p in extra {
+                        if !prev_paths.contains(&p) {
+                            prev_paths.push(p);
+                        }
+                    }
+                } else {
+                    out.push(TranscriptBlock::Shots {
+                        id: format!("{block_id}#shots"),
+                        paths: extra,
+                    });
+                }
+            }
+        }
+        *rows = out;
+    }
 }
 
 /// What the full-window overlay shows.
 #[derive(Clone)]
 enum Lightbox {
-    Image(std::path::PathBuf),
+    Images {
+        items: Vec<std::path::PathBuf>,
+        index: usize,
+        nav_gen: u64,
+        nav_dir: i8,
+    },
     /// A `mermaid` fence, to pan and zoom. `row_id` keys its "Copied" states.
     Diagram {
         row_id: String,
@@ -7366,6 +8010,122 @@ enum Lightbox {
         content: String,
         error: bool,
     },
+}
+
+impl Lightbox {
+    pub(super) fn single_image(path: std::path::PathBuf) -> Self {
+        Self::Images {
+            items: vec![path],
+            index: 0,
+            nav_gen: 0,
+            nav_dir: 0,
+        }
+    }
+}
+
+fn is_any_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        crate::files::FileKind::of(path),
+        crate::files::FileKind::Image | crate::files::FileKind::Svg
+    )
+}
+
+fn resolve_image_candidate(
+    raw: &str,
+    roots: &[std::path::PathBuf],
+    dir_hints: &[String],
+    known_images: &[String],
+) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('`');
+    if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("file://localhost")
+        .or_else(|| trimmed.strip_prefix("file://"))
+        .unwrap_or(trimmed);
+    if stripped.contains("://") {
+        return None;
+    }
+    let clean = stripped.strip_prefix("./").unwrap_or(stripped);
+    if !is_any_image_path(std::path::Path::new(clean)) {
+        return None;
+    }
+    if let Some(found) = crate::files::resolve(clean, roots) {
+        return Some(found.to_string_lossy().into_owned());
+    }
+    for dir in dir_hints {
+        let joined = std::path::Path::new(dir).join(clean);
+        if joined.is_file() {
+            return Some(
+                joined
+                    .canonicalize()
+                    .unwrap_or(joined)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        let joined_rel = joined.to_string_lossy();
+        if let Some(found) = crate::files::resolve(&joined_rel, roots) {
+            return Some(found.to_string_lossy().into_owned());
+        }
+    }
+    let fname = std::path::Path::new(clean).file_name();
+    for known in known_images {
+        let kp = std::path::Path::new(known);
+        if (known.ends_with(clean) || (fname.is_some() && kp.file_name() == fname)) && kp.is_file()
+        {
+            return Some(
+                kp.canonicalize()
+                    .unwrap_or_else(|_| kp.to_path_buf())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    None
+}
+
+fn extract_block_image_paths(
+    block: &TranscriptBlock,
+    roots: &[std::path::PathBuf],
+    dir_hints: &[String],
+    known_images: &[String],
+    shown: &mut HashSet<String>,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let collect_inline = |text: &str, spans: &[crate::markdown::InlineSpan], out: &mut Vec<String>| {
+        for span in spans {
+            if let Some(link) = &span.link {
+                out.push(link.clone());
+            }
+            if span.style.code {
+                out.push(text[span.range.clone()].trim().to_string());
+            }
+        }
+        out.extend(crate::files::path_tokens(text));
+    };
+    match block {
+        TranscriptBlock::Paragraph { content, spans, .. }
+        | TranscriptBlock::Quote { content, spans, .. } => {
+            collect_inline(content, spans, &mut candidates);
+        }
+        TranscriptBlock::List { items, .. } => {
+            for item in items {
+                collect_inline(&item.text, &item.spans, &mut candidates);
+            }
+        }
+        _ => {}
+    }
+    let mut out = Vec::new();
+    for cand in candidates {
+        if let Some(resolved) = resolve_image_candidate(&cand, roots, dir_hints, known_images)
+            && shown.insert(resolved.clone())
+        {
+            out.push(resolved);
+        }
+    }
+    out
 }
 
 /// Rows that are the turn's work (folded into "Show works").
@@ -7755,6 +8515,82 @@ fn interim(row: TranscriptBlock) -> TranscriptBlock {
         | TranscriptBlock::List { .. }
         | TranscriptBlock::Quote { .. } => TranscriptBlock::Interim(Box::new(row)),
         row => row,
+    }
+}
+
+#[cfg(test)]
+mod image_gallery_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_image_candidate_finds_relative_and_dir_hint_images() {
+        let dir = std::env::temp_dir().join(format!("keel-img-resolve-{}", std::process::id()));
+        let sub = dir.join("docs/screenshots/944");
+        std::fs::create_dir_all(&sub).unwrap();
+        let shot1 = sub.join("list-total-nilai.png");
+        let shot2 = sub.join("list-tax-columns.png");
+        std::fs::write(&shot1, b"png").unwrap();
+        std::fs::write(&shot2, b"png").unwrap();
+
+        let roots = vec![dir.clone()];
+        let hints = vec!["docs/screenshots/944".to_string()];
+        let found1 = resolve_image_candidate("docs/screenshots/944/list-total-nilai.png", &roots, &[], &[])
+            .unwrap();
+        assert!(found1.ends_with("list-total-nilai.png"));
+
+        // Basename only, resolved via directory hint mentioned in the reply.
+        let found2 = resolve_image_candidate("list-tax-columns.png", &roots, &hints, &[]).unwrap();
+        assert!(found2.ends_with("list-tax-columns.png"));
+
+        // Non-image files are ignored.
+        assert!(resolve_image_candidate("Cargo.toml", &roots, &hints, &[]).is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extract_block_image_paths_pulls_inline_code_and_links_without_dups() {
+        let dir = std::env::temp_dir().join(format!("keel-img-extract-{}", std::process::id()));
+        let sub = dir.join("docs/screenshots/944");
+        std::fs::create_dir_all(&sub).unwrap();
+        for name in ["a.png", "b.png", "c.png", "d.png"] {
+            std::fs::write(sub.join(name), b"png").unwrap();
+        }
+        let roots = vec![dir.clone()];
+        let hints = vec!["docs/screenshots/944".to_string()];
+        let mut shown = HashSet::new();
+        let block = TranscriptBlock::List {
+            id: "m#0".into(),
+            items: vec![
+                crate::markdown::ListItem {
+                    marker: "•".into(),
+                    depth: 0,
+                    text: "a.png first".into(),
+                    spans: vec![crate::markdown::InlineSpan {
+                        range: 0..5,
+                        style: crate::markdown::InlineStyle {
+                            code: true,
+                            ..Default::default()
+                        },
+                        link: None,
+                    }],
+                    task: None,
+                },
+                crate::markdown::ListItem {
+                    marker: "•".into(),
+                    depth: 0,
+                    text: "b.png and c.png and d.png".into(),
+                    spans: Vec::new(),
+                    task: None,
+                },
+            ],
+        };
+        let extracted = extract_block_image_paths(&block, &roots, &hints, &[], &mut shown);
+        assert_eq!(extracted.len(), 4);
+        // Second call deduplicates against `shown`.
+        assert!(extract_block_image_paths(&block, &roots, &hints, &[], &mut shown).is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

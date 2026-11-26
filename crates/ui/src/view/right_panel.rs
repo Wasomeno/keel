@@ -41,6 +41,7 @@ pub(super) enum RightTabKind {
     Launcher,
     Changes,
     File,
+    Subagents,
     Browser(u64),
     Terminal(String),
 }
@@ -122,7 +123,10 @@ impl KeelWindow {
     /// Whether `tab` should appear in the current chat's unified strip.
     fn right_tab_visible(&self, tab: &RightTab, chat: Option<&str>) -> bool {
         match &tab.kind {
-            RightTabKind::Launcher | RightTabKind::Changes | RightTabKind::File => true,
+            RightTabKind::Launcher
+            | RightTabKind::Changes
+            | RightTabKind::File
+            | RightTabKind::Subagents => true,
             RightTabKind::Browser(id) => self
                 .browser
                 .tab_ix(*id)
@@ -146,6 +150,7 @@ impl KeelWindow {
         // Remove dangling browser/terminal entries and deduplicate non-launcher kinds.
         let mut seen_changes = false;
         let mut seen_file = false;
+        let mut seen_subagents = false;
         let mut seen_browser = Vec::new();
         let mut seen_terminal = Vec::new();
         let browser = &self.browser;
@@ -165,6 +170,14 @@ impl KeelWindow {
                     false
                 } else {
                     seen_file = true;
+                    true
+                }
+            }
+            RightTabKind::Subagents => {
+                if seen_subagents {
+                    false
+                } else {
+                    seen_subagents = true;
                     true
                 }
             }
@@ -426,6 +439,11 @@ impl KeelWindow {
                     window.focus(&self.files.focus, cx);
                 }
             }
+            Some(RightTabKind::Subagents) => {
+                if let Some(window) = window {
+                    window.focus(&self.right_panel.focus, cx);
+                }
+            }
             Some(RightTabKind::Browser(id)) => {
                 if let Some(b_ix) = self.browser.tab_ix(id) {
                     if let Some(window) = window {
@@ -562,6 +580,32 @@ impl KeelWindow {
             self.open_right_panel(window, cx);
         } else {
             self.right_ensure_kind(kind, true, true, Some(window), cx);
+        }
+    }
+
+    /// Open or focus the right side panel's Subagents tab.
+    pub(super) fn open_subagents_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_right_tab(RightTabKind::Subagents, window, cx);
+    }
+
+    /// Open the right side panel directly onto a specific subagent's detail
+    /// session (e.g. when clicking an inline subagent row in the main chat).
+    pub(super) fn open_subagent_in_panel(
+        &mut self,
+        subagent_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_open_on_subagents = self.right_panel.open
+            && matches!(self.right_panel_active_kind(), Some(RightTabKind::Subagents));
+        if !was_open_on_subagents {
+            self.open_right_tab(RightTabKind::Subagents, window, cx);
+            // Panel itself is sliding in; jump straight to the selected detail.
+            self.subagent_open = Some(subagent_id.to_string());
+            self.subagent_drill = None;
+            cx.notify();
+        } else {
+            self.open_subagent_session(subagent_id, cx);
         }
     }
 
@@ -741,7 +785,7 @@ impl KeelWindow {
                     self.teardown_terminal_tab(t_ix, cx);
                 }
             }
-            RightTabKind::Launcher | RightTabKind::Changes => {}
+            RightTabKind::Launcher | RightTabKind::Changes | RightTabKind::Subagents => {}
         }
 
         let was_active = pos == self.right_panel.active;
@@ -750,6 +794,7 @@ impl KeelWindow {
         let vis_pos = vis_before.iter().position(|&i| i == pos);
 
         self.right_panel.tabs.remove(pos);
+        self.browser.spinners.remove(&tab_id);
         if pos < self.right_panel.active {
             self.right_panel.active -= 1;
         }
@@ -797,6 +842,9 @@ impl KeelWindow {
     /// Aggregated background activity indicator for the closed header button:
     /// `(color, bright, tooltip_hint)`.
     pub(super) fn right_panel_activity(&self, t: Tokens) -> Option<(u32, bool, &'static str)> {
+        if self.running_subagent_count() > 0 {
+            return Some((t.accent, true, "Subagents running"));
+        }
         if self.terminal.busy {
             return Some((t.accent, true, "Terminal command running"));
         }
@@ -882,6 +930,9 @@ impl KeelWindow {
                     .flex_col()
                     .child(self.render_files_tree_content(content_w, t, window, cx))
                     .into_any_element()
+            }
+            Some(RightTabKind::Subagents) => {
+                self.render_subagents_panel_content(content_w, t, window, cx)
             }
             Some(RightTabKind::Browser(id)) => {
                 if let Some(b_ix) = self.browser.tab_ix(id)
@@ -1020,23 +1071,25 @@ impl KeelWindow {
                     let group = format!("right-tab-{id}");
 
                     let (icon, label, dot, subtle_tag, spin_icon): (
-                        Icon,
+                        Option<Icon>,
                         SharedString,
                         Option<u32>,
                         Option<SharedString>,
                         bool,
                     ) = match &tab.kind {
-                        RightTabKind::Launcher => (Icon::Plus, "New Tab".into(), None, None, false),
+                        RightTabKind::Launcher => {
+                            (Some(Icon::Plus), "New Tab".into(), None, None, false)
+                        }
                         RightTabKind::Changes => {
                             let badge = changes_count
                                 .filter(|n| *n > 0)
                                 .map(|n| SharedString::from(format!("{n}")));
-                            (Icon::GitCompare, "Changes".into(), None, badge, false)
+                            (Some(Icon::GitCompare), "Changes".into(), None, badge, false)
                         }
                         RightTabKind::File => {
                             if let Some(name) = &selected_file_name {
                                 (
-                                    Icon::for_path(name),
+                                    Some(Icon::for_path(name)),
                                     name.clone().into(),
                                     file_dirty.then_some(t.warning),
                                     None,
@@ -1044,7 +1097,7 @@ impl KeelWindow {
                                 )
                             } else {
                                 (
-                                    Icon::File,
+                                    Some(Icon::File),
                                     "File".into(),
                                     file_dirty.then_some(t.warning),
                                     None,
@@ -1052,33 +1105,51 @@ impl KeelWindow {
                                 )
                             }
                         }
+                        RightTabKind::Subagents => {
+                            let running = self.running_subagent_count();
+                            let total = self.subagents.len();
+                            let badge = if running > 0 {
+                                Some(SharedString::from(format!("{running}")))
+                            } else if total > 0 {
+                                Some(SharedString::from(format!("{total}")))
+                            } else {
+                                None
+                            };
+                            (
+                                None,
+                                "Subagents".into(),
+                                (running > 0).then_some(t.accent),
+                                badge,
+                                false,
+                            )
+                        }
                         RightTabKind::Browser(bid) => {
                             if let Some(bt) =
                                 self.browser.tab_ix(*bid).map(|bix| &self.browser.tabs[bix])
                             {
                                 (
-                                    Icon::Globe,
+                                    Some(Icon::Globe),
                                     bt.label().into(),
                                     bt.is_agent().then_some(t.info),
                                     None,
                                     bt.page.loading,
                                 )
                             } else {
-                                (Icon::Globe, "Browser".into(), None, None, false)
+                                (Some(Icon::Globe), "Browser".into(), None, None, false)
                             }
                         }
                         RightTabKind::Terminal(tid) => {
                             if let Some(tix) = self.terminal.tab_ix(tid) {
                                 let tt = &self.terminal.tabs[tix];
                                 (
-                                    Icon::Tool,
+                                    Some(Icon::Tool),
                                     tt.label(tix).into(),
                                     tt.busy.then_some(t.accent),
                                     tt.exited.map(|_| "exited".into()),
                                     false,
                                 )
                             } else {
-                                (Icon::Tool, "Terminal".into(), None, None, false)
+                                (Some(Icon::Tool), "Terminal".into(), None, None, false)
                             }
                         }
                     };
@@ -1108,22 +1179,22 @@ impl KeelWindow {
                             })),
                     );
 
-                    let icon_el = if spin_icon {
-                        div()
-                            .flex_none()
-                            .text_color(c(t.accent))
-                            .child(crate::motion::spin(
-                                Icon::Spinner.el(zpx(13.)),
-                                ("right-tab-spin", id as usize),
-                                reduced,
-                            ))
-                            .into_any_element()
+                    let icon_el: Option<AnyElement> = if spin_icon {
+                        Some(
+                            div()
+                                .flex_none()
+                                .text_color(c(t.accent))
+                                .child(self.browser.tab_spinner(id, reduced, cx))
+                                .into_any_element(),
+                        )
                     } else {
-                        div()
-                            .flex_none()
-                            .text_color(c(if active { t.text_muted } else { t.text_faint }))
-                            .child(icon.el(zpx(13.)))
-                            .into_any_element()
+                        icon.map(|icon| {
+                            div()
+                                .flex_none()
+                                .text_color(c(if active { t.text_muted } else { t.text_faint }))
+                                .child(icon.el(zpx(13.)))
+                                .into_any_element()
+                        })
                     };
 
                     let pill = div()
@@ -1165,7 +1236,7 @@ impl KeelWindow {
                         .children(dot.map(|col| {
                             div().flex_none().size(zpx(6.)).rounded_full().bg(c(col))
                         }))
-                        .child(icon_el)
+                        .children(icon_el)
                         .child(div().min_w_0().truncate().child(label))
                         .children(subtle_tag.map(|tag| {
                             div()
@@ -1409,6 +1480,797 @@ impl KeelWindow {
             )
     }
 
+    /// Right side panel body for `RightTabKind::Subagents`: master-detail view
+    /// that switches inside the right panel between the subagents list and the
+    /// selected subagent's full session (with directional drill-in motion),
+    /// keeping the main chat panel untouched on the left.
+    fn render_subagents_panel_content(
+        &mut self,
+        content_w: f32,
+        t: Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let reduced = self.reduced();
+        let drill = self.subagent_drill.as_ref().and_then(|(at, leaving, id)| {
+            let dur = if *leaving {
+                Duration::from_millis(170)
+            } else {
+                Duration::from_millis(220)
+            };
+            let raw = (at.elapsed().as_secs_f32() / dur.as_secs_f32()).clamp(0., 1.);
+            if reduced || raw >= 1. {
+                None
+            } else {
+                let eased = if *leaving {
+                    crate::motion::ease_out(raw)
+                } else {
+                    crate::motion::ease_out_strong(raw)
+                };
+                Some((
+                    crate::motion::drill_frame(eased, *leaving, reduced),
+                    id.clone(),
+                ))
+            }
+        });
+        if drill.is_some() {
+            window.request_animation_frame();
+        } else if self.subagent_drill.is_some() {
+            self.subagent_drill = None;
+        }
+
+        if let Some((frame, drill_id)) = drill {
+            let list_el = self.render_subagents_list(t, cx);
+            let detail_el = self.render_subagent_detail(&drill_id, content_w, t, window, cx);
+            return div()
+                .id("right-subagents-scope")
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .left(px(frame.parent_x))
+                        .opacity(0.65 + 0.35 * frame.child_shift)
+                        .child(list_el),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .left(px(content_w * frame.child_shift))
+                        .flex()
+                        .flex_col()
+                        .bg(c(t.window))
+                        .border_l_1()
+                        .border_color(c(t.border).opacity(0.75))
+                        .child(detail_el),
+                )
+                .into_any_element();
+        }
+
+        if let Some(open_id) = self.subagent_open.clone() {
+            return div()
+                .id("right-subagents-scope")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.render_subagent_detail(&open_id, content_w, t, window, cx))
+                .into_any_element();
+        }
+
+        div()
+            .id("right-subagents-scope")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.render_subagents_list(t, cx))
+            .into_any_element()
+    }
+
+    fn render_subagents_list(&mut self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
+        let reduced = self.reduced();
+        let now_ms = crate::trace_view::now_ms();
+        let active_open = self.subagent_open.clone();
+        let mut subs: Vec<&serde_json::Value> = self.subagent_list();
+        // Keep running subagents pinned at the top while preserving chronological order within each group.
+        subs.sort_by_key(|sub| {
+            let status = sub.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            match status {
+                "running" => 0u8,
+                "blocked" => 1u8,
+                _ => 2u8,
+            }
+        });
+
+        if subs.is_empty() {
+            return div()
+                .flex_1()
+                .px_6()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1p5()
+                .child(
+                    div()
+                        .t_small()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(c(t.text_muted))
+                        .child("No subagents in this chat"),
+                )
+                .child(
+                    div()
+                        .t_caption()
+                        .text_color(c(t.text_faint))
+                        .child("Delegated agents will appear here as they run."),
+                )
+                .into_any_element();
+        }
+
+        let rows: Vec<AnyElement> = subs
+            .into_iter()
+            .map(|sub| {
+                let id = sub
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let name = sub
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("subagent")
+                    .to_string();
+                let status = sub
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("running")
+                    .to_string();
+                let description = sub
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let active_tool = sub
+                    .get("active_tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let created_at = sub.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+                let duration_ms = sub.get("duration_ms").and_then(|v| v.as_u64());
+                let read_only = sub
+                    .get("read_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let worktree_branch = sub
+                    .get("worktree_branch")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+
+                let is_running = status == "running";
+                let is_selected = active_open.as_deref() == Some(id.as_str());
+                let (status_col, status_label) = super::main_pane::subagent_status(&status, t);
+
+                // While running, lead with the live current task/tool step (falling back
+                // to the assigned description); once finished, show the assigned task.
+                let current_task = if is_running && !active_tool.trim().is_empty() {
+                    active_tool
+                } else if !description.trim().is_empty() {
+                    description.clone()
+                } else if is_running {
+                    "Working…".to_string()
+                } else {
+                    status_label.clone()
+                };
+
+                let mode_tag = if worktree_branch.is_some() {
+                    Some("worktree")
+                } else if read_only {
+                    Some("read-only")
+                } else {
+                    None
+                };
+
+                let right_meta = if is_running {
+                    let secs = if created_at > 0 {
+                        ((now_ms - created_at).max(0) / 1_000) as u64
+                    } else {
+                        0
+                    };
+                    if secs < 60 {
+                        format!("{secs}s")
+                    } else {
+                        format!("{}m {:02}s", secs / 60, secs % 60)
+                    }
+                } else if let Some(ms) = duration_ms {
+                    super::main_pane::format_subagent_duration(ms)
+                } else {
+                    status_label
+                };
+
+                let leading: AnyElement = div()
+                    .flex_none()
+                    .child(crate::subagent_entity::render_entity(
+                        &id,
+                        &name,
+                        crate::subagent_entity::EntityState::from_status(&status),
+                        34.,
+                        self.clock_epoch,
+                        t,
+                        reduced,
+                    ))
+                    .into_any_element();
+
+                let open_id = id.clone();
+                div()
+                    .id(ElementId::Name(format!("right-subagent-row-{id}").into()))
+                    .w_full()
+                    .px_2p5()
+                    .py_2()
+                    .rounded(RADIUS_MD)
+                    .border_1()
+                    .border_color(if is_selected {
+                        c(t.border)
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(is_selected, |d| d.bg(c(t.selected)))
+                    .when(!is_selected, |d| {
+                        d.hover_fade(c(t.hover), Some(c(t.selected)))
+                    })
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2p5()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.open_subagent_session(&open_id, cx);
+                    }))
+                    .child(leading)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(zpx(2.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .t_small()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(c(t.text))
+                                            .child(name),
+                                    )
+                                    .when_some(mode_tag, |d, tag| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .font_family(crate::style::MONO)
+                                                .t_caption()
+                                                .text_color(c(t.text_faint))
+                                                .child(tag),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .t_caption()
+                                    .line_clamp(2)
+                                    .text_color(c(if is_running {
+                                        t.text_muted
+                                    } else {
+                                        t.text_faint
+                                    }))
+                                    .child(current_task),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .mt(zpx(1.))
+                            .font_family(crate::style::MONO)
+                            .t_caption()
+                            .text_color(c(if is_running || status == "error" || status == "blocked" {
+                                status_col
+                            } else {
+                                t.text_faint
+                            }))
+                            .child(right_meta),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        div()
+            .id("right-subagents-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap(zpx(2.))
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// Full subagent session rendered inside the right side panel using Keel's
+    /// exact main-chat pipeline (`turn::doc_steps` → `turn::push_rows` →
+    /// `transcript::render_transcript_blocks`).
+    fn render_subagent_detail(
+        &mut self,
+        subagent_id: &str,
+        content_w: f32,
+        t: Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(record) = self.subagents.get(subagent_id).cloned() else {
+            return self.render_subagents_list(t, cx);
+        };
+        let reduced = self.reduced();
+        let now_ms = crate::trace_view::now_ms();
+        let name = record
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("subagent")
+            .to_string();
+        let description = record
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let status = record
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("running")
+            .to_string();
+        let blocked = record
+            .get("blocked_question")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let model = record
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let read_only = record
+            .get("read_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let turns = record.get("turns").and_then(|v| v.as_u64()).unwrap_or(0);
+        let input_tokens = record
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output_tokens = record
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let created_at = record
+            .get("created_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let duration_ms = record.get("duration_ms").and_then(|v| v.as_u64());
+        let worktree_branch = record
+            .get("worktree_branch")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let active_tool = record
+            .get("active_tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let (color, label) = super::main_pane::subagent_status(&status, t);
+        let is_running = status == "running";
+
+        let msg_id = format!("subagent-{subagent_id}");
+        let doc_steps = crate::turn::doc_steps(&record);
+        let mut steps = crate::turn::merge_doc(&msg_id, Vec::new(), doc_steps);
+        for step in &mut steps {
+            if let crate::turn::Step::Text(state) = step {
+                state.reparse_tail();
+            }
+        }
+        let mut blocks = Vec::new();
+        {
+            let expanded_tools = &self.expanded_tools;
+            crate::turn::push_rows(
+                &msg_id,
+                &steps,
+                &|id| expanded_tools.contains(id),
+                &mut blocks,
+            );
+        }
+        let has_live_tool_row = blocks.iter().any(|b| match b {
+            crate::markdown::TranscriptBlock::ToolGroup { tools, .. } => {
+                tools.iter().any(|tool| tool.is_live())
+            }
+            _ => false,
+        });
+        if is_running && !reduced {
+            window.request_animation_frame();
+        }
+
+        let system_dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
+        let syntax = keel_theme::resolve_syntax_theme(self.state.ui_settings.theme, system_dark);
+        let weak = cx.entity().downgrade();
+        let handle = window.window_handle();
+        let zoom = crate::style::zoom();
+        let inner_w = (content_w / zoom - 32.).max(220.);
+        let open_lines = self.open_lines_rc();
+        let rc = crate::transcript::RowContext {
+            tokens: t,
+            syntax,
+            reduced,
+            diagram_menu: None,
+            diagram_menu_ix: 0,
+            diagram_menu_keyboard: false,
+            toggles: std::rc::Rc::new(self.fold_toggles.clone()),
+            copied: self.copied.as_ref().map(|(row, _)| row.clone()),
+            copied_at: self.copied.as_ref().map(|(_, at)| *at),
+            on_action: std::rc::Rc::new(move |action, cx| {
+                use crate::transcript::RowAction;
+                if let RowAction::OpenFile { path } = action {
+                    let weak = weak.clone();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            weak.update(cx, |view, cx| view.open_file_result(path.into(), window, cx))
+                        });
+                    });
+                    return;
+                }
+                if let RowAction::OpenFileAt { path, line } = action {
+                    let weak = weak.clone();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            weak.update(cx, |view, cx| view.open_file_at(path.into(), line, window, cx))
+                        });
+                    });
+                    return;
+                }
+                if let RowAction::OpenFileDiff { path } = action {
+                    let weak = weak.clone();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            weak.update(cx, |view, cx| view.show_file_diff(path, window, cx))
+                        });
+                    });
+                    return;
+                }
+                let _ = weak.update(cx, |view, cx| match action {
+                    RowAction::Toggle { row_id } => view.toggle_row(&row_id, cx),
+                    RowAction::Copy { row_id, content } => view.copy_code(row_id, content, cx),
+                    RowAction::OpenImage { path } => {
+                        view.open_inline_image(&path, cx);
+                    }
+                    RowAction::OpenImageGallery { paths, index } => {
+                        let resolved = paths.iter().map(|p| view.resolve_image_path(p)).collect();
+                        view.open_image_gallery(resolved, index, cx);
+                    }
+                    RowAction::OpenDiagram { row_id, source } => {
+                        view.open_lightbox(
+                            super::Lightbox::Diagram {
+                                row_id,
+                                source,
+                                view: Default::default(),
+                            },
+                            cx,
+                        );
+                    }
+                    RowAction::OpenSubagent { subagent_id } => {
+                        view.open_subagent_session(&subagent_id, cx)
+                    }
+                    RowAction::OpenUrl { url } => cx.open_url(&url),
+                    RowAction::OpenFullOutput {
+                        title,
+                        content,
+                        error,
+                    } => {
+                        view.open_lightbox(
+                            super::Lightbox::Output {
+                                title,
+                                content,
+                                error,
+                            },
+                            cx,
+                        );
+                    }
+                    _ => {}
+                });
+            }),
+            order: 0,
+            live_choices: None,
+            merges: Default::default(),
+            mr_fetches: Default::default(),
+            armed_runs: Default::default(),
+            run_at: None,
+            step_from: None,
+            tool_from: Default::default(),
+            muted: false,
+            now: Instant::now(),
+            now_ms,
+            clock_epoch: self.clock_epoch,
+            viewport_h: f32::from(window.viewport_size().height),
+            open_lines,
+            row_heights: self.transcript.row_heights.clone(),
+            prose_max_w: inner_w.min(crate::transcript::prose_max_w()),
+            column_w: inner_w,
+            bubble_max_w: None,
+            probe: None,
+            plan_running: is_running,
+            plan_cards: Default::default(),
+            citations: Default::default(),
+            current_citations: None,
+            subagent_info: Default::default(),
+        };
+
+        let mut meta_items: Vec<String> = Vec::new();
+        if let Some(branch) = &worktree_branch {
+            meta_items.push(format!("worktree {branch}"));
+        } else if read_only {
+            meta_items.push("read-only".to_string());
+        }
+        if !model.is_empty() {
+            let short_model = model.rsplit('/').next().unwrap_or(&model);
+            meta_items.push(short_model.to_string());
+        }
+        if turns > 0 {
+            meta_items.push(if turns == 1 {
+                "1 turn".to_string()
+            } else {
+                format!("{turns} turns")
+            });
+        }
+        if input_tokens > 0 || output_tokens > 0 {
+            meta_items.push(format!(
+                "{} in · {} out",
+                super::main_pane::format_compact_tokens(input_tokens),
+                super::main_pane::format_compact_tokens(output_tokens)
+            ));
+        }
+        if is_running && created_at > 0 {
+            let secs = ((now_ms - created_at).max(0) / 1_000) as u64;
+            meta_items.push(if secs < 60 {
+                format!("{secs}s")
+            } else {
+                format!("{}m {:02}s", secs / 60, secs % 60)
+            });
+        } else if let Some(ms) = duration_ms {
+            meta_items.push(super::main_pane::format_subagent_duration(ms));
+        }
+
+        let rows = crate::transcript::render_transcript_blocks(&msg_id, blocks, &rc);
+
+        let live_footer = (is_running && !has_live_tool_row).then(|| {
+            let status_text = if !active_tool.is_empty() {
+                active_tool.clone()
+            } else if rows.is_empty() {
+                "Starting subagent…".to_string()
+            } else {
+                "Working…".to_string()
+            };
+            div()
+                .w_full()
+                .px_4()
+                .pt_2()
+                .child(crate::trace_view::live_status_chrome(
+                    div().whitespace_nowrap().child(status_text).into_any_element(),
+                    None,
+                    t,
+                    reduced,
+                ))
+                .into_any_element()
+        });
+
+        let empty_done = (!is_running && rows.is_empty()).then(|| {
+            div()
+                .w_full()
+                .px_4()
+                .py_4()
+                .t_small()
+                .text_color(c(t.text_faint))
+                .child("No output recorded.")
+                .into_any_element()
+        });
+
+        div()
+            .id("right-subagent-detail")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(c(t.border).opacity(0.6))
+                    .flex()
+                    .flex_col()
+                    .gap(zpx(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id("right-subagent-back")
+                                    .h(zpx(24.))
+                                    .px(zpx(6.))
+                                    .ml(zpx(-6.))
+                                    .rounded(crate::style::RADIUS_SM)
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .t_small()
+                                    .text_color(c(t.text_muted))
+                                    .cursor_pointer()
+                                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                                    .hover(|s| s.text_color(c(t.text)))
+                                    .active(|s| s.opacity(0.8))
+                                    .child(Icon::Back.el(zpx(13.)))
+                                    .child("Subagents")
+                                    .child(
+                                        div()
+                                            .ml_1()
+                                            .font_family(crate::style::MONO)
+                                            .t_caption()
+                                            .text_color(c(t.text_faint))
+                                            .child("Esc"),
+                                    )
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.close_subagent_session(cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(crate::subagent_entity::render_entity(
+                                subagent_id,
+                                &name,
+                                crate::subagent_entity::EntityState::from_status(&status),
+                                44.,
+                                self.clock_epoch,
+                                t,
+                                reduced,
+                            ))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .t_title()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .h(zpx(20.))
+                                    .px_2()
+                                    .rounded(crate::style::RADIUS_SM)
+                                    .bg(c(color & 0xFFFF_FF00 | 0x1A))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(zpx(5.))
+                                    .t_caption()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(c(color))
+                                    .child(
+                                        div()
+                                            .size(zpx(5.))
+                                            .flex_none()
+                                            .rounded_full()
+                                            .bg(c(color)),
+                                    )
+                                    .child(label),
+                            ),
+                    )
+                    .when(!description.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .t_small()
+                                .text_color(c(t.text_muted))
+                                .child(description),
+                        )
+                    })
+                    .when(!meta_items.is_empty(), |d| {
+                        let mut strip = div()
+                            .pt(zpx(2.))
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x(zpx(6.))
+                            .gap_y(zpx(2.))
+                            .font_family(crate::style::MONO)
+                            .t_caption()
+                            .text_color(c(t.text_faint));
+                        for (ix, item) in meta_items.into_iter().enumerate() {
+                            if ix > 0 {
+                                strip = strip.child(div().opacity(0.55).child("·"));
+                            }
+                            strip = strip.child(item);
+                        }
+                        d.child(strip)
+                    }),
+            )
+            .child(
+                div()
+                    .id("right-subagent-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .pt_2()
+                    .pb_6()
+                    .flex()
+                    .flex_col()
+                    .children(rows)
+                    .children(empty_done)
+                    .children(live_footer)
+                    .when(!blocked.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .px_4()
+                                .pt_2()
+                                .child(
+                                    div()
+                                        .rounded(RADIUS_MD)
+                                        .bg(c(t.surface))
+                                        .border_1()
+                                        .border_color(c(t.warning))
+                                        .px_3()
+                                        .py_2()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .t_small()
+                                        .text_color(c(t.text))
+                                        .child(
+                                            div()
+                                                .text_color(c(t.warning))
+                                                .child(Icon::Alert.el(zpx(13.))),
+                                        )
+                                        .child(format!("Waiting for input: {blocked}")),
+                                ),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn right_tip_label(&self, id: &str) -> Option<(String, Option<&'static str>)> {
         use super::tooltip::keys;
         let (text, key) = match id {
@@ -1490,7 +2352,10 @@ mod tests {
     ) -> Vec<u64> {
         tabs.iter()
             .filter(|t| match &t.kind {
-                RightTabKind::Launcher | RightTabKind::Changes | RightTabKind::File => true,
+                RightTabKind::Launcher
+                | RightTabKind::Changes
+                | RightTabKind::File
+                | RightTabKind::Subagents => true,
                 RightTabKind::Browser(id) => visible_browsers.contains(id),
                 RightTabKind::Terminal(id) => visible_terminals.iter().any(|s| *s == id),
             })

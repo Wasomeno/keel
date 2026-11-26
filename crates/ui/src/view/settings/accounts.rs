@@ -11,8 +11,7 @@ use crate::icons::Icon;
 use crate::style::{INPUT_H, KeelStyled, MONO, c, r_md, zpx};
 
 /// Caption under the "Model providers" label.
-const PROVIDERS_CAPTION: &str =
-    "Sign-in opens in your browser. Kept for Keel only, apart from your own Pi.";
+const PROVIDERS_CAPTION: &str = "Sign-in opens in your browser. Credentials stay local to Keel.";
 
 impl KeelWindow {
     /// Keel's Pi and which providers it is signed in to.
@@ -440,23 +439,15 @@ impl KeelWindow {
                                     .t_body()
                                     .text_color(c(t.danger))
                                     .child(Icon::Alert.el(zpx(14.)))
-                                    .child("Keel's bundled Pi is missing"),
+                                    .child("Keel harness is unavailable"),
                             )
                             .child(div().t_small().text_color(c(t.text_muted)).child(
-                                "Run scripts/fetch-pi.sh or set PI_EXECUTABLE, then restart Keel.",
+                                "Restart Keel to retry.",
                             )),
                     ],
                     t,
                 ));
         }
-
-        let version = (!h.version.is_empty()).then(|| {
-            div()
-                .t_caption()
-                .text_color(c(t.text_faint))
-                .child(format!("Pi {}", h.version))
-                .into_any_element()
-        });
 
         let rows: Vec<gpui::Div> = h
             .accounts
@@ -473,7 +464,7 @@ impl KeelWindow {
             .child(card_group_header(
                 "Model providers",
                 Some(PROVIDERS_CAPTION),
-                version,
+                None,
                 t,
             ))
             .child(settings_card(rows, t))

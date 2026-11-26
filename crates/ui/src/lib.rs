@@ -38,6 +38,7 @@ pub mod state;
 pub mod stats;
 pub mod steps;
 pub mod style;
+pub mod subagent_entity;
 pub mod syntax;
 pub mod terminal;
 pub mod test_run;

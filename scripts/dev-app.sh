@@ -4,20 +4,29 @@
 # capture its window; the installed ~/Applications/Keel.app is untouched.
 # Drive it with ui-dev.sock (see crates/ui/src/dev_control.rs).
 #
-#   scripts/dev-app.sh            # build, refresh the bundle, relaunch
+#   scripts/dev-app.sh            # build, refresh the bundle, relaunch in foreground
 #   scripts/dev-app.sh --no-build # refresh and relaunch only
+#   scripts/dev-app.sh --bg       # launch in background without stealing focus
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[ "${1:-}" = "--no-build" ] || cargo build -p keel
+
+NO_BUILD=0
+BG=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-build) NO_BUILD=1 ;;
+    --bg) BG=1 ;;
+    *) echo "Unknown flag: $arg" >&2; exit 2 ;;
+  esac
+done
+
+[ "$NO_BUILD" -eq 1 ] || cargo build -p keel
 APP=target/KeelDebug.app
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 # The bundle must own its executable; a wrapper script that execs the debug
 # binary leaves the window outside the bundle. An APFS clone costs no disk.
 cp -c target/debug/keel "$APP/Contents/MacOS/.keel.new" 2>/dev/null || cp target/debug/keel "$APP/Contents/MacOS/.keel.new"
 mv -f "$APP/Contents/MacOS/.keel.new" "$APP/Contents/MacOS/keel"
-# Keel finds Pi at ../Resources/pi beside its binary.
-ln -sfn ../../../debug/pi "$APP/Contents/Resources/pi"
-ln -sfn ../../../debug/pi-packages "$APP/Contents/Resources/pi-packages"
 
 # CEF framework and helpers
 CEF_SRC="$(pwd)/.cef/cef_macos_aarch64/Chromium Embedded Framework.framework"
@@ -74,9 +83,38 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   $ICON_KEYS
 </dict></plist>
 PLIST
-pkill -f 'KeelDebug.app/Contents/MacOS/keel|target/debug/keel' || true
-sleep 1
-# -g: launch behind the current app, so the user's screen stays theirs.
-# Do not steal focus: open -g plus KEEL_NO_ACTIVATE skips cx.activate.
-export KEEL_NO_ACTIVATE=1
-open -g "$APP"
+PATTERN='KeelDebug.app/Contents/MacOS/keel|target/debug/keel'
+pkill -f "$PATTERN" || true
+
+# Wait for the old instance (and its CEF teardown) to actually exit so `open`
+# doesn't collide with a dying process and silently no-op.
+for _ in $(seq 1 50); do
+  if ! pgrep -f "$PATTERN" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+if pgrep -f "$PATTERN" >/dev/null 2>&1; then
+  pkill -9 -f "$PATTERN" || true
+  sleep 0.2
+fi
+
+APP_ABS="$(pwd)/$APP"
+if [ "$BG" -eq 1 ]; then
+  # -g: launch behind the current app, so the user's screen stays theirs.
+  export KEEL_NO_ACTIVATE=1
+  open -g -n "$APP_ABS"
+else
+  unset KEEL_NO_ACTIVATE || true
+  open -n "$APP_ABS"
+fi
+
+# Confirm the new instance actually came up.
+for _ in $(seq 1 30); do
+  if pgrep -f 'KeelDebug.app/Contents/MacOS/keel' >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 0.1
+done
+echo "error: KeelDebug.app did not start" >&2
+exit 1

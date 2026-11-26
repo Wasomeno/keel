@@ -120,7 +120,8 @@ pub enum NativeEvent {
     Wake,
 }
 
-static ACTIVE_WAKER_TX: Mutex<Option<Sender>> = Mutex::new(None);
+#[cfg(not(target_os = "macos"))]
+static ACTIVE_WAKER_TX: Mutex<Vec<Sender>> = Mutex::new(Vec::new());
 static CEF_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
@@ -370,13 +371,12 @@ wrap_browser_process_handler! {
             #[cfg(target_os = "macos")]
             mac_dispatch::schedule_work(delay_ms);
 
-            // The UI pump (`spin`) also drives paints. A delayed wake used to
-            // spawn a thread per callback and re-enter the loop; the timer in
-            // `schedule_work` is the one follow-up.
-            if delay_ms <= 0
-                && let Some(tx) = ACTIVE_WAKER_TX.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
-            {
-                let _ = tx.send(NativeEvent::Wake);
+            // On macOS `mac_dispatch::schedule_work` already schedules the main
+            // queue directly; only wake UI listeners on platforms without it.
+            #[cfg(not(target_os = "macos"))]
+            if delay_ms <= 0 {
+                let mut wakers = ACTIVE_WAKER_TX.lock().unwrap_or_else(|p| p.into_inner());
+                wakers.retain(|tx| tx.send(NativeEvent::Wake).is_ok());
             }
         }
     }
@@ -409,6 +409,7 @@ struct SharedState {
     can_back: bool,
     can_forward: bool,
     progress: f32,
+    cursor: gpui::CursorStyle,
     sites: Option<Vec<String>>,
     upload: Option<Vec<PathBuf>>,
     agent_mode: bool,
@@ -588,6 +589,29 @@ wrap_display_handler! {
             let _ = self.tx.send(NativeEvent::Console(entry));
             0
         }
+
+        fn on_cursor_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            _cursor: *mut u8,
+            type_: CursorType,
+            _custom_cursor_info: Option<&CursorInfo>,
+        ) -> ::std::os::raw::c_int {
+            let next = cef_cursor_to_gpui(type_);
+            let changed = {
+                let mut s = self.shared.lock().unwrap();
+                if s.cursor != next {
+                    s.cursor = next;
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                let _ = self.tx.send(NativeEvent::Changed);
+            }
+            1
+        }
     }
 }
 
@@ -682,9 +706,9 @@ wrap_request_handler! {
             let Some(req) = request else { return 0 };
             let raw_url = req.url();
             let url = CefString::from(&raw_url).to_string();
-            eprintln!("[cef] on_before_browse: url={:?}", url);
+            tracing::debug!(target: "keel_ui::browser::cef", url = ?url, "on_before_browse");
             if !url.is_empty() && !allowed_navigation(&url) {
-                eprintln!("[cef] on_before_browse BLOCKED: url={:?}", url);
+                tracing::debug!(target: "keel_ui::browser::cef", url = ?url, "blocked navigation");
                 return 1;
             }
             let state = self.shared.lock().unwrap();
@@ -714,6 +738,37 @@ wrap_context_menu_handler! {
             if let Some(m) = model {
                 m.clear();
             }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+wrap_keyboard_handler! {
+    struct KeelKeyboardHandler;
+    impl KeyboardHandler {
+        fn on_pre_key_event(
+            &self,
+            _browser: Option<&mut Browser>,
+            _event: Option<&KeyEvent>,
+            _os_event: *mut u8,
+            is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
+        ) -> ::std::os::raw::c_int {
+            if let Some(shortcut) = is_keyboard_shortcut {
+                *shortcut = 0;
+            }
+            0
+        }
+
+        fn on_key_event(
+            &self,
+            _browser: Option<&mut Browser>,
+            _event: Option<&KeyEvent>,
+            _os_event: *mut u8,
+        ) -> ::std::os::raw::c_int {
+            // GPUI already matched the menu bar and keymap before forwarding
+            // to CEF; returning 1 stops Chromium from re-entering `[NSApp mainMenu]`
+            // while GPUI may hold an active borrow.
+            1
         }
     }
 }
@@ -805,6 +860,16 @@ wrap_client! {
         fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
             Some(self.context_menu.clone())
         }
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            #[cfg(target_os = "macos")]
+            {
+                Some(KeelKeyboardHandler::new())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        }
     }
 }
 
@@ -813,7 +878,7 @@ pub struct NativePage {
     frame_state: Arc<Mutex<FrameState>>,
     shared_state: Arc<Mutex<SharedState>>,
     current_frame: RefCell<Option<Arc<gpui::RenderImage>>>,
-    dropped_frame: RefCell<Option<Arc<gpui::RenderImage>>>,
+    dropped_frames: RefCell<Vec<Arc<gpui::RenderImage>>>,
     origin: Cell<Point<Pixels>>,
     tx: Sender,
     held_dialog: Arc<Mutex<Option<(DialogKind, JsdialogCallback)>>>,
@@ -840,6 +905,8 @@ pub struct NativePage {
     background: Cell<bool>,
     shown: Cell<bool>,
     parked: Cell<bool>,
+    focused: Cell<bool>,
+    pressed_button: Cell<Option<gpui::MouseButton>>,
 }
 
 impl NativePage {
@@ -864,6 +931,7 @@ impl NativePage {
             can_back: false,
             can_forward: false,
             progress: 0.0,
+            cursor: gpui::CursorStyle::Arrow,
             sites: None,
             upload: None,
             agent_mode: false,
@@ -923,14 +991,18 @@ impl NativePage {
             (None, None)
         };
 
-        *ACTIVE_WAKER_TX.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx.clone());
+        #[cfg(not(target_os = "macos"))]
+        ACTIVE_WAKER_TX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(tx.clone());
 
         Ok(Self {
             browser,
             frame_state,
             shared_state,
             current_frame: RefCell::new(None),
-            dropped_frame: RefCell::new(None),
+            dropped_frames: RefCell::new(Vec::new()),
             origin: Cell::new(Point::default()),
             tx,
             held_dialog,
@@ -950,7 +1022,13 @@ impl NativePage {
             background: Cell::new(false),
             shown: Cell::new(false),
             parked: Cell::new(false),
+            focused: Cell::new(false),
+            pressed_button: Cell::new(None),
         })
+    }
+
+    pub fn cursor_style(&self) -> gpui::CursorStyle {
+        self.shared_state.lock().unwrap().cursor
     }
 
     pub fn state(&self) -> PageState {
@@ -1163,8 +1241,8 @@ impl NativePage {
         self.current_frame.borrow().clone()
     }
 
-    pub fn take_dropped_frame(&self) -> Option<Arc<gpui::RenderImage>> {
-        self.dropped_frame.borrow_mut().take()
+    pub fn take_dropped_frames(&self) -> Vec<Arc<gpui::RenderImage>> {
+        std::mem::take(&mut *self.dropped_frames.borrow_mut())
     }
 
     pub fn current_frame(&self) -> Option<Arc<gpui::RenderImage>> {
@@ -1184,7 +1262,7 @@ impl NativePage {
             if let Some(rgba) = image::RgbaImage::from_raw(w, h, fs.buffer.clone()) {
                 let render_img = Arc::new(gpui::RenderImage::new(vec![image::Frame::new(rgba)]));
                 if let Some(old) = self.current_frame.borrow_mut().replace(render_img) {
-                    *self.dropped_frame.borrow_mut() = Some(old);
+                    self.dropped_frames.borrow_mut().push(old);
                 }
                 return true;
             }
@@ -1234,68 +1312,128 @@ impl NativePage {
         Err("no frame rendered".into())
     }
 
-    pub fn handle_mouse_down(&self, pos: Point<Pixels>, button: gpui::MouseButton) {
+    fn rel_point(&self, pos: Point<Pixels>) -> (i32, i32) {
         let origin = self.origin.get();
-        let rel_x = (f32::from(pos.x - origin.x)).max(0.0);
-        let rel_y = (f32::from(pos.y - origin.y)).max(0.0);
-        let event = MouseEvent {
-            x: rel_x.round() as i32,
-            y: rel_y.round() as i32,
-            modifiers: 0,
-        };
+        let rel_x = f32::from(pos.x - origin.x).max(0.0);
+        let rel_y = f32::from(pos.y - origin.y).max(0.0);
+        (rel_x.round() as i32, rel_y.round() as i32)
+    }
+
+    pub fn handle_mouse_down(
+        &self,
+        pos: Point<Pixels>,
+        button: gpui::MouseButton,
+        modifiers: gpui::Modifiers,
+        click_count: usize,
+    ) {
         let btn = match button {
             gpui::MouseButton::Left => MouseButtonType::LEFT,
             gpui::MouseButton::Middle => MouseButtonType::MIDDLE,
             gpui::MouseButton::Right => MouseButtonType::RIGHT,
             gpui::MouseButton::Navigate(_) => return,
         };
+        self.pressed_button.set(Some(button));
+        self.set_focus(true);
+        let (x, y) = self.rel_point(pos);
+        let event = MouseEvent {
+            x,
+            y,
+            modifiers: cef_mouse_modifiers(&modifiers, None),
+        };
+        let clicks = click_count.clamp(1, 3) as i32;
         if let Some(host) = self.browser.host() {
-            host.send_mouse_click_event(Some(&event), btn, 0, 1);
+            host.send_mouse_click_event(Some(&event), btn, 0, clicks);
         }
+        self.spin_soon();
     }
 
-    pub fn handle_mouse_up(&self, pos: Point<Pixels>, button: gpui::MouseButton) {
-        let origin = self.origin.get();
-        let rel_x = (f32::from(pos.x - origin.x)).max(0.0);
-        let rel_y = (f32::from(pos.y - origin.y)).max(0.0);
-        let event = MouseEvent {
-            x: rel_x.round() as i32,
-            y: rel_y.round() as i32,
-            modifiers: 0,
-        };
+    pub fn handle_mouse_up(
+        &self,
+        pos: Point<Pixels>,
+        button: gpui::MouseButton,
+        modifiers: gpui::Modifiers,
+        click_count: usize,
+    ) {
         let btn = match button {
             gpui::MouseButton::Left => MouseButtonType::LEFT,
             gpui::MouseButton::Middle => MouseButtonType::MIDDLE,
             gpui::MouseButton::Right => MouseButtonType::RIGHT,
             gpui::MouseButton::Navigate(_) => return,
         };
+        if self.pressed_button.get() == Some(button) {
+            self.pressed_button.set(None);
+        }
+        let (x, y) = self.rel_point(pos);
+        let event = MouseEvent {
+            x,
+            y,
+            modifiers: cef_mouse_modifiers(&modifiers, None),
+        };
+        let clicks = click_count.clamp(1, 3) as i32;
         if let Some(host) = self.browser.host() {
-            host.send_mouse_click_event(Some(&event), btn, 1, 1);
+            host.send_mouse_click_event(Some(&event), btn, 1, clicks);
+        }
+        self.spin_soon();
+    }
+
+    pub fn handle_mouse_up_outside(
+        &self,
+        pos: Point<Pixels>,
+        button: gpui::MouseButton,
+        modifiers: gpui::Modifiers,
+        click_count: usize,
+    ) {
+        if self.pressed_button.get() == Some(button) {
+            self.handle_mouse_up(pos, button, modifiers, click_count);
         }
     }
 
-    pub fn handle_mouse_move(&self, pos: Point<Pixels>) {
-        let origin = self.origin.get();
-        let rel_x = (f32::from(pos.x - origin.x)).max(0.0);
-        let rel_y = (f32::from(pos.y - origin.y)).max(0.0);
+    pub fn handle_mouse_move(
+        &self,
+        pos: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+        pressed_button: Option<gpui::MouseButton>,
+    ) {
+        let (x, y) = self.rel_point(pos);
         let event = MouseEvent {
-            x: rel_x.round() as i32,
-            y: rel_y.round() as i32,
-            modifiers: 0,
+            x,
+            y,
+            modifiers: cef_mouse_modifiers(&modifiers, pressed_button),
         };
         if let Some(host) = self.browser.host() {
             host.send_mouse_move_event(Some(&event), 0);
         }
+        self.spin_soon();
     }
 
-    pub fn handle_scroll_wheel(&self, pos: Point<Pixels>, delta: gpui::ScrollDelta) {
-        let origin = self.origin.get();
-        let rel_x = (f32::from(pos.x - origin.x)).max(0.0);
-        let rel_y = (f32::from(pos.y - origin.y)).max(0.0);
+    pub fn handle_mouse_leave(&self, pos: Point<Pixels>, modifiers: gpui::Modifiers) {
+        let (x, y) = self.rel_point(pos);
         let event = MouseEvent {
-            x: rel_x.round() as i32,
-            y: rel_y.round() as i32,
-            modifiers: 0,
+            x,
+            y,
+            modifiers: cef_mouse_modifiers(&modifiers, None),
+        };
+        if let Some(host) = self.browser.host() {
+            host.send_mouse_move_event(Some(&event), 1);
+        }
+        self.spin_soon();
+    }
+
+    pub fn handle_scroll_wheel(
+        &self,
+        pos: Point<Pixels>,
+        delta: gpui::ScrollDelta,
+        modifiers: gpui::Modifiers,
+    ) {
+        let (x, y) = self.rel_point(pos);
+        let mut flags = cef_mouse_modifiers(&modifiers, None);
+        if matches!(delta, gpui::ScrollDelta::Pixels(_)) {
+            flags |= EVENTFLAG_PRECISION_SCROLLING_DELTA;
+        }
+        let event = MouseEvent {
+            x,
+            y,
+            modifiers: flags,
         };
         let (dx, dy) = match delta {
             gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
@@ -1304,112 +1442,84 @@ impl NativePage {
         if let Some(host) = self.browser.host() {
             host.send_mouse_wheel_event(Some(&event), dx.round() as i32, dy.round() as i32);
         }
+        self.spin_soon();
     }
 
     pub fn handle_key_down(&self, event: &gpui::KeyDownEvent) -> bool {
-        let key = &event.keystroke.key;
-        if forwarded_key(
-            event.keystroke.modifiers.platform,
-            event.keystroke.modifiers.control,
-            key,
-        ) {
-            return false;
+        match translate_key_down(&event.keystroke, event.is_held) {
+            TranslatedKeyDown::Forward => false,
+            TranslatedKeyDown::Editor(op) => {
+                self.defer_edit(op);
+                true
+            }
+            TranslatedKeyDown::CommitText(text) => {
+                self.defer_edit(EditOp::CommitText(text));
+                true
+            }
+            TranslatedKeyDown::Keys { raw_down, char_event } => {
+                self.focused.set(true);
+                // Not now: `send_key_event` walks the menu bar, and validating a
+                // menu item borrows the UI again. That abort is the crash.
+                self.defer_key(raw_down, char_event, true);
+                true
+            }
         }
-        let vk = key_to_vk(key);
-        let ch = if key.chars().count() == 1 {
-            key.chars().next().unwrap()
-        } else {
-            '\0'
-        };
-        let mut modifiers = 0u32;
-        if event.keystroke.modifiers.shift {
-            modifiers |= 1 << 0;
-        }
-        if event.keystroke.modifiers.control {
-            modifiers |= 1 << 1;
-        }
-        if event.keystroke.modifiers.alt {
-            modifiers |= 1 << 2;
-        }
-        if event.keystroke.modifiers.platform {
-            modifiers |= 1 << 3;
-        }
-
-        let key_event = KeyEvent {
-            size: std::mem::size_of::<sys::_cef_key_event_t>(),
-            type_: KeyEventType::RAWKEYDOWN,
-            modifiers,
-            windows_key_code: vk,
-            native_key_code: 0,
-            is_system_key: 0,
-            character: ch as u16,
-            unmodified_character: ch as u16,
-            focus_on_editable_field: 0,
-        };
-        let char_event = if ch != '\0'
-            && !event.keystroke.modifiers.platform
-            && !event.keystroke.modifiers.control
-        {
-            Some(KeyEvent {
-                type_: KeyEventType::CHAR,
-                ..key_event
-            })
-        } else {
-            None
-        };
-        // Not now: `send_key_event` walks the menu bar, and validating a
-        // menu item borrows the UI again. That abort is the crash.
-        self.defer_key(key_event, char_event);
-        true
     }
 
     pub fn handle_key_up(&self, event: &gpui::KeyUpEvent) -> bool {
-        let key = &event.keystroke.key;
-        if forwarded_key(
-            event.keystroke.modifiers.platform,
-            event.keystroke.modifiers.control,
-            key,
-        ) {
+        let Some(key_event) = translate_key_up(&event.keystroke) else {
             return false;
-        }
-        let vk = key_to_vk(key);
-        let ch = if key.chars().count() == 1 {
-            key.chars().next().unwrap()
-        } else {
-            '\0'
         };
-        let mut modifiers = 0u32;
-        if event.keystroke.modifiers.shift {
-            modifiers |= 1 << 0;
-        }
-        if event.keystroke.modifiers.control {
-            modifiers |= 1 << 1;
-        }
-        if event.keystroke.modifiers.alt {
-            modifiers |= 1 << 2;
-        }
-        if event.keystroke.modifiers.platform {
-            modifiers |= 1 << 3;
-        }
-
-        let key_event = KeyEvent {
-            size: std::mem::size_of::<sys::_cef_key_event_t>(),
-            type_: KeyEventType::KEYUP,
-            modifiers,
-            windows_key_code: vk,
-            native_key_code: 0,
-            is_system_key: 0,
-            character: ch as u16,
-            unmodified_character: ch as u16,
-            focus_on_editable_field: 0,
-        };
-        self.defer_key(key_event, None);
+        self.defer_key(key_event, None, self.focused.get());
         true
     }
 
-    pub fn focus_parent(&self) {
+    pub fn set_focus(&self, focused: bool) {
+        if self.focused.get() == focused {
+            return;
+        }
+        self.focused.set(focused);
         if let Some(host) = self.browser.host() {
-            host.set_focus(1);
+            host.set_focus(if focused { 1 } else { 0 });
+        }
+        self.spin_soon();
+    }
+
+    pub fn focus_parent(&self) {
+        self.set_focus(false);
+    }
+
+    pub fn copy(&self) {
+        self.defer_edit(EditOp::Copy);
+    }
+
+    pub fn cut(&self) {
+        self.defer_edit(EditOp::Cut);
+    }
+
+    pub fn paste(&self) {
+        self.defer_edit(EditOp::Paste);
+    }
+
+    pub fn paste_and_match_style(&self) {
+        self.defer_edit(EditOp::PasteAndMatchStyle);
+    }
+
+    pub fn select_all(&self) {
+        self.defer_edit(EditOp::SelectAll);
+    }
+
+    pub fn undo(&self) {
+        self.defer_edit(EditOp::Undo);
+    }
+
+    pub fn redo(&self) {
+        self.defer_edit(EditOp::Redo);
+    }
+
+    pub fn commit_text(&self, text: &str) {
+        if !text.is_empty() {
+            self.defer_edit(EditOp::CommitText(text.to_string()));
         }
     }
 
@@ -1430,38 +1540,80 @@ impl NativePage {
     }
 
     /// Deliver a key after this turn. See `handle_key_down`.
-    fn defer_key(&self, event: KeyEvent, char_event: Option<KeyEvent>) {
+    fn defer_key(&self, event: KeyEvent, char_event: Option<KeyEvent>, ensure_focus: bool) {
         #[cfg(target_os = "macos")]
         {
             struct Job {
                 browser: Browser,
                 event: KeyEvent,
                 char_event: Option<KeyEvent>,
+                ensure_focus: bool,
             }
             extern "C" fn fire(ctx: *mut std::ffi::c_void) {
                 let job = unsafe { Box::from_raw(ctx as *mut Job) };
                 if let Some(host) = job.browser.host() {
+                    if job.ensure_focus {
+                        host.set_focus(1);
+                    }
                     host.send_key_event(Some(&job.event));
                     if let Some(ch) = job.char_event.as_ref() {
                         host.send_key_event(Some(ch));
                     }
                 }
+                mac_dispatch::pump();
             }
             let job = Box::new(Job {
                 browser: self.browser.clone(),
                 event,
                 char_event,
+                ensure_focus,
             });
             mac_dispatch::after(Box::into_raw(job) as *mut std::ffi::c_void, fire);
         }
         #[cfg(not(target_os = "macos"))]
         {
             if let Some(host) = self.browser.host() {
+                if ensure_focus {
+                    host.set_focus(1);
+                }
                 host.send_key_event(Some(&event));
                 if let Some(ch) = char_event.as_ref() {
                     host.send_key_event(Some(ch));
                 }
             }
+            self.spin();
+        }
+    }
+
+    fn defer_edit(&self, op: EditOp) {
+        self.focused.set(true);
+        let cdp_id_base = match &op {
+            EditOp::KeyCommand(_) => self.next_cdp_id.fetch_add(2, Ordering::SeqCst),
+            _ => 0,
+        };
+        #[cfg(target_os = "macos")]
+        {
+            struct Job {
+                browser: Browser,
+                op: EditOp,
+                cdp_id_base: u64,
+            }
+            extern "C" fn fire(ctx: *mut std::ffi::c_void) {
+                let job = unsafe { Box::from_raw(ctx as *mut Job) };
+                run_edit_op(&job.browser, job.op, job.cdp_id_base);
+                mac_dispatch::pump();
+            }
+            let job = Box::new(Job {
+                browser: self.browser.clone(),
+                op,
+                cdp_id_base,
+            });
+            mac_dispatch::after(Box::into_raw(job) as *mut std::ffi::c_void, fire);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            run_edit_op(&self.browser, op, cdp_id_base);
+            self.spin();
         }
     }
 
@@ -1480,7 +1632,7 @@ impl NativePage {
         if let Some(host) = self.browser.host() {
             host.send_dev_tools_message(Some(s.as_bytes()));
         }
-        self.spin();
+        self.spin_soon();
     }
 
     pub fn eval_agent(&self, seq: u64, code: &str) {
@@ -1696,7 +1848,9 @@ impl NativePage {
 
     pub fn park(&self) {
         self.parked.set(true);
+        self.focused.set(false);
         if let Some(host) = self.browser.host() {
+            host.set_focus(0);
             host.was_hidden(1);
         }
         self.set_frame_rate(1);
@@ -1820,27 +1974,766 @@ impl Drop for NativePage {
     }
 }
 
-fn key_to_vk(key: &str) -> i32 {
-    match key {
-        "enter" => 0x0D,
-        "escape" => 0x1B,
-        "tab" => 0x09,
-        "backspace" => 0x08,
-        "space" => 0x20,
-        "arrowup" | "up" => 0x26,
-        "arrowdown" | "down" => 0x28,
-        "arrowleft" | "left" => 0x25,
-        "arrowright" | "right" => 0x27,
-        "pageup" => 0x21,
-        "pagedown" => 0x22,
-        "home" => 0x24,
-        "end" => 0x23,
-        "delete" => 0x2E,
-        k if k.len() == 1 => {
-            let c = k.chars().next().unwrap().to_ascii_uppercase();
-            c as i32
+// `cef_event_flags_t` bit values from `include/internal/cef_types.h`.
+const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
+const EVENTFLAG_CONTROL_DOWN: u32 = 1 << 2;
+const EVENTFLAG_ALT_DOWN: u32 = 1 << 3;
+const EVENTFLAG_LEFT_MOUSE_BUTTON: u32 = 1 << 4;
+const EVENTFLAG_MIDDLE_MOUSE_BUTTON: u32 = 1 << 5;
+const EVENTFLAG_RIGHT_MOUSE_BUTTON: u32 = 1 << 6;
+const EVENTFLAG_COMMAND_DOWN: u32 = 1 << 7;
+const EVENTFLAG_IS_KEY_PAD: u32 = 1 << 9;
+const EVENTFLAG_IS_REPEAT: u32 = 1 << 13;
+const EVENTFLAG_PRECISION_SCROLLING_DELTA: u32 = 1 << 14;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyCommandSpec {
+    key: &'static str,
+    code: &'static str,
+    windows_key_code: i32,
+    native_key_code: i32,
+    cdp_modifiers: u32,
+    is_repeat: bool,
+    command: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditOp {
+    Copy,
+    Cut,
+    Paste,
+    PasteAndMatchStyle,
+    SelectAll,
+    Undo,
+    Redo,
+    CommitText(String),
+    KeyCommand(KeyCommandSpec),
+}
+
+fn run_edit_op(browser: &Browser, op: EditOp, cdp_id_base: u64) {
+    if let Some(host) = browser.host() {
+        host.set_focus(1);
+        match op {
+            EditOp::CommitText(text) => {
+                let cef_text = CefString::from(text.as_str());
+                let invalid = Range {
+                    from: u32::MAX,
+                    to: u32::MAX,
+                };
+                host.ime_commit_text(Some(&cef_text), Some(&invalid), 0);
+                return;
+            }
+            EditOp::KeyCommand(spec) => {
+                let down = serde_json::json!({
+                    "id": cdp_id_base,
+                    "method": "Input.dispatchKeyEvent",
+                    "params": {
+                        "type": "rawKeyDown",
+                        "modifiers": spec.cdp_modifiers,
+                        "windowsVirtualKeyCode": spec.windows_key_code,
+                        "nativeVirtualKeyCode": spec.native_key_code,
+                        "key": spec.key,
+                        "code": spec.code,
+                        "autoRepeat": spec.is_repeat,
+                        "commands": [spec.command],
+                    }
+                })
+                .to_string();
+                let up = serde_json::json!({
+                    "id": cdp_id_base + 1,
+                    "method": "Input.dispatchKeyEvent",
+                    "params": {
+                        "type": "keyUp",
+                        "modifiers": spec.cdp_modifiers,
+                        "windowsVirtualKeyCode": spec.windows_key_code,
+                        "nativeVirtualKeyCode": spec.native_key_code,
+                        "key": spec.key,
+                        "code": spec.code,
+                    }
+                })
+                .to_string();
+                host.send_dev_tools_message(Some(down.as_bytes()));
+                host.send_dev_tools_message(Some(up.as_bytes()));
+                return;
+            }
+            _ => {}
         }
-        _ => 0,
+    }
+    let Some(frame) = browser.focused_frame().or_else(|| browser.main_frame()) else {
+        return;
+    };
+    match op {
+        EditOp::Copy => frame.copy(),
+        EditOp::Cut => frame.cut(),
+        EditOp::Paste => frame.paste(),
+        EditOp::PasteAndMatchStyle => frame.paste_and_match_style(),
+        EditOp::SelectAll => frame.select_all(),
+        EditOp::Undo => frame.undo(),
+        EditOp::Redo => frame.redo(),
+        EditOp::CommitText(_) | EditOp::KeyCommand(_) => {}
+    }
+}
+
+fn cef_mouse_modifiers(
+    mods: &gpui::Modifiers,
+    pressed_button: Option<gpui::MouseButton>,
+) -> u32 {
+    let mut flags = 0u32;
+    if mods.shift {
+        flags |= EVENTFLAG_SHIFT_DOWN;
+    }
+    if mods.control {
+        flags |= EVENTFLAG_CONTROL_DOWN;
+    }
+    if mods.alt {
+        flags |= EVENTFLAG_ALT_DOWN;
+    }
+    if mods.platform {
+        flags |= EVENTFLAG_COMMAND_DOWN;
+    }
+    match pressed_button {
+        Some(gpui::MouseButton::Left) => flags |= EVENTFLAG_LEFT_MOUSE_BUTTON,
+        Some(gpui::MouseButton::Middle) => flags |= EVENTFLAG_MIDDLE_MOUSE_BUTTON,
+        Some(gpui::MouseButton::Right) => flags |= EVENTFLAG_RIGHT_MOUSE_BUTTON,
+        _ => {}
+    }
+    flags
+}
+
+fn cef_key_modifiers(
+    mods: &gpui::Modifiers,
+    inferred_shift: bool,
+    is_held: bool,
+    is_keypad: bool,
+) -> u32 {
+    let mut flags = 0u32;
+    if mods.shift || inferred_shift {
+        flags |= EVENTFLAG_SHIFT_DOWN;
+    }
+    if mods.control {
+        flags |= EVENTFLAG_CONTROL_DOWN;
+    }
+    if mods.alt {
+        flags |= EVENTFLAG_ALT_DOWN;
+    }
+    if mods.platform {
+        flags |= EVENTFLAG_COMMAND_DOWN;
+    }
+    if is_keypad {
+        flags |= EVENTFLAG_IS_KEY_PAD;
+    }
+    if is_held {
+        flags |= EVENTFLAG_IS_REPEAT;
+    }
+    flags
+}
+
+fn cef_cursor_to_gpui(cursor: CursorType) -> gpui::CursorStyle {
+    use gpui::CursorStyle;
+    if cursor == CursorType::IBEAM {
+        CursorStyle::IBeam
+    } else if cursor == CursorType::VERTICALTEXT {
+        CursorStyle::IBeamCursorForVerticalLayout
+    } else if cursor == CursorType::HAND {
+        CursorStyle::PointingHand
+    } else if cursor == CursorType::CROSS || cursor == CursorType::CELL {
+        CursorStyle::Crosshair
+    } else if cursor == CursorType::GRAB {
+        CursorStyle::OpenHand
+    } else if cursor == CursorType::GRABBING
+        || cursor == CursorType::MOVE
+        || cursor == CursorType::DND_MOVE
+    {
+        CursorStyle::ClosedHand
+    } else if cursor == CursorType::WESTRESIZE {
+        CursorStyle::ResizeLeft
+    } else if cursor == CursorType::EASTRESIZE {
+        CursorStyle::ResizeRight
+    } else if cursor == CursorType::EASTWESTRESIZE {
+        CursorStyle::ResizeLeftRight
+    } else if cursor == CursorType::NORTHRESIZE {
+        CursorStyle::ResizeUp
+    } else if cursor == CursorType::SOUTHRESIZE {
+        CursorStyle::ResizeDown
+    } else if cursor == CursorType::NORTHSOUTHRESIZE {
+        CursorStyle::ResizeUpDown
+    } else if cursor == CursorType::COLUMNRESIZE {
+        CursorStyle::ResizeColumn
+    } else if cursor == CursorType::ROWRESIZE {
+        CursorStyle::ResizeRow
+    } else if cursor == CursorType::NORTHWESTRESIZE
+        || cursor == CursorType::SOUTHEASTRESIZE
+        || cursor == CursorType::NORTHWESTSOUTHEASTRESIZE
+    {
+        CursorStyle::ResizeUpLeftDownRight
+    } else if cursor == CursorType::NORTHEASTRESIZE
+        || cursor == CursorType::SOUTHWESTRESIZE
+        || cursor == CursorType::NORTHEASTSOUTHWESTRESIZE
+    {
+        CursorStyle::ResizeUpRightDownLeft
+    } else if cursor == CursorType::NOTALLOWED
+        || cursor == CursorType::NODROP
+        || cursor == CursorType::DND_NONE
+    {
+        CursorStyle::OperationNotAllowed
+    } else if cursor == CursorType::ALIAS || cursor == CursorType::DND_LINK {
+        CursorStyle::DragLink
+    } else if cursor == CursorType::COPY || cursor == CursorType::DND_COPY {
+        CursorStyle::DragCopy
+    } else if cursor == CursorType::CONTEXTMENU {
+        CursorStyle::ContextualMenu
+    } else {
+        CursorStyle::Arrow
+    }
+}
+
+#[derive(Debug)]
+enum TranslatedKeyDown {
+    Forward,
+    Editor(EditOp),
+    CommitText(String),
+    Keys {
+        raw_down: KeyEvent,
+        char_event: Option<KeyEvent>,
+    },
+}
+
+struct KeySpec {
+    windows_key_code: i32,
+    native_key_code: i32,
+    character: u16,
+    unmodified_character: u16,
+    emit_char: bool,
+    is_keypad: bool,
+    inferred_shift: bool,
+}
+
+fn translate_key_down(ks: &gpui::Keystroke, is_held: bool) -> TranslatedKeyDown {
+    if forwarded_key(ks.modifiers.platform, ks.modifiers.control, &ks.key) {
+        return TranslatedKeyDown::Forward;
+    }
+
+    // Standard macOS Cmd editing commands run directly on the focused CEF frame
+    // because windowless CEF has no Cocoa Edit menu responder chain.
+    if ks.modifiers.platform && !ks.modifiers.control {
+        let lower = ks.key.to_ascii_lowercase();
+        match (lower.as_str(), ks.modifiers.shift, ks.modifiers.alt) {
+            ("c", false, false) => return TranslatedKeyDown::Editor(EditOp::Copy),
+            ("x", false, false) => return TranslatedKeyDown::Editor(EditOp::Cut),
+            ("v", false, false) => return TranslatedKeyDown::Editor(EditOp::Paste),
+            ("v", true, false) | ("v", true, true) => {
+                return TranslatedKeyDown::Editor(EditOp::PasteAndMatchStyle);
+            }
+            ("a", false, false) => return TranslatedKeyDown::Editor(EditOp::SelectAll),
+            ("z", false, false) => return TranslatedKeyDown::Editor(EditOp::Undo),
+            ("z", true, false) | ("y", false, false) => {
+                return TranslatedKeyDown::Editor(EditOp::Redo);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(cmd_spec) = mac_key_command(ks, is_held) {
+        return TranslatedKeyDown::Editor(EditOp::KeyCommand(cmd_spec));
+    }
+
+    if !ks.modifiers.platform
+        && !ks.modifiers.control
+        && let Some(text) = ks.key_char.as_deref()
+        && text.encode_utf16().count() > 1
+    {
+        return TranslatedKeyDown::CommitText(text.to_string());
+    }
+
+    let spec = key_spec(&ks.key, ks.key_char.as_deref(), &ks.modifiers);
+    let modifiers = cef_key_modifiers(
+        &ks.modifiers,
+        spec.inferred_shift,
+        is_held,
+        spec.is_keypad,
+    );
+    let raw_down = KeyEvent {
+        size: std::mem::size_of::<sys::_cef_key_event_t>(),
+        type_: KeyEventType::RAWKEYDOWN,
+        modifiers,
+        windows_key_code: spec.windows_key_code,
+        native_key_code: spec.native_key_code,
+        is_system_key: 0,
+        character: spec.character,
+        unmodified_character: spec.unmodified_character,
+        focus_on_editable_field: 0,
+    };
+    let char_event = spec.emit_char.then(|| KeyEvent {
+        type_: KeyEventType::CHAR,
+        windows_key_code: i32::from(spec.character),
+        ..raw_down
+    });
+    TranslatedKeyDown::Keys {
+        raw_down,
+        char_event,
+    }
+}
+
+fn translate_key_up(ks: &gpui::Keystroke) -> Option<KeyEvent> {
+    if forwarded_key(ks.modifiers.platform, ks.modifiers.control, &ks.key) {
+        return None;
+    }
+    if mac_key_command(ks, false).is_some() {
+        return None;
+    }
+    let spec = key_spec(&ks.key, ks.key_char.as_deref(), &ks.modifiers);
+    let modifiers = cef_key_modifiers(&ks.modifiers, spec.inferred_shift, false, spec.is_keypad);
+    Some(KeyEvent {
+        size: std::mem::size_of::<sys::_cef_key_event_t>(),
+        type_: KeyEventType::KEYUP,
+        modifiers,
+        windows_key_code: spec.windows_key_code,
+        native_key_code: spec.native_key_code,
+        is_system_key: 0,
+        character: spec.character,
+        unmodified_character: spec.unmodified_character,
+        focus_on_editable_field: 0,
+    })
+}
+
+/// Cocoa `NSTextInputContext` line/document/Emacs bindings that windowless CEF
+/// on macOS does not synthesize from raw `send_key_event` alone.
+fn mac_key_command(ks: &gpui::Keystroke, is_repeat: bool) -> Option<KeyCommandSpec> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (ks, is_repeat);
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if ks.modifiers.alt {
+            return None;
+        }
+        let lower = ks.key.to_ascii_lowercase();
+        let shift_bit = if ks.modifiers.shift { 8u32 } else { 0u32 };
+        if ks.modifiers.platform && !ks.modifiers.control {
+            let cdp_modifiers = 4u32 | shift_bit;
+            let (key, code, windows_key_code, native_key_code, command) =
+                match (lower.as_str(), ks.modifiers.shift) {
+                    ("backspace", false) => {
+                        ("Backspace", "Backspace", 0x08, 0x33, "deleteToBeginningOfLine")
+                    }
+                    ("delete", false) => ("Delete", "Delete", 0x2E, 0x75, "deleteToEndOfLine"),
+                    ("left" | "arrowleft", false) => {
+                        ("ArrowLeft", "ArrowLeft", 0x25, 0x7B, "moveToBeginningOfLine")
+                    }
+                    ("left" | "arrowleft", true) => (
+                        "ArrowLeft",
+                        "ArrowLeft",
+                        0x25,
+                        0x7B,
+                        "moveToBeginningOfLineAndModifySelection",
+                    ),
+                    ("right" | "arrowright", false) => {
+                        ("ArrowRight", "ArrowRight", 0x27, 0x7C, "moveToEndOfLine")
+                    }
+                    ("right" | "arrowright", true) => (
+                        "ArrowRight",
+                        "ArrowRight",
+                        0x27,
+                        0x7C,
+                        "moveToEndOfLineAndModifySelection",
+                    ),
+                    ("up" | "arrowup", false) => (
+                        "ArrowUp",
+                        "ArrowUp",
+                        0x26,
+                        0x7E,
+                        "moveToBeginningOfDocument",
+                    ),
+                    ("up" | "arrowup", true) => (
+                        "ArrowUp",
+                        "ArrowUp",
+                        0x26,
+                        0x7E,
+                        "moveToBeginningOfDocumentAndModifySelection",
+                    ),
+                    ("down" | "arrowdown", false) => (
+                        "ArrowDown",
+                        "ArrowDown",
+                        0x28,
+                        0x7D,
+                        "moveToEndOfDocument",
+                    ),
+                    ("down" | "arrowdown", true) => (
+                        "ArrowDown",
+                        "ArrowDown",
+                        0x28,
+                        0x7D,
+                        "moveToEndOfDocumentAndModifySelection",
+                    ),
+                    _ => return None,
+                };
+            return Some(KeyCommandSpec {
+                key,
+                code,
+                windows_key_code,
+                native_key_code,
+                cdp_modifiers,
+                is_repeat,
+                command,
+            });
+        }
+        if ks.modifiers.control && !ks.modifiers.platform {
+            let cdp_modifiers = 2u32 | shift_bit;
+            let (key, code, windows_key_code, native_key_code, command) =
+                match (lower.as_str(), ks.modifiers.shift) {
+                    ("a", false) => ("a", "KeyA", 0x41, 0x00, "moveToBeginningOfParagraph"),
+                    ("a", true) => (
+                        "A",
+                        "KeyA",
+                        0x41,
+                        0x00,
+                        "moveToBeginningOfParagraphAndModifySelection",
+                    ),
+                    ("e", false) => ("e", "KeyE", 0x45, 0x0E, "moveToEndOfParagraph"),
+                    ("e", true) => (
+                        "E",
+                        "KeyE",
+                        0x45,
+                        0x0E,
+                        "moveToEndOfParagraphAndModifySelection",
+                    ),
+                    ("k", false) => ("k", "KeyK", 0x4B, 0x28, "deleteToEndOfParagraph"),
+                    ("d", false) => ("d", "KeyD", 0x44, 0x02, "deleteForward"),
+                    ("h", false) => ("h", "KeyH", 0x48, 0x04, "deleteBackward"),
+                    _ => return None,
+                };
+            return Some(KeyCommandSpec {
+                key,
+                code,
+                windows_key_code,
+                native_key_code,
+                cdp_modifiers,
+                is_repeat,
+                command,
+            });
+        }
+        None
+    }
+}
+
+fn key_spec(key: &str, key_char: Option<&str>, mods: &gpui::Modifiers) -> KeySpec {
+    let lower = key.to_ascii_lowercase();
+    let plain_text_mods = !mods.platform && !mods.control;
+
+    match lower.as_str() {
+        "backspace" => KeySpec {
+            windows_key_code: 0x08,
+            native_key_code: 0x33,
+            character: 0x7F,
+            unmodified_character: 0x7F,
+            emit_char: false,
+            is_keypad: false,
+            inferred_shift: false,
+        },
+        "delete" => KeySpec {
+            windows_key_code: 0x2E,
+            native_key_code: 0x75,
+            character: 0xF728,
+            unmodified_character: 0xF728,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "enter" => KeySpec {
+            windows_key_code: 0x0D,
+            native_key_code: 0x24,
+            character: 0x0D,
+            unmodified_character: 0x0D,
+            emit_char: plain_text_mods,
+            is_keypad: false,
+            inferred_shift: false,
+        },
+        "tab" => KeySpec {
+            windows_key_code: 0x09,
+            native_key_code: 0x30,
+            character: if mods.shift { 0x19 } else { 0x09 },
+            unmodified_character: 0x09,
+            emit_char: false,
+            is_keypad: false,
+            inferred_shift: false,
+        },
+        "escape" => KeySpec {
+            windows_key_code: 0x1B,
+            native_key_code: 0x35,
+            character: 0x1B,
+            unmodified_character: 0x1B,
+            emit_char: false,
+            is_keypad: false,
+            inferred_shift: false,
+        },
+        "space" => KeySpec {
+            windows_key_code: 0x20,
+            native_key_code: 0x31,
+            character: 0x20,
+            unmodified_character: 0x20,
+            emit_char: plain_text_mods,
+            is_keypad: false,
+            inferred_shift: false,
+        },
+        "up" | "arrowup" => KeySpec {
+            windows_key_code: 0x26,
+            native_key_code: 0x7E,
+            character: 0xF700,
+            unmodified_character: 0xF700,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "down" | "arrowdown" => KeySpec {
+            windows_key_code: 0x28,
+            native_key_code: 0x7D,
+            character: 0xF701,
+            unmodified_character: 0xF701,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "left" | "arrowleft" => KeySpec {
+            windows_key_code: 0x25,
+            native_key_code: 0x7B,
+            character: 0xF702,
+            unmodified_character: 0xF702,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "right" | "arrowright" => KeySpec {
+            windows_key_code: 0x27,
+            native_key_code: 0x7C,
+            character: 0xF703,
+            unmodified_character: 0xF703,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "home" => KeySpec {
+            windows_key_code: 0x24,
+            native_key_code: 0x73,
+            character: 0xF729,
+            unmodified_character: 0xF729,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "end" => KeySpec {
+            windows_key_code: 0x23,
+            native_key_code: 0x77,
+            character: 0xF72B,
+            unmodified_character: 0xF72B,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "pageup" => KeySpec {
+            windows_key_code: 0x21,
+            native_key_code: 0x74,
+            character: 0xF72C,
+            unmodified_character: 0xF72C,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "pagedown" => KeySpec {
+            windows_key_code: 0x22,
+            native_key_code: 0x79,
+            character: 0xF72D,
+            unmodified_character: 0xF72D,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        "insert" => KeySpec {
+            windows_key_code: 0x2D,
+            native_key_code: 0x72,
+            character: 0xF746,
+            unmodified_character: 0xF746,
+            emit_char: false,
+            is_keypad: true,
+            inferred_shift: false,
+        },
+        s if s.starts_with('f') && s.len() >= 2 => {
+            if let Ok(n) = s[1..].parse::<u8>()
+                && (1..=20).contains(&n)
+            {
+                let f_char = 0xF704u16 + u16::from(n - 1);
+                return KeySpec {
+                    windows_key_code: 0x70 + i32::from(n - 1),
+                    native_key_code: mac_fn_key_code(n),
+                    character: f_char,
+                    unmodified_character: f_char,
+                    emit_char: false,
+                    is_keypad: true,
+                    inferred_shift: false,
+                };
+            }
+            char_key_spec(key, key_char, mods)
+        }
+        _ => char_key_spec(key, key_char, mods),
+    }
+}
+
+fn char_key_spec(key: &str, key_char: Option<&str>, mods: &gpui::Modifiers) -> KeySpec {
+    let key_u16 = single_utf16(key);
+    let typed_u16 = key_char.and_then(single_utf16);
+    let base_ch = key.chars().next().filter(|_| key.chars().count() == 1);
+    let (vk, native_key_code, shifted_symbol) = base_ch
+        .map(ansi_char_codes)
+        .unwrap_or((0, 0xFF, false));
+
+    let unmodified_character = match (base_ch, mods.shift) {
+        (Some(c), true) if c.is_ascii_lowercase() => c.to_ascii_uppercase() as u16,
+        _ => key_u16.or(typed_u16).unwrap_or(0),
+    };
+
+    let character = if mods.control && !mods.platform && !mods.alt {
+        if let Some(c) = base_ch {
+            let lc = c.to_ascii_lowercase();
+            if lc.is_ascii_lowercase() {
+                u16::from(lc as u8 - b'a' + 1)
+            } else {
+                unmodified_character
+            }
+        } else {
+            0
+        }
+    } else {
+        typed_u16.unwrap_or(unmodified_character)
+    };
+
+    let emit_char = !mods.platform
+        && !mods.control
+        && character >= 0x20
+        && character != 0x7F
+        && !(0xF700..=0xF8FF).contains(&character);
+
+    KeySpec {
+        windows_key_code: vk,
+        native_key_code,
+        character,
+        unmodified_character,
+        emit_char,
+        is_keypad: false,
+        // GPUI clears `modifiers.shift` on macOS when Shift produces a non-letter
+        // ASCII symbol (`@`, `:`, `_`, etc.). Restore it for accurate DOM key events.
+        inferred_shift: shifted_symbol && !mods.platform && !mods.control && !mods.alt,
+    }
+}
+
+fn single_utf16(s: &str) -> Option<u16> {
+    let mut it = s.encode_utf16();
+    let first = it.next()?;
+    if it.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn mac_fn_key_code(n: u8) -> i32 {
+    match n {
+        1 => 0x7A,
+        2 => 0x78,
+        3 => 0x63,
+        4 => 0x76,
+        5 => 0x60,
+        6 => 0x61,
+        7 => 0x62,
+        8 => 0x64,
+        9 => 0x65,
+        10 => 0x6D,
+        11 => 0x67,
+        12 => 0x6F,
+        13 => 0x69,
+        14 => 0x6B,
+        15 => 0x71,
+        16 => 0x6A,
+        17 => 0x40,
+        18 => 0x4F,
+        19 => 0x50,
+        20 => 0x5A,
+        _ => 0xFF,
+    }
+}
+
+/// Returns `(windows_key_code, mac_carbon_key_code, is_shifted_us_symbol)`.
+fn ansi_char_codes(ch: char) -> (i32, i32, bool) {
+    match ch.to_ascii_lowercase() {
+        'a' => (0x41, 0x00, false),
+        's' => (0x53, 0x01, false),
+        'd' => (0x44, 0x02, false),
+        'f' => (0x46, 0x03, false),
+        'h' => (0x48, 0x04, false),
+        'g' => (0x47, 0x05, false),
+        'z' => (0x5A, 0x06, false),
+        'x' => (0x58, 0x07, false),
+        'c' => (0x43, 0x08, false),
+        'v' => (0x56, 0x09, false),
+        'b' => (0x42, 0x0B, false),
+        'q' => (0x51, 0x0C, false),
+        'w' => (0x57, 0x0D, false),
+        'e' => (0x45, 0x0E, false),
+        'r' => (0x52, 0x0F, false),
+        'y' => (0x59, 0x10, false),
+        't' => (0x54, 0x11, false),
+        '1' => (0x31, 0x12, false),
+        '!' => (0x31, 0x12, true),
+        '2' => (0x32, 0x13, false),
+        '@' => (0x32, 0x13, true),
+        '3' => (0x33, 0x14, false),
+        '#' => (0x33, 0x14, true),
+        '4' => (0x34, 0x15, false),
+        '$' => (0x34, 0x15, true),
+        '6' => (0x36, 0x16, false),
+        '^' => (0x36, 0x16, true),
+        '5' => (0x35, 0x17, false),
+        '%' => (0x35, 0x17, true),
+        '=' => (0xBB, 0x18, false),
+        '+' => (0xBB, 0x18, true),
+        '9' => (0x39, 0x19, false),
+        '(' => (0x39, 0x19, true),
+        '7' => (0x37, 0x1A, false),
+        '&' => (0x37, 0x1A, true),
+        '-' => (0xBD, 0x1B, false),
+        '_' => (0xBD, 0x1B, true),
+        '8' => (0x38, 0x1C, false),
+        '*' => (0x38, 0x1C, true),
+        '0' => (0x30, 0x1D, false),
+        ')' => (0x30, 0x1D, true),
+        ']' => (0xDD, 0x1E, false),
+        '}' => (0xDD, 0x1E, true),
+        'o' => (0x4F, 0x1F, false),
+        'u' => (0x55, 0x20, false),
+        '[' => (0xDB, 0x21, false),
+        '{' => (0xDB, 0x21, true),
+        'i' => (0x49, 0x22, false),
+        'p' => (0x50, 0x23, false),
+        'l' => (0x4C, 0x25, false),
+        'j' => (0x4A, 0x26, false),
+        '\'' => (0xDE, 0x27, false),
+        '"' => (0xDE, 0x27, true),
+        'k' => (0x4B, 0x28, false),
+        ';' => (0xBA, 0x29, false),
+        ':' => (0xBA, 0x29, true),
+        '\\' => (0xDC, 0x2A, false),
+        '|' => (0xDC, 0x2A, true),
+        ',' => (0xBC, 0x2B, false),
+        '<' => (0xBC, 0x2B, true),
+        '/' => (0xBF, 0x2C, false),
+        '?' => (0xBF, 0x2C, true),
+        'n' => (0x4E, 0x2D, false),
+        'm' => (0x4D, 0x2E, false),
+        '.' => (0xBE, 0x2F, false),
+        '>' => (0xBE, 0x2F, true),
+        '`' => (0xC0, 0x32, false),
+        '~' => (0xC0, 0x32, true),
+        _ => (0, 0xFF, false),
     }
 }
 
@@ -1859,7 +2752,8 @@ fn urlencoding_simple(text: &str) -> String {
 
 #[cfg(test)]
 mod settle_tests {
-    use super::settle_paint;
+    use super::*;
+    use gpui::{Keystroke, Modifiers, MouseButton};
 
     #[test]
     fn only_a_paint_at_the_new_size_catches_up() {
@@ -1867,5 +2761,200 @@ mod settle_tests {
         assert_eq!(settle_paint(due, (400, 600)), due);
         assert_eq!(settle_paint(due, (800, 600)), None);
         assert_eq!(settle_paint(None, (800, 600)), None);
+    }
+
+    #[test]
+    fn cef_modifier_flags_match_cef_types_header() {
+        let mods = Modifiers {
+            shift: true,
+            control: true,
+            alt: true,
+            platform: true,
+            function: false,
+        };
+        let flags = cef_key_modifiers(&mods, false, true, true);
+        assert_eq!(
+            flags,
+            (1 << 1) | (1 << 2) | (1 << 3) | (1 << 7) | (1 << 9) | (1 << 13)
+        );
+        let drag = cef_mouse_modifiers(&Modifiers::default(), Some(MouseButton::Left));
+        assert_eq!(drag, 1 << 4);
+    }
+
+    #[test]
+    fn backspace_and_delete_use_macos_keycodes_without_char_events() {
+        let bs = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "backspace".into(),
+            key_char: None,
+        };
+        match translate_key_down(&bs, false) {
+            TranslatedKeyDown::Keys {
+                raw_down,
+                char_event,
+            } => {
+                assert_eq!(raw_down.windows_key_code, 0x08);
+                assert_eq!(raw_down.native_key_code, 0x33);
+                assert_eq!(raw_down.character, 0x7F);
+                assert_eq!(raw_down.unmodified_character, 0x7F);
+                assert!(char_event.is_none());
+            }
+            other => panic!("unexpected backspace translation: {other:?}"),
+        }
+
+        let cmd_bs = Keystroke {
+            modifiers: Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            key: "backspace".into(),
+            key_char: None,
+        };
+        #[cfg(target_os = "macos")]
+        match translate_key_down(&cmd_bs, false) {
+            TranslatedKeyDown::Editor(EditOp::KeyCommand(spec)) => {
+                assert_eq!(spec.command, "deleteToBeginningOfLine");
+                assert_eq!(spec.windows_key_code, 0x08);
+                assert_eq!(spec.native_key_code, 0x33);
+                assert_eq!(spec.cdp_modifiers, 4);
+                assert!(translate_key_up(&cmd_bs).is_none());
+            }
+            other => panic!("unexpected cmd-backspace translation: {other:?}"),
+        }
+
+        let del = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "delete".into(),
+            key_char: None,
+        };
+        match translate_key_down(&del, false) {
+            TranslatedKeyDown::Keys {
+                raw_down,
+                char_event,
+            } => {
+                assert_eq!(raw_down.windows_key_code, 0x2E);
+                assert_eq!(raw_down.native_key_code, 0x75);
+                assert_eq!(raw_down.character, 0xF728);
+                assert_ne!(raw_down.modifiers & EVENTFLAG_IS_KEY_PAD, 0);
+                assert!(char_event.is_none());
+            }
+            other => panic!("unexpected delete translation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn space_enter_uppercase_and_shifted_symbols_emit_proper_chars() {
+        let space = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "space".into(),
+            key_char: Some(" ".into()),
+        };
+        match translate_key_down(&space, false) {
+            TranslatedKeyDown::Keys {
+                raw_down,
+                char_event: Some(ch),
+            } => {
+                assert_eq!(raw_down.native_key_code, 0x31);
+                assert_eq!(ch.character, 0x20);
+                assert_eq!(ch.windows_key_code, 0x20);
+            }
+            other => panic!("unexpected space translation: {other:?}"),
+        }
+
+        let enter = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "enter".into(),
+            key_char: Some("\n".into()),
+        };
+        match translate_key_down(&enter, false) {
+            TranslatedKeyDown::Keys {
+                raw_down,
+                char_event: Some(ch),
+            } => {
+                assert_eq!(raw_down.native_key_code, 0x24);
+                assert_eq!(ch.character, 0x0D);
+            }
+            other => panic!("unexpected enter translation: {other:?}"),
+        }
+
+        let upper_a = Keystroke {
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            key: "a".into(),
+            key_char: Some("A".into()),
+        };
+        match translate_key_down(&upper_a, false) {
+            TranslatedKeyDown::Keys {
+                raw_down,
+                char_event: Some(ch),
+            } => {
+                assert_eq!(raw_down.windows_key_code, 0x41);
+                assert_eq!(raw_down.native_key_code, 0x00);
+                assert_eq!(ch.character, 'A' as u16);
+                assert_eq!(ch.windows_key_code, 'A' as i32);
+            }
+            other => panic!("unexpected Shift+A translation: {other:?}"),
+        }
+
+        // GPUI clears `modifiers.shift` for shifted symbols like `@`.
+        let at_sign = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "@".into(),
+            key_char: Some("@".into()),
+        };
+        match translate_key_down(&at_sign, false) {
+            TranslatedKeyDown::Keys {
+                raw_down,
+                char_event: Some(ch),
+            } => {
+                assert_eq!(raw_down.windows_key_code, 0x32);
+                assert_eq!(raw_down.native_key_code, 0x13);
+                assert_ne!(raw_down.modifiers & EVENTFLAG_SHIFT_DOWN, 0);
+                assert_eq!(ch.character, '@' as u16);
+            }
+            other => panic!("unexpected @ translation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clipboard_shortcuts_and_emoji_use_editor_and_ime() {
+        let paste = Keystroke {
+            modifiers: Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            key: "v".into(),
+            key_char: None,
+        };
+        assert!(matches!(
+            translate_key_down(&paste, false),
+            TranslatedKeyDown::Editor(EditOp::Paste)
+        ));
+
+        let redo = Keystroke {
+            modifiers: Modifiers {
+                platform: true,
+                shift: true,
+                ..Default::default()
+            },
+            key: "z".into(),
+            key_char: None,
+        };
+        assert!(matches!(
+            translate_key_down(&redo, false),
+            TranslatedKeyDown::Editor(EditOp::Redo)
+        ));
+
+        let emoji = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "🚀".into(),
+            key_char: Some("🚀".into()),
+        };
+        assert!(matches!(
+            translate_key_down(&emoji, false),
+            TranslatedKeyDown::CommitText(ref s) if s == "🚀"
+        ));
     }
 }

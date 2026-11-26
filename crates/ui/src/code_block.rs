@@ -915,6 +915,35 @@ fn body(
         0.
     };
     let order = order_base(&props.id);
+    if props.size == CodeSize::Full
+        && !metrics.animating
+        && rows.len() > 60
+        && metrics.cap.is_finite()
+        && metrics.cap < metrics.content_h - 0.5
+    {
+        return VirtualFullBody {
+            props: props.clone(),
+            t,
+            syntax: syntax.clone(),
+            rows: rows.to_vec(),
+            variants: variants.to_vec(),
+            spans: spans.clone(),
+            numbers,
+            first,
+            num_w,
+            markers,
+            plain,
+            selection,
+            line_h,
+            order,
+            pad_x,
+            step,
+            metrics,
+            bg,
+            el: None,
+        }
+        .into_any_element();
+    }
     let lines = rows.iter().enumerate().map(|(ix, (range, text))| {
         let variant = variants.get(ix).copied().unwrap_or(LineVariant::Default);
         line_row(
@@ -986,6 +1015,213 @@ fn body(
             move |d| d.child(floating_copy(props, t, group, copy_body, on_action))
         })
         .into_any_element()
+}
+
+/// Renders only visible lines around the internal scroll offset for tall scrollable
+/// `CodeSize::Full` blocks, keeping a zero-height widest-line spacer for stable horizontal scrolling.
+struct VirtualFullBody {
+    props: CodeBlockProps,
+    t: Tokens,
+    syntax: SyntaxPaintMap,
+    rows: Vec<(Range<usize>, String)>,
+    variants: Vec<LineVariant>,
+    spans: Spans,
+    numbers: bool,
+    first: u32,
+    num_w: f32,
+    markers: bool,
+    plain: Hsla,
+    selection: Hsla,
+    line_h: f32,
+    order: u64,
+    pad_x: f32,
+    step: TypeStep,
+    metrics: BlockMetrics,
+    bg: u32,
+    el: Option<AnyElement>,
+}
+
+impl IntoElement for VirtualFullBody {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for VirtualFullBody {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        let scroll_handle = window
+            .use_keyed_state(
+                ElementId::Name(format!("code-scroll-{}", self.props.id).into()),
+                cx,
+                |_, _| gpui::ScrollHandle::new(),
+            )
+            .read(cx)
+            .clone();
+        let scroll_y = (-f32::from(scroll_handle.offset().y)).max(0.);
+        let line_h_px = f32::from(zpx(self.line_h)).max(1.0);
+        let cap_px = f32::from(zpx(self.metrics.cap));
+        let total = self.rows.len();
+        let vis_start = ((scroll_y / line_h_px).floor() as usize)
+            .saturating_sub(16)
+            .min(total);
+        let vis_end = (((scroll_y + cap_px) / line_h_px).ceil() as usize + 16).min(total);
+
+        let widest_ix = self
+            .rows
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (_, s))| s.len())
+            .map(|(ix, _)| ix);
+
+        let build_row = |ix: usize| {
+            let (range, text) = &self.rows[ix];
+            let variant = self
+                .variants
+                .get(ix)
+                .copied()
+                .unwrap_or(LineVariant::Default);
+            line_row(
+                &self.props,
+                self.t,
+                &self.syntax,
+                &self.spans,
+                variant,
+                text,
+                range.start,
+                ix,
+                self.numbers,
+                self.first.saturating_add(ix as u32),
+                self.num_w,
+                self.markers,
+                self.plain,
+                self.selection,
+                self.line_h,
+                self.order + ix as u64,
+            )
+        };
+
+        let top_h = vis_start as f32 * self.line_h;
+        let bottom_h = (total.saturating_sub(vis_end)) as f32 * self.line_h;
+        let width_keeper = widest_ix
+            .filter(|&ix| ix < vis_start || ix >= vis_end)
+            .map(|ix| {
+                let (_, text) = &self.rows[ix];
+                div()
+                    .h(px(0.))
+                    .overflow_hidden()
+                    .min_w_full()
+                    .flex()
+                    .flex_row()
+                    .when(self.numbers, |d| {
+                        d.child(div().flex_none().w(zpx(self.num_w)).pr(zpx(NUMBER_GAP)))
+                    })
+                    .when(self.markers, |d| {
+                        d.child(div().flex_none().w(zpx(MARKER_W)))
+                    })
+                    .child(div().flex_none().whitespace_nowrap().child(text.clone()))
+            });
+
+        let lines = (vis_start..vis_end).map(build_row);
+        let mut el = div()
+            .relative()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(ElementId::Name(format!("code-body-{}", self.props.id).into()))
+                    .w_full()
+                    .min_w_0()
+                    .max_h(zpx(self.metrics.cap))
+                    .px(zpx(self.pad_x))
+                    .py(zpx(line_box(self.props.size).1))
+                    .overflow_y_scroll()
+                    .when(!self.props.wraps(), |d| d.overflow_x_scroll())
+                    .track_scroll(&scroll_handle)
+                    .type_step(self.step)
+                    .font_family(MONO)
+                    .text_color(self.plain)
+                    .child(
+                        div()
+                            .min_w_full()
+                            .flex()
+                            .flex_col()
+                            .when(top_h > 0., |d| d.child(div().h(zpx(top_h)).flex_none()))
+                            .children(width_keeper)
+                            .children(lines)
+                            .when(bottom_h > 0., |d| {
+                                d.child(div().h(zpx(bottom_h)).flex_none())
+                            }),
+                    ),
+            )
+            .when(self.metrics.fade, |d| {
+                let solid = c(self.bg);
+                let clear = solid.opacity(0.);
+                d.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(zpx(FADE_H))
+                        .bg(gpui::linear_gradient(
+                            180.,
+                            gpui::linear_color_stop(clear, 0.),
+                            gpui::linear_color_stop(solid, 1.),
+                        )),
+                )
+            })
+            .into_any_element();
+        let layout_id = el.request_layout(window, cx);
+        self.el = Some(el);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<gpui::Pixels>,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        if let Some(el) = &mut self.el {
+            el.prepaint(window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<gpui::Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        if let Some(el) = &mut self.el {
+            el.paint(window, cx);
+        }
+    }
 }
 
 fn line_row(
@@ -1486,7 +1722,7 @@ impl IntoElement for LineText {
 
 impl Element for LineText {
     type RequestLayoutState = ();
-    type PrepaintState = (gpui_base::TextSelectionHandle, Hitbox);
+    type PrepaintState = Option<(gpui_base::TextSelectionHandle, Hitbox)>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -1515,12 +1751,20 @@ impl Element for LineText {
         window: &mut gpui::Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let mask = window.content_mask().bounds;
+        let pad = px(768.);
+        if bounds.bottom() < mask.top() - pad || bounds.top() > mask.bottom() + pad {
+            return None;
+        }
         self.child.prepaint(window, cx);
         let handle = window
-            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |_, cx| {
-                gpui_base::TextSelectionHandle::new("", cx)
+            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |window, cx| {
+                let handle = gpui_base::TextSelectionHandle::new("", cx);
+                let sub = handle.refresh_window_on_change(window, cx);
+                (handle, sub)
             })
             .read(cx)
+            .0
             .clone();
         let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
         handle.register(
@@ -1530,7 +1774,7 @@ impl Element for LineText {
             window,
             cx,
         );
-        (handle, hitbox)
+        Some((handle, hitbox))
     }
 
     fn paint(
@@ -1539,10 +1783,13 @@ impl Element for LineText {
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<gpui::Pixels>,
         _: &mut (),
-        (handle, hitbox): &mut Self::PrepaintState,
+        state: &mut Self::PrepaintState,
         window: &mut gpui::Window,
         cx: &mut App,
     ) {
+        let Some((handle, hitbox)) = state else {
+            return;
+        };
         window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
         self.child.paint(window, cx);
         let run = gpui_base::TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds)

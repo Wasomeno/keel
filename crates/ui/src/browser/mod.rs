@@ -33,9 +33,15 @@ pub fn normalize_address(input: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    if let Some((scheme, _)) = text.split_once("://") {
-        return matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
-            .then(|| text.to_string());
+    if allowed_navigation(text) {
+        return Some(text.to_string());
+    }
+    if text.contains("://") {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("file:") || lower.starts_with("javascript:") {
+        return None;
     }
     let host = text.split(['/', '?', '#']).next().unwrap_or(text);
     let bare = host.rsplit_once(':').map_or(host, |(h, port)| {
@@ -76,12 +82,34 @@ fn encode_query(text: &str) -> String {
 }
 
 /// A key typed into a focused page that Keel takes instead: ⌘ shortcuts
-/// other than the page's own editing and find keys, plus ⌃` and ⌃Tab.
+/// other than the page's own editing, selection, navigation, and find keys,
+/// plus ⌃` and ⌃Tab.
 pub fn forwarded_key(cmd: bool, ctrl: bool, key: &str) -> bool {
     if cmd {
-        !matches!(key, "c" | "v" | "x" | "a" | "z" | "f" | "g")
+        !matches!(
+            key.to_ascii_lowercase().as_str(),
+            "c" | "v"
+                | "x"
+                | "a"
+                | "z"
+                | "y"
+                | "f"
+                | "g"
+                | "backspace"
+                | "delete"
+                | "left"
+                | "right"
+                | "up"
+                | "down"
+                | "arrowleft"
+                | "arrowright"
+                | "arrowup"
+                | "arrowdown"
+                | "home"
+                | "end"
+        )
     } else {
-        ctrl && matches!(key, "`" | "tab")
+        ctrl && matches!(key.to_ascii_lowercase().as_str(), "`" | "tab")
     }
 }
 
@@ -119,7 +147,16 @@ mod tests {
             normalize_address("c++").as_deref(),
             Some("https://duckduckgo.com/?q=c%2B%2B")
         );
+        assert_eq!(
+            normalize_address("about:blank").as_deref(),
+            Some("about:blank")
+        );
+        assert_eq!(
+            normalize_address("data:text/html,<h1>ok</h1>").as_deref(),
+            Some("data:text/html,<h1>ok</h1>")
+        );
         assert_eq!(normalize_address("file:///etc/passwd"), None);
+        assert_eq!(normalize_address("javascript:alert(1)"), None);
         assert_eq!(normalize_address("  "), None);
     }
 
@@ -134,11 +171,19 @@ mod tests {
 
     #[test]
     fn editing_keys_stay_with_the_page() {
-        assert!(!forwarded_key(true, false, "c"));
-        assert!(!forwarded_key(true, false, "f"));
+        for k in [
+            "c", "v", "x", "a", "z", "y", "f", "g", "backspace", "delete", "left", "right", "up",
+            "down", "arrowleft", "arrowright", "arrowup", "arrowdown", "home", "end",
+        ] {
+            assert!(!forwarded_key(true, false, k), "{k} should stay with page");
+        }
         assert!(forwarded_key(true, false, "l"));
+        assert!(forwarded_key(true, false, "r"));
+        assert!(forwarded_key(true, false, "["));
+        assert!(forwarded_key(true, false, "]"));
         assert!(forwarded_key(true, false, "b"));
         assert!(forwarded_key(false, true, "`"));
+        assert!(forwarded_key(false, true, "tab"));
         assert!(!forwarded_key(false, true, "a"));
         assert!(!forwarded_key(false, false, "l"));
     }

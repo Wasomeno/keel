@@ -38,7 +38,6 @@ pub(super) enum SettingsTab {
     General,
     Notifications,
     Accounts,
-    Skills,
     Memory,
     Integrations,
 }
@@ -50,9 +49,8 @@ impl SettingsTab {
             Self::General => 0,
             Self::Notifications => 1,
             Self::Accounts => 2,
-            Self::Skills => 3,
-            Self::Memory => 4,
-            Self::Integrations => 5,
+            Self::Memory => 3,
+            Self::Integrations => 4,
         }
     }
 
@@ -61,7 +59,6 @@ impl SettingsTab {
             Self::General => "General",
             Self::Notifications => "Notifications",
             Self::Accounts => "Accounts",
-            Self::Skills => "Skills",
             Self::Memory => "Memory",
             Self::Integrations => "Integrations",
         }
@@ -72,7 +69,6 @@ impl SettingsTab {
             Self::General => Icon::Settings,
             Self::Notifications => Icon::Volume2,
             Self::Accounts => Icon::Agent,
-            Self::Skills => Icon::Puzzle,
             Self::Memory => Icon::Brain,
             Self::Integrations => Icon::Globe,
         }
@@ -83,7 +79,6 @@ impl SettingsTab {
             "general" | "appearance" | "updates" | "background" => Some(Self::General),
             "notifications" | "notify" => Some(Self::Notifications),
             "accounts" | "providers" => Some(Self::Accounts),
-            "skills" => Some(Self::Skills),
             "memory" => Some(Self::Memory),
             "integrations" | "browser" | "connections" => Some(Self::Integrations),
             _ => None,
@@ -99,9 +94,8 @@ impl SettingsTab {
             Self::General => 0.,
             Self::Notifications => step,
             Self::Accounts => step + NAV_ITEM_H + GROUP_GAP,
-            Self::Skills => step + NAV_ITEM_H + GROUP_GAP + step,
-            Self::Memory => step + NAV_ITEM_H + GROUP_GAP + step * 2.,
-            Self::Integrations => step + NAV_ITEM_H + GROUP_GAP + step * 3.,
+            Self::Memory => step + NAV_ITEM_H + GROUP_GAP + step,
+            Self::Integrations => step + NAV_ITEM_H + GROUP_GAP + step * 2.,
         }
     }
 }
@@ -243,6 +237,83 @@ pub(super) enum SkillStatusFilter {
     Disabled,
 }
 
+/// Top-level mode inside Settings → Skills.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum SkillsViewMode {
+    #[default]
+    Installed,
+    Discover,
+}
+
+/// One entry in the curated remote skills catalog.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CatalogSkillRow {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub author: String,
+    pub category: String,
+    pub trending: bool,
+    pub repo: String,
+    pub branch: String,
+    pub path: String,
+    pub source_url: String,
+    pub commit: String,
+    pub installed: bool,
+    pub installed_path: Option<String>,
+    pub update_available: bool,
+    pub avatar_path: Option<String>,
+}
+
+impl CatalogSkillRow {
+    pub(crate) fn parse(v: &serde_json::Value) -> Self {
+        let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+        Self {
+            id: s("id"),
+            name: s("name"),
+            description: s("description"),
+            author: s("author"),
+            category: s("category"),
+            trending: v["trending"].as_bool().unwrap_or(false),
+            repo: s("repo"),
+            branch: s("branch"),
+            path: s("path"),
+            source_url: s("source_url"),
+            commit: s("commit"),
+            installed: v["installed"].as_bool().unwrap_or(false),
+            installed_path: v["installed_path"].as_str().map(str::to_string),
+            update_available: v["update_available"].as_bool().unwrap_or(false),
+            avatar_path: v["avatar_path"].as_str().map(str::to_string),
+        }
+    }
+
+    pub(crate) fn git_ref(&self) -> &str {
+        if !self.commit.is_empty() {
+            &self.commit
+        } else if !self.branch.is_empty() {
+            &self.branch
+        } else {
+            "main"
+        }
+    }
+
+    pub(crate) fn to_entry_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "author": self.author,
+            "category": self.category,
+            "trending": self.trending,
+            "repo": self.repo,
+            "branch": self.branch,
+            "path": self.path,
+            "source_url": self.source_url,
+            "commit": self.commit,
+        })
+    }
+}
+
 /// Where an added skill is about to be copied, or a delete/replace still to confirm.
 #[derive(Clone)]
 pub(super) enum SkillConfirm {
@@ -260,6 +331,7 @@ pub(super) enum SkillConfirm {
 /// Settings → Skills state.
 pub(super) struct SkillsPage {
     pub open: bool,
+    pub view_mode: SkillsViewMode,
     pub transition: Option<(u64, bool)>,
     pub load_gen: u64,
     pub rows: Option<Result<Vec<SkillRow>, String>>,
@@ -269,7 +341,6 @@ pub(super) struct SkillsPage {
     pub confirm_gen: u64,
     pub confirm_leaving: Option<(u64, SkillConfirm)>,
     pub row_errors: std::collections::HashMap<String, String>,
-    pub scroll: gpui::ScrollHandle,
     pub list_scroll: UniformListScrollHandle,
     pub author_filter: Option<String>,
     pub status_filter: SkillStatusFilter,
@@ -278,17 +349,58 @@ pub(super) struct SkillsPage {
     pub expanded_content: std::collections::HashMap<String, String>,
     pub modal_skill: Option<SkillRow>,
     pub modal_leaving: Option<(u64, SkillRow)>,
-    pub modal_gen: u64,
     pub modal_scroll: gpui::ScrollHandle,
     /// The creator filter menu next to the search.
     pub creator_menu_open: bool,
     pub creator_btn_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    // Discover catalog state (stale-while-revalidate client refresh).
+    pub catalog_gen: u64,
+    pub catalog_rows: Option<Result<Vec<CatalogSkillRow>, String>>,
+    pub catalog_source: String,
+    pub catalog_refreshing: bool,
+    pub catalog_warning: Option<String>,
+    pub catalog_list_scroll: UniformListScrollHandle,
+    pub catalog_scroll: gpui::ScrollHandle,
+    pub installed_scroll: gpui::ScrollHandle,
+    pub installed_usage_filter: Option<String>,
+    pub installed_strip_origin: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
+    pub installed_chip_bounds:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, gpui::Bounds<gpui::Pixels>>>>,
+    pub category_filter: Option<String>,
+    pub category_menu_open: bool,
+    pub catalog_author_filter: Option<String>,
+    pub catalog_filter_menu_open: bool,
+    pub catalog_filter_btn_bounds:
+        std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pub installing: std::collections::HashSet<String>,
+    pub install_errors: std::collections::HashMap<String, String>,
+    pub modal_catalog: Option<CatalogSkillRow>,
+    pub modal_catalog_leaving: Option<(u64, CatalogSkillRow)>,
+    pub catalog_readmes: std::collections::HashMap<String, Result<String, String>>,
+    pub catalog_readme_loading: std::collections::HashSet<String>,
+    /// Cached GitHub creator avatar PNGs keyed by lowercase repo owner.
+    pub catalog_avatars: std::collections::HashMap<String, std::path::PathBuf>,
+    pub catalog_avatars_fetching: bool,
+    /// Inline detail page navigation transition (forward = into detail, back = to list).
+    pub detail_nav_gen: u64,
+    pub detail_nav_forward: bool,
+    pub detail_nav_at: Option<std::time::Instant>,
+    /// Tab switch & filter settle transitions (Emil directional crossfade + subtle rise).
+    pub tab_nav_gen: u64,
+    pub tab_nav_forward: bool,
+    pub tab_nav_at: Option<std::time::Instant>,
+    pub filter_at: Option<std::time::Instant>,
+    pub filter_forward: bool,
+    pub category_strip_origin: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
+    pub category_chip_bounds:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl Default for SkillsPage {
     fn default() -> Self {
         Self {
             open: false,
+            view_mode: SkillsViewMode::Installed,
             transition: None,
             load_gen: 0,
             rows: None,
@@ -298,7 +410,6 @@ impl Default for SkillsPage {
             confirm_gen: 0,
             confirm_leaving: None,
             row_errors: std::collections::HashMap::new(),
-            scroll: gpui::ScrollHandle::default(),
             list_scroll: UniformListScrollHandle::new(),
             author_filter: None,
             status_filter: SkillStatusFilter::All,
@@ -307,10 +418,43 @@ impl Default for SkillsPage {
             expanded_content: std::collections::HashMap::new(),
             modal_skill: None,
             modal_leaving: None,
-            modal_gen: 0,
             modal_scroll: gpui::ScrollHandle::default(),
             creator_menu_open: false,
             creator_btn_bounds: Default::default(),
+            catalog_gen: 0,
+            catalog_rows: None,
+            catalog_source: String::new(),
+            catalog_refreshing: false,
+            catalog_warning: None,
+            catalog_list_scroll: UniformListScrollHandle::new(),
+            catalog_scroll: gpui::ScrollHandle::default(),
+            installed_scroll: gpui::ScrollHandle::default(),
+            installed_usage_filter: None,
+            installed_strip_origin: Default::default(),
+            installed_chip_bounds: Default::default(),
+            category_filter: None,
+            category_menu_open: false,
+            catalog_author_filter: None,
+            catalog_filter_menu_open: false,
+            catalog_filter_btn_bounds: Default::default(),
+            installing: std::collections::HashSet::new(),
+            install_errors: std::collections::HashMap::new(),
+            modal_catalog: None,
+            modal_catalog_leaving: None,
+            catalog_readmes: std::collections::HashMap::new(),
+            catalog_readme_loading: std::collections::HashSet::new(),
+            catalog_avatars: std::collections::HashMap::new(),
+            catalog_avatars_fetching: false,
+            detail_nav_gen: 0,
+            detail_nav_forward: true,
+            detail_nav_at: None,
+            tab_nav_gen: 0,
+            tab_nav_forward: true,
+            tab_nav_at: None,
+            filter_at: None,
+            filter_forward: true,
+            category_strip_origin: Default::default(),
+            category_chip_bounds: Default::default(),
         }
     }
 }
@@ -437,6 +581,10 @@ impl KeelWindow {
         self.skills.author_filter = None;
         self.skills.modal_skill = None;
         self.skills.modal_leaving = None;
+        self.skills.modal_catalog = None;
+        self.skills.modal_catalog_leaving = None;
+        self.skills.category_menu_open = false;
+        self.skills.creator_menu_open = false;
         self.memory.open = false;
         self.memory.transition = None;
         self.memory.modal = None;
@@ -476,10 +624,7 @@ impl KeelWindow {
         self.dotify
             .settings_scroll
             .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
-        if tab == SettingsTab::Skills {
-            self.skills.open = true;
-            self.load_skills(cx);
-        } else if tab == SettingsTab::Memory {
+        if tab == SettingsTab::Memory {
             self.memory.open = true;
             self.load_memory(cx);
         }
@@ -517,7 +662,6 @@ impl KeelWindow {
 
         let rail = self.render_nav_rail(t, cx);
         let detail = self.render_detail_pane(t, cx);
-        let skill_modal = self.render_skill_modal(t, cx);
         let memory_modal = self.render_memory_modal(t, cx);
 
         div()
@@ -530,7 +674,6 @@ impl KeelWindow {
             .bg(c(t.window))
             .child(rail)
             .child(detail)
-            .children(skill_modal)
             .children(memory_modal)
     }
 
@@ -568,8 +711,7 @@ impl KeelWindow {
                 .justify_between()
                 .gap(zpx(8.))
                 .cursor_pointer()
-                .when(!is_active, |d| d.hover_fade(c(t.hover), None))
-                .active(|s| s.opacity(0.8))
+                .hover_fade_when(!is_active, c(t.hover), None)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.select_settings_tab(tab, cx);
                 }))
@@ -605,6 +747,7 @@ impl KeelWindow {
         };
 
         let nav_list = div()
+            .id("settings-nav-list")
             .relative()
             .w_full()
             .flex()
@@ -625,7 +768,6 @@ impl KeelWindow {
                     .flex_col()
                     .gap(zpx(ITEM_GAP))
                     .child(render_item(SettingsTab::Accounts))
-                    .child(render_item(SettingsTab::Skills))
                     .child(render_item(SettingsTab::Memory))
                     .child(render_item(SettingsTab::Integrations)),
             );
@@ -680,25 +822,16 @@ impl KeelWindow {
                     })),
             );
 
-        // Skills manages its own virtualized list scroll, so it gets a
-        // full-height non-scrolling flex container; all other tabs use a
-        // single vertical scroll area.
-        let is_skills = tab == SettingsTab::Skills;
         let tab_body: gpui::Div = match tab {
             SettingsTab::General => self.render_general_tab(t, cx),
             SettingsTab::Notifications => self.render_notifications_tab(t, cx),
             SettingsTab::Accounts => self.render_accounts_tab(t, cx),
-            SettingsTab::Skills => self.render_skills_tab(t, cx),
             SettingsTab::Memory => self.render_memory_tab(t, cx),
             SettingsTab::Integrations => self.render_integrations_tab(t, cx),
         };
 
         // Opacity only. The generation id replays on a tab change and stays
         // put for clicks inside the tab. Reduced motion snaps to opaque.
-        // The wrapper is always present: an animation element's id is part of
-        // its children's element path, so dropping it after the fade would
-        // reset every stateful child (the Skills uniform_list and its fade)
-        // and make the list blink. `animating` only gates the opacity.
         let animated_body: AnyElement = tab_body
             .with_animation(
                 ElementId::Name(format!("settings-pane-in-{tab_gen}").into()),
@@ -717,37 +850,26 @@ impl KeelWindow {
             .flex_col()
             .child(animated_body);
 
-        let body_shell: AnyElement = if is_skills {
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(padded.flex_1().min_h_0())
-                .into_any_element()
-        } else {
-            div()
-                .id("settings-scroll")
-                .track_scroll(&self.dotify.settings_scroll)
-                .when(self.show_sound_menu, |d| {
-                    d.on_scroll(cx.listener(|this, _, _, cx| {
-                        if this.show_sound_menu {
-                            this.show_sound_menu = false;
-                            this.sound_menu_scroll_y = None;
-                            cx.notify();
-                        }
-                    }))
-                })
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .child(padded)
-                .into_any_element()
-        };
+        let body_shell: AnyElement = div()
+            .id("settings-scroll")
+            .track_scroll(&self.dotify.settings_scroll)
+            .when(self.show_sound_menu, |d| {
+                d.on_scroll(cx.listener(|this, _, _, cx| {
+                    if this.show_sound_menu {
+                        this.show_sound_menu = false;
+                        this.sound_menu_scroll_y = None;
+                        cx.notify();
+                    }
+                }))
+            })
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .child(padded)
+            .into_any_element();
 
         div()
             .flex_1()
@@ -770,7 +892,6 @@ mod tests {
             SettingsTab::General,
             SettingsTab::Notifications,
             SettingsTab::Accounts,
-            SettingsTab::Skills,
             SettingsTab::Memory,
             SettingsTab::Integrations,
         ];
@@ -782,9 +903,8 @@ mod tests {
         assert_eq!(SettingsTab::General.rail_y(), 0.);
         assert_eq!(SettingsTab::Notifications.rail_y(), 32.);
         assert_eq!(SettingsTab::Accounts.rail_y(), 74.);
-        assert_eq!(SettingsTab::Skills.rail_y(), 106.);
-        assert_eq!(SettingsTab::Memory.rail_y(), 138.);
-        assert_eq!(SettingsTab::Integrations.rail_y(), 170.);
+        assert_eq!(SettingsTab::Memory.rail_y(), 106.);
+        assert_eq!(SettingsTab::Integrations.rail_y(), 138.);
         assert_eq!(
             SettingsTab::from_name("notifications"),
             Some(SettingsTab::Notifications)

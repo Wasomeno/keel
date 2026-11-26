@@ -119,6 +119,14 @@ pub struct SubagentView {
     pub ended_at: Option<i64>,
     pub last_summary: String,
     pub blocked_question: Option<String>,
+    pub model: String,
+    pub read_only: bool,
+    pub turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub duration_ms: u64,
+    pub worktree_branch: String,
+    pub active_tool: String,
 }
 
 /// One part of a message.
@@ -513,6 +521,28 @@ impl SessionDoc {
         if let Some(question) = view.blocked_question.as_deref() {
             entry.insert("blocked_question", question)?;
         }
+        if !view.model.is_empty() {
+            entry.insert("model", view.model.as_str())?;
+        }
+        if view.read_only {
+            entry.insert("read_only", true)?;
+        }
+        if view.turns > 0 {
+            entry.insert("turns", i64::from(view.turns))?;
+        }
+        if view.input_tokens > 0 {
+            entry.insert("input_tokens", view.input_tokens as i64)?;
+        }
+        if view.output_tokens > 0 {
+            entry.insert("output_tokens", view.output_tokens as i64)?;
+        }
+        if view.duration_ms > 0 {
+            entry.insert("duration_ms", view.duration_ms as i64)?;
+        }
+        if !view.worktree_branch.is_empty() {
+            entry.insert("worktree_branch", view.worktree_branch.as_str())?;
+        }
+        entry.insert("active_tool", view.active_tool.as_str())?;
         doc.commit();
         Ok(())
     }
@@ -1237,6 +1267,10 @@ fn read_subagents(doc: &LoroDoc) -> Vec<SubagentView> {
                 Some(ValueOrContainer::Value(loro::LoroValue::I64(at))) => Some(at),
                 _ => None,
             };
+            let read_only = matches!(
+                entry.get("read_only"),
+                Some(ValueOrContainer::Value(loro::LoroValue::Bool(true)))
+            );
             Some(SubagentView {
                 id: map_str(&entry, "id"),
                 parent_tool_id: map_str(&entry, "parent_tool_id"),
@@ -1247,6 +1281,14 @@ fn read_subagents(doc: &LoroDoc) -> Vec<SubagentView> {
                 ended_at,
                 last_summary: map_str(&entry, "last_summary"),
                 blocked_question: map_opt_str(&entry, "blocked_question"),
+                model: map_str(&entry, "model"),
+                read_only,
+                turns: u32::try_from(map_u64(&entry, "turns")).unwrap_or(u32::MAX),
+                input_tokens: map_u64(&entry, "input_tokens"),
+                output_tokens: map_u64(&entry, "output_tokens"),
+                duration_ms: map_u64(&entry, "duration_ms"),
+                worktree_branch: map_str(&entry, "worktree_branch"),
+                active_tool: map_str(&entry, "active_tool"),
             })
         })
         .collect()

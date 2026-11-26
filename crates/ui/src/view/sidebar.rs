@@ -25,7 +25,7 @@ pub(super) const SECTION_HEADER_HEIGHT: f32 = 28.;
 const SECTION_GAP: f32 = 16.;
 const MORE_ROW_HEIGHT: f32 = 26.;
 const MORE_ROW_PITCH: f32 = MORE_ROW_HEIGHT + 1.;
-const EMPTY_ROW_HEIGHT: f32 = 30.;
+const EMPTY_ROW_HEIGHT: f32 = 28.;
 
 fn section_gap(first: bool, loose: bool) -> f32 {
     if loose && !first { SECTION_GAP } else { 0. }
@@ -38,32 +38,79 @@ fn section_header_pitch(first: bool, loose: bool) -> f32 {
 /// One entry of the sidebar list, in draw order.
 enum SidebarItem {
     ProjectsLabel,
+    /// No projects created yet.
+    NoProjects,
     ProjectHeader(keel_proto::projects::Project, bool, bool),
     SpacesHeader(bool),
     Header(SpaceSection, bool),
     Row(AttentionChat, keel_proto::DisplayStatus, bool),
     /// A space's "Show N more" (0: "Show less").
     More(String, usize),
-    /// The "Chats" group with nothing in it.
-    Empty(String),
+    /// An empty "Chats" section (top-level) or an open project with no chats (nested).
+    Empty { id: String, nested: bool },
     /// No folders under "Spaces" yet.
     NoSpaces,
 }
 
-/// A static placeholder under an empty group ("No chats", "No spaces").
-fn empty_row(id: String, icon: Icon, label: &'static str, t: Tokens) -> gpui::Stateful<gpui::Div> {
+/// Major sidebar section heading ("Projects", "Spaces", "Chats").
+/// 13 px semibold muted with a subtle 13 px icon in a 16 px box so the title
+/// text lands on the shared 24 px left rail (4 px padding + 16 px icon + 4 px gap).
+fn section_title(icon: Icon, label: &'static str, t: Tokens) -> gpui::Div {
     div()
-        .id(ElementId::Name(id.into()))
-        .h(zpx(EMPTY_ROW_HEIGHT))
-        .flex_none()
-        .px_2()
         .flex()
         .flex_row()
         .items_center()
+        .gap_1()
+        .t_body()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(c(t.text_muted))
+        .child(
+            div()
+                .size(zpx(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(c(t.text_faint))
+                .child(icon.el(zpx(13.))),
+        )
+        .child(label)
+}
+
+/// A quiet placeholder under an empty sidebar group ("No projects", "No spaces", "No chats").
+/// Sits on the same left rail as the group's items (24 px top-level, 28 px nested)
+/// without repeating the section header's icon.
+fn empty_row(
+    id: String,
+    label: &'static str,
+    nested: bool,
+    actionable: bool,
+    t: Tokens,
+) -> gpui::Stateful<gpui::Div> {
+    let group = format!("empty-g-{id}");
+    let indent = if nested { 28. } else { 24. };
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .h(zpx(EMPTY_ROW_HEIGHT))
+        .flex_none()
+        .pl(zpx(indent))
+        .pr_1p5()
+        .rounded(RADIUS_MD)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
         .gap_2()
         .t_small()
         .text_color(c(t.text_faint))
-        .child(div().flex_none().child(icon.el(zpx(12.))))
+        .when(actionable, |d| {
+            d.hover_probe(group.clone())
+                .group(group.clone())
+                .cursor_pointer()
+                .hover(|s| s.text_color(c(t.text_muted)))
+                .hover_fade(c(t.hover), None)
+                .active(|s| s.opacity(0.8))
+        })
         .child(
             div()
                 .min_w_0()
@@ -72,6 +119,22 @@ fn empty_row(id: String, icon: Icon, label: &'static str, t: Tokens) -> gpui::St
                 .text_ellipsis()
                 .child(label),
         )
+        .when(actionable, |d| {
+            d.child(reveal_on_hover(
+                ElementId::Name(format!("empty-act-{id}").into()),
+                group,
+                0.,
+                1.,
+                div()
+                    .size(zpx(18.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(c(t.text_muted))
+                    .child(Icon::Plus.el(zpx(12.))),
+            ))
+        })
 }
 
 /// A small hover action in a space header.
@@ -168,16 +231,78 @@ impl KeelWindow {
             .min_h_0()
             .flex()
             .flex_col()
+            .child(self.render_sidebar_skills_nav(t, cx))
             .children(self.render_rename_prompt(t, cx))
             .child(self.render_chat_list(t, cx))
             .children(self.render_selection_bar(t, cx))
             .child(self.render_sidebar_footer(t, cx))
     }
 
+    fn render_sidebar_skills_nav(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        let skills_active = self.skills.open && !self.settings_open;
+
+        div()
+            .flex_none()
+            .px(zpx(14.))
+            .pb(zpx(8.))
+            .mb(zpx(6.))
+            .border_b_1()
+            .border_color(c(t.border))
+            .child(
+                div()
+                    .id("sidebar-skills-btn")
+                    .h(zpx(28.))
+                    .pl_1()
+                    .pr_1p5()
+                    .rounded(RADIUS_MD)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .t_body()
+                    .font_weight(if skills_active {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(c(if skills_active { t.text } else { t.text_muted }))
+                    .when(skills_active, |d| d.bg(c(t.selected)))
+                    .when(!skills_active, |d| {
+                        d.hover(|s| s.text_color(c(t.text)))
+                            .hover_fade(c(t.hover), None)
+                    })
+                    .active(|s| s.opacity(0.75))
+                    .child(
+                        div()
+                            .size(zpx(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(c(if skills_active {
+                                t.text_muted
+                            } else {
+                                t.text_faint
+                            }))
+                            .child(Icon::Puzzle.el(zpx(13.))),
+                    )
+                    .child(div().flex_1().child("Skills"))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if this.skills.open && !this.settings_open {
+                            this.close_pages();
+                            cx.notify();
+                        } else {
+                            this.open_skills(cx);
+                        }
+                    })),
+            )
+    }
+
     fn render_sidebar_footer(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_none()
-            .px_2()
+            .px(zpx(14.))
             .py_1p5()
             .border_t_1()
             .border_color(c(t.border))
@@ -185,19 +310,29 @@ impl KeelWindow {
                 div()
                     .id("sidebar-settings-btn")
                     .h(zpx(28.))
-                    .px_2()
+                    .pl_1()
+                    .pr_1p5()
                     .rounded(RADIUS_MD)
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .cursor_pointer()
                     .t_small()
                     .text_color(c(t.text_muted))
                     .hover(|s| s.text_color(c(t.text)))
                     .hover_fade(c(t.hover), None)
                     .active(|s| s.opacity(0.75))
-                    .child(Icon::Settings.el(zpx(13.)).text_color(c(t.text_faint)))
+                    .child(
+                        div()
+                            .size(zpx(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(c(t.text_faint))
+                            .child(Icon::Settings.el(zpx(13.))),
+                    )
                     .child(div().flex_1().child("Settings"))
                     .child(
                         div()
@@ -281,26 +416,7 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .justify_between()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .t_caption()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(c(t.text_faint))
-                    .child(
-                        div()
-                            .size(zpx(16.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::FolderTree.el(zpx(12.))),
-                    )
-                    .child("Projects"),
-            )
+            .child(section_title(Icon::FolderTree, "Projects", t))
             .child(reveal_on_hover("projects-overflow-reveal", "projects-header", if menu_open { 1. } else { 0. }, 1.,
                 div()
                     .relative()
@@ -400,26 +516,7 @@ impl KeelWindow {
                     .items_center()
                     .justify_between()
                     .when(!focused, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .t_caption()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(c(t.text_faint))
-                                .child(
-                                    div()
-                                        .size(zpx(16.))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(Icon::Folder.el(zpx(12.))),
-                                )
-                                .child("Spaces"),
-                        )
+                        d.child(section_title(Icon::Folder, "Spaces", t))
                     })
                     .when(focused, |d| {
                         d.child(
@@ -855,38 +952,49 @@ impl KeelWindow {
         // Lay the list out as keyed items with known heights, so a fold or a
         // re-sort can glide everything below from where it was drawn.
         let mut items: Vec<(String, f32, SidebarItem)> = Vec::new();
-        let show_projects = !focused && !self.projects.store.projects.is_empty();
+        let show_projects = !focused;
         if show_projects {
             items.push((
                 "l:projects".into(),
                 SECTION_HEADER_HEIGHT + 1.,
                 SidebarItem::ProjectsLabel,
             ));
-            for (p_ix, project) in self.projects.store.projects.clone().into_iter().enumerate() {
-                let p_id = project.id.clone();
-                let open = self.projects.unfolded.contains(&p_id);
-                let first = p_ix == 0;
-                let pitch = SECTION_HEADER_HEIGHT + 1.;
+            if self.projects.store.projects.is_empty() {
                 items.push((
-                    format!("p:{p_id}"),
-                    pitch,
-                    SidebarItem::ProjectHeader(project, open, first),
+                    "e:projects".into(),
+                    EMPTY_ROW_HEIGHT + 1.,
+                    SidebarItem::NoProjects,
                 ));
-                if open {
-                    let project_chats = self.visible_project_chats(&p_id);
-                    if project_chats.is_empty() {
-                        items.push((
-                            format!("e:project-{p_id}"),
-                            EMPTY_ROW_HEIGHT + 1.,
-                            SidebarItem::Empty(p_id.clone()),
-                        ));
-                    } else {
-                        for (chat, status) in project_chats {
+            } else {
+                for (p_ix, project) in self.projects.store.projects.clone().into_iter().enumerate() {
+                    let p_id = project.id.clone();
+                    let open = self.projects.unfolded.contains(&p_id);
+                    let first = p_ix == 0;
+                    let pitch = SECTION_HEADER_HEIGHT + 1.;
+                    items.push((
+                        format!("p:{p_id}"),
+                        pitch,
+                        SidebarItem::ProjectHeader(project, open, first),
+                    ));
+                    if open {
+                        let project_chats = self.visible_project_chats(&p_id);
+                        if project_chats.is_empty() {
                             items.push((
-                                chat.id.clone(),
-                                CHAT_ROW_PITCH,
-                                SidebarItem::Row(chat, status, true),
+                                format!("e:project-{p_id}"),
+                                EMPTY_ROW_HEIGHT + 1.,
+                                SidebarItem::Empty {
+                                    id: p_id.clone(),
+                                    nested: true,
+                                },
                             ));
+                        } else {
+                            for (chat, status) in project_chats {
+                                items.push((
+                                    chat.id.clone(),
+                                    CHAT_ROW_PITCH,
+                                    SidebarItem::Row(chat, status, true),
+                                ));
+                            }
                         }
                     }
                 }
@@ -929,7 +1037,10 @@ impl KeelWindow {
                 items.push((
                     format!("e:{space_id}"),
                     EMPTY_ROW_HEIGHT + 1.,
-                    SidebarItem::Empty(space_id.clone()),
+                    SidebarItem::Empty {
+                        id: space_id.clone(),
+                        nested: false,
+                    },
                 ));
             }
             let all_shown = !focused
@@ -993,6 +1104,12 @@ impl KeelWindow {
                 });
                 let el = match item {
                     SidebarItem::ProjectsLabel => self.render_projects_header(t, cx),
+                    SidebarItem::NoProjects => {
+                        empty_row("projects-empty-row".into(), "No projects", false, true, t)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_project_modal(window, cx);
+                            }))
+                    }
                     SidebarItem::ProjectHeader(project, open, first) => {
                         self.render_project_header(project, open, first, t, cx)
                     }
@@ -1005,16 +1122,27 @@ impl KeelWindow {
                     SidebarItem::More(space_id, hidden) => {
                         self.render_more_row(space_id, hidden, t, cx)
                     }
-                    SidebarItem::Empty(space_id) => empty_row(
-                        format!("space-empty-row-{space_id}"),
-                        Icon::Comment,
-                        "No chats",
-                        t,
-                    )
-                    .pl(zpx(28.))
-                    .pr_2(),
+                    SidebarItem::Empty { id, nested } => {
+                        let row = empty_row(
+                            format!("space-empty-row-{id}"),
+                            "No chats",
+                            nested,
+                            !nested,
+                            t,
+                        );
+                        if nested {
+                            row
+                        } else {
+                            row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.new_chat_in_space(id.clone(), cx);
+                            }))
+                        }
+                    }
                     SidebarItem::NoSpaces => {
-                        empty_row("spaces-empty-row".into(), Icon::Folder, "No spaces", t)
+                        empty_row("spaces-empty-row".into(), "No spaces", false, true, t)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.pick_folder_for_new_chat(cx);
+                            }))
                     }
                     SidebarItem::Row(chat, status, nested) => {
                         let ix = row_ix;
@@ -1070,7 +1198,7 @@ impl KeelWindow {
                 this.projects.folder_card = None;
                 cx.notify();
             }))
-            .px_2()
+            .px(zpx(14.))
             .pb_2()
             .flex()
             .flex_col()
@@ -1143,20 +1271,7 @@ impl KeelWindow {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_1()
-                        .t_caption()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(c(t.text_faint))
-                        .child(
-                            div()
-                                .size(zpx(16.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(Icon::Comment.el(zpx(12.))),
-                        )
-                        .child("Chats"),
+                        .child(section_title(Icon::Comment, "Chats", t)),
                 );
         }
 

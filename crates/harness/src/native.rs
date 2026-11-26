@@ -15,21 +15,23 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use keel_core::store::{SessionLog, SessionMeta, new_id as new_session_id};
 use keel_core::{
-    Harness as CoreHarness, HookConfig, RunEvent, RunStop, Session, SkillCatalog, build_route,
+    AGENT_TOOL_NAME, Harness as CoreHarness, HookConfig, ProjectInstructions, RunEvent, RunStop,
+    Session, SkillCatalog, SubagentCatalog, SubagentConfig, SubagentEvent,
+    build_openai_codex_route, build_route,
 };
 use keel_llm_catalog::{AuthSpec, Catalog, LoadedCatalog, ModelSpec, Provider};
 use keel_llm_route::{
     Client, CredentialRef, CredentialStore, EnvResolver, GROK_DEFAULT_CLIENT_ID, GROK_TOKEN_URL,
-    OAuthError, OAuthProviderConfig, OAuthTokenSet, SecretResolver, StoreResolver,
-    default_http_client, login_device, login_pkce,
+    OPENAI_DEFAULT_CLIENT_ID, OPENAI_TOKEN_URL, OAuthError, OAuthProviderConfig, OAuthTokenSet,
+    SecretResolver, StoreResolver, default_http_client, login_device, login_pkce,
 };
 use keel_llm_types::{
-    CachePolicy, LlmError, LlmEvent, Message, Part, ReasoningEffort, Role, ToolSpec,
+    CachePolicy, LlmError, LlmEvent, Message, Part, ProtocolId, ReasoningEffort, Role, ToolSpec,
 };
 use keel_mcp::{McpConfig, ServerConfig};
 use keel_proto::{
-    AgentEvent, HarnessId, OptionRole, PermissionMode, QuestionKind, QuestionOption, TokenUsage,
-    ToolAsk, ToolDiff, TurnStatus, UserInputQuestion,
+    AgentEvent, HarnessId, OptionRole, PermissionMode, QuestionKind, QuestionOption, SubagentCaps,
+    SubagentRef, SubagentVisibility, TokenUsage, ToolAsk, ToolDiff, TurnStatus, UserInputQuestion,
 };
 use keel_tools::{
     PermissionDecision, PermissionGate, PermissionRequest, Tool, ToolContext, ToolFuture,
@@ -79,7 +81,7 @@ const SETTINGS_PROVIDERS: [(&str, &str, &str, &str); 5] = [
     (
         "openai",
         "OpenAI",
-        "OpenAI API key (OPENAI_API_KEY)",
+        "ChatGPT Plus / Pro subscription, or OPENAI_API_KEY",
         "openai",
     ),
     (
@@ -175,6 +177,12 @@ impl Harness for PiHarness {
         true
     }
 
+    fn subagent_caps(&self) -> SubagentCaps {
+        SubagentCaps {
+            visibility: SubagentVisibility::Full,
+        }
+    }
+
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         let loaded = load_catalog();
         for warning in &loaded.warnings {
@@ -186,8 +194,9 @@ impl Harness for PiHarness {
 
     async fn reasoning_levels(&self, model: &ModelId) -> Result<Vec<ReasoningLevel>, HarnessError> {
         let catalog = load_catalog().catalog;
+        let store = credential_store();
         let resolver = secret_resolver();
-        let (_, spec) = resolve_model(&catalog, resolver.as_ref(), &model.0)?;
+        let (_, spec) = resolve_model(&catalog, resolver.as_ref(), store.as_ref(), &model.0)?;
         if !spec.compat().supports_reasoning {
             return Ok(Vec::new());
         }
@@ -257,6 +266,26 @@ impl Harness for PiHarness {
             let _ = set_env_disabled(&store, "grok", false);
             return Ok(());
         }
+        if normalized == "openai" {
+            let mut config = OAuthProviderConfig::openai();
+            apply_openai_oauth_env(&mut config)?;
+            let http = default_http_client().map_err(failed)?;
+            let tokens = login_pkce(
+                &http,
+                &config,
+                Duration::from_secs(300),
+                |url| {
+                    on(SignInEvent::Browser {
+                        url: url.to_string(),
+                    });
+                },
+            )
+            .await
+            .map_err(failed)?;
+            store.set_oauth("openai", &tokens).map_err(failed)?;
+            let _ = set_env_disabled(&store, "openai", false);
+            return Ok(());
+        }
 
         let catalog = load_catalog().catalog;
         let catalog_id = canonical_provider_id(&normalized);
@@ -309,9 +338,11 @@ impl Harness for PiHarness {
 
     async fn one_shot(&self, model: &ModelId, prompt: &str) -> Result<String, HarnessError> {
         let catalog = load_catalog().catalog;
+        let store = credential_store();
         let resolver = secret_resolver();
-        let (provider, model_spec) = resolve_model(&catalog, resolver.as_ref(), &model.0)?;
-        let route = build_route(&provider, &model_spec).map_err(failed)?;
+        let (provider, model_spec) =
+            resolve_model(&catalog, resolver.as_ref(), store.as_ref(), &model.0)?;
+        let route = build_route_for_store(&provider, &model_spec, store.as_ref()).map_err(failed)?;
         let client = Client::with_resolver(resolver).map_err(failed)?;
         let mut session = Session::new(route, client).with_cache(CachePolicy::None);
         let outcome = tokio::time::timeout(crate::ONE_SHOT_LIMIT, session.step(Some(prompt)))
@@ -331,9 +362,11 @@ impl Harness for PiHarness {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<AgentEvent, HarnessError>> + Send>>, HarnessError>
     {
         let catalog = load_catalog().catalog;
+        let store = credential_store();
         let resolver = secret_resolver();
-        let (provider, model_spec) = resolve_model(&catalog, resolver.as_ref(), &spec.model.0)?;
-        let route = build_route(&provider, &model_spec).map_err(failed)?;
+        let (provider, model_spec) =
+            resolve_model(&catalog, resolver.as_ref(), store.as_ref(), &spec.model.0)?;
+        let route = build_route_for_store(&provider, &model_spec, store.as_ref()).map_err(failed)?;
         let client = Client::with_resolver(resolver).map_err(failed)?;
         let workspace = Workspace::open(&spec.cwd).map_err(failed)?;
 
@@ -404,45 +437,57 @@ async fn run_session(
         session = session.with_reasoning(effort);
     }
 
-    if let Some(prompt) = KeelProfile::default()
-        .system_prompt
-        .as_deref()
-        .filter(|p| !p.trim().is_empty())
-    {
-        session.append_system(prompt);
-    } else {
-        session.append_system(KEEL_SYSTEM_PROMPT);
-    }
-    if has_ui_tools {
-        session.append_system(crate::UI_CARDS_PROMPT);
-    }
-    if spec.scratch {
-        session.append_system(crate::SCRATCH_PROMPT);
-    }
-    if let Some(project) = spec.project.as_ref().filter(|p| !p.roots.is_empty()) {
-        let mut roots = project.roots.clone();
-        if roots.len() > 1 {
-            roots[1..].sort_by(|a, b| a.0.cmp(&b.0));
-        }
-        let text = keel_proto::projects::roots_prompt(&project.name, &roots);
-        session.append_system(text.trim_end());
-    }
-    if let Some(dir) = memory_socket {
-        let mem = fetch_memory_prompt(dir, &spec.cwd).await;
-        session.append_system(&format!("<keel_memory>\n{}\n</keel_memory>", mem.trim_end()));
-    }
-
     let sessions_dir = data_dir
         .map(KeelProfile::sessions_dir)
         .unwrap_or_else(|| std::env::temp_dir().join("keel-sessions"));
-    let (session_log, resumed_from_log) = open_or_create_session(
-        &sessions_dir,
-        spec.resume.as_ref(),
-        &provider,
-        &model_spec,
-        &spec.cwd,
-        &mut session,
-    )?;
+
+    let mut resumed_session = try_resume_session(&sessions_dir, spec.resume.as_ref(), &mut session);
+    let has_stored_system = resumed_session
+        .as_ref()
+        .is_some_and(|opened| opened.has_stored_system);
+    if !has_stored_system {
+        let initial_memory = match memory_socket {
+            Some(dir) => Some(fetch_memory_prompt(dir, &spec.cwd).await),
+            None => None,
+        };
+        let project_instructions = (!spec.scratch && !env_flag("KEEL_NO_INSTRUCTIONS"))
+            .then(|| ProjectInstructions::discover(&spec.cwd));
+        if let Some(instructions) = &project_instructions {
+            for warning in instructions.warnings() {
+                tracing::warn!(
+                    target: "keel_harness::native",
+                    warning = %warning,
+                    "project instructions warning"
+                );
+            }
+            if !instructions.is_empty() {
+                tracing::info!(
+                    target: "keel_harness::native",
+                    count = instructions.len(),
+                    bytes = instructions.total_bytes(),
+                    "loaded project instructions"
+                );
+            }
+        }
+        configure_fresh_system_prompt(
+            &mut session,
+            KeelProfile::default().system_prompt.as_deref(),
+            has_ui_tools,
+            spec.scratch,
+            spec.project.as_ref(),
+            project_instructions.as_ref(),
+            initial_memory.as_deref(),
+        );
+    }
+
+    let (session_log, resumed_from_log, resumed) = match resumed_session.take() {
+        Some(opened) => (opened.log, opened.id, true),
+        None => {
+            let (log, id) =
+                create_session_log(&sessions_dir, &provider, &model_spec, &spec.cwd, &session)?;
+            (log, id, false)
+        }
+    };
     let log_arc = Arc::new(session_log);
     if let Some(report) = &spec.report_session {
         report(
@@ -451,6 +496,25 @@ async fn run_session(
         );
     }
     session = session.with_sink(Arc::clone(&log_arc) as Arc<dyn keel_core::SessionSink>);
+
+    if resumed {
+        if let Some(dir) = memory_socket {
+            let current = fetch_memory_prompt(dir, &spec.cwd).await;
+            let last_known = last_known_memory(&session);
+            if should_emit_memory_update(last_known.as_deref(), current.trim()) {
+                session.push_message(Message::user(format!(
+                    "<keel_memory_update>\n{}\n</keel_memory_update>",
+                    current.trim()
+                )));
+            }
+        }
+        if !spec.plan_mode && history_ends_in_plan_mode(&session.history) {
+            session.push_message(Message::user(format!(
+                "[plan mode]\n{}",
+                keel_core::PLAN_MODE_OFF_NOTICE
+            )));
+        }
+    }
 
     let (inline_imgs, unread_imgs) = crate::inline_images(&spec.attachments);
     if !inline_imgs.is_empty() {
@@ -464,9 +528,6 @@ async fn run_session(
 
     let mut initial_prompt = normalize_skill_invocation(&spec.initial_text);
     initial_prompt.push_str(&crate::attachment_note(&unread_imgs));
-    if spec.plan_mode && has_ui_tools {
-        initial_prompt = format!("[plan mode]\n{}\n\n{}", crate::PLAN_MODE_PROMPT, initial_prompt);
-    }
     if initial_prompt.trim().is_empty() && !spec.attachments.is_empty() {
         initial_prompt = "See the attached image(s).".to_string();
     }
@@ -498,16 +559,36 @@ async fn run_session(
         HookConfig::empty()
     };
 
+    let subagent_catalog = if spec.scratch {
+        SubagentCatalog::builtins()
+    } else {
+        SubagentCatalog::discover(&spec.cwd)
+    };
+    let mut subagent_config = SubagentConfig::new(subagent_catalog)
+        .with_model_catalog(Arc::new(load_catalog().catalog))
+        .with_log_dir(log_arc.subagent_dir())
+        .with_allow_worktree(!spec.scratch);
+    if let Some(dir) = data_dir {
+        subagent_config = subagent_config
+            .with_worktree_dir(KeelProfile::home(dir).join("worktrees").join(&resumed_from_log));
+    }
+
     let mut harness = CoreHarness::new(session, Arc::new(registry), workspace)
         .with_permissions(gate)
         .with_skills(skills)
         .with_hooks(hooks)
-        .with_hook_context(resumed_from_log, if spec.resume.is_some() { "resume" } else { "startup" })
+        .with_hook_context(resumed_from_log, if resumed { "resume" } else { "startup" })
         .with_session_state(Arc::clone(&log_arc) as Arc<dyn keel_tools::SessionState>)
+        .with_subagents(subagent_config)
         .with_max_turns(max_turns)
         .with_cancellation(cancel.clone())
-        .with_sandbox(env_flag("KEEL_SANDBOX"))
-        .with_plan_mode(spec.plan_mode);
+        .with_sandbox(env_flag("KEEL_SANDBOX"));
+    if let Some(plan_prompt) =
+        keel_plan_mode_prompt(has_ui_tools, keel_tools::plan_sandbox_supported())
+    {
+        harness = harness.with_plan_mode_prompt(plan_prompt);
+    }
+    harness = harness.with_plan_mode(spec.plan_mode);
 
     let full_model_id = format!("{}/{}", provider.id, model_spec.id);
     let context_window = model_spec.context_window;
@@ -639,7 +720,12 @@ async fn control_router(
                 } else {
                     next_q_id += 1;
                     let q_id = format!("perm-{next_q_id}");
-                    let prompt = format!("Allow {}?", req.tool);
+                    let prompt = match parse_subagent_permission_prefix(&req.summary) {
+                        Some((agent_name, _)) => {
+                            format!("Allow {}? ({agent_name} subagent)", req.tool)
+                        }
+                        None => format!("Allow {}?", req.tool),
+                    };
                     let tool_ask = ToolAsk::from_input(&req.tool, None, &req.arguments);
                     let question = UserInputQuestion {
                         id: q_id.clone(),
@@ -677,6 +763,16 @@ enum ControlSelect {
     Permission(Option<PermissionRequest>),
 }
 
+/// Parse the `[agent:<name>#<id>] ` prefix attached by `keel-core` when a
+/// subagent requests tool permission through the parent gate.
+fn parse_subagent_permission_prefix(summary: &str) -> Option<(&str, &str)> {
+    let rest = summary.strip_prefix("[agent:")?;
+    let end = rest.find(']')?;
+    let inner = &rest[..end];
+    let (name, id) = inner.split_once('#')?;
+    (!name.is_empty() && !id.is_empty()).then_some((name, id))
+}
+
 fn auto_permission(
     req: &PermissionRequest,
     permission: PermissionMode,
@@ -690,7 +786,10 @@ fn auto_permission(
                 .then_some(PermissionDecision::Allow);
         }
         let allow = crate::plan_mode_allows(&req.tool)
-            || matches!(base.as_str(), "view_image" | "skill" | "browser_open_pane");
+            || matches!(
+                base.as_str(),
+                "view_image" | "skill" | "browser_open_pane" | AGENT_TOOL_NAME
+            );
         return Some(if allow {
             PermissionDecision::Allow
         } else {
@@ -711,6 +810,7 @@ fn auto_permission(
             | "memory_write"
             | "web_search"
             | "web_fetch"
+            | AGENT_TOOL_NAME
     ) || keel_proto::is_ui_tool(&req.tool)
         || (crate::is_browser_tool(&req.tool)
             && (crate::plan_mode_allows(&req.tool) || base == "browser_open_pane"))
@@ -777,6 +877,9 @@ struct EventTranslator {
     turn_usage: Option<keel_llm_types::Usage>,
     labels: LabelStream,
     pending_diffs: HashMap<String, PendingDiff>,
+    pending_agent_calls: HashSet<String>,
+    spawned_agent_calls: HashSet<String>,
+    subagent_turns: HashMap<String, u32>,
 }
 
 impl EventTranslator {
@@ -795,6 +898,9 @@ impl EventTranslator {
             turn_usage: None,
             labels: LabelStream::default(),
             pending_diffs: HashMap::new(),
+            pending_agent_calls: HashSet::new(),
+            spawned_agent_calls: HashSet::new(),
+            subagent_turns: HashMap::new(),
         }
     }
 
@@ -870,6 +976,12 @@ impl EventTranslator {
                 summary: _,
                 arguments,
             } => {
+                // `agent` calls render as dedicated `PartView::Subagent` rows via
+                // `SubagentEvent::Started`; suppress the redundant parent tool row.
+                if name == AGENT_TOOL_NAME {
+                    self.pending_agent_calls.insert(call_id.to_owned());
+                    return;
+                }
                 let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
                 let mut detail = crate::tool_detail_for(name, &args);
                 if detail.is_empty() && name == "apply_patch" {
@@ -894,13 +1006,30 @@ impl EventTranslator {
             }
             RunEvent::ToolFinished {
                 call_id,
-                name: _,
+                name,
                 is_error,
                 preview: _,
                 output,
                 images,
                 duration_ms,
             } => {
+                if self.pending_agent_calls.remove(call_id) {
+                    let spawned = self.spawned_agent_calls.remove(call_id);
+                    // Only surface a raw tool error row if the `agent` tool failed
+                    // before spawning a child (e.g. invalid arguments / unknown role).
+                    if !is_error || spawned {
+                        return;
+                    }
+                    self.emit(AgentEvent::ToolStarted {
+                        tool_id: call_id.to_owned(),
+                        name: name.to_owned(),
+                        input_bytes: 0,
+                        detail: String::new(),
+                        label: String::new(),
+                        subagent: None,
+                        kind: crate::kind_from_name(name).map(str::to_string),
+                    });
+                }
                 let diff = if !is_error {
                     self.finish_pending_diff(call_id)
                 } else {
@@ -924,7 +1053,198 @@ impl EventTranslator {
                     duration_ms,
                 });
             }
+            RunEvent::Subagent(ev) => self.on_subagent_event(ev),
             RunEvent::Retrying { .. } | RunEvent::Progress { .. } | RunEvent::VerifyRequested { .. } => {}
+        }
+    }
+
+    fn on_subagent_event(&mut self, event: &SubagentEvent) {
+        match event {
+            SubagentEvent::Started {
+                id,
+                parent_call_id,
+                agent,
+                description,
+                depth: _,
+                model,
+                read_only,
+                resumed: _,
+                worktree: _,
+                worktree_branch,
+            } => {
+                let tool_id = if let Some(cid) = parent_call_id {
+                    self.spawned_agent_calls.insert(cid.clone());
+                    cid.clone()
+                } else {
+                    id.clone()
+                };
+                self.subagent_turns.entry(id.clone()).or_insert(0);
+                self.emit(AgentEvent::SubagentStarted {
+                    tool_id,
+                    subagent_id: id.clone(),
+                    name: agent.clone(),
+                    description: description.clone(),
+                });
+                self.emit(AgentEvent::SubagentMeta {
+                    subagent_id: id.clone(),
+                    model: Some(model.clone()),
+                    read_only: Some(*read_only),
+                    turns: Some(0),
+                    input_tokens: None,
+                    output_tokens: None,
+                    duration_ms: None,
+                    worktree_branch: worktree_branch.clone(),
+                    active_tool: Some(String::new()),
+                });
+            }
+            SubagentEvent::TextDelta {
+                id,
+                agent: _,
+                index,
+                delta,
+            } => {
+                if !delta.is_empty() {
+                    let turn = self.subagent_turns.get(id).copied().unwrap_or(0);
+                    self.emit(AgentEvent::Text {
+                        message_id: format!("sa-{id}-t{turn}"),
+                        part_id: format!("text-{index}"),
+                        delta: delta.clone(),
+                        subagent: Some(SubagentRef { id: id.clone() }),
+                    });
+                }
+            }
+            SubagentEvent::ReasoningDelta {
+                id,
+                agent: _,
+                index,
+                delta,
+            } => {
+                if !delta.is_empty() {
+                    let turn = self.subagent_turns.get(id).copied().unwrap_or(0);
+                    self.emit(AgentEvent::Reasoning {
+                        message_id: format!("sa-{id}-t{turn}"),
+                        part_id: format!("think-{index}"),
+                        delta: delta.clone(),
+                        subagent: Some(SubagentRef { id: id.clone() }),
+                    });
+                }
+            }
+            SubagentEvent::ToolStarted {
+                id,
+                agent: _,
+                call_id,
+                tool,
+                summary,
+                arguments,
+            } => {
+                let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+                let mut detail = crate::tool_detail_for(tool, &args);
+                if detail.is_empty() && tool == "apply_patch" {
+                    detail = patch_first_path(args.get("patch").and_then(Value::as_str));
+                }
+                if detail.is_empty() && !summary.is_empty() && summary != tool {
+                    detail = summary
+                        .strip_prefix(tool.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(summary)
+                        .to_string();
+                }
+                let label = crate::tool_label(&args);
+                let kind = crate::kind_from_name(tool).map(str::to_string);
+                self.emit(AgentEvent::ToolStarted {
+                    tool_id: call_id.clone(),
+                    name: tool.clone(),
+                    input_bytes: arguments.len() as u64,
+                    detail,
+                    label,
+                    subagent: Some(SubagentRef { id: id.clone() }),
+                    kind,
+                });
+            }
+            SubagentEvent::ToolFinished {
+                id,
+                agent: _,
+                call_id,
+                tool: _,
+                is_error,
+                output,
+                duration_ms,
+            } => {
+                self.emit(AgentEvent::ToolFinished {
+                    tool_id: call_id.clone(),
+                    summary: summary_line(output, *is_error),
+                    output_bytes: output.len() as u64,
+                    is_error: *is_error,
+                    images: Vec::new(),
+                    output_tail: keel_proto::output_tail(output),
+                    subagent: Some(SubagentRef { id: id.clone() }),
+                    diff: None,
+                    duration_ms: *duration_ms,
+                });
+            }
+            SubagentEvent::TurnFinished {
+                id,
+                agent: _,
+                turn,
+                stop: _,
+            } => {
+                let turns = *turn as u32;
+                self.subagent_turns.insert(id.clone(), turns);
+                self.emit(AgentEvent::SubagentMeta {
+                    subagent_id: id.clone(),
+                    model: None,
+                    read_only: None,
+                    turns: Some(turns),
+                    input_tokens: None,
+                    output_tokens: None,
+                    duration_ms: None,
+                    worktree_branch: None,
+                    active_tool: None,
+                });
+            }
+            SubagentEvent::Finished {
+                id,
+                agent: _,
+                model,
+                stop,
+                turns,
+                usage,
+                duration_ms,
+                worktree: _,
+                worktree_branch,
+            } => {
+                self.subagent_turns.remove(id);
+                if usage.total() > 0 {
+                    // `context_window: None` rolls subagent spend into chat totals
+                    // without overwriting the parent's context meter.
+                    self.emit(AgentEvent::Usage {
+                        usage: to_proto_usage(model, *usage, None),
+                    });
+                }
+                self.emit(AgentEvent::SubagentMeta {
+                    subagent_id: id.clone(),
+                    model: Some(model.clone()),
+                    read_only: None,
+                    turns: Some(*turns as u32),
+                    input_tokens: Some(usage.input_tokens),
+                    output_tokens: Some(usage.output_tokens),
+                    duration_ms: Some(*duration_ms),
+                    worktree_branch: worktree_branch.clone(),
+                    active_tool: Some(String::new()),
+                });
+                let status = match stop {
+                    RunStop::Cancelled => TurnStatus::Interrupted {},
+                    RunStop::Failed => TurnStatus::Errored {
+                        message: "subagent failed".to_string(),
+                    },
+                    _ => TurnStatus::Completed {},
+                };
+                self.emit(AgentEvent::SubagentDone {
+                    subagent_id: id.clone(),
+                    status,
+                });
+            }
         }
     }
 
@@ -1255,6 +1575,10 @@ impl<T: Tool> Tool for LabelledTool<T> {
 
     fn allowed_in_plan_mode(&self) -> bool {
         self.0.allowed_in_plan_mode()
+    }
+
+    fn timeout(&self, limits: &keel_tools::ToolLimits) -> Option<Duration> {
+        self.0.timeout(limits)
     }
 
     fn execute<'a>(&'a self, mut arguments: Value, context: &'a ToolContext) -> ToolFuture<'a> {
@@ -1643,50 +1967,175 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Value, String> {
 // Session Log, Catalog, Credentials & Model Resolution
 // ---------------------------------------------------------------------------
 
-fn open_or_create_session(
+struct ResumedSession {
+    log: SessionLog,
+    id: String,
+    has_stored_system: bool,
+}
+
+fn configure_fresh_system_prompt(
+    session: &mut Session,
+    profile_prompt: Option<&str>,
+    has_ui_tools: bool,
+    scratch: bool,
+    project: Option<&crate::ProjectRoots>,
+    project_instructions: Option<&ProjectInstructions>,
+    initial_memory: Option<&str>,
+) {
+    let host_prompt = profile_prompt
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or(KEEL_SYSTEM_PROMPT);
+    session.system = keel_core::effective_system_prompt(
+        Some(host_prompt.trim()),
+        Some(keel_core::default_working_rules()),
+    );
+    if has_ui_tools {
+        session.append_system(crate::UI_CARDS_PROMPT);
+    }
+    if scratch {
+        session.append_system(crate::SCRATCH_PROMPT);
+    }
+    if let Some(project) = project.filter(|p| !p.roots.is_empty()) {
+        let mut roots = project.roots.clone();
+        if roots.len() > 1 {
+            roots[1..].sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        let text = keel_proto::projects::roots_prompt(&project.name, &roots);
+        session.append_system(text.trim_end());
+    }
+    if let Some(rendered) = project_instructions.and_then(ProjectInstructions::render) {
+        session.append_system(&rendered);
+    }
+    if let Some(mem) = initial_memory {
+        session.append_system(&format!("<keel_memory>\n{}\n</keel_memory>", mem.trim_end()));
+    }
+}
+
+fn keel_plan_mode_prompt(has_ui_tools: bool, bash_sandboxed: bool) -> Option<String> {
+    if !has_ui_tools {
+        return None;
+    }
+    if bash_sandboxed {
+        Some(format!(
+            "{}\n\nYou may also use `bash` for read-only inspection commands (such as `git status`, `git diff`, `git log`, or `rg`); in plan mode, `bash` runs in a read-only, network-disabled OS sandbox.",
+            crate::PLAN_MODE_PROMPT
+        ))
+    } else {
+        Some(crate::PLAN_MODE_PROMPT.to_string())
+    }
+}
+
+fn extract_tagged_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.rfind(&open)? + open.len();
+    let tail = &text[start..];
+    let end = tail.find(&close)?;
+    Some(tail[..end].trim())
+}
+
+fn last_known_memory(session: &Session) -> Option<String> {
+    for msg in session.history.iter().rev() {
+        let text = msg.text();
+        if let Some(block) = extract_tagged_block(&text, "keel_memory_update") {
+            return Some(block.to_string());
+        }
+    }
+    session
+        .system
+        .as_deref()
+        .and_then(|sys| extract_tagged_block(sys, "keel_memory"))
+        .map(str::to_string)
+}
+
+fn should_emit_memory_update(last_known: Option<&str>, current: &str) -> bool {
+    let current = current.trim();
+    if current.is_empty() {
+        return false;
+    }
+    let unavailable = format!("{MEMORY_PREAMBLE}\n\n{MEMORY_UNAVAILABLE}");
+    if let Some(prev) = last_known {
+        if prev == current {
+            return false;
+        }
+        if current == unavailable && prev != unavailable {
+            return false;
+        }
+    }
+    true
+}
+
+fn history_ends_in_plan_mode(history: &[Message]) -> bool {
+    for msg in history.iter().rev() {
+        if msg.role != Role::User {
+            continue;
+        }
+        let text = msg.text();
+        if let Some(rest) = text.trim_start().strip_prefix("[plan mode]\n") {
+            return rest.trim() != keel_core::PLAN_MODE_OFF_NOTICE;
+        }
+    }
+    false
+}
+
+fn try_resume_session(
     sessions_dir: &Path,
     resume: Option<&NativeSessionId>,
+    session: &mut Session,
+) -> Option<ResumedSession> {
+    let NativeSessionId(raw) = resume?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let raw_path = Path::new(raw);
+    let (dir, id) = if raw_path.is_file() || raw.ends_with(".jsonl") {
+        let dir = raw_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(sessions_dir);
+        let stem = raw_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw.as_str());
+        (dir, stem)
+    } else {
+        (sessions_dir, raw.as_str())
+    };
+    match SessionLog::open_with_state(dir, id) {
+        Ok((log, meta, messages, working_memory)) => {
+            session.history = messages;
+            if let Some(wm) = working_memory {
+                session.restore_working_memory(wm);
+            }
+            let has_stored_system = meta.system.is_some();
+            if let Some(stored) = meta.system {
+                session.system = Some(stored);
+            }
+            Some(ResumedSession {
+                log,
+                id: meta.id,
+                has_stored_system,
+            })
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "keel_harness::native",
+                resume = %raw,
+                error = %err,
+                "could not resume session log; starting a fresh session"
+            );
+            None
+        }
+    }
+}
+
+fn create_session_log(
+    sessions_dir: &Path,
     provider: &Provider,
     model_spec: &ModelSpec,
     cwd: &Path,
-    session: &mut Session,
+    session: &Session,
 ) -> Result<(SessionLog, String), HarnessError> {
-    if let Some(NativeSessionId(raw)) = resume
-        && !raw.trim().is_empty()
-    {
-        let raw_path = Path::new(raw);
-        let (dir, id) = if raw_path.is_file() || raw.ends_with(".jsonl") {
-            let dir = raw_path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(sessions_dir);
-            let stem = raw_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(raw.as_str());
-            (dir, stem)
-        } else {
-            (sessions_dir, raw.as_str())
-        };
-        match SessionLog::open_with_state(dir, id) {
-            Ok((log, meta, messages, working_memory)) => {
-                session.history = messages;
-                if let Some(wm) = working_memory {
-                    session.restore_working_memory(wm);
-                }
-                return Ok((log, meta.id));
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "keel_harness::native",
-                    resume = %raw,
-                    error = %err,
-                    "could not resume session log; starting a fresh session"
-                );
-            }
-        }
-    }
-
     let id = new_session_id();
     let meta = SessionMeta::new(
         &id,
@@ -1701,16 +2150,33 @@ fn open_or_create_session(
     Ok((log, id))
 }
 
+fn openai_uses_oauth(store: Option<&CredentialStore>) -> bool {
+    store.is_some_and(|s| s.get_oauth("openai").ok().flatten().is_some())
+}
+
+fn build_route_for_store(
+    provider: &Provider,
+    model: &ModelSpec,
+    store: Option<&CredentialStore>,
+) -> Result<keel_llm_route::Route, LlmError> {
+    if provider.id == "openai" && openai_uses_oauth(store) {
+        build_openai_codex_route(provider, model)
+    } else {
+        build_route(provider, model)
+    }
+}
+
 fn resolve_model(
     catalog: &Catalog,
     resolver: &dyn SecretResolver,
+    store: Option<&CredentialStore>,
     requested: &str,
 ) -> Result<(Provider, ModelSpec), HarnessError> {
     let trimmed = requested.trim();
     if trimmed.is_empty() {
         for (provider_id, model_id) in DEFAULT_MODEL_CANDIDATES {
             if let Some((provider, model)) = catalog.find(provider_id, model_id) {
-                let route = build_route(provider, model);
+                let route = build_route_for_store(provider, model, store);
                 if route.is_ok_and(|r| r.auth.apply(resolver).is_ok()) {
                     return Ok((provider.clone(), model.clone()));
                 }
@@ -1723,7 +2189,7 @@ fn resolve_model(
             if keel_llm_protocol::for_protocol(model.protocol, model.compat()).is_none() {
                 continue;
             }
-            if let Ok(route) = build_route(provider, model)
+            if let Ok(route) = build_route_for_store(provider, model, store)
                 && route.auth.apply(resolver).is_ok()
             {
                 return Ok((provider.clone(), model.clone()));
@@ -1982,9 +2448,16 @@ fn list_models_for_with(
     env_get: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<Model> {
     let disabled_env = load_disabled_env(store);
+    let openai_oauth = openai_uses_oauth(store);
     catalog
         .models()
         .filter(|(provider, model)| {
+            if provider.id == "openai"
+                && openai_oauth
+                && model.protocol != ProtocolId::OpenAiResponses
+            {
+                return false;
+            }
             provider_is_connected_with_disabled(provider, store, &disabled_env, env_get)
                 && keel_llm_protocol::for_protocol(model.protocol, model.compat()).is_some()
         })
@@ -2019,6 +2492,7 @@ fn credential_store_in(agent_dir: Option<&Path>) -> Option<CredentialStore> {
 fn default_oauth_metadata(store_key: &str) -> Option<(&'static str, &'static str)> {
     match store_key {
         "grok" => Some((GROK_DEFAULT_CLIENT_ID, GROK_TOKEN_URL)),
+        "openai" => Some((OPENAI_DEFAULT_CLIENT_ID, OPENAI_TOKEN_URL)),
         "anthropic" => Some((ANTHROPIC_OAUTH_CLIENT_ID, ANTHROPIC_OAUTH_TOKEN_URL)),
         _ => None,
     }
@@ -2350,7 +2824,7 @@ fn remove_legacy_auth_json_entries(auth_path: &Path, catalog_id: &str) -> std::i
 }
 
 fn supports_oauth(account_id: &str) -> bool {
-    matches!(account_id, "xai" | "grok")
+    matches!(account_id, "xai" | "grok" | "openai")
 }
 
 fn build_auth_rows(catalog: &Catalog, store: Option<&CredentialStore>) -> Vec<AuthAccount> {
@@ -2413,6 +2887,38 @@ fn apply_grok_oauth_env(config: &mut OAuthProviderConfig) -> Result<(), HarnessE
             ))
         })?;
         config.callback_port = (port != 0).then_some(port);
+    }
+    Ok(())
+}
+
+fn apply_openai_oauth_env(config: &mut OAuthProviderConfig) -> Result<(), HarnessError> {
+    if let Ok(client_id) = std::env::var("KEEL_OPENAI_CLIENT_ID")
+        && !client_id.trim().is_empty()
+    {
+        config.client_id = client_id;
+    }
+    if let Ok(url) = std::env::var("KEEL_OPENAI_OAUTH_AUTHORIZE_URL")
+        && !url.trim().is_empty()
+    {
+        config.authorize_url = url;
+    }
+    if let Ok(url) = std::env::var("KEEL_OPENAI_OAUTH_TOKEN_URL")
+        && !url.trim().is_empty()
+    {
+        config.token_url = url;
+    }
+    if let Ok(port_raw) = std::env::var("KEEL_OPENAI_OAUTH_PORT")
+        && !port_raw.trim().is_empty()
+    {
+        let port: u16 = port_raw.trim().parse().map_err(|_| {
+            HarnessError::Failed(format!(
+                "KEEL_OPENAI_OAUTH_PORT must be a TCP port number, got `{port_raw}`"
+            ))
+        })?;
+        config.callback_port = (port != 0).then_some(port);
+        if port == 0 {
+            config.strict_callback_port = false;
+        }
     }
     Ok(())
 }
@@ -4850,7 +5356,58 @@ mod tests {
         assert!(!anthropic.supports_oauth);
         let xai = rows.iter().find(|r| r.id == "xai").unwrap();
         assert!(xai.supports_oauth);
+        let openai = rows.iter().find(|r| r.id == "openai").unwrap();
+        assert!(openai.supports_oauth);
         assert!(!rows.iter().any(|r| matches!(r.id.as_str(), "minimax" | "neuralwatt")));
+    }
+
+    #[test]
+    fn openai_oauth_routes_to_codex_backend_and_filters_to_responses_models() {
+        let dir = TmpDir::new("openai-oauth");
+        let store = CredentialStore::at(dir.path().join("credentials.json"));
+        let tokens = OAuthTokenSet {
+            access_token: "test-oauth-access".to_string(),
+            refresh_token: Some("test-oauth-refresh".to_string()),
+            expires_at: Some(9_999_999_999),
+            token_type: "Bearer".to_string(),
+            client_id: Some(OPENAI_DEFAULT_CLIENT_ID.to_string()),
+            token_url: Some(OPENAI_TOKEN_URL.to_string()),
+        };
+        store.set_oauth("openai", &tokens).unwrap();
+
+        let catalog = load_catalog().catalog;
+        let rows = build_auth_rows(&catalog, Some(&store));
+        let openai = rows.iter().find(|r| r.id == "openai").unwrap();
+        assert!(openai.signed_in);
+        assert_eq!(openai.detail, "oauth");
+        assert!(openai.supports_oauth);
+
+        let models = list_models_for_with(&catalog, Some(&store), &|_| None);
+        assert!(
+            models.iter().any(|m| m.id.0 == "openai/gpt-5.3-codex"),
+            "expected Codex Responses model under OpenAI OAuth"
+        );
+        assert!(
+            !models.iter().any(|m| m.id.0 == "openai/gpt-4.1"),
+            "openai-chat models should be hidden under OpenAI subscription OAuth"
+        );
+
+        let (provider, codex_model) = catalog.find("openai", "gpt-5.3-codex").unwrap();
+        let codex_route = build_route_for_store(provider, codex_model, Some(&store)).unwrap();
+        assert_eq!(
+            codex_route.endpoint,
+            keel_llm_route::OPENAI_CODEX_RESPONSES_URL
+        );
+        assert!(matches!(
+            codex_route.auth,
+            keel_llm_route::Auth::OpenAiCodexBearer { .. }
+        ));
+
+        // Switching to a plain API key restores the standard Platform API route.
+        store.set("openai", "sk-openai-test").unwrap();
+        let api_route = build_route_for_store(provider, codex_model, Some(&store)).unwrap();
+        assert_eq!(api_route.endpoint, "https://api.openai.com/v1/responses");
+        assert!(matches!(api_route.auth, keel_llm_route::Auth::Bearer { .. }));
     }
 
     #[test]
@@ -4925,5 +5482,259 @@ mod tests {
         set_api_key_with(&store, "openai", "sk-readded").unwrap();
         let resolver = KeelSecretResolver::new(store);
         assert_eq!(resolver.resolve(&cref).as_deref(), Some("sk-readded"));
+    }
+
+    #[test]
+    fn fresh_system_prompt_keeps_single_identity_and_harness_working_rules() {
+        let catalog = load_catalog().catalog;
+        let (provider, model_spec) =
+            resolve_model(&catalog, &EnvResolver, None, "openai/gpt-4.1").unwrap();
+        let route = build_route(&provider, &model_spec).unwrap();
+        let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+        let mut session = Session::new(route, client);
+
+        configure_fresh_system_prompt(
+            &mut session,
+            KeelProfile::default().system_prompt.as_deref(),
+            true,
+            true,
+            None,
+            None,
+            Some("User prefers short diffs."),
+        );
+
+        let sys = session.system.as_deref().expect("system prompt");
+        assert!(sys.starts_with(KEEL_SYSTEM_PROMPT));
+        assert!(
+            !sys.contains("You are keel, a coding agent."),
+            "app session should not stack the coding-agent identity before companion identity: {sys}"
+        );
+        assert!(sys.contains(keel_core::default_working_rules()));
+        assert!(sys.contains(crate::UI_CARDS_PROMPT));
+        assert!(sys.contains(crate::SCRATCH_PROMPT));
+        assert!(sys.contains("<keel_memory>\nUser prefers short diffs.\n</keel_memory>"));
+    }
+
+    #[test]
+    fn plan_mode_prompt_helper_unifies_ui_and_sandbox_guidance() {
+        assert!(keel_plan_mode_prompt(false, true).is_none());
+        assert!(keel_plan_mode_prompt(false, false).is_none());
+
+        let without_bash = keel_plan_mode_prompt(true, false).expect("ui plan prompt");
+        assert!(without_bash.contains("show_plan"));
+        assert!(!without_bash.contains("network-disabled OS sandbox"));
+
+        let with_bash = keel_plan_mode_prompt(true, true).expect("ui plan prompt with bash");
+        assert!(with_bash.contains("show_plan"));
+        assert!(with_bash.contains("read-only, network-disabled OS sandbox"));
+    }
+
+    #[test]
+    fn resume_restores_pinned_system_prompt_and_tracks_memory_updates() {
+        let dir = TmpDir::new("resume-sys");
+        let catalog = load_catalog().catalog;
+        let (provider, model_spec) =
+            resolve_model(&catalog, &EnvResolver, None, "openai/gpt-4.1").unwrap();
+        let route = build_route(&provider, &model_spec).unwrap();
+        let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+
+        let mut fresh = Session::new(route.clone(), client.clone());
+        let instructions_dir = TmpDir::new("resume-instructions");
+        fs::write(
+            instructions_dir.path().join("AGENTS.md"),
+            "Repo rule: always run cargo test.",
+        )
+        .unwrap();
+        let instructions = ProjectInstructions::discover_with_home(instructions_dir.path(), None);
+        configure_fresh_system_prompt(
+            &mut fresh,
+            Some(KEEL_SYSTEM_PROMPT),
+            false,
+            false,
+            None,
+            Some(&instructions),
+            Some("v1 memory"),
+        );
+        let pinned = fresh.system.clone().expect("pinned system");
+        let pos_inst = pinned
+            .find("Repo rule: always run cargo test.")
+            .expect("project instructions included");
+        let pos_mem = pinned
+            .find("<keel_memory>\nv1 memory\n</keel_memory>")
+            .expect("memory included");
+        assert!(pos_inst < pos_mem, "instructions should precede memory");
+        let (_log, id) =
+            create_session_log(dir.path(), &provider, &model_spec, dir.path(), &fresh).unwrap();
+
+        let mut resumed = Session::new(route, client);
+        let opened = try_resume_session(dir.path(), Some(&NativeSessionId(id)), &mut resumed)
+            .expect("resumed session");
+        assert!(opened.has_stored_system);
+        assert_eq!(resumed.system.as_deref(), Some(pinned.as_str()));
+
+        assert_eq!(last_known_memory(&resumed).as_deref(), Some("v1 memory"));
+        assert!(!should_emit_memory_update(Some("v1 memory"), "v1 memory"));
+        assert!(!should_emit_memory_update(
+            Some("v1 memory"),
+            &format!("{MEMORY_PREAMBLE}\n\n{MEMORY_UNAVAILABLE}")
+        ));
+        assert!(should_emit_memory_update(Some("v1 memory"), "v2 memory"));
+
+        resumed.push_message(Message::user(
+            "<keel_memory_update>\nv2 memory\n</keel_memory_update>",
+        ));
+        assert_eq!(last_known_memory(&resumed).as_deref(), Some("v2 memory"));
+        assert!(!should_emit_memory_update(Some("v2 memory"), "v2 memory"));
+    }
+
+    #[test]
+    fn history_ends_in_plan_mode_tracks_on_and_off_transitions() {
+        let mut history = vec![Message::user("hello")];
+        assert!(!history_ends_in_plan_mode(&history));
+
+        history.push(Message::user("[plan mode]\nPlan mode is on."));
+        assert!(history_ends_in_plan_mode(&history));
+
+        history.push(Message::user(format!(
+            "[plan mode]\n{}",
+            keel_core::PLAN_MODE_OFF_NOTICE
+        )));
+        assert!(!history_ends_in_plan_mode(&history));
+    }
+
+    #[test]
+    fn subagent_events_translate_without_duplicate_parent_tool_row() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tr = EventTranslator::new(
+            tx,
+            "grok/grok-4.20".into(),
+            200_000,
+            PathBuf::from("/tmp"),
+        );
+        tr.on_event(RunEvent::ToolStarted {
+            call_id: "call-1",
+            name: AGENT_TOOL_NAME,
+            summary: "agent explore",
+            arguments: r#"{"agent":"explore","description":"Scan crates","prompt":"Check"}"#,
+        });
+        tr.on_event(RunEvent::Subagent(&SubagentEvent::Started {
+            id: "sa-001".into(),
+            parent_call_id: Some("call-1".into()),
+            agent: "explore".into(),
+            description: "Scan crates".into(),
+            depth: 1,
+            model: "grok/grok-4.20".into(),
+            read_only: true,
+            resumed: false,
+            worktree: None,
+            worktree_branch: None,
+        }));
+        tr.on_event(RunEvent::Subagent(&SubagentEvent::ToolStarted {
+            id: "sa-001".into(),
+            agent: "explore".into(),
+            call_id: "c-tool-1".into(),
+            tool: "search".into(),
+            summary: "search Cargo.toml".into(),
+            arguments: r#"{"pattern":"keel-core"}"#.into(),
+        }));
+        tr.on_event(RunEvent::Subagent(&SubagentEvent::TextDelta {
+            id: "sa-001".into(),
+            agent: "explore".into(),
+            index: 0,
+            delta: "Found it.".into(),
+        }));
+        tr.on_event(RunEvent::Subagent(&SubagentEvent::ToolFinished {
+            id: "sa-001".into(),
+            agent: "explore".into(),
+            call_id: "c-tool-1".into(),
+            tool: "search".into(),
+            is_error: false,
+            output: "Cargo.toml:1: keel-core".into(),
+            duration_ms: Some(42),
+        }));
+        tr.on_event(RunEvent::Subagent(&SubagentEvent::Finished {
+            id: "sa-001".into(),
+            agent: "explore".into(),
+            model: "grok/grok-4.20".into(),
+            stop: RunStop::EndTurn,
+            turns: 2,
+            usage: keel_llm_types::Usage {
+                input_tokens: 1200,
+                output_tokens: 150,
+                ..Default::default()
+            },
+            duration_ms: 820,
+            worktree: None,
+            worktree_branch: None,
+        }));
+        tr.on_event(RunEvent::ToolFinished {
+            call_id: "call-1",
+            name: AGENT_TOOL_NAME,
+            is_error: false,
+            preview: "ok",
+            output: "Found it.",
+            images: &[],
+            duration_ms: Some(825),
+        });
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev.unwrap());
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolStarted { subagent: None, .. })),
+            "parent agent tool call must not emit a duplicate top-level tool row"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SubagentStarted { tool_id, subagent_id, name, description }
+            if tool_id == "call-1" && subagent_id == "sa-001" && name == "explore" && description == "Scan crates"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Text { delta, subagent: Some(sub), .. }
+            if delta == "Found it." && sub.id == "sa-001"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Usage { usage }
+            if usage.input == 1200 && usage.output == 150 && usage.context_window.is_none()
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SubagentMeta { subagent_id, turns: Some(2), duration_ms: Some(820), .. }
+            if subagent_id == "sa-001"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SubagentDone { subagent_id, status: TurnStatus::Completed {} }
+            if subagent_id == "sa-001"
+        )));
+    }
+
+    #[test]
+    fn agent_tool_is_auto_allowed_and_subagent_permission_prefix_parses() {
+        let (tx, _rx) = oneshot::channel();
+        let req = PermissionRequest {
+            tool: AGENT_TOOL_NAME.into(),
+            summary: "agent explore".into(),
+            arguments: json!({"agent": "explore", "prompt": "check"}),
+            responder: tx,
+        };
+        assert!(matches!(
+            auto_permission(&req, PermissionMode::Ask, false, None),
+            Some(PermissionDecision::Allow)
+        ));
+        assert!(matches!(
+            auto_permission(&req, PermissionMode::Ask, true, None),
+            Some(PermissionDecision::Allow)
+        ));
+        assert_eq!(
+            parse_subagent_permission_prefix("[agent:worker#sa-002] bash cargo test"),
+            Some(("worker", "sa-002"))
+        );
+        assert_eq!(parse_subagent_permission_prefix("bash cargo test"), None);
     }
 }

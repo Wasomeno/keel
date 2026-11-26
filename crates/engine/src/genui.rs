@@ -166,21 +166,37 @@ pub fn ui_tools() -> Value {
             }
         },
         {
+            "name": "show_images",
+            "description": "Show local images or screenshots inline in your reply as a compact clickable gallery (up to 3 squares with a 3+ overflow; clicking any square opens a full-screen viewer). Call this whenever you want to send screenshots or images directly to the user in your reply instead of only naming paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": "Paths to image files on disk (workspace-relative or absolute)"
+                    }
+                },
+                "required": ["paths"]
+            }
+        },
+        {
             "name": "show_steps",
-            "description": "Show a numbered step list. Use kind: 'task' (default) to show main task execution progress in the right session panel. Use kind: 'guide' to show how-to instructions in the chat reply. At most eight steps. current is the index of the step in progress; omit it when every step is done.",
+            "description": "Show a numbered step list. Use kind: 'task' (default) to show main task execution progress in the todo bar above the composer. Use kind: 'guide' to show how-to instructions in the chat reply. At most eight steps. current is the index of the step in progress; omit it when every step is done.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 8, "description": "Step labels, in order, one short line each"},
                     "current": {"type": "integer", "description": "Index of the step in progress. Omit when all are done"},
-                    "kind": {"type": "string", "enum": ["task", "guide"], "description": "'task' (default) for main task execution steps in the right session panel; 'guide' for how-to instructions in chat"}
+                    "kind": {"type": "string", "enum": ["task", "guide"], "description": "'task' (default) for main task execution steps above the composer; 'guide' for how-to instructions in chat"}
                 },
                 "required": ["items"]
             }
         },
         {
             "name": "task_steps",
-            "description": "Show or update the main task execution steps in the right session panel. At most eight steps. current is the index of the step in progress; omit it when every step is done.",
+            "description": "Show or update the live todo list above the composer for multi-step tasks. Call at the start with current: 0, advance current as each step starts, and omit current when every step is done. At most eight steps.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -216,6 +232,7 @@ pub fn ui_tools() -> Value {
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string"},
+                                "summary": {"type": "string", "description": "Optional short takeaway or best-for note for this option"},
                                 "points": {"type": "array", "items": {"type": "string"}, "maxItems": 4, "description": "Short claims, one line each"},
                                 "recommended": {"type": "boolean", "description": "Set true on at most one column, and only when presenting options to choose between where you recommend one; leave false/omitted otherwise"}
                             },
@@ -342,6 +359,7 @@ pub fn ui_call(name: &str, args: &Value) -> Option<Result<String, String>> {
         "show_stats" => stats_spec(args),
         "show_commands" => commands_spec(args),
         "show_files" => files_spec(args),
+        "show_images" => images_spec(args),
         "show_mr" => mr_call_spec(args),
         "show_steps" => steps_spec(args),
         "task_steps" => steps_spec(args),
@@ -355,7 +373,8 @@ pub fn ui_call(name: &str, args: &Value) -> Option<Result<String, String>> {
     };
     // The spec stays the last JSON line: the engine reads the card from it.
     Some(spec.map(|spec| match *tool {
-        "show_steps" | "task_steps" | "show_compare" | "show_diagram" | "show_plan" => {
+        "show_steps" | "task_steps" | "show_compare" | "show_diagram" | "show_plan"
+        | "show_images" => {
             format!("Shown to the user as a card. Do not repeat it in your reply.\n{spec}")
         }
         _ => spec.to_string(),
@@ -639,6 +658,72 @@ fn files_spec(args: &Value) -> Result<Value, String> {
     Ok(json!({"component": "files", "root": root, "files": files, "more": 0}))
 }
 
+fn is_image_ext(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" | "svg"
+            )
+        })
+}
+
+fn images_spec(args: &Value) -> Result<Value, String> {
+    let raw = strings(&args["paths"])
+        .or_else(|| strings(&args["images"]))
+        .filter(|p| !p.is_empty())
+        .ok_or("images needs one or more image file paths")?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    for entry in raw.into_iter().take(MAX_FILES) {
+        let trimmed = entry.trim().trim_matches('`');
+        if trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+            || trimmed.starts_with("data:")
+        {
+            continue;
+        }
+        let cleaned = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+        if cleaned.contains("://") {
+            continue;
+        }
+        let expanded = if let Some(rest) = cleaned.strip_prefix("~/") {
+            std::env::var("HOME")
+                .map(|home| format!("{}/{rest}", home.trim_end_matches('/')))
+                .unwrap_or_else(|_| cleaned.to_string())
+        } else {
+            cleaned.strip_prefix("./").unwrap_or(cleaned).to_string()
+        };
+        if expanded.is_empty() || !is_image_ext(&expanded) {
+            continue;
+        }
+        let resolved = {
+            let p = std::path::Path::new(&expanded);
+            if p.is_absolute() {
+                expanded
+            } else {
+                let joined = cwd.join(p);
+                if joined.is_file() {
+                    joined.to_string_lossy().into_owned()
+                } else {
+                    expanded
+                }
+            }
+        };
+        if seen.insert(resolved.clone()) {
+            paths.push(resolved);
+        }
+    }
+    if paths.is_empty() {
+        return Err("images needs valid image paths (.png, .jpg, .webp, .gif, .svg)".into());
+    }
+    let root = cwd.to_string_lossy().into_owned();
+    Ok(json!({"component": "images", "root": root, "paths": paths}))
+}
+
 fn steps_spec(args: &Value) -> Result<Value, String> {
     let items = strings(&args["items"])
         .filter(|s| (2..=MAX_STEPS).contains(&s.len()))
@@ -674,7 +759,15 @@ fn compare_spec(args: &Value) -> Result<Value, String> {
         if title.is_empty() || points.is_empty() {
             return None;
         }
-        Some(json!({"title": title, "points": points.into_iter().take(MAX_POINTS).collect::<Vec<_>>(), "recommended": col["recommended"] == true}))
+        let mut obj = json!({
+            "title": title,
+            "points": points.into_iter().take(MAX_POINTS).collect::<Vec<_>>(),
+            "recommended": col["recommended"] == true,
+        });
+        if let Some(summary) = col["summary"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            obj["summary"] = json!(summary);
+        }
+        Some(obj)
     }).take(3).collect();
     if columns.len() < 2 {
         return Err("a comparison needs two columns".into());
@@ -1075,12 +1168,14 @@ mod tests {
             "show_compare",
             &json!({
                 "columns": [
-                    {"title": "Redis", "points": ["Survives a restart"], "recommended": true},
-                    {"title": "Memory", "points": ["Nothing to run"]}
+                    {"title": "Redis", "summary": "Best for persistence", "points": ["Survives a restart"], "recommended": true},
+                    {"title": "Memory", "summary": " ", "points": ["Nothing to run"]}
                 ]
             }),
         ));
         assert_eq!(compared["columns"][0]["recommended"], true);
+        assert_eq!(compared["columns"][0]["summary"], "Best for persistence");
+        assert!(compared["columns"][1].get("summary").is_none());
         assert!(
             ui_call(
                 "show_compare",
@@ -1221,5 +1316,18 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn an_images_call_normalizes_and_deduplicates_paths() {
+        let spec = card(ui_call(
+            "show_images",
+            &json!({"paths": ["./docs/a.png", "docs/a.png", "https://example.com/x.png", "notes.txt", "b.webp"]}),
+        ));
+        assert_eq!(spec["component"], "images");
+        assert_eq!(spec["paths"], json!(["docs/a.png", "b.webp"]));
+        assert!(keel_proto::is_ui_tool("mcp__keel-ui__show_images"));
+        assert!(ui_call("show_images", &json!({"paths": ["notes.txt"]})).unwrap().is_err());
+        assert!(ui_call("show_images", &json!({"paths": []})).unwrap().is_err());
     }
 }

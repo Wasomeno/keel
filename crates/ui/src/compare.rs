@@ -6,6 +6,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     pub title: String,
+    pub summary: Option<String>,
     pub points: Vec<String>,
     pub recommended: bool,
 }
@@ -20,6 +21,11 @@ pub fn from_spec(spec: &Value) -> Option<Vec<Column>> {
         .iter()
         .filter_map(|col| {
             let title = col["title"].as_str().unwrap_or_default().trim().to_string();
+            let summary = col["summary"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             let points: Vec<String> = col["points"]
                 .as_array()?
                 .iter()
@@ -30,6 +36,7 @@ pub fn from_spec(spec: &Value) -> Option<Vec<Column>> {
                 .collect();
             (!title.is_empty() && !points.is_empty()).then_some(Column {
                 title,
+                summary,
                 points,
                 recommended: col["recommended"] == true,
             })
@@ -49,12 +56,14 @@ mod tests {
         let columns = from_spec(&json!({
             "component": "compare",
             "columns": [
-                { "title": "Redis", "points": ["Survives a restart"], "recommended": true },
-                { "title": "Memory", "points": ["Nothing to run", " "] }
+                { "title": "Redis", "summary": "Best for persistence", "points": ["Survives a restart"], "recommended": true },
+                { "title": "Memory", "summary": " ", "points": ["Nothing to run", " "] }
             ]
         }))
         .unwrap();
         assert_eq!(columns[0].recommended, true);
+        assert_eq!(columns[0].summary.as_deref(), Some("Best for persistence"));
+        assert_eq!(columns[1].summary, None);
         assert_eq!(columns[1].points, vec!["Nothing to run".to_string()]);
         assert!(from_spec(&json!({ "component": "compare", "columns": [{ "title": "Only", "points": ["a"] }] })).is_none());
     }

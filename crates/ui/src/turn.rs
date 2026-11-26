@@ -83,6 +83,8 @@ pub enum Step {
         id: String,
         citations: crate::citations::Citations,
     },
+    /// Inline image gallery the engine's generative UI added (a `ui` part with `component: "images"`).
+    Images { id: String, paths: Vec<String> },
     /// The agent's plan (a `plan` part); one per message, replaced whole.
     Plan(Vec<crate::trace::PlanItem>),
 }
@@ -145,6 +147,7 @@ pub enum DocStep {
         id: String,
         citations: crate::citations::Citations,
     },
+    Images { id: String, paths: Vec<String> },
     Plan(Vec<crate::trace::PlanItem>),
 }
 
@@ -367,12 +370,38 @@ pub fn doc_steps(view: &serde_json::Value) -> Vec<DocStep> {
                         id: s("id"),
                         citations,
                     });
+                } else if let Some(paths) = parse_images_spec(spec) {
+                    out.push(DocStep::Images { id: s("id"), paths });
                 }
             }
             _ => {}
         }
     }
     out
+}
+
+fn parse_images_spec(spec: &serde_json::Value) -> Option<Vec<String>> {
+    if spec.get("component").and_then(|v| v.as_str()) != Some("images") {
+        return None;
+    }
+    let root = spec.get("root").and_then(|v| v.as_str()).unwrap_or("");
+    let paths: Vec<String> = spec
+        .get("paths")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+        .map(|p| {
+            let path = std::path::Path::new(p);
+            if !path.is_absolute() && !root.is_empty() {
+                let joined = std::path::Path::new(root).join(path);
+                if joined.is_file() {
+                    return joined.to_string_lossy().into_owned();
+                }
+            }
+            p.to_string()
+        })
+        .collect();
+    (!paths.is_empty()).then_some(paths)
 }
 
 fn kind(step: &Step) -> u8 {
@@ -395,6 +424,7 @@ fn kind(step: &Step) -> u8 {
         Step::Diagram { .. } => 15,
         Step::PlanCard { .. } => 16,
         Step::Citations { .. } => 17,
+        Step::Images { .. } => 18,
     }
 }
 
@@ -407,7 +437,7 @@ fn text_count(steps: &[Step]) -> usize {
 /// ordinal. Live steps past the doc's (it lags the stream) stay at the end.
 pub fn merge_doc(message_id: &str, old: Vec<Step>, doc: Vec<DocStep>) -> Vec<Step> {
     // Old steps by kind, in order.
-    let mut by_kind: [std::collections::VecDeque<Step>; 18] = Default::default();
+    let mut by_kind: [std::collections::VecDeque<Step>; 19] = Default::default();
     for step in old {
         by_kind[kind(&step) as usize].push_back(step);
     }
@@ -507,10 +537,14 @@ pub fn merge_doc(message_id: &str, old: Vec<Step>, doc: Vec<DocStep>) -> Vec<Ste
                 by_kind[17].pop_front();
                 Step::Citations { id, citations }
             }
+            DocStep::Images { id, paths } => {
+                by_kind[18].pop_front();
+                Step::Images { id, paths }
+            }
         });
     }
     // Live-only text and thinking (tools, subagents and charts only ever come from the doc).
-    let [texts, reasonings, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _] = by_kind;
+    let [texts, reasonings, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _] = by_kind;
     for step in reasonings.into_iter().chain(texts) {
         // A live step the doc already holds (a driver that glued it onto an
         // earlier part) is not shown twice.
@@ -574,6 +608,7 @@ impl Step {
                 | Step::Compare { .. }
                 | Step::Diagram { .. }
                 | Step::PlanCard { .. }
+                | Step::Images { .. }
         )
     }
 }
@@ -688,8 +723,15 @@ pub fn push_rows(
                             continue;
                         }
                     }
+                    if let TranscriptBlock::Shots { id, paths } = block {
+                        push_reply_shots(out, id, paths);
+                        continue;
+                    }
                     out.push(block);
                 }
+            }
+            Step::Images { id, paths } => {
+                push_reply_shots(out, format!("{message_id}#ui-{id}"), paths.clone());
             }
             Step::Subagent {
                 subagent_id,
@@ -931,6 +973,34 @@ fn line_overrides(
         }
     }
     out
+}
+
+/// Append a reply `Shots` row, coalescing consecutive non-tool image rows so
+/// adjacent markdown images or `show_images` calls share one 3+ gallery strip.
+fn push_reply_shots(out: &mut Vec<TranscriptBlock>, id: String, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Some(TranscriptBlock::Shots {
+        id: prev_id,
+        paths: prev_paths,
+    }) = out.last_mut()
+        && !prev_id.contains("#tools")
+    {
+        for path in paths {
+            if !prev_paths.contains(&path) {
+                prev_paths.push(path);
+            }
+        }
+        return;
+    }
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !deduped.contains(&path) {
+            deduped.push(path);
+        }
+    }
+    out.push(TranscriptBlock::Shots { id, paths: deduped });
 }
 
 #[cfg(test)]
@@ -1479,5 +1549,30 @@ mod tests {
         rows.clear();
         push_rows("m", &[step(1)], &|id| id.ends_with("#ui-c=0"), &mut rows);
         assert!(!open(&rows), "a saved close choice wins");
+    }
+
+    #[test]
+    fn show_images_ui_part_and_consecutive_shots_coalesce() {
+        let view = serde_json::json!({"parts": [
+            {"kind": "text", "id": "t1", "body": "![a](docs/a.png)\n\n![b](docs/b.png)"},
+            {"kind": "ui", "id": "u1", "spec": {"component": "images", "paths": ["docs/b.png", "docs/c.png", "docs/d.png"]}}
+        ]});
+        let mut steps = merge_doc("m", Vec::new(), doc_steps(&view));
+        parsed(&mut steps);
+        let mut rows = Vec::new();
+        push_rows("m", &steps, &|_| false, &mut rows);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0],
+            TranscriptBlock::Shots {
+                id: "m#t0#0".into(),
+                paths: vec![
+                    "docs/a.png".into(),
+                    "docs/b.png".into(),
+                    "docs/c.png".into(),
+                    "docs/d.png".into()
+                ]
+            }
+        );
     }
 }

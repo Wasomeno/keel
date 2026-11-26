@@ -102,6 +102,51 @@ fn writes_files(name: &str) -> bool {
     .any(|w| name.contains(w))
 }
 
+/// Whether a finished tool call could plausibly have written or modified
+/// workspace files (unlike read-only inspection, search, fetch, or UI tools).
+pub fn may_write_files(name: &str, state: &str) -> bool {
+    if state != "done" {
+        return false;
+    }
+    if writes_files(name) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "read"
+            | "read_file"
+            | "view"
+            | "grep"
+            | "rg"
+            | "search"
+            | "glob"
+            | "find"
+            | "ls"
+            | "list_dir"
+            | "list_directory"
+            | "fetch"
+            | "fetch_url"
+            | "webfetch"
+            | "web_search"
+            | "websearch"
+            | "todowrite"
+            | "todo_write"
+            | "todoread"
+            | "ask_user"
+            | "question"
+    ) || keel_proto::UI_TOOLS
+        .iter()
+        .any(|ui| lower == *ui || lower.ends_with(ui))
+        || lower == keel_proto::RECEIPT_TOOL
+        || lower.contains("keel-browser")
+        || lower.starts_with("gitlab")
+    {
+        return false;
+    }
+    true
+}
+
 /// Paths a finished file-writing tool names, in its title or result line
 /// (pi: "Successfully wrote to /a/b.svg"; Claude: "File created successfully at: /a/b.svg").
 pub fn candidates_in_tool(name: &str, state: &str, summary: &str) -> Vec<String> {
@@ -111,6 +156,34 @@ pub fn candidates_in_tool(name: &str, state: &str, summary: &str) -> Vec<String>
     let mut out = path_tokens(name);
     out.extend(path_tokens(summary));
     out
+}
+
+fn contains_word(lower: &str, word: &str) -> bool {
+    lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|tok| tok == word)
+}
+
+fn is_negated_or_hypothetical(lower: &str) -> bool {
+    const NEGATIONS_AND_MODALS: [&str; 16] = [
+        "not changed",
+        "not modified",
+        "not edited",
+        "not updated",
+        "not touched",
+        "no changes",
+        "do not change",
+        "does not change",
+        "without changing",
+        "should be ",
+        "would be ",
+        "will be ",
+        "can be ",
+        "could be ",
+        "must ",
+        "need to ",
+    ];
+    NEGATIONS_AND_MODALS.iter().any(|p| lower.contains(p))
 }
 
 /// Paths on answer lines that say a file was made or edited ("Created pelican.svg", "Added dummy comments in:").
@@ -133,8 +206,16 @@ pub fn candidates_in_text(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            in_list = false;
+            continue;
+        }
         let lower = trimmed.to_ascii_lowercase();
-        if VERBS.iter().any(|v| lower.contains(v)) {
+        if is_negated_or_hypothetical(&lower) {
+            in_list = false;
+            continue;
+        }
+        if VERBS.iter().any(|v| contains_word(&lower, v)) {
             in_list = true;
             out.extend(path_tokens(line));
         } else if in_list
@@ -153,7 +234,7 @@ pub fn candidates_in_text(text: &str) -> Vec<String> {
 
 /// Words in `text` that look like file paths: a stem and a short extension
 /// with a letter in it, not a URL.
-fn path_tokens(text: &str) -> Vec<String> {
+pub(crate) fn path_tokens(text: &str) -> Vec<String> {
     text.split(|ch: char| {
         ch.is_whitespace()
             || matches!(
@@ -368,6 +449,17 @@ mod tests {
         );
         assert!(candidates_in_text("See src/main.rs for details.").is_empty());
         assert!(candidates_in_text("Created https://example.com/x.svg and v0.56").is_empty());
+        assert!(
+            candidates_in_text(
+                "## What changes\n1. src/utils/format-currency.ts is not changed.\n2. Leave src/a.ts unchanged."
+            )
+            .is_empty()
+        );
+        assert!(!may_write_files("read", "done"));
+        assert!(!may_write_files("grep", "done"));
+        assert!(!may_write_files("mcp__keel-ui__show_choices", "done"));
+        assert!(may_write_files("edit", "done"));
+        assert!(may_write_files("bash", "done"));
     }
 
     #[test]

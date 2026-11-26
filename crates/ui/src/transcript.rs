@@ -16,7 +16,7 @@
 //! - Paint-only syntax colors.
 
 use crate::hover_fade::HoverFadeExt;
-use crate::motion::{reveal_on_hover, reveal_on_hover_curved};
+use crate::motion::reveal_on_hover_curved;
 use crate::style::zpx;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -247,7 +247,7 @@ impl TranscriptState {
     /// counts unmeasured rows as 0 px tall, so a small overdraw let a fast flick
     /// clamp the scroll to 0 (a jump to the very top) and made rows appended
     /// below look like "near the bottom" (a yank back down).
-    pub const OVERDRAW: Pixels = px(2048.0);
+    pub const OVERDRAW: Pixels = px(768.0);
     /// Code (and folded trace text) line height, at the current zoom.
     pub fn line_height() -> Pixels {
         crate::style::zpx(20.0)
@@ -488,6 +488,13 @@ impl TranscriptState {
                 continue;
             }
             let text = match &row.block {
+                TranscriptBlock::UserMessage { text, .. } => {
+                    if text.trim().is_empty() {
+                        "Image"
+                    } else {
+                        text.as_str()
+                    }
+                }
                 TranscriptBlock::Paragraph { content, .. }
                 | TranscriptBlock::Heading { content, .. }
                 | TranscriptBlock::Quote { content, .. } => content.as_str(),
@@ -735,6 +742,11 @@ impl TranscriptState {
         Some(now + crate::motion::ROW_STAGGER * k.min(3) as u32)
     }
 
+    /// Whether any row currently has an active entrance or exit animation.
+    pub fn has_motion(&self) -> bool {
+        self.has_motion
+    }
+
     /// Drop ghosts whose exit has played. True while any row still enters
     /// or leaves (the view keeps asking for frames).
     pub fn reap(&mut self, now: std::time::Instant) -> bool {
@@ -783,6 +795,13 @@ impl TranscriptState {
             return cached;
         }
         let height = match block {
+            TranscriptBlock::UserMessage { blocks, .. } => {
+                let children: f32 = blocks
+                    .iter()
+                    .map(|block| f32::from(self.compute_block_height(block, width)))
+                    .sum();
+                px(children) + zpx(16. + 8. * blocks.len().saturating_sub(1) as f32)
+            }
             // Muted narration keeps the prose type, so it is as tall.
             TranscriptBlock::Interim(inner) => return self.compute_block_height(inner, width),
             TranscriptBlock::Code {
@@ -849,9 +868,7 @@ impl TranscriptState {
             }
             TranscriptBlock::TurnSummary { .. } => px(crate::trace_view::LINE_H),
             TranscriptBlock::Images { .. } => px(THUMB_H + 8.0),
-            TranscriptBlock::Shots { paths, .. } => {
-                px(paths.len().max(1) as f32 * (SHOT_H + 8.0) + 8.0)
-            }
+            TranscriptBlock::Shots { .. } => px(SHOT_SQ + 10.0),
             TranscriptBlock::Files { .. } => px(FILE_CHIP_H + 12.0),
             TranscriptBlock::Reasoning {
                 content, expanded, ..
@@ -905,7 +922,9 @@ impl TranscriptState {
             TranscriptBlock::Callout { .. } => px(CALLOUT_H + 10.0),
             TranscriptBlock::Compare { columns, .. } => {
                 let points = columns.iter().map(|c| c.points.len()).max().unwrap_or(1);
-                px(COMPARE_HEAD_H + 22.0 * points as f32 + 22.0)
+                let has_summary = columns.iter().any(|c| c.summary.is_some());
+                let col_head = if has_summary { 60.0 } else { 42.0 };
+                px(COMPARE_HEAD_H + col_head + 26.0 * points as f32 + 28.0)
             }
             TranscriptBlock::PlanCard { plan, .. } => {
                 px(36. + 20. + plan.steps.len() as f32 * 40. + 48.)
@@ -935,6 +954,11 @@ pub enum RowAction {
     },
     OpenImage {
         path: String,
+    },
+    /// Open an inline image gallery modal at `index` with the full list of images.
+    OpenImageGallery {
+        paths: Vec<String>,
+        index: usize,
     },
     /// A file chip: preview in the browser pane, or open with the system app.
     OpenFile {
@@ -1119,9 +1143,8 @@ pub struct RowContext {
     /// Uncapped column content width, in the same unit as `prose_max_w`.
     /// Diagrams scale to this so they keep the full column.
     pub column_w: f32,
-    /// Mid-slide: the widest a user bubble may wrap at, in px. Rows follow
-    /// the column's gliding width (their edges and right-aligned icons move
-    /// with it), while text wraps once at the narrower end and keeps it.
+    /// Approximate maximum user bubble width in window px (85% of the reading
+    /// column), used to cap inline file chips inside a user bubble.
     pub bubble_max_w: Option<f32>,
     /// Debug trace: records a code block's or tool row's painted box.
     pub probe: Option<std::rc::Rc<dyn Fn(RowProbe) -> Option<AnyElement>>>,
@@ -1133,6 +1156,20 @@ pub struct RowContext {
     pub citations: std::rc::Rc<HashMap<String, std::rc::Rc<crate::citations::Citations>>>,
     /// Resolved citations for the row currently being rendered.
     pub current_citations: Option<(String, std::rc::Rc<crate::citations::Citations>)>,
+    /// Live metadata for active/completed subagents in the current chat, used
+    /// by inline subagent trace rows without rewriting the parent message doc.
+    pub subagent_info: std::rc::Rc<HashMap<String, SubagentInlineInfo>>,
+}
+
+/// Compact per-subagent live metadata surfaced on inline trace rows.
+#[derive(Clone, Debug, Default)]
+pub struct SubagentInlineInfo {
+    pub description: String,
+    pub active_tool: String,
+    pub turns: u32,
+    pub duration_ms: Option<u64>,
+    pub read_only: bool,
+    pub worktree_branch: Option<String>,
 }
 
 /// Which row box a debug probe reads.
@@ -1767,6 +1804,27 @@ fn render_chart(
     div().w_full().py_1().child(card)
 }
 
+/// Shared "Recommended" pill for choice rows and comparison columns.
+fn recommended_pill(id: String, reduced: bool, t: Tokens) -> gpui::AnyElement {
+    crate::motion::settle(
+        div()
+            .flex_none()
+            .h(zpx(20.))
+            .px(zpx(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(c(t.accent))
+            .text_color(c(t.text_on_accent))
+            .text_size(zpx(11.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child("Recommended"),
+        id,
+        reduced,
+    )
+}
+
 /// Choice buttons as a card: a header, then one row per option with its
 /// number, label, a "Recommended" pill, and an arrow that lights on hover.
 /// Only the latest turn's card clicks, and only while the chat is idle; an
@@ -1822,30 +1880,6 @@ fn render_choices(
                     .text_color(c(t.text_muted))
             })
             .child((ix + 1).to_string());
-        let pill = div()
-            .flex_none()
-            .h(zpx(18.))
-            .px_1p5()
-            .flex()
-            .items_center()
-            .gap_1()
-            .rounded_full()
-            .border_1()
-            .border_color(c(t.border).opacity(0.6))
-            .bg(c(t.surface).opacity(0.75))
-            .text_size(zpx(10.5))
-            .text_color(c(t.text_muted))
-            .child(Icon::StarFilled.el(zpx(9.)))
-            .child("Recommended");
-        let pill = if recommended {
-            crate::motion::settle(
-                pill,
-                format!("choice-rec-{}-{ix}", item.row_id()),
-                rc.reduced,
-            )
-        } else {
-            pill.into_any_element()
-        };
         let row = div()
             .id(ElementId::Name(group.clone()))
             .group(group.clone())
@@ -1868,7 +1902,13 @@ fn render_choices(
                     .text_color(c(t.text))
                     .child(label.clone()),
             )
-            .when(recommended, |d| d.child(pill))
+            .when(recommended, |d| {
+                d.child(recommended_pill(
+                    format!("choice-rec-{}-{ix}", item.row_id()),
+                    rc.reduced,
+                    t,
+                ))
+            })
             .when(live, |d| {
                 d.cursor_pointer()
                     .active(|s| s.opacity(0.85))
@@ -2179,20 +2219,13 @@ fn render_mr_card(
     };
     let open = {
         let (url, on_action) = (card.url(), rc.on_action.clone());
-        let btn = interactive_ctrl(icon_ctrl(format!("mr-open-{row_id}"), false))
+        interactive_ctrl(icon_ctrl(format!("mr-open-{row_id}"), false))
             .aria_label("Open merge request")
             .tooltip(move |_, cx| {
                 cx.new(|_| crate::view::Tip::new("Open on GitLab", t)).into()
             })
             .on_click(move |_, _, cx| on_action(RowAction::OpenUrl { url: url.clone() }, cx))
-            .child(Icon::External.el(zpx(12.)));
-        reveal_on_hover(
-            format!("mr-reveal-open-{row_id}"),
-            group.clone(),
-            0.45,
-            1.,
-            btn,
-        )
+            .child(Icon::External.el(zpx(12.)))
     };
     let refresh_btn = {
         let (on_action, r_id, msg_id, p_id) = (
@@ -2201,7 +2234,7 @@ fn render_mr_card(
             message_id.to_string(),
             part_id.to_string(),
         );
-        let btn = icon_ctrl(format!("mr-refresh-{row_id}"), refreshing)
+        icon_ctrl(format!("mr-refresh-{row_id}"), refreshing)
             .aria_label("Refresh merge request")
             .when(!refreshing, |d| {
                 interactive_ctrl(d).on_click(move |_, _, cx| {
@@ -2223,15 +2256,7 @@ fn render_mr_card(
                 Icon::Spinner.el(zpx(12.))
             } else {
                 Icon::Reload.el(zpx(12.))
-            });
-        // Stays up while a refresh runs, so the spinner shows without hover.
-        reveal_on_hover(
-            format!("mr-reveal-refresh-{row_id}"),
-            group.clone(),
-            if refreshing { 1. } else { 0.45 },
-            1.,
-            btn,
-        )
+            })
     };
     let rows = mr_detail_rows(card, status, t);
     let spoken = format!(
@@ -2245,21 +2270,14 @@ fn render_mr_card(
     let details = {
         let heading: SharedString = card.mr.label().into();
         let tip_rows = rows.clone();
-        let btn = interactive_ctrl(icon_ctrl(format!("mr-details-{row_id}"), false))
+        interactive_ctrl(icon_ctrl(format!("mr-details-{row_id}"), false))
             .aria_label(spoken)
             .tooltip(move |_, cx| {
                 let (heading, rows) = (heading.clone(), tip_rows.clone());
                 cx.new(|_| MrDetailsTip { heading, rows, t }).into()
             })
             .tooltip_show_delay(crate::view::tooltip::delay())
-            .child(Icon::Info.el(zpx(13.)));
-        reveal_on_hover(
-            format!("mr-reveal-details-{row_id}"),
-            group.clone(),
-            0.45,
-            1.,
-            btn,
-        )
+            .child(Icon::Info.el(zpx(13.)))
     };
     let badge = if snap.draft {
         div()
@@ -2318,14 +2336,23 @@ fn render_mr_card(
             .child(card.mr.project.clone())
             .into_any_element()
     };
-    let controls = div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_0p5()
-        .child(details)
-        .child(refresh_btn)
-        .child(open);
+    let controls = reveal_on_hover_curved(
+        format!("mr-reveal-controls-{row_id}"),
+        group.clone(),
+        if refreshing { 1. } else { 0. },
+        1.,
+        std::time::Duration::from_millis(160),
+        std::time::Duration::from_millis(110),
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .child(details)
+            .child(refresh_btn)
+            .child(open),
+    )
+    .with_offset(4., 0.);
     let top_row = div()
         .min_h(zpx(24.))
         .flex()
@@ -3404,101 +3431,195 @@ fn render_citations(
     ))
 }
 
-/// Claims side by side. Columns cascade in; the recommended one gets the
-/// same accent treatment as a recommended choice.
+/// Claims side by side in one unified split card: a quiet header bar,
+/// hairline-divided columns, tonal step on the recommended option, and
+/// wrapping claims that never clip.
 fn render_compare(
     item: &TranscriptRowItem,
     columns: &[crate::compare::Column],
     rc: &RowContext,
 ) -> gpui::Div {
     let t = rc.tokens;
-    let cards = columns.iter().enumerate().map(|(ix, col)| {
-        let points = col.points.iter().map(|point| {
+    let row_id = item.row_id();
+    let has_summary = columns.iter().any(|c| c.summary.is_some());
+    let header = div()
+        .h(zpx(COMPARE_HEAD_H))
+        .px(zpx(14.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .border_b_1()
+        .border_color(c(t.border).opacity(0.65))
+        .child(
             div()
-                .h(px(22.))
                 .flex()
                 .items_center()
-                .gap_1p5()
+                .gap(zpx(8.))
+                .child(Icon::GitCompare.el(zpx(14.)).text_color(c(t.text_muted)))
+                .child(
+                    div()
+                        .text_size(zpx(13.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(t.text))
+                        .child("Compare"),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                    "tnum".into(),
+                    1,
+                )])))
+                .text_size(zpx(12.))
+                .text_color(c(t.text_faint))
+                .child(format!("{} options", columns.len())),
+        );
+
+    let cols = columns.iter().enumerate().map(|(ix, col)| {
+        let recommended = col.recommended;
+        let points = col.points.iter().map(|point| {
+            div()
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(zpx(8.))
                 .child(
                     div()
                         .flex_none()
-                        .size(px(4.))
+                        .mt(zpx(if recommended { 6.5 } else { 7. }))
+                        .size(zpx(if recommended { 5. } else { 4. }))
                         .rounded_full()
-                        .bg(c(t.text_faint)),
+                        .bg(if recommended {
+                            c(t.accent)
+                        } else {
+                            c(t.text_faint)
+                        }),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
                         .text_size(zpx(12.5))
-                        .text_color(c(t.text))
+                        .line_height(zpx(18.))
+                        .text_color(if recommended {
+                            c(t.text)
+                        } else {
+                            c(t.text).opacity(0.86)
+                        })
                         .child(point.clone()),
                 )
         });
-        let card = div()
-            .id(("compare-card", ix))
-            .flex_1()
-            .min_w_0()
-            .px_3()
-            .py(px(10.))
+
+        let col_header = div()
+            .w_full()
+            .px(zpx(14.))
+            .pt(zpx(12.))
+            .pb(zpx(10.))
             .flex()
             .flex_col()
-            .gap_1()
-            .rounded(RADIUS_LG)
-            .border_1()
-            .border_color(if col.recommended {
-                c(t.accent).opacity(0.45)
-            } else {
-                c(t.border)
-            })
-            .bg(c(t.floating))
-            .hover_fade(c(t.hover), None)
+            .gap(zpx(3.))
+            .border_b_1()
+            .border_color(c(t.border).opacity(0.45))
+            .when(recommended, |d| d.bg(c(t.accent).opacity(0.03)))
             .child(
                 div()
-                    .h(px(18.))
+                    .w_full()
+                    .min_h(zpx(20.))
                     .flex()
                     .items_center()
-                    .gap_1p5()
+                    .justify_between()
+                    .gap(zpx(8.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(zpx(13.))
+                            .text_size(zpx(13.5))
+                            .line_height(zpx(18.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(c(t.text))
                             .child(col.title.clone()),
                     )
-                    .when(col.recommended, |d| {
-                        d.child(crate::motion::settle(
-                            div()
-                                .flex_none()
-                                .h(zpx(18.))
-                                .px_1p5()
-                                .flex()
-                                .items_center()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(c(t.border).opacity(0.6))
-                                .bg(c(t.surface).opacity(0.75))
-                                .text_size(zpx(10.5))
-                                .text_color(c(t.text_muted))
-                                .child("Recommended"),
-                            format!("compare-rec-{}-{ix}", item.row_id()),
+                    .when(recommended, |d| {
+                        d.child(recommended_pill(
+                            format!("compare-rec-{row_id}-{ix}"),
                             rc.reduced,
+                            t,
                         ))
                     }),
             )
+            .when_some(col.summary.as_ref(), |d, summary| {
+                d.child(
+                    div()
+                        .w_full()
+                        .text_size(zpx(12.))
+                        .line_height(zpx(16.))
+                        .text_color(c(t.text_muted))
+                        .child(summary.clone()),
+                )
+            })
+            .when(has_summary && col.summary.is_none(), |d| {
+                d.child(div().h(zpx(16.)))
+            });
+
+        let col_body = div()
+            .w_full()
+            .px(zpx(14.))
+            .py(zpx(12.))
+            .flex()
+            .flex_col()
+            .gap(zpx(8.))
             .children(points);
-        crate::motion::stagger_in(
-            card,
-            format!("compare-{}-{ix}", item.row_id()),
+
+        let col_content = crate::motion::stagger_in(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(col_header)
+                .child(col_body),
+            format!("compare-{row_id}-{ix}"),
             ix,
             rc.reduced,
-        )
+        );
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .when(ix > 0, |d| {
+                d.border_l_1().border_color(c(t.border).opacity(0.65))
+            })
+            .when(recommended, |d| d.bg(c(t.accent).opacity(0.045)))
+            .child(col_content)
     });
-    div().w_full().py_1().flex().gap_2().children(cards)
+
+    let card = div()
+        .w_full()
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(c(t.border))
+        .bg(c(t.floating))
+        .overflow_hidden()
+        .child(header)
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_stretch()
+                .children(cols),
+        );
+
+    div().w_full().py_1().child(crate::motion::appear(
+        card,
+        format!("compare-card-{row_id}"),
+        crate::motion::BASE,
+        4.,
+        rc.reduced,
+    ))
 }
 
 /// A box drawing, painted by the diagram fence's painter. The card fades in;
@@ -5310,6 +5431,7 @@ pub fn has_message_text(items: &[TranscriptRowItem], ix: usize) -> bool {
 
 fn block_has_markdown(block: &TranscriptBlock) -> bool {
     match block {
+        TranscriptBlock::UserMessage { text, .. } => !text.trim().is_empty(),
         TranscriptBlock::Paragraph { .. }
         | TranscriptBlock::Heading { .. }
         | TranscriptBlock::Quote { .. }
@@ -5354,6 +5476,7 @@ fn block_markdown(block: &TranscriptBlock) -> Option<String> {
         )
     };
     Some(match block {
+        TranscriptBlock::UserMessage { text, .. } if !text.trim().is_empty() => text.clone(),
         TranscriptBlock::Paragraph { content, .. } => content.clone(),
         TranscriptBlock::Heading { level, content, .. } => {
             format!("{} {content}", "#".repeat(*level as usize))
@@ -5408,40 +5531,72 @@ pub fn message_copy(
     shown: bool,
     rc: &RowContext,
 ) -> AnyElement {
+    message_copy_parts(
+        item,
+        items,
+        ix,
+        shown,
+        rc.copied.as_deref(),
+        rc.tokens,
+        rc.on_action.clone(),
+    )
+}
+
+/// Renders the hover-revealed Copy button from the minimal copy inputs so a
+/// per-message `Entity` can own hover updates without rebuilding the list view.
+pub fn message_copy_parts(
+    item: &TranscriptRowItem,
+    items: std::rc::Rc<Vec<TranscriptRowItem>>,
+    ix: usize,
+    shown: bool,
+    copied_row: Option<&str>,
+    tokens: Tokens,
+    on_action: OnRowAction,
+) -> AnyElement {
     let key = format!("{}#message", item.message_id);
-    let copied = rc.copied.as_deref() == Some(key.as_str());
-    let on_action = rc.on_action.clone();
+    let copied = copied_row == Some(key.as_str());
+    let button = if copied {
+        div()
+            .id(ElementId::Name(format!("copy-{key}").into()))
+            .h(zpx(22.))
+            .px_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .rounded_full()
+            .text_color(c(tokens.success))
+            .t_caption()
+            .child(Icon::Check.el(zpx(11.)))
+            .child("Copied")
+    } else {
+        bar_button(
+            format!("copy-{key}"),
+            Icon::Copy,
+            "Copy",
+            tokens.text_faint,
+            tokens,
+        )
+        .t_caption()
+        .on_click(move |_, _, cx| {
+            if let Some(content) = message_text(&items, ix) {
+                on_action(
+                    RowAction::Copy {
+                        row_id: key.clone(),
+                        content,
+                    },
+                    cx,
+                );
+            }
+        })
+    };
     div()
         .w_full()
         .px_4()
         .flex()
         .when(item.role == "user", |d| d.justify_end())
         .when(!shown && !copied, |d| d.invisible())
-        .child(
-            bar_button(
-                format!("copy-{key}"),
-                if copied { Icon::Check } else { Icon::Copy },
-                if copied { "Copied" } else { "Copy" },
-                if copied {
-                    rc.tokens.success
-                } else {
-                    rc.tokens.text_faint
-                },
-                rc.tokens,
-            )
-            .t_caption()
-            .on_click(move |_, _, cx| {
-                if let Some(content) = message_text(&items, ix) {
-                    on_action(
-                        RowAction::Copy {
-                            row_id: key.clone(),
-                            content,
-                        },
-                        cx,
-                    );
-                }
-            }),
-        )
+        .child(button)
         .into_any_element()
 }
 
@@ -6364,7 +6519,43 @@ pub fn render_row(
         .into_any_element()
 }
 
+/// Render a sequence of [`TranscriptBlock`]s using Keel's exact main-chat row
+/// renderer (prose, code blocks, tables, tool groups, labels, thinking rails,
+/// plans, diffs) outside the virtualized chat list.
+pub fn render_transcript_blocks(
+    message_id: &str,
+    blocks: Vec<TranscriptBlock>,
+    rc: &RowContext,
+) -> Vec<AnyElement> {
+    let rows: Vec<TranscriptRowItem> = blocks
+        .into_iter()
+        .map(|block| TranscriptRowItem::new(message_id, "assistant", block))
+        .collect();
+    rows.iter()
+        .enumerate()
+        .map(|(ix, item)| {
+            let prev = ix.checked_sub(1).and_then(|p| rows.get(p));
+            let gap = row_gap(prev, item);
+            let item_rc = RowContext {
+                order: rc.order.saturating_add((ix as u64) << 12),
+                ..rc.clone()
+            };
+            render_row_body(item, &item_rc)
+                .pt(zpx(gap))
+                .into_any_element()
+        })
+        .collect()
+}
+
 fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
+    render_row_body_inner(item, rc, false)
+}
+
+fn render_row_body_inner(
+    item: &TranscriptRowItem,
+    rc: &RowContext,
+    inside_bubble: bool,
+) -> gpui::Stateful<gpui::Div> {
     if let TranscriptBlock::Interim(inner) = &item.block {
         // The same prose, muted: same type and wrap, so moving into the fold
         // only changes its color.
@@ -6376,7 +6567,7 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             muted: true,
             ..rc.clone()
         };
-        return render_row_body(&inner, &rc);
+        return render_row_body_inner(&inner, &rc, inside_bubble);
     }
     let (t, syntax) = (rc.tokens, rc.syntax);
     let role_is_user = item.role == "user";
@@ -6486,6 +6677,19 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             })
     };
     let content_elem = match &item.block {
+        TranscriptBlock::UserMessage { blocks, .. } => div()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(zpx(8.))
+            .children(blocks.iter().enumerate().map(|(ix, block)| {
+                let child = TranscriptRowItem::new(&item.message_id, &item.role, block.clone());
+                let rc = RowContext {
+                    order: rc.order.saturating_add((ix as u64) << 12),
+                    ..rc.clone()
+                };
+                render_row_body_inner(&child, &rc, true)
+            })),
         TranscriptBlock::Code {
             language,
             content,
@@ -6619,13 +6823,38 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
         }
         // Unwrapped at the top of this fn.
         TranscriptBlock::Interim(_) => div(),
-        TranscriptBlock::Paragraph { content, spans, .. } => prose(div()).child(inline_text(
-            format!("p-{}", item.row_id()),
-            content,
-            spans,
-            0,
-            rc,
-        )),
+        TranscriptBlock::Paragraph { content, spans, .. } => {
+            let id = format!("p-{}", item.row_id());
+            let mut paragraph = prose(div());
+            if inside_bubble && content.contains('\n') && needs_inline_chips_with(content, spans, &[])
+            {
+                // The chip renderer wraps words in a flex row, which otherwise
+                // treats a soft newline like any other whitespace.
+                let mut offset = 0;
+                paragraph = paragraph.flex().flex_col().children(
+                    content.split('\n').enumerate().map(|(ix, line)| {
+                        let end = offset + line.len();
+                        let spans = spans
+                            .iter()
+                            .filter_map(|span| {
+                                let start = span.range.start.max(offset);
+                                let stop = span.range.end.min(end);
+                                (start < stop).then(|| InlineSpan {
+                                    range: start - offset..stop - offset,
+                                    style: span.style,
+                                    link: span.link.clone(),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        offset = end + 1;
+                        inline_text(format!("{id}-{ix}"), line, &spans, ix as u64, rc)
+                    }),
+                );
+            } else {
+                paragraph = paragraph.child(inline_text(id, content, spans, 0, rc));
+            }
+            paragraph
+        }
         TranscriptBlock::Quote { content, spans, .. } => prose(div())
             .pl_3()
             .border_l_2()
@@ -6774,12 +7003,16 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
                     .map(|(ix, file)| file_chip(item, ix, file, rc)),
             ),
         TranscriptBlock::Shots { paths, .. } => {
-            div().w_full().py_1().flex().flex_col().gap_2().children(
-                paths
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, path)| shot(item, ix, path, rc)),
-            )
+            let visible = paths.len().min(3);
+            let overflow = paths.len() > 3;
+            div()
+                .w_full()
+                .py_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(SHOT_GAP))
+                .children((0..visible).map(|ix| shot(item, ix, paths, overflow && ix == 2, rc)))
         }
         TranscriptBlock::Images { items, .. } => div()
             .flex()
@@ -6795,8 +7028,11 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             ),
     };
 
-    div()
-        .id(ElementId::Name(format!("row-{}", item.row_id()).into()))
+    let row = div().id(ElementId::Name(format!("row-{}", item.row_id()).into()));
+    if inside_bubble {
+        return row.min_w_0().child(content_elem);
+    }
+    row
         .w_full()
         .px_4()
         .pb(zpx(2.))
@@ -6808,7 +7044,6 @@ fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<
             div()
                 .when(role_is_user, |s| {
                     s.max_w(relative(0.85))
-                        .when_some(rc.bubble_max_w, |s, w| s.max_w(px(w)))
                         .min_w_0()
                         .overflow_hidden()
                         .px_3()
@@ -6860,10 +7095,16 @@ fn url_host(url: &str) -> String {
     }
 }
 
+static FAVICON_CACHE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 fn favicon_cache_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("keel-favicons");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    FAVICON_CACHE_DIR
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join("keel-favicons");
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        })
+        .clone()
 }
 
 fn host_favicon_path(host: &str) -> std::path::PathBuf {
@@ -6883,6 +7124,30 @@ fn host_favicon_path(host: &str) -> std::path::PathBuf {
 static FAVICON_FETCHES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
     std::sync::OnceLock::new();
 
+/// Maps host -> cached local path once known present on disk, avoiding repeat `stat` calls during renders.
+static FAVICON_READY: std::sync::OnceLock<
+    std::sync::RwLock<HashMap<String, Option<std::path::PathBuf>>>,
+> = std::sync::OnceLock::new();
+
+fn favicon_ready_cache()
+-> &'static std::sync::RwLock<HashMap<String, Option<std::path::PathBuf>>> {
+    FAVICON_READY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+fn cached_favicon_path(host: &str) -> Option<std::path::PathBuf> {
+    if let Ok(read) = favicon_ready_cache().read()
+        && let Some(entry) = read.get(host)
+    {
+        return entry.clone();
+    }
+    let path = host_favicon_path(host);
+    let ready = path.exists().then_some(path);
+    if let Ok(mut write) = favicon_ready_cache().write() {
+        write.insert(host.to_string(), ready.clone());
+    }
+    ready
+}
+
 fn start_favicon_fetch(host: &str) {
     if host.is_empty()
         || host == "localhost"
@@ -6893,8 +7158,7 @@ fn start_favicon_fetch(host: &str) {
         return;
     }
 
-    let dest = host_favicon_path(host);
-    if dest.exists() {
+    if cached_favicon_path(host).is_some() {
         return;
     }
 
@@ -6911,12 +7175,16 @@ fn start_favicon_fetch(host: &str) {
         set.insert(host.to_string());
     }
 
+    let dest = host_favicon_path(host);
     let host_owned = host.to_string();
     std::thread::spawn(move || {
         if let Some(img) = download_favicon_image(&host_owned) {
             let tmp = dest.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-            if img.save_with_format(&tmp, image::ImageFormat::Png).is_ok() {
-                let _ = std::fs::rename(&tmp, &dest);
+            if img.save_with_format(&tmp, image::ImageFormat::Png).is_ok()
+                && std::fs::rename(&tmp, &dest).is_ok()
+                && let Ok(mut write) = favicon_ready_cache().write()
+            {
+                write.insert(host_owned, Some(dest));
             }
         }
     });
@@ -7035,8 +7303,7 @@ fn favicon_badge(host: &str, size_px: f32, t: Tokens) -> AnyElement {
             .into_any_element();
     }
 
-    let path = host_favicon_path(host);
-    if path.exists() {
+    if let Some(path) = cached_favicon_path(host) {
         return gpui::img(path)
             .size(zpx(size_px))
             .rounded(px(2.))
@@ -7555,7 +7822,6 @@ fn link_chip(
         .id(ElementId::Name(format!("link-chip-{id}").into()))
         .h(zpx(22.))
         .px(zpx(8.))
-        .my(zpx(1.))
         .flex()
         .flex_row()
         .items_center()
@@ -7566,6 +7832,7 @@ fn link_chip(
         .bg(c(t.code))
         .text_color(c(t.text))
         .text_size(zpx(12.))
+        .line_height(zpx(16.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
         .hover(|s| {
@@ -7720,9 +7987,16 @@ fn citation_layout(text: &str, cite_ids: &[usize]) -> Vec<CitationLayoutItem> {
     items
 }
 
-/// Hang `punct` on the last flex item. Pulled slightly toward the marker so
-/// the period sits just outside the pill's right edge, clear of the fill.
-fn attach_punctuation(elements: &mut Vec<AnyElement>, punct: &str, t: Tokens) {
+/// Hang `punct` on the last flex item. `pull` tucks punctuation closer to a
+/// compact `[n]` marker; full-height chips keep `0.` so punctuation sits
+/// cleanly outside the chip's right border.
+fn attach_punctuation(
+    elements: &mut Vec<AnyElement>,
+    punct: &str,
+    pull: f32,
+    t: Tokens,
+    runs: &FlowRuns,
+) {
     let Some(prev) = elements.pop() else {
         return;
     };
@@ -7731,14 +8005,14 @@ fn attach_punctuation(elements: &mut Vec<AnyElement>, punct: &str, t: Tokens) {
             .flex_none()
             .flex()
             .flex_row()
-            .items_baseline()
+            .items_center()
             .child(prev)
             .child(
                 div()
                     .flex_none()
-                    .ml(zpx(-MARKER_PUNCT_PULL))
+                    .when(pull != 0., |d| d.ml(zpx(-pull)))
                     .text_color(c(t.text).opacity(0.88))
-                    .child(punct.to_string()),
+                    .child(flow_text(punct.to_string(), false, runs)),
             )
             .into_any_element(),
     );
@@ -7845,8 +8119,23 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
         return None;
     }
 
-    let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
-    let filename = parts.last()?;
+    if !trimmed.contains(['/', '.'])
+        && !SPECIAL_FILES
+            .iter()
+            .any(|f| trimmed.eq_ignore_ascii_case(f))
+    {
+        return None;
+    }
+
+    let mut part_count = 0usize;
+    let mut filename = "";
+    for part in trimmed.split('/').filter(|p| !p.is_empty()) {
+        part_count += 1;
+        filename = part;
+    }
+    if part_count == 0 {
+        return None;
+    }
 
     if SPECIAL_FILES
         .iter()
@@ -7859,19 +8148,18 @@ fn looks_like_file_path(s: &str, is_code: bool) -> Option<String> {
     }
 
     if let Some((stem, ext)) = filename.rsplit_once('.') {
-        let ext_lower = ext.to_ascii_lowercase();
         if stem.is_empty()
             || ext.chars().all(|c| c.is_ascii_digit())
             || stem.chars().all(|c| c.is_ascii_digit())
         {
             return None;
         }
-        if parts.len() > 1 {
+        if part_count > 1 {
             if (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
                 return Some(trimmed.to_string());
             }
-        } else if is_code || EXTENSIONS.iter().any(|e| ext_lower == *e) {
-            if EXTENSIONS.iter().any(|e| ext_lower == *e) {
+        } else if is_code || EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            if EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
                 return Some(trimmed.to_string());
             }
         }
@@ -8241,6 +8529,7 @@ fn file_inline_chip(
     t: Tokens,
     max_w: gpui::Pixels,
     on_action: OnRowAction,
+    runs: &FlowRuns,
 ) -> gpui::Stateful<gpui::Div> {
     let file_kind = crate::files::FileKind::of(std::path::Path::new(path));
     let icon = file_kind.icon();
@@ -8284,21 +8573,26 @@ fn file_inline_chip(
                 .text_ellipsis_middle()
                 .font_family(crate::style::MONO)
                 .text_size(zpx(11.5))
+                .line_height(zpx(16.))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(c(t.text))
-                .child(display_path),
+                .child(flow_text(display_path, true, runs)),
         )
         .tooltip(move |_, cx| {
             let path = tip_path.clone();
             cx.new(move |_| FileTip { path, tokens: t }).into()
         })
         .on_click(move |_, _, cx| {
-            on_action(
+            let action = if matches!(file_kind, FileKind::Image | FileKind::Svg) {
+                RowAction::OpenImage {
+                    path: click_path.clone(),
+                }
+            } else {
                 RowAction::OpenFile {
                     path: click_path.clone(),
-                },
-                cx,
-            );
+                }
+            };
+            on_action(action, cx);
         })
 }
 
@@ -8320,11 +8614,16 @@ fn needs_inline_chips_with(text: &str, spans: &[InlineSpan], cite_ids: &[usize])
     {
         return true;
     }
+    let has_cites = |s: &str| {
+        !cite_ids.is_empty()
+            && s.contains('[')
+            && !crate::citations::find_citation_badges(s, cite_ids).is_empty()
+    };
     let mut cursor = 0;
     for span in spans {
         if span.range.start > cursor {
             let plain = &text[cursor..span.range.start];
-            if !crate::citations::find_citation_badges(plain, cite_ids).is_empty()
+            if has_cites(plain)
                 || plain
                     .split_whitespace()
                     .any(|w| looks_like_file_path(w, false).is_some())
@@ -8336,7 +8635,7 @@ fn needs_inline_chips_with(text: &str, spans: &[InlineSpan], cite_ids: &[usize])
     }
     if cursor < text.len() {
         let plain = &text[cursor..];
-        if !crate::citations::find_citation_badges(plain, cite_ids).is_empty()
+        if has_cites(plain)
             || plain
                 .split_whitespace()
                 .any(|w| looks_like_file_path(w, false).is_some())
@@ -8481,9 +8780,11 @@ fn inline_text(
         ));
     }
 
+    let runs: FlowRuns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut elements: Vec<AnyElement> = Vec::new();
     let mut item_ix = 0;
     let mut hug_next = false;
+    let mut prev_is_marker = false;
     for (range, style, link) in slices {
         if let Some(url) = link {
             let label = &text[range];
@@ -8496,17 +8797,21 @@ fn inline_text(
                         t,
                         chip_max,
                         rc.on_action.clone(),
+                        &runs,
                     )
+                    .when(hug_next, |d| d.ml(zpx(-4.)))
                     .into_any_element(),
                 );
                 item_ix += 1;
                 hug_next = true;
+                prev_is_marker = false;
                 continue;
             }
             let host = url_host(&url);
             start_favicon_fetch(&host);
             fetch_preview_title(url.clone());
             let display_label = url_chip_label(label, &url);
+            let is_marker = is_marker_label(&display_label);
             elements.push(
                 link_chip(
                     &format!("{id}-{item_ix}"),
@@ -8515,10 +8820,12 @@ fn inline_text(
                     t,
                     rc.on_action.clone(),
                 )
+                .when(hug_next && !is_marker, |d| d.ml(zpx(-4.)))
                 .into_any_element(),
             );
             item_ix += 1;
             hug_next = true;
+            prev_is_marker = is_marker;
         } else {
             let slice_str = &text[range];
             if style.code {
@@ -8530,11 +8837,14 @@ fn inline_text(
                             t,
                             chip_max,
                             rc.on_action.clone(),
+                            &runs,
                         )
+                        .when(hug_next, |d| d.ml(zpx(-4.)))
                         .into_any_element(),
                     );
                     item_ix += 1;
                     hug_next = true;
+                    prev_is_marker = false;
                     continue;
                 }
                 // Same mono as the StyledText path, at a size that matches the
@@ -8551,117 +8861,153 @@ fn inline_text(
                             .font_family(MONO)
                             .text_size(zpx(INLINE_CODE_PX))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .child(code_word.to_string())
+                            .child(flow_text(code_word.to_string(), !pull, &runs))
                             .into_any_element(),
                     );
                     item_ix += 1;
                 }
                 hug_next = !slice_str.ends_with(char::is_whitespace);
+                prev_is_marker = false;
                 continue;
             }
 
-            let layout = citation_layout(slice_str, &cite_ids);
-            for piece in layout {
-                match piece {
-                    CitationLayoutItem::Badge { id: cite_id, punct } => {
-                        if let Some((_, cites)) = cite_ctx
-                            && let Some(cite) = cites.get(cite_id)
-                        {
-                            let badge = citation_badge(
-                                &format!("{id}-{item_ix}"),
-                                cite,
-                                t,
-                                rc.syntax,
-                                rc.on_action.clone(),
-                            );
-                            elements.push(badge.into_any_element());
-                            item_ix += 1;
-                            if !punct.is_empty() {
-                                attach_punctuation(&mut elements, &punct, t);
+            let push_plain_word =
+                |word_str: &str,
+                 elements: &mut Vec<AnyElement>,
+                 item_ix: &mut usize,
+                 hug_next: &mut bool,
+                 prev_is_marker: &mut bool| {
+                    let mut word: std::borrow::Cow<'_, str> = std::borrow::Cow::Borrowed(word_str);
+                    if *hug_next {
+                        if let Some((punct, rest)) = leading_punctuation(&word) {
+                            let pull = if *prev_is_marker { MARKER_PUNCT_PULL } else { 0. };
+                            attach_punctuation(elements, punct, pull, t, &runs);
+                            *prev_is_marker = false;
+                            if rest.is_empty() {
+                                *hug_next = false;
+                                return;
                             }
-                        } else {
-                            let mut word = format!("[{cite_id}]");
-                            word.push_str(&punct);
-                            elements.push(
-                                div()
-                                    .flex_none()
-                                    .when(hug_next, |d| d.ml(zpx(-4.)))
-                                    .text_color(c(t.text).opacity(0.88))
-                                    .child(word)
-                                    .into_any_element(),
-                            );
-                            item_ix += 1;
+                            word = std::borrow::Cow::Owned(rest.to_string());
                         }
                     }
-                    CitationLayoutItem::Word(word) => {
-                        let mut word = word;
-                        if hug_next {
-                            if let Some((punct, rest)) = leading_punctuation(&word) {
-                                let punct = punct.to_string();
-                                let rest = rest.to_string();
-                                attach_punctuation(&mut elements, &punct, t);
-                                if rest.is_empty() {
-                                    hug_next = false;
-                                    continue;
-                                }
-                                word = rest;
-                            }
+                    let is_bullet =
+                        word == "·" || word == "•" || word == "◦" || word == "▪";
+                    let is_punct = word == ","
+                        || word == "."
+                        || word == ":"
+                        || word == ";"
+                        || word == "!"
+                        || word == "?"
+                        || word == ")";
+                    let (trimmed_word, trailing_punct) = split_trailing_punct(&word);
+                    if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
+                        elements.push(
+                            file_inline_chip(
+                                &format!("{id}-{item_ix}"),
+                                &file_path,
+                                t,
+                                chip_max,
+                                rc.on_action.clone(),
+                                &runs,
+                            )
+                            .into_any_element(),
+                        );
+                        *item_ix += 1;
+                        if !trailing_punct.is_empty() {
+                            attach_punctuation(elements, trailing_punct, 0., t, &runs);
                         }
-                        let is_bullet = word == "·"
-                            || word == "•"
-                            || word == "◦"
-                            || word == "▪";
-                        let is_punct = word == ","
-                            || word == "."
-                            || word == ":"
-                            || word == ";"
-                            || word == "!"
-                            || word == "?"
-                            || word == ")";
-                        let (trimmed_word, trailing_punct) = split_trailing_punct(&word);
-                        if let Some(file_path) = looks_like_file_path(trimmed_word, false) {
-                            elements.push(
-                                file_inline_chip(
-                                    &format!("{id}-{item_ix}"),
-                                    &file_path,
-                                    t,
-                                    chip_max,
-                                    rc.on_action.clone(),
-                                )
-                                .into_any_element(),
-                            );
-                            item_ix += 1;
-                            if !trailing_punct.is_empty() {
-                                attach_punctuation(&mut elements, trailing_punct, t);
-                            }
-                        } else if is_bullet {
-                            elements.push(
-                                div()
-                                    .flex_none()
-                                    .px(zpx(1.))
-                                    .text_color(c(t.text_faint))
-                                    .child(word)
-                                    .into_any_element(),
-                            );
-                            item_ix += 1;
-                        } else {
-                            let el = div()
+                    } else if is_bullet {
+                        elements.push(
+                            div()
                                 .flex_none()
-                                .when(is_punct, |d| d.ml(zpx(-4.)))
-                                .when(style.bold, |d| {
-                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(c(t.text))
-                                })
-                                .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
-                                .when(style.italic, |d| d.italic())
-                                .when(style.strike, |d| d.line_through())
-                                .child(word);
-                            elements.push(el.into_any_element());
-                            item_ix += 1;
+                                .px(zpx(1.))
+                                .text_color(c(t.text_faint))
+                                .child(flow_text(word.into_owned(), true, &runs))
+                                .into_any_element(),
+                        );
+                        *item_ix += 1;
+                    } else {
+                        let el = div()
+                            .flex_none()
+                            .when(is_punct, |d| d.ml(zpx(-4.)))
+                            .when(style.bold, |d| {
+                                d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                            })
+                            .when(!style.bold, |d| d.text_color(c(t.text).opacity(0.88)))
+                            .when(style.italic, |d| d.italic())
+                            .when(style.strike, |d| d.line_through())
+                            .child(flow_text(word.into_owned(), !is_punct, &runs));
+                        elements.push(el.into_any_element());
+                        *item_ix += 1;
+                    }
+                    *hug_next = false;
+                    *prev_is_marker = false;
+                };
+
+            if cite_ids.is_empty() || !slice_str.contains('[') {
+                for word_str in slice_str.split_whitespace() {
+                    push_plain_word(
+                        word_str,
+                        &mut elements,
+                        &mut item_ix,
+                        &mut hug_next,
+                        &mut prev_is_marker,
+                    );
+                }
+            } else {
+                let layout = citation_layout(slice_str, &cite_ids);
+                for piece in layout {
+                    match piece {
+                        CitationLayoutItem::Badge { id: cite_id, punct } => {
+                            if let Some((_, cites)) = cite_ctx
+                                && let Some(cite) = cites.get(cite_id)
+                            {
+                                let badge = citation_badge(
+                                    &format!("{id}-{item_ix}"),
+                                    cite,
+                                    t,
+                                    rc.syntax,
+                                    rc.on_action.clone(),
+                                );
+                                elements.push(badge.into_any_element());
+                                item_ix += 1;
+                                if !punct.is_empty() {
+                                    attach_punctuation(
+                                        &mut elements,
+                                        &punct,
+                                        MARKER_PUNCT_PULL,
+                                        t,
+                                        &runs,
+                                    );
+                                }
+                            } else {
+                                let mut word = format!("[{cite_id}]");
+                                word.push_str(&punct);
+                                elements.push(
+                                    div()
+                                        .flex_none()
+                                        .when(hug_next, |d| d.ml(zpx(-4.)))
+                                        .text_color(c(t.text).opacity(0.88))
+                                        .child(flow_text(word, !hug_next, &runs))
+                                        .into_any_element(),
+                                );
+                                item_ix += 1;
+                            }
+                            hug_next = false;
+                            prev_is_marker = false;
+                        }
+                        CitationLayoutItem::Word(word) => {
+                            push_plain_word(
+                                &word,
+                                &mut elements,
+                                &mut item_ix,
+                                &mut hug_next,
+                                &mut prev_is_marker,
+                            );
                         }
                     }
                 }
-                hug_next = false;
             }
             hug_next = !slice_str.is_empty() && !slice_str.ends_with(char::is_whitespace);
         }
@@ -8673,12 +9019,23 @@ fn inline_text(
         .flex()
         .flex_row()
         .flex_wrap()
-        .items_baseline()
+        // gpui-fast leaf text nodes report no font baseline to Taffy, so
+        // items_baseline() aligns to box bottom (for text) vs icon bottom (for
+        // flex chips) and drops chips ~6px below the line. items_center()
+        // centers chips cleanly within the line-height box.
+        .items_center()
         .gap_x(zpx(4.))
         .gap_y(zpx(0.))
         .children(elements);
 
-    flow.into_any_element()
+    SelectableFlow {
+        key: format!("sel-{id}").into(),
+        runs,
+        child: flow.into_any_element(),
+        order: rc.order + order,
+        color: c(rc.tokens.selection),
+    }
+    .into_any_element()
 }
 
 /// Text that joins the window's drag selection (Cmd-C copies it). `wrap`
@@ -8754,10 +9111,13 @@ impl gpui::Element for Selectable {
     ) -> (gpui_base::TextSelectionHandle, gpui::Hitbox) {
         self.child.prepaint(window, cx);
         let handle = window
-            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |_, cx| {
-                gpui_base::TextSelectionHandle::new("", cx)
+            .use_keyed_state(ElementId::Name(self.key.clone()), cx, |window, cx| {
+                let handle = gpui_base::TextSelectionHandle::new("", cx);
+                let sub = handle.refresh_window_on_change(window, cx);
+                (handle, sub)
             })
             .read(cx)
+            .0
             .clone();
         let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
         handle.register(
@@ -8791,32 +9151,275 @@ impl gpui::Element for Selectable {
             .first()
             .cloned()
             .flatten();
-        if let Some(range) = range
-            && let (Some(start), Some(end)) = (
-                self.layout.position_for_index(range.start),
-                self.layout.position_for_index(range.end),
-            )
-        {
-            let lh = self.layout.line_height();
-            let quad = |a: gpui::Point<Pixels>, b: gpui::Point<Pixels>| {
-                gpui::fill(gpui::Bounds::from_corners(a, b), self.color)
+        if let Some(range) = range {
+            paint_selection_range(&self.layout, bounds, range, self.color, window);
+        }
+    }
+}
+
+fn paint_selection_range(
+    layout: &gpui::TextLayout,
+    bounds: gpui::Bounds<Pixels>,
+    range: Range<usize>,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let (Some(start), Some(end)) = (
+        layout.position_for_index(range.start),
+        layout.position_for_index(range.end),
+    ) else {
+        return;
+    };
+    let lh = layout.line_height();
+    let quad = |a: gpui::Point<Pixels>, b: gpui::Point<Pixels>| {
+        gpui::fill(gpui::Bounds::from_corners(a, b), color)
+    };
+    if start.y == end.y {
+        window.paint_quad(quad(start, gpui::point(end.x, end.y + lh)));
+    } else {
+        window.paint_quad(quad(start, gpui::point(bounds.right(), start.y + lh)));
+        if end.y > start.y + lh {
+            window.paint_quad(quad(
+                gpui::point(bounds.left(), start.y + lh),
+                gpui::point(bounds.right(), end.y),
+            ));
+        }
+        window.paint_quad(quad(
+            gpui::point(bounds.left(), end.y),
+            gpui::point(end.x, end.y + lh),
+        ));
+    }
+}
+
+struct FlowRunSlot {
+    text: SharedString,
+    layout: gpui::TextLayout,
+    bounds: std::cell::Cell<gpui::Bounds<Pixels>>,
+    space_before: bool,
+}
+
+type FlowRuns = std::rc::Rc<std::cell::RefCell<Vec<std::rc::Rc<FlowRunSlot>>>>;
+
+fn flow_text(text: String, space_before: bool, runs: &FlowRuns) -> AnyElement {
+    let styled = gpui::StyledText::new(text.clone());
+    let layout = styled.layout().clone();
+    let slot = std::rc::Rc::new(FlowRunSlot {
+        text: text.into(),
+        layout,
+        bounds: std::cell::Cell::new(gpui::Bounds::default()),
+        space_before,
+    });
+    runs.borrow_mut().push(slot.clone());
+    FlowWord {
+        slot,
+        child: styled.into_any_element(),
+    }
+    .into_any_element()
+}
+
+struct FlowWord {
+    slot: std::rc::Rc<FlowRunSlot>,
+    child: AnyElement,
+}
+
+impl IntoElement for FlowWord {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for FlowWord {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        self.slot.bounds.set(bounds);
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+struct SelectableFlow {
+    key: SharedString,
+    runs: FlowRuns,
+    child: AnyElement,
+    order: u64,
+    color: Hsla,
+}
+
+impl IntoElement for SelectableFlow {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for SelectableFlow {
+    type RequestLayoutState = ();
+    type PrepaintState = (
+        gpui_base::TextSelectionHandle,
+        std::rc::Rc<std::cell::RefCell<String>>,
+        gpui::Hitbox,
+    );
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Self::PrepaintState {
+        let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
+        self.child.prepaint(window, cx);
+        let (handle, copy_buf) = {
+            let state = window.use_keyed_state(
+                ElementId::Name(self.key.clone()),
+                cx,
+                |window, cx| {
+                    let handle = gpui_base::TextSelectionHandle::new("", cx);
+                    let copy_buf = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+                    let buf = copy_buf.clone();
+                    handle.copy_with(move |_| buf.borrow().clone(), cx);
+                    let sub = handle.refresh_window_on_change(window, cx);
+                    (handle, copy_buf, sub)
+                },
+            );
+            let st = state.read(cx);
+            (st.0.clone(), st.1.clone())
+        };
+        handle.register(
+            gpui_base::TextSelectionRegistration::new(hitbox.clone(), bounds)
+                .with_document_order(self.order)
+                .with_text_bounds(vec![bounds]),
+            window,
+            cx,
+        );
+        (handle, copy_buf, hitbox)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut (),
+        (handle, copy_buf, hitbox): &mut Self::PrepaintState,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
+        self.child.paint(window, cx);
+        let slots = self.runs.borrow();
+        let sel_runs: Vec<gpui_base::TextSelectionRun> = slots
+            .iter()
+            .enumerate()
+            .map(|(ix, slot)| {
+                gpui_base::TextSelectionRun::new(
+                    slot.text.clone(),
+                    slot.layout.clone(),
+                    slot.bounds.get(),
+                )
+                .with_document_order(ix as u64)
+            })
+            .collect();
+        let projection = handle.update_runs(&sel_runs, cx);
+        let mut copied = String::new();
+        let mut prev_tail: Option<(Pixels, Pixels, Pixels)> = None;
+        for (slot, range) in slots.iter().zip(projection.ranges().iter()) {
+            let Some(range) = range.clone() else {
+                prev_tail = None;
+                continue;
             };
-            if start.y == end.y {
-                window.paint_quad(quad(start, gpui::point(end.x, end.y + lh)));
-            } else {
-                window.paint_quad(quad(start, gpui::point(bounds.right(), start.y + lh)));
-                if end.y > start.y + lh {
-                    window.paint_quad(quad(
-                        gpui::point(bounds.left(), start.y + lh),
-                        gpui::point(bounds.right(), end.y),
-                    ));
-                }
-                window.paint_quad(quad(
-                    gpui::point(bounds.left(), end.y),
-                    gpui::point(end.x, end.y + lh),
+            if !copied.is_empty() && slot.space_before {
+                copied.push(' ');
+            }
+            copied.push_str(&slot.text[range.clone()]);
+            let b = slot.bounds.get();
+            let lh = slot.layout.line_height();
+            if let Some((prev_right, prev_top, prev_bottom)) = prev_tail
+                && range.start == 0
+                && (b.top() - prev_top).abs() < lh * 0.5
+                && b.left() > prev_right
+            {
+                let gap_top = prev_top.min(b.top());
+                let gap_bottom = prev_bottom.max(b.top() + lh);
+                window.paint_quad(gpui::fill(
+                    gpui::Bounds::from_corners(
+                        gpui::point(prev_right, gap_top),
+                        gpui::point(b.left(), gap_bottom),
+                    ),
+                    self.color,
                 ));
             }
+            paint_selection_range(&slot.layout, b, range.clone(), self.color, window);
+            prev_tail = (range.end == slot.text.len()).then(|| {
+                let end_pos = slot
+                    .layout
+                    .position_for_index(range.end)
+                    .unwrap_or_else(|| gpui::point(b.right(), b.top()));
+                (end_pos.x, end_pos.y, end_pos.y + lh)
+            });
         }
+        *copy_buf.borrow_mut() = copied;
     }
 }
 
@@ -9006,55 +9609,76 @@ fn thumbnail(
     }
 }
 
-/// A tool screenshot or markdown image: at most 360 wide, 16:10 frame.
-const SHOT_W: f32 = 360.;
-const SHOT_H: f32 = 225.;
+/// An inline image square in a reply or tool gallery; at most 3 squares show,
+/// with a `3+` scrim on the third when more exist.
+const SHOT_SQ: f32 = 92.;
+const SHOT_GAP: f32 = 8.;
 
-/// One large image under a tool row or in assistant text. Click previews
-/// it like a file chip (browser pane, else the system viewer).
+/// One square thumbnail in a [`TranscriptBlock::Shots`] gallery row. Clicking
+/// opens the full-window image modal with the full `paths` list.
 fn shot(
     item: &TranscriptRowItem,
     ix: usize,
-    path: &str,
+    paths: &[String],
+    show_overflow: bool,
     rc: &RowContext,
 ) -> gpui::Stateful<gpui::Div> {
     let t = rc.tokens;
+    let path = &paths[ix];
     let on_action = rc.on_action.clone();
-    let open = path.to_string();
+    let gallery = paths.to_vec();
     let name = std::path::Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
+    let tip_text = if show_overflow {
+        format!("View all {} images", paths.len())
+    } else {
+        path.to_string()
+    };
+    let hover_color = c(t.hover);
     div()
         .id(ElementId::Name(
             format!("shot-{}-{ix}", item.row_id()).into(),
         ))
-        .w(zpx(SHOT_W))
-        .max_w_full()
-        .h(zpx(SHOT_H))
+        .relative()
+        .size(zpx(SHOT_SQ))
         .flex_none()
-        .rounded(RADIUS_MD)
+        .rounded(RADIUS_LG)
         .overflow_hidden()
         .border_1()
         .border_color(c(t.border))
         .bg(c(t.surface))
         .cursor_pointer()
         .hover(|s| s.border_color(c(t.focus)))
-        .active(|s| s.border_color(c(t.focus)).opacity(0.90))
-        .on_click(move |_, _, cx| on_action(RowAction::OpenFile { path: open.clone() }, cx))
+        .active(|s| s.border_color(c(t.focus)).opacity(0.86))
+        .tooltip(move |_, cx| {
+            let path = tip_text.clone();
+            cx.new(move |_| FileTip { path, tokens: t }).into()
+        })
+        .on_click(move |_, _, cx| {
+            on_action(
+                RowAction::OpenImageGallery {
+                    paths: gallery.clone(),
+                    index: ix,
+                },
+                cx,
+            )
+        })
         .child(
             // Downscaled once, off the main thread, not the full bitmap.
             gpui::img(crate::thumbs::source(
                 path,
-                SHOT_W * crate::style::zoom(),
-                SHOT_H * crate::style::zoom(),
-                false,
+                SHOT_SQ * crate::style::zoom(),
+                SHOT_SQ * crate::style::zoom(),
+                true,
             ))
             .size_full()
-            .object_fit(gpui::ObjectFit::Contain)
+            .object_fit(gpui::ObjectFit::Cover)
             .with_fallback(move || {
                 div()
                     .size_full()
+                    .px_1p5()
                     .flex()
                     .flex_col()
                     .items_center()
@@ -9062,10 +9686,44 @@ fn shot(
                     .gap_1()
                     .text_color(c(t.text_faint))
                     .child(Icon::Image.el(zpx(18.)))
-                    .child(div().t_caption().child(name.clone()))
+                    .child(
+                        div()
+                            .t_caption()
+                            .max_w_full()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(name.clone()),
+                    )
                     .into_any_element()
             }),
         )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(hover_color.opacity(0.))
+                .hover(|s| s.bg(hover_color.opacity(0.08))),
+        )
+        .when(show_overflow, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui::black().opacity(0.58))
+                    .hover(|s| s.bg(gpui::black().opacity(0.46)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_size(zpx(18.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(gpui::white())
+                            .child("3+"),
+                    ),
+            )
+        })
 }
 
 const FILE_CHIP_H: f32 = 32.;

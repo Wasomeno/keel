@@ -10,13 +10,14 @@
 //!   with the group parent marked by [`HoverFadeExt::hover_probe`].
 
 use crate::motion::ease_out;
+use crate::style::zpx;
 use gpui::{
     AbsoluteLength, AnyElement, App, Bounds, Corners, Element, ElementId, GlobalElementId, Hitbox,
     HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Style, Styled, Window,
     prelude::*,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -25,6 +26,28 @@ thread_local! {
     /// group parent's first child, so it prepaints before any reveal inside
     /// that parent reads it.
     static PROBES: RefCell<HashMap<SharedString, Hitbox>> = RefCell::new(HashMap::new());
+    /// True while building rows inside a virtualized list scroll layer: hovers
+    /// resolve immediately without per-frame `request_animation_frame()` ticks
+    /// or `cx.notify(list_view)` calls that would bypass scroll-layer caching.
+    static LIST_SCOPE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks hover fades constructed inside `f` as list-scoped (instant hover, no
+/// animation frames or list-view notifications).
+pub fn in_list_scope<R>(f: impl FnOnce() -> R) -> R {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            LIST_SCOPE.with(|c| c.set(self.0));
+        }
+    }
+    let prev = LIST_SCOPE.with(|c| c.replace(true));
+    let _reset = Reset(prev);
+    f()
+}
+
+fn in_list() -> bool {
+    LIST_SCOPE.with(Cell::get)
 }
 use std::time::{Duration, Instant};
 
@@ -102,6 +125,8 @@ struct TintState {
 /// probe behind [`HoverFadeExt::hover_probe`]).
 pub struct HoverTint {
     probe: Option<SharedString>,
+    enabled: bool,
+    instant: bool,
     color: Hsla,
     press: Option<Hsla>,
     radii: Corners<Option<AbsoluteLength>>,
@@ -174,8 +199,8 @@ impl Element for HoverTint {
         if self.probe.is_some() {
             return;
         }
-        let reduced = cx.reduce_motion();
-        let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
+        let reduced = self.instant || cx.reduce_motion();
+        let hovered = self.enabled && hitbox.is_hovered(window) && !cx.has_active_drag();
         let state = window.with_element_state(id, |s: Option<Rc<RefCell<TintState>>>, _| {
             let s = s.unwrap_or_default();
             (s.clone(), s)
@@ -207,19 +232,26 @@ impl Element for HoverTint {
         if let Some(color) = paint {
             window.paint_quad(gpui::fill(bounds, color).corner_radii(radii));
         }
-        if moving {
+        if moving && !self.instant {
             window.request_animation_frame();
         }
 
         // Redraw when the hover or press flips; nothing runs in between.
         let view = window.current_view();
-        let hb = hitbox.clone();
-        window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-            if phase == gpui::DispatchPhase::Bubble && hb.is_hovered(window) != hovered {
-                cx.notify(view);
-            }
-        });
-        if self.press.is_some() {
+        if self.enabled {
+            let hb = hitbox.clone();
+            let instant = self.instant;
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase == gpui::DispatchPhase::Bubble && hb.is_hovered(window) != hovered {
+                    if instant {
+                        window.refresh();
+                    } else {
+                        cx.notify(view);
+                    }
+                }
+            });
+        }
+        if self.enabled && self.press.is_some() {
             let hb = hitbox.clone();
             let st = state.clone();
             window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
@@ -250,6 +282,10 @@ pub trait HoverFadeExt: Sized {
     /// the tint copies the corner radii). `press`, when set, shows at once
     /// while the mouse is held, so press feedback stays instant.
     fn hover_fade(self, color: impl Into<Hsla>, press: Option<Hsla>) -> Self;
+    /// Like [`Self::hover_fade`], but keeps the tint layer mounted when `enabled`
+    /// is `false` so child indices never shift and an active hover eases out
+    /// cleanly instead of snapping off.
+    fn hover_fade_when(self, enabled: bool, color: impl Into<Hsla>, press: Option<Hsla>) -> Self;
     /// [`Self::hover_fade`] with the tint (and its hover area) grown past the
     /// element by `x` and `y`, for bare rows whose text sits flush with
     /// their neighbours.
@@ -270,6 +306,31 @@ impl HoverFadeExt for Stateful<gpui::Div> {
         self.hover_fade_outset(color, press, Pixels::ZERO, Pixels::ZERO)
     }
 
+    fn hover_fade_when(
+        mut self,
+        enabled: bool,
+        color: impl Into<Hsla>,
+        press: Option<Hsla>,
+    ) -> Self {
+        let color = color.into();
+        let r = self.style().corner_radii.clone();
+        let radii = Corners {
+            top_left: r.top_left,
+            top_right: r.top_right,
+            bottom_right: r.bottom_right,
+            bottom_left: r.bottom_left,
+        };
+        self.child(HoverTint {
+            probe: None,
+            enabled,
+            instant: in_list(),
+            color,
+            press,
+            radii,
+            style: layer_style(Pixels::ZERO, Pixels::ZERO),
+        })
+    }
+
     fn hover_fade_outset(
         mut self,
         color: impl Into<Hsla>,
@@ -287,6 +348,8 @@ impl HoverFadeExt for Stateful<gpui::Div> {
         };
         self.child(HoverTint {
             probe: None,
+            enabled: true,
+            instant: in_list(),
             color,
             press,
             radii,
@@ -297,6 +360,8 @@ impl HoverFadeExt for Stateful<gpui::Div> {
     fn hover_probe(self, group: impl Into<SharedString>) -> Self {
         self.child(HoverTint {
             probe: Some(group.into()),
+            enabled: true,
+            instant: in_list(),
             color: gpui::transparent_black(),
             press: None,
             radii: Corners::default(),
@@ -318,8 +383,8 @@ fn layer_style(x: Pixels, y: Pixels) -> Style {
     style
 }
 
-/// A child whose opacity eases toward `on` while `group` is hovered and
-/// toward `off` otherwise.
+/// A child whose opacity (and optional positional offset) eases toward `on`
+/// while `group` is hovered and toward `off` otherwise.
 pub struct RevealOnHover<E> {
     id: ElementId,
     group: SharedString,
@@ -328,6 +393,9 @@ pub struct RevealOnHover<E> {
     in_dur: Duration,
     out_dur: Duration,
     strong: bool,
+    instant: bool,
+    offset_x: f32,
+    offset_y: f32,
     el: Option<E>,
 }
 
@@ -349,6 +417,9 @@ pub fn reveal_on_hover<E: IntoElement + Styled + 'static>(
         in_dur: HOVER_IN,
         out_dur: HOVER_OUT,
         strong: false,
+        instant: in_list(),
+        offset_x: 0.,
+        offset_y: 0.,
         el: Some(el),
     }
 }
@@ -371,7 +442,20 @@ pub fn reveal_on_hover_curved<E: IntoElement + Styled + 'static>(
         in_dur,
         out_dur,
         strong: true,
+        instant: in_list(),
+        offset_x: 0.,
+        offset_y: 0.,
         el: Some(el),
+    }
+}
+
+impl<E> RevealOnHover<E> {
+    /// Slide from `(x, y)` px at rest (`v = 0`) to `(0, 0)` when hovered (`v = 1`).
+    /// Skipped under reduced motion so the reveal stays a pure opacity fade.
+    pub fn with_offset(mut self, x: f32, y: f32) -> Self {
+        self.offset_x = x;
+        self.offset_y = y;
+        self
     }
 }
 
@@ -412,16 +496,23 @@ impl<E: IntoElement + Styled + 'static> Element for RevealOnHover<E> {
         let (v, moving) = state
             .borrow()
             .map_or((0., false), |f| f.value(Instant::now()));
-        if moving {
+        if moving && !self.instant {
             window.request_animation_frame();
         }
         let opacity = self.off + (self.on - self.off) * v;
-        let mut el = self
-            .el
-            .take()
-            .expect("laid out once")
-            .opacity(opacity)
-            .into_any_element();
+        let mut styled = self.el.take().expect("laid out once").opacity(opacity);
+        if !self.instant
+            && !cx.reduce_motion()
+            && self.off < self.on
+            && (self.offset_x != 0. || self.offset_y != 0.)
+        {
+            let t = 1. - v;
+            styled = styled
+                .relative()
+                .left(zpx(self.offset_x * t))
+                .top(zpx(self.offset_y * t));
+        }
+        let mut el = styled.into_any_element();
         (el.request_layout(window, cx), (el, state))
     }
 
@@ -455,6 +546,7 @@ impl<E: IntoElement + Styled + 'static> Element for RevealOnHover<E> {
         let in_dur = self.in_dur;
         let out_dur = self.out_dur;
         let strong = self.strong;
+        let reduced = self.instant || cx.reduce_motion();
         let changed = {
             let mut st = state.borrow_mut();
             match st.as_mut() {
@@ -462,18 +554,30 @@ impl<E: IntoElement + Styled + 'static> Element for RevealOnHover<E> {
                     *st = Some(Fade::new_with(hovered, in_dur, out_dur, strong));
                     hovered
                 }
-                Some(f) => f.set(hovered, now, cx.reduce_motion()),
+                Some(f) => f.set(hovered, now, reduced),
             }
         };
-        if changed {
+        if changed && !self.instant {
             window.request_animation_frame();
         }
         el.paint(window, cx);
         if let Some(g) = group {
             let view = window.current_view();
+            let instant = self.instant;
+            let state = state.clone();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
-                if phase == gpui::DispatchPhase::Bubble && g.is_hovered(window) != hovered {
-                    cx.notify(view);
+                if phase == gpui::DispatchPhase::Bubble {
+                    let next = g.is_hovered(window) && !cx.has_active_drag();
+                    if next != hovered {
+                        if instant {
+                            if let Some(f) = state.borrow_mut().as_mut() {
+                                f.set(next, Instant::now(), true);
+                            }
+                            window.refresh();
+                        } else {
+                            cx.notify(view);
+                        }
+                    }
                 }
             });
         }

@@ -71,6 +71,462 @@ pub(super) struct BrowserPanel {
     /// Last agent op or pane close, for [`PARK_AFTER`].
     idle_since: Option<Instant>,
     park_task: Option<gpui::Task<()>>,
+    /// Isolated viewport entity so CEF frames and cursor updates don't rebuild `KeelWindow`.
+    viewport: Entity<BrowserViewportView>,
+    /// Isolated progress & settle-sweep entity so loading animations don't rebuild `KeelWindow`.
+    load_bar: Entity<BrowserLoadBarView>,
+    /// Cached per-tab spinner entities so rotating tab icons don't rebuild `KeelWindow`.
+    pub(super) spinners: std::collections::HashMap<u64, Entity<SpinIconView>>,
+    /// Last state synced to `viewport` (`(page_ptr, cursor)`) to skip no-op updates.
+    last_viewport: Option<(usize, gpui::CursorStyle)>,
+    /// Last state synced to `load_bar` to skip no-op updates.
+    last_load_bar: Option<LoadBarSnapshot>,
+}
+
+/// Snapshot driving [`BrowserLoadBarView`], compared before updating the entity.
+#[derive(Clone, PartialEq)]
+struct LoadBarSnapshot {
+    tokens: Tokens,
+    reduced: bool,
+    tab_id: u64,
+    loading: bool,
+    bar: (f32, f32, u64),
+    bar_done: bool,
+    layout_line: Option<(u64, Option<Instant>)>,
+}
+
+/// Isolated entity rendering the thin 2px loading bar and layout-settle sweep under the toolbar.
+#[derive(Default)]
+pub(super) struct BrowserLoadBarView {
+    state: Option<LoadBarSnapshot>,
+}
+
+impl BrowserLoadBarView {
+    fn sync(&mut self, next: LoadBarSnapshot, cx: &mut Context<Self>) {
+        if self.state.as_ref() != Some(&next) {
+            self.state = Some(next);
+            cx.notify();
+        }
+    }
+}
+
+impl gpui::Render for BrowserLoadBarView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let host = div().id("browser-load-bar").relative().size_full();
+        let Some(state) = &self.state else {
+            return host;
+        };
+        let t = state.tokens;
+        let bar_el = if state.loading || state.bar_done {
+            let (from, to, n) = state.bar;
+            let done = state.bar_done;
+            let line = div()
+                .absolute()
+                .left_0()
+                .bottom_0()
+                .h(px(2.))
+                .rounded_r(px(1.))
+                .bg(c(t.accent));
+            if state.reduced {
+                (!done).then(|| line.w(relative(to)).into_any_element())
+            } else {
+                let duration = if done { BASE * 2 } else { SLOW };
+                Some(
+                    line.with_animation(
+                        ElementId::Name(format!("browser-bar-{}-{n}", state.tab_id).into()),
+                        gpui::Animation::new(duration).with_easing(ease_out),
+                        move |el, d| {
+                            el.w(relative(from + (to - from) * d)).opacity(if done {
+                                1. - ease_in(d)
+                            } else {
+                                1.
+                            })
+                        },
+                    )
+                    .into_any_element(),
+                )
+            }
+        } else {
+            None
+        };
+
+        let layout_el = state.layout_line.map(|(n, leaving)| {
+            let segment = div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(relative(0.28))
+                .rounded_r(px(1.))
+                .bg(c(t.accent));
+            let segment = if state.reduced {
+                segment.left_0().into_any_element()
+            } else {
+                segment
+                    .with_animation(
+                        ElementId::Name(format!("browser-settle-sweep-{n}").into()),
+                        Animation::new(SPIN).repeat(),
+                        |el, d| el.left(relative(0.72 * d)),
+                    )
+                    .into_any_element()
+            };
+            let track = div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(2.))
+                .overflow_hidden()
+                .child(segment);
+            if state.reduced || leaving.is_none() {
+                track.into_any_element()
+            } else {
+                track
+                    .with_animation(
+                        ElementId::Name(format!("browser-settle-out-{n}").into()),
+                        Animation::new(FAST).with_easing(ease_out_strong),
+                        |el, d| el.opacity(1. - d),
+                    )
+                    .into_any_element()
+            }
+        });
+
+        host.children(bar_el).children(layout_el)
+    }
+}
+
+/// Isolated spinning tab indicator so tab loading animation doesn't rebuild `KeelWindow`.
+pub(super) struct SpinIconView {
+    id: u64,
+    reduced: bool,
+}
+
+impl SpinIconView {
+    fn new(id: u64, reduced: bool) -> Self {
+        Self { id, reduced }
+    }
+}
+
+impl gpui::Render for SpinIconView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(("right-tab-spin-host", self.id as usize))
+            .flex_none()
+            .child(crate::motion::spin(
+                Icon::Spinner.el(zpx(13.)),
+                ("right-tab-spin", self.id as usize),
+                self.reduced,
+            ))
+    }
+}
+
+/// Isolated CEF viewport entity so 60fps browser paints and cursor changes don't rebuild `KeelWindow`.
+pub(super) struct BrowserViewportView {
+    page: Option<std::rc::Rc<crate::browser::NativePage>>,
+    cursor: gpui::CursorStyle,
+    focus: FocusHandle,
+    parent: gpui::WeakEntity<KeelWindow>,
+}
+
+impl BrowserViewportView {
+    fn new(focus: FocusHandle, parent: gpui::WeakEntity<KeelWindow>) -> Self {
+        Self {
+            page: None,
+            cursor: gpui::CursorStyle::Arrow,
+            focus,
+            parent,
+        }
+    }
+
+    fn set_state(
+        &mut self,
+        page: Option<std::rc::Rc<crate::browser::NativePage>>,
+        cursor: gpui::CursorStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = page;
+        self.cursor = cursor;
+        cx.notify();
+    }
+
+    fn notify_frame(
+        &mut self,
+        page: std::rc::Rc<crate::browser::NativePage>,
+        cursor: gpui::CursorStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = Some(page);
+        self.cursor = cursor;
+        cx.notify();
+    }
+}
+
+impl gpui::Render for BrowserViewportView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(native) = self.page.clone() else {
+            return div().id("browser-viewport").size_full().into_any_element();
+        };
+        let page_prep = std::rc::Rc::downgrade(&native);
+        let page_paint = std::rc::Rc::downgrade(&native);
+        let focus = self.focus.clone();
+        let focus_prep = focus.clone();
+        div()
+            .id("browser-viewport")
+            .relative()
+            .size_full()
+            .cursor(self.cursor)
+            .track_focus(&focus)
+            .key_context(crate::keys::BROWSER_VIEWPORT)
+            .on_action(cx.listener(
+                |this, _: &gpui_base::input::Copy, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.copy();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &gpui_base::input::Cut, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.cut();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &gpui_base::input::Paste, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.paste();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &crate::keys::BrowserPasteAndMatchStyle, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.paste_and_match_style();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &gpui_base::input::SelectAll, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.select_all();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &gpui_base::input::Undo, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.undo();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &gpui_base::input::Redo, _window, cx| {
+                    if let Some(native) = &this.page {
+                        native.redo();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if let Some(native) = &this.page
+                    && native.handle_key_down(event)
+                {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
+                if let Some(native) = &this.page
+                    && native.handle_key_up(event)
+                {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let was_focused = this.focus.is_focused(window);
+                    window.focus(&this.focus, cx);
+                    if !was_focused {
+                        cx.notify();
+                        let _ = this.parent.update(cx, |_, cx| cx.notify());
+                    }
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_down(
+                            event.position,
+                            MouseButton::Left,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let was_focused = this.focus.is_focused(window);
+                    window.focus(&this.focus, cx);
+                    if !was_focused {
+                        cx.notify();
+                        let _ = this.parent.update(cx, |_, cx| cx.notify());
+                    }
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_down(
+                            event.position,
+                            MouseButton::Right,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let was_focused = this.focus.is_focused(window);
+                    window.focus(&this.focus, cx);
+                    if !was_focused {
+                        cx.notify();
+                        let _ = this.parent.update(cx, |_, cx| cx.notify());
+                    }
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_down(
+                            event.position,
+                            MouseButton::Middle,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(gpui::NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                    if let Some(native) = &this.page {
+                        native.history(false);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(gpui::NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                    if let Some(native) = &this.page {
+                        native.history(true);
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_up(
+                            event.position,
+                            MouseButton::Left,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_up_outside(
+                            event.position,
+                            MouseButton::Left,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_up(
+                            event.position,
+                            MouseButton::Right,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                    if let Some(native) = &this.page {
+                        native.handle_mouse_up(
+                            event.position,
+                            MouseButton::Middle,
+                            event.modifiers,
+                            event.click_count,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, _cx| {
+                if let Some(native) = &this.page {
+                    native.handle_mouse_move(
+                        event.position,
+                        event.modifiers,
+                        event.pressed_button,
+                    );
+                }
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, window, _cx| {
+                if !*hovered
+                    && let Some(native) = &this.page
+                {
+                    native.handle_mouse_leave(window.mouse_position(), window.modifiers());
+                }
+            }))
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, _cx| {
+                if let Some(native) = &this.page {
+                    native.handle_scroll_wheel(event.position, event.delta, event.modifiers);
+                }
+            }))
+            .child(
+                gpui::canvas(
+                    move |bounds, window, _cx| {
+                        if let Some(page) = page_prep.upgrade() {
+                            let scale = window.scale_factor();
+                            page.set_scale_factor(scale);
+                            page.set_focus(focus_prep.is_focused(window));
+                            page.sync(bounds, bounds, 1.0, false);
+                        }
+                    },
+                    move |bounds, _, window, _cx| {
+                        if let Some(page) = page_paint.upgrade() {
+                            for old in page.take_dropped_frames() {
+                                let _ = window.drop_image(old);
+                            }
+                            if let Some(img) = page.render_frame() {
+                                let _ = window.paint_image(
+                                    bounds,
+                                    bounds,
+                                    Default::default(),
+                                    img,
+                                    0,
+                                    false,
+                                );
+                            }
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
+    }
 }
 
 /// One tab: its page and what the toolbar shows for it.
@@ -220,6 +676,8 @@ const PARK_AFTER: Duration = Duration::from_secs(10 * 60);
 
 impl BrowserPanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<KeelWindow>) -> Self {
+        let focus = cx.focus_handle();
+        let parent = cx.entity().downgrade();
         Self {
             width: None,
             resizing: false,
@@ -227,7 +685,12 @@ impl BrowserPanel {
             resize_from: None,
             address: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Search or enter address")),
-            focus: cx.focus_handle(),
+            viewport: cx.new(|_| BrowserViewportView::new(focus.clone(), parent)),
+            load_bar: cx.new(|_| BrowserLoadBarView::default()),
+            spinners: std::collections::HashMap::new(),
+            last_viewport: None,
+            last_load_bar: None,
+            focus,
             tabs: vec![BrowserTab::new(0)],
             active: 0,
             next_tab: 1,
@@ -239,6 +702,26 @@ impl BrowserPanel {
             idle_since: None,
             park_task: None,
         }
+    }
+
+    pub(super) fn tab_spinner(
+        &mut self,
+        id: u64,
+        reduced: bool,
+        cx: &mut Context<KeelWindow>,
+    ) -> Entity<SpinIconView> {
+        let spinner = self
+            .spinners
+            .entry(id)
+            .or_insert_with(|| cx.new(|_| SpinIconView::new(id, reduced)))
+            .clone();
+        if spinner.read(cx).reduced != reduced {
+            spinner.update(cx, |s, cx| {
+                s.reduced = reduced;
+                cx.notify();
+            });
+        }
+        spinner
     }
 
     pub(super) fn tab(&self) -> &BrowserTab {
@@ -287,6 +770,19 @@ impl KeelWindow {
             && !self.settings_open
             && self.confirming_delete_chats.is_none()
             && self.state.confirming_delete_space.is_none()
+    }
+
+    /// True when the live web viewport (not the address bar or chat composer) has focus.
+    pub(super) fn browser_viewport_focused(&self, window: &Window) -> bool {
+        self.browser.focus.is_focused(window)
+            && self.right_panel_open()
+            && matches!(
+                self.right_panel_active_kind(),
+                Some(super::right_panel::RightTabKind::Browser(_))
+            )
+            && self.browser.tab().native.is_some()
+            && self.browser.tab().page.url.is_some()
+            && self.browser.tab().error.is_none()
     }
 
     /// An agent's page is alive with the right side panel closed: the
@@ -595,6 +1091,58 @@ impl KeelWindow {
         }
     }
 
+    fn browser_tokens(&self, window: &Window) -> Tokens {
+        let system_dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
+        self.state.effective_tokens(system_dark)
+    }
+
+    /// Push the active tab's `NativePage` & cursor to `viewport` only when they change.
+    pub(super) fn sync_browser_viewport(&mut self, cx: &mut Context<Self>) {
+        let native = self.browser.tab().native.clone();
+        let ptr = native
+            .as_ref()
+            .map_or(0usize, |p| std::rc::Rc::as_ptr(p) as usize);
+        let cursor = native
+            .as_ref()
+            .map_or(gpui::CursorStyle::Arrow, |p| p.cursor_style());
+        let key = (ptr, cursor);
+        if self.browser.last_viewport == Some(key) {
+            return;
+        }
+        self.browser.last_viewport = Some(key);
+        if let Some(page) = &native {
+            let _ = page.update_frame();
+        }
+        self.browser
+            .viewport
+            .update(cx, |v, cx| v.set_state(native, cursor, cx));
+    }
+
+    /// Push the active tab's progress/settle state to `load_bar` only when it changes.
+    fn sync_browser_load_bar(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
+        let reduced = self.reduced();
+        let tab = self.browser.tab();
+        let snapshot = LoadBarSnapshot {
+            tokens,
+            reduced,
+            tab_id: tab.id,
+            loading: tab.page.loading,
+            bar: tab.bar,
+            bar_done: tab.bar_done,
+            layout_line: tab.layout_line,
+        };
+        if self.browser.last_load_bar.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.browser.last_load_bar = Some(snapshot.clone());
+        self.browser
+            .load_bar
+            .update(cx, |v, cx| v.sync(snapshot, cx));
+    }
+
     /// Spin CEF until this tab stops loading. One `DoMessageLoopWork` only
     /// starts the request; without a follow-up the document never commits
     /// and the bar stays up. Agent navigations previously did not do this.
@@ -610,13 +1158,11 @@ impl KeelWindow {
                     .await;
                 native.spin_soon();
                 let keep_going = this
-                    .update(cx, |this, _| {
-                        crate::dev_control::redraw();
+                    .read_with(cx, |this, _| {
                         this.browser
                             .tabs
                             .get(ix)
-                            .map(|t| t.page.loading)
-                            .unwrap_or(false)
+                            .is_some_and(|t| t.page.loading)
                     })
                     .unwrap_or(false);
                 if !keep_going {
@@ -625,9 +1171,6 @@ impl KeelWindow {
                             .timer(std::time::Duration::from_millis(16))
                             .await;
                         native.spin_soon();
-                        let _ = this.update(cx, |_, _| {
-                            crate::dev_control::redraw();
-                        });
                     }
                     break;
                 }
@@ -701,10 +1244,13 @@ impl KeelWindow {
         }
         match event {
             NativeEvent::FrameReady => {
-                if native.update_frame() {
-                    cx.notify();
-                    #[cfg(target_os = "macos")]
-                    crate::dev_control::redraw();
+                if shown && native.update_frame() {
+                    let ptr = std::rc::Rc::as_ptr(&native) as usize;
+                    let cursor = native.cursor_style();
+                    self.browser.last_viewport = Some((ptr, cursor));
+                    self.browser
+                        .viewport
+                        .update(cx, |v, cx| v.notify_frame(native, cursor, cx));
                 }
             }
             NativeEvent::Wake => {
@@ -714,9 +1260,18 @@ impl KeelWindow {
             }
             NativeEvent::Changed => {
                 let mut state = native.state();
+                let cursor = native.cursor_style();
                 let b = &mut self.browser;
                 let address = b.address.clone();
                 let tab = &mut b.tabs[ix];
+                let prev_header = (
+                    tab.page.loading,
+                    tab.page.can_back,
+                    tab.page.can_forward,
+                    tab.page.url.is_some(),
+                    tab.label(),
+                    tab.preview.is_some(),
+                );
                 // A file preview reads as its file, not `about:blank`; another
                 // page, once loaded, ends the preview.
                 let blank = state.url.as_deref().is_none_or(|u| u == "about:blank");
@@ -757,12 +1312,32 @@ impl KeelWindow {
                 }
                 let loaded = !state.loading;
                 tab.page = state;
+                let next_header = (
+                    tab.page.loading,
+                    tab.page.can_back,
+                    tab.page.can_forward,
+                    tab.page.url.is_some(),
+                    tab.label(),
+                    tab.preview.is_some(),
+                );
+                let header_changed = prev_header != next_header;
                 if loaded {
                     self.agent_page_loaded(ix, window, cx);
                 }
-                cx.notify();
-                #[cfg(target_os = "macos")]
-                crate::dev_control::redraw();
+                if shown {
+                    let ptr = std::rc::Rc::as_ptr(&native) as usize;
+                    if self.browser.last_viewport != Some((ptr, cursor)) {
+                        self.browser.last_viewport = Some((ptr, cursor));
+                        self.browser
+                            .viewport
+                            .update(cx, |v, cx| v.set_state(Some(native), cursor, cx));
+                    }
+                    let t = self.browser_tokens(window);
+                    self.sync_browser_load_bar(t, cx);
+                }
+                if header_changed || (loaded && is_agent) {
+                    cx.notify();
+                }
             }
             // A link that asks for a new window: a new tab, shown.
             NativeEvent::Open(url) => {
@@ -944,6 +1519,7 @@ impl KeelWindow {
         // Dropping a page removes its native view; the frame callbacks hold
         // it weakly, so nothing outlives this.
         b.tabs.clear();
+        b.spinners.clear();
         b.active = b.push_tab();
         b.sessions += 1;
         let fresh_id = b.tabs[b.active].id;
@@ -984,15 +1560,11 @@ impl KeelWindow {
     }
 
     /// The pane's full width for this window: the dragged width or a share of
-    /// the window, always leaving the chat its minimum.
+    /// the window, independent of the left sidebar so toggling the sidebar
+    /// never shifts the right panel.
     pub(super) fn browser_width(&self, window: &Window) -> f32 {
         let viewport = f32::from(window.viewport_size().width);
-        let sidebar = if self.state.ui_settings.sidebar_collapsed {
-            0.
-        } else {
-            self.state.sidebar_width()
-        };
-        let max = (viewport - sidebar - MIN_CHAT).max(MIN_WIDTH);
+        let max = (viewport - MIN_CHAT).max(MIN_WIDTH);
         // Whole pixels. A fractional width snaps back and forth in the
         // compositor and the edge shivers while you drag.
         self.browser
@@ -1116,6 +1688,7 @@ impl KeelWindow {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         self.note_layout_line(cx);
+        self.sync_browser_load_bar(t, cx);
         let page = &self.browser.tab().page;
         let has_page = page.url.is_some();
         let nav = |id: &'static str, icon: Icon, enabled: bool| {
@@ -1239,8 +1812,15 @@ impl KeelWindow {
                     cx,
                 ),
             )
-            .children(self.render_browser_bar(t))
-            .children(self.render_layout_line(t))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(2.))
+                    .child(self.browser.load_bar.clone()),
+            )
     }
 
     fn page_geometry_pending(&self) -> bool {
@@ -1290,61 +1870,19 @@ impl KeelWindow {
                     .is_some_and(|(generation, leave)| generation == n && leave.is_some())
                 {
                     tab.layout_line = None;
-                    cx.notify();
+                    if this.browser.tab().id == tab_id {
+                        let t = this
+                            .browser
+                            .last_load_bar
+                            .as_ref()
+                            .map(|b| b.tokens)
+                            .unwrap_or_else(|| this.state.effective_tokens(true));
+                        this.sync_browser_load_bar(t, cx);
+                    }
                 }
             });
         })
         .detach();
-    }
-
-    /// A 2px accent segment under the toolbar, the same mark as the load
-    /// bar, while the page reflows to the pane. It sweeps until the paint
-    /// at the new size arrives, then fades. Reduced motion keeps a static
-    /// segment and removes it with the paint.
-    fn render_layout_line(&self, t: Tokens) -> Option<AnyElement> {
-        let (n, leaving) = self.browser.tab().layout_line?;
-        let reduced = self.reduced();
-        let segment = div()
-            .absolute()
-            .top_0()
-            .h_full()
-            .w(relative(0.28))
-            .rounded_r(px(1.))
-            .bg(c(t.accent));
-        // Divs have no translate. `left` on this one clipped bar is the
-        // sweep the skeleton already uses. Linear: the motion is constant
-        // for as long as the paint takes.
-        let segment = if reduced {
-            segment.left_0().into_any_element()
-        } else {
-            segment
-                .with_animation(
-                    ElementId::Name(format!("browser-settle-sweep-{n}").into()),
-                    Animation::new(SPIN).repeat(),
-                    |el, d| el.left(relative(0.72 * d)),
-                )
-                .into_any_element()
-        };
-        let track = div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(px(2.))
-            .overflow_hidden()
-            .child(segment);
-        if reduced || leaving.is_none() {
-            return Some(track.into_any_element());
-        }
-        Some(
-            track
-                .with_animation(
-                    ElementId::Name(format!("browser-settle-out-{n}").into()),
-                    Animation::new(FAST).with_easing(ease_out_strong),
-                    |el, d| el.opacity(1. - d),
-                )
-                .into_any_element(),
-        )
     }
 
     /// What each browser toolbar button does, as its tooltip says it (state-aware),
@@ -1369,42 +1907,6 @@ impl KeelWindow {
         Some((text.to_string(), key))
     }
 
-    /// A thin accent line under the toolbar: glides to each progress step,
-    /// then fills and fades when the load finishes.
-    fn render_browser_bar(&self, t: Tokens) -> Option<AnyElement> {
-        let b = self.browser.tab();
-        if !b.page.loading && !b.bar_done {
-            return None;
-        }
-        let (from, to, n) = b.bar;
-        let done = b.bar_done;
-        let line = div()
-            .absolute()
-            .left_0()
-            .bottom_0()
-            .h(px(2.))
-            .rounded_r(px(1.))
-            .bg(c(t.accent));
-        if self.reduced() {
-            return (!done).then(|| line.w(relative(to)).into_any_element());
-        }
-        let duration = if done { BASE * 2 } else { SLOW };
-        Some(
-            line.with_animation(
-                ElementId::Name(format!("browser-bar-{}-{n}", b.id).into()),
-                gpui::Animation::new(duration).with_easing(ease_out),
-                move |el, d| {
-                    el.w(relative(from + (to - from) * d)).opacity(if done {
-                        1. - ease_in(d)
-                    } else {
-                        1.
-                    })
-                },
-            )
-            .into_any_element(),
-        )
-    }
-
     /// The page card: the live page, or a start screen until there's an address.
     fn render_browser_page(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
         let card = div()
@@ -1425,150 +1927,12 @@ impl KeelWindow {
         if self.browser.tab().page.url.is_none() {
             return card.child(self.render_browser_empty(t, None, cx));
         }
-        let card = match self.browser.tab().native.clone() {
-            Some(native) => {
-                let page_prep = std::rc::Rc::downgrade(&native);
-                let page_paint = std::rc::Rc::downgrade(&native);
-                let focus = self.browser.focus.clone();
-                card.child(
-                    div()
-                        .id("browser-viewport")
-                        .relative()
-                        .size_full()
-                        .track_focus(&focus)
-                        .key_context("Browser")
-                        .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                if native.handle_key_down(event) {
-                                    cx.stop_propagation();
-                                }
-                            }
-                        }))
-                        .capture_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                if native.handle_key_up(event) {
-                                    cx.stop_propagation();
-                                }
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                window.focus(&this.browser.focus, cx);
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_mouse_down(event.position, MouseButton::Left);
-                                }
-                            }),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                window.focus(&this.browser.focus, cx);
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_mouse_down(event.position, MouseButton::Right);
-                                }
-                            }),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Middle,
-                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                window.focus(&this.browser.focus, cx);
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_mouse_down(event.position, MouseButton::Middle);
-                                }
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_mouse_up(event.position, MouseButton::Left);
-                                }
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Right,
-                            cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_mouse_up(event.position, MouseButton::Right);
-                                }
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Middle,
-                            cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_mouse_up(event.position, MouseButton::Middle);
-                                }
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, _cx| {
-                            if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                && let Some(native) = &tab.native
-                            {
-                                native.handle_mouse_move(event.position);
-                            }
-                        }))
-                        .on_scroll(cx.listener(
-                            |this, event: &ScrollEvent, _window, _cx| {
-                                if let Some(tab) = this.browser.tabs.get(this.browser.active)
-                                    && let Some(native) = &tab.native
-                                {
-                                    native.handle_scroll_wheel(event.position, event.delta);
-                                }
-                            },
-                        ))
-                        .child(
-                            gpui::canvas(
-                                move |bounds, window, _cx| {
-                                    if let Some(page) = page_prep.upgrade() {
-                                        let scale = window.scale_factor();
-                                        page.set_scale_factor(scale);
-                                        page.sync(bounds, bounds, 1.0, false);
-                                    }
-                                },
-                                move |bounds, _, window, _cx| {
-                                    if let Some(page) = page_paint.upgrade() {
-                                        if let Some(old) = page.take_dropped_frame() {
-                                            let _ = window.drop_image(old);
-                                        }
-                                        if let Some(img) = page.render_frame() {
-                                            let _ = window.paint_image(
-                                                bounds,
-                                                bounds,
-                                                Default::default(),
-                                                img,
-                                                0,
-                                                false,
-                                            );
-                                        }
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        ),
-                )
-            }
-            None => card,
-        };
-        card
+        if self.browser.tab().native.is_some() {
+            self.sync_browser_viewport(cx);
+            card.child(self.browser.viewport.clone())
+        } else {
+            card
+        }
     }
 
     fn render_browser_empty(

@@ -188,6 +188,27 @@ pub enum AgentEvent {
         subagent_id: String,
         status: TurnStatus,
     },
+    /// Optional factual telemetry for a subagent (model, read-only mode, turns,
+    /// token counts, elapsed duration, worktree branch, or active tool step).
+    SubagentMeta {
+        subagent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turns: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_tool: Option<String>,
+    },
     /// Tokens spent since the last `Usage` of this run, and how full the
     /// context is now. Drivers send it after each model call or turn.
     Usage {

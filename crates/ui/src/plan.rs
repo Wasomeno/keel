@@ -381,7 +381,7 @@ impl ApprovalMode {
 }
 
 /// Edits and phase for one card. Inputs exist only while editing.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CardState {
     pub phase: Phase,
     pub steps: Vec<EditStep>,

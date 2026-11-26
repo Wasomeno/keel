@@ -12,6 +12,7 @@ pub mod dotify;
 pub mod files;
 mod genui;
 pub mod memory;
+pub mod skill_catalog;
 pub mod skills;
 pub use genui::{ui_call, ui_tools};
 mod journal;
@@ -1637,7 +1638,7 @@ impl Engine {
                     view.id = subagent_id.clone();
                     view.parent_tool_id = tool_id;
                     view.name = name.clone();
-                    view.description = description;
+                    view.description = description.clone();
                     if view.status.is_empty() || view.status == "running" {
                         view.status = "running".to_string();
                     }
@@ -1648,12 +1649,64 @@ impl Engine {
                             subagent_id: subagent_id.clone(),
                             name,
                             state: view.status.clone(),
-                            summary: String::new(),
+                            summary: description,
                         },
                     );
                 }
                 state.dirty = true;
                 self.push_message(state, chat_id, &message_id);
+                self.push_subagent(state, chat_id, &subagent_id);
+                Vec::new()
+            }
+            AgentEvent::SubagentMeta {
+                subagent_id,
+                model,
+                read_only,
+                turns,
+                input_tokens,
+                output_tokens,
+                duration_ms,
+                worktree_branch,
+                active_tool,
+            } => {
+                if let Some(doc) = state.store.session(chat_id) {
+                    let _ = doc.ensure_subagent(&subagent_id, now);
+                    let mut record = doc
+                        .view()
+                        .subagents
+                        .into_iter()
+                        .find(|sub| sub.id == subagent_id)
+                        .unwrap_or(keel_doc::SubagentView {
+                            id: subagent_id.clone(),
+                            ..Default::default()
+                        });
+                    if let Some(m) = model {
+                        record.model = m;
+                    }
+                    if let Some(ro) = read_only {
+                        record.read_only = ro;
+                    }
+                    if let Some(t) = turns {
+                        record.turns = t;
+                    }
+                    if let Some(in_tok) = input_tokens {
+                        record.input_tokens = in_tok;
+                    }
+                    if let Some(out_tok) = output_tokens {
+                        record.output_tokens = out_tok;
+                    }
+                    if let Some(ms) = duration_ms {
+                        record.duration_ms = ms;
+                    }
+                    if let Some(branch) = worktree_branch {
+                        record.worktree_branch = branch;
+                    }
+                    if let Some(tool) = active_tool {
+                        record.active_tool = tool;
+                    }
+                    let _ = doc.upsert_subagent(&record);
+                }
+                state.dirty = true;
                 self.push_subagent(state, chat_id, &subagent_id);
                 Vec::new()
             }
@@ -1708,11 +1761,19 @@ impl Engine {
             });
         record.status = state_str.to_string();
         record.ended_at = Some(now);
+        record.active_tool.clear();
         if let Some(note) = note {
             record.last_summary = keel_doc::tool_summary(&note);
         }
+        let inline_summary = if state_str == "error" && !record.last_summary.is_empty() {
+            record.last_summary.clone()
+        } else if !record.description.is_empty() {
+            record.description.clone()
+        } else {
+            record.last_summary.clone()
+        };
         let _ = doc.upsert_subagent(&record);
-        let _ = doc.set_subagent_part(subagent_id, state_str, &record.last_summary);
+        let _ = doc.set_subagent_part(subagent_id, state_str, &inline_summary);
         let message_id = view
             .messages
             .iter()
@@ -1812,6 +1873,24 @@ impl Engine {
                     row.started_ms = Some(now);
                 }
                 let _ = doc.upsert_sub_tool(sub, &row);
+                // Surface the currently active tool on the subagent record so the
+                // inline chat row and header menu show live progress.
+                let active_hint = if !row.label.is_empty() {
+                    row.label.clone()
+                } else if !row.detail.is_empty() {
+                    format!("{} {}", row.name, row.detail)
+                } else {
+                    row.name.clone()
+                };
+                if let Some(mut record) = doc
+                    .view()
+                    .subagents
+                    .into_iter()
+                    .find(|s| s.id == sub)
+                {
+                    record.active_tool = active_hint;
+                    let _ = doc.upsert_subagent(&record);
+                }
                 state.dirty = true;
                 self.push_subagent(state, chat_id, sub);
             }
@@ -1847,6 +1926,24 @@ impl Engine {
                     row.started_ms = Some(now);
                 }
                 let _ = doc.upsert_sub_tool(sub, &row);
+                // Surface the currently active tool on the subagent record so the
+                // inline chat row and header menu show live progress.
+                let active_hint = if !row.label.is_empty() {
+                    row.label.clone()
+                } else if !row.detail.is_empty() {
+                    format!("{} {}", row.name, row.detail)
+                } else {
+                    row.name.clone()
+                };
+                if let Some(mut record) = doc
+                    .view()
+                    .subagents
+                    .into_iter()
+                    .find(|s| s.id == sub)
+                {
+                    record.active_tool = active_hint;
+                    let _ = doc.upsert_subagent(&record);
+                }
                 state.dirty = true;
                 self.push_subagent(state, chat_id, sub);
             }
@@ -1916,6 +2013,35 @@ impl Engine {
                     now,
                 );
                 let _ = doc.upsert_sub_tool(sub, &row);
+                // Clear `active_tool` once no child tools remain running, or
+                // show a still-running sibling tool when calls execute in parallel.
+                let next_active = doc
+                    .sub_parts(sub)
+                    .ok()
+                    .and_then(|parts| {
+                        parts.into_iter().rev().find_map(|part| match part {
+                            keel_doc::PartView::Tool(t) if t.state == "running" => {
+                                if !t.label.is_empty() {
+                                    Some(t.label)
+                                } else if !t.detail.is_empty() {
+                                    Some(format!("{} {}", t.name, t.detail))
+                                } else {
+                                    Some(t.name)
+                                }
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_default();
+                if let Some(mut record) = doc
+                    .view()
+                    .subagents
+                    .into_iter()
+                    .find(|s| s.id == sub)
+                {
+                    record.active_tool = next_active;
+                    let _ = doc.upsert_subagent(&record);
+                }
                 state.dirty = true;
                 self.push_subagent(state, chat_id, sub);
             }
@@ -3283,6 +3409,14 @@ impl Engine {
                 "ended_at": record.ended_at,
                 "last_summary": record.last_summary,
                 "blocked_question": record.blocked_question,
+                "model": record.model,
+                "read_only": record.read_only,
+                "turns": record.turns,
+                "input_tokens": record.input_tokens,
+                "output_tokens": record.output_tokens,
+                "duration_ms": record.duration_ms,
+                "worktree_branch": record.worktree_branch,
+                "active_tool": record.active_tool,
                 "parts": parts,
             }),
         );
@@ -4984,6 +5118,132 @@ impl Engine {
         }
     }
 
+    fn rpc_browse_skills(
+        &self,
+        id: &str,
+        params: &Value,
+        outbound: &keel_rpc::Outbound,
+    ) -> String {
+        let Some(agent) = keel_harness::pi_agent_dir().map(PathBuf::from) else {
+            return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
+        };
+        let force = params
+            .get("force")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let cache_only = params
+            .get("cache_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let (data_dir, id, outbound) = (
+            compute_data_dir(&self.inner.profile),
+            id.to_string(),
+            outbound.clone(),
+        );
+        std::thread::spawn(move || {
+            let reply = match skill_catalog::browse_skills(&data_dir, &agent, force, cache_only) {
+                Ok(resp) => success(&id, serde_json::json!(resp)),
+                Err(err) => failure(&id, RpcErrorCode::Internal, &err),
+            };
+            outbound.push(&reply);
+        });
+        "{}".to_string()
+    }
+
+    fn rpc_fetch_catalog_skill_readme(
+        &self,
+        id: &str,
+        params: &Value,
+        outbound: &keel_rpc::Outbound,
+    ) -> String {
+        let Some(repo) = params.get("repo").and_then(Value::as_str).map(str::to_string) else {
+            return failure(id, RpcErrorCode::BadParams, "repo is required");
+        };
+        let git_ref = params
+            .get("ref")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("main")
+            .to_string();
+        let path = params
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let (id, outbound) = (id.to_string(), outbound.clone());
+        std::thread::spawn(move || {
+            let reply = match skill_catalog::fetch_catalog_readme(&repo, &git_ref, &path) {
+                Ok(content) => success(&id, serde_json::json!({ "content": content })),
+                Err(err) => failure(&id, RpcErrorCode::BadParams, &err),
+            };
+            outbound.push(&reply);
+        });
+        "{}".to_string()
+    }
+
+    fn rpc_install_catalog_skill(
+        &self,
+        id: &str,
+        params: &Value,
+        outbound: &keel_rpc::Outbound,
+    ) -> String {
+        let Some(agent) = keel_harness::pi_agent_dir().map(PathBuf::from) else {
+            return failure(id, RpcErrorCode::Internal, "Keel's bundled Pi is missing");
+        };
+        let Ok(entry) =
+            serde_json::from_value::<skill_catalog::CatalogEntry>(params["skill"].clone())
+        else {
+            return failure(id, RpcErrorCode::BadParams, "skill entry is required");
+        };
+        let replace = params
+            .get("replace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let (data_dir, id, outbound) = (
+            compute_data_dir(&self.inner.profile),
+            id.to_string(),
+            outbound.clone(),
+        );
+        std::thread::spawn(move || {
+            let reply =
+                match skill_catalog::install_catalog_skill(&data_dir, &agent, &entry, replace) {
+                    Ok(()) => success(&id, serde_json::json!({})),
+                    Err(err) => failure(&id, RpcErrorCode::BadParams, &err),
+                };
+            outbound.push(&reply);
+        });
+        "{}".to_string()
+    }
+
+    fn rpc_prefetch_skill_avatars(
+        &self,
+        id: &str,
+        params: &Value,
+        outbound: &keel_rpc::Outbound,
+    ) -> String {
+        let repos: Vec<String> = params
+            .get("repos")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (data_dir, id, outbound) = (
+            compute_data_dir(&self.inner.profile),
+            id.to_string(),
+            outbound.clone(),
+        );
+        std::thread::spawn(move || {
+            let avatars = skill_catalog::prefetch_avatars(&data_dir, &repos);
+            let reply = success(&id, serde_json::json!({ "avatars": avatars }));
+            outbound.push(&reply);
+        });
+        "{}".to_string()
+    }
+
     /// Promote a hosted scratch / no-project chat into a real folder space.
     /// When the chat owns an isolated `{data_dir}/scratch/{chat_id}` workspace,
     /// its files are copied (without overwriting existing files or following
@@ -5448,6 +5708,16 @@ impl EngineHost for Engine {
             "memory_delete" => self.rpc_memory_delete(&request.id, &request.params),
             "add_skill" => self.rpc_add_skill(&request.id, &request.params),
             "remove_skill" => self.rpc_remove_skill(&request.id, &request.params),
+            "browse_skills" => self.rpc_browse_skills(&request.id, &request.params, outbound),
+            "fetch_catalog_skill_readme" => {
+                self.rpc_fetch_catalog_skill_readme(&request.id, &request.params, outbound)
+            }
+            "install_catalog_skill" => {
+                self.rpc_install_catalog_skill(&request.id, &request.params, outbound)
+            }
+            "prefetch_skill_avatars" => {
+                self.rpc_prefetch_skill_avatars(&request.id, &request.params, outbound)
+            }
             "queue_command" => self.rpc_queue(&request.id, &request.params),
             "subagent_caps" => self.rpc_subagent_caps(&request.id, &request.params),
             "suggest_prompt" => self.rpc_suggest_prompt(&request.id, &request.params, outbound),

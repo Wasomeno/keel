@@ -26,6 +26,16 @@
 
 ## Downloads
 
+### Quick Install (macOS)
+
+Install the latest release to `/Applications` with no Gatekeeper prompt:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Wasomeno/keel/main/install.sh | sh
+```
+
+### Manual Downloads
+
 Download the latest pre-built application for macOS:
 
 | Platform | Format | Size | Download |
@@ -36,7 +46,7 @@ Download the latest pre-built application for macOS:
 
 *See all assets and checksums on the [Releases page](https://github.com/Wasomeno/keel/releases).*
 
-> **Note on First Launch:** This build is signed with a self-signed certificate, not notarized. Move `Keel.app` to `/Applications`, open it once, then go to System Settings → Privacy & Security and click **Open Anyway**. From 0.2.4 on, Keel updates itself in place from Settings → Updates.
+> **Note on Manual Downloads:** Browser downloads are signed with a self-signed certificate (not notarized). If you download manually instead of using `install.sh`, move `Keel.app` to `/Applications`, open it once, then go to System Settings → Privacy & Security and click **Open Anyway**. From 0.2.4 on, Keel updates itself in place from Settings → Updates.
 
 ---
 

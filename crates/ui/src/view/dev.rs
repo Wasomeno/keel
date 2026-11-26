@@ -239,6 +239,20 @@ impl KeelWindow {
                 self.close_lightbox(cx);
                 "ok"
             }
+            "open_shots" => {
+                if let Some((ix, paths)) = self.transcript.items.iter().find_map(|i| match &i.block {
+                    crate::markdown::TranscriptBlock::Shots { paths, .. } if !paths.is_empty() => {
+                        Some((0usize, paths.clone()))
+                    }
+                    _ => None,
+                }) {
+                    let resolved = paths.iter().map(|p| self.resolve_image_path(p)).collect();
+                    self.open_image_gallery(resolved, ix, cx);
+                    "ok"
+                } else {
+                    "error: no shots row in transcript"
+                }
+            }
             "diagram_menu" => {
                 let row_id = if arg.is_empty() {
                     self.transcript.items.iter().find_map(|i| {
@@ -573,6 +587,17 @@ impl KeelWindow {
                 }
                 "error: no active browser tab".into()
             }
+
+            "browser_clipboard_set" => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(arg.to_string()));
+                "ok"
+            }
+            "browser_clipboard_get" => {
+                return cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .unwrap_or_default();
+            }
             "browser_state" => {
                 let b = &self.browser;
                 let tab = b.tab();
@@ -649,6 +674,7 @@ impl KeelWindow {
                         super::right_panel::RightTabKind::Launcher => "launcher",
                         super::right_panel::RightTabKind::Changes => "changes",
                         super::right_panel::RightTabKind::File => "file",
+                        super::right_panel::RightTabKind::Subagents => "subagents",
                         super::right_panel::RightTabKind::Browser(_) => "browser",
                         super::right_panel::RightTabKind::Terminal(_) => "terminal",
                     }),
@@ -787,6 +813,7 @@ impl KeelWindow {
                 "ok"
             }
             "plan" => return self.dev_plan(arg, window, cx),
+            "todo" => self.dev_todo(arg, cx),
             "win_shot" => {
                 let path = if arg.is_empty() {
                     "/tmp/keel-win-shot.png"
@@ -995,6 +1022,48 @@ impl KeelWindow {
         })
         .detach();
         crate::plan::fixture_reply(phase, &plan, &steps)
+    }
+
+    /// Inject or toggle a composer todo fixture for visual inspection.
+    fn dev_todo(&mut self, arg: &str, cx: &mut Context<Self>) -> &'static str {
+        let arg = arg.trim();
+        let id = "todo-fixture".to_string();
+        match arg {
+            "clear" => {
+                self.messages.remove(&id);
+                self.msg_order.retain(|m| m != &id);
+                self.todo_state.reset();
+                cx.notify();
+                return "cleared";
+            }
+            "toggle" => {
+                self.todo_state.toggle(std::time::Instant::now());
+                self.kick_motion(cx);
+                cx.notify();
+                return "toggled";
+            }
+            _ => {}
+        }
+        let current = if arg == "done" { None } else { Some(1) };
+        let steps = crate::steps::Steps {
+            items: vec![
+                "Inspect transcript hover animations".into(),
+                "Run cargo t and summarize results".into(),
+                "Verify inline citations formatting".into(),
+            ],
+            current,
+            kind: crate::steps::StepKind::Task,
+        };
+        let entry = self.message_entry(&id, "assistant");
+        entry.steps = vec![crate::turn::Step::Steps {
+            id: "task_steps".into(),
+            steps,
+        }];
+        self.todo_state.dismissed_source = None;
+        self.todo_state.dismiss_at = None;
+        self.kick_motion(cx);
+        cx.notify();
+        "ok"
     }
 
     fn dev_state(&self, cx: &Context<Self>) -> String {

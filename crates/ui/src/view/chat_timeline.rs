@@ -210,7 +210,6 @@ impl KeelWindow {
     pub(super) fn sync_chat_timeline(&mut self, t: Tokens, cx: &mut Context<Self>) {
         let active_chat = self.current_chat.is_some()
             && !(self.right_panel_expanded() && self.right_panel_open())
-            && self.subagent_open.is_none()
             && self.chat_reveal.is_none();
         let points = self.transcript.user_points_rc();
         let transcript_empty = self.transcript.items.is_empty();
@@ -298,6 +297,8 @@ struct TimelineState {
     scroll_fade: Fade,
     tick_fades: Vec<Fade>,
     active_fades: Vec<Fade>,
+    scratch_tick_ts: Vec<f32>,
+    scratch_active_ts: Vec<f32>,
     hovered_ix: Option<usize>,
     shown_ix: Option<usize>,
     pressed_ix: Option<usize>,
@@ -325,6 +326,8 @@ impl Default for TimelineState {
             ),
             tick_fades: Vec::new(),
             active_fades: Vec::new(),
+            scratch_tick_ts: Vec::new(),
+            scratch_active_ts: Vec::new(),
             hovered_ix: None,
             shown_ix: None,
             pressed_ix: None,
@@ -407,6 +410,25 @@ impl ChatTimelineRail {
     }
 }
 
+fn timeline_slot_at(
+    hb: &Hitbox,
+    strip: Bounds<Pixels>,
+    pitch: f32,
+    total_items: usize,
+    pos: gpui::Point<Pixels>,
+    window: &Window,
+) -> Option<usize> {
+    if total_items == 0 || pitch <= 0.0 || !hb.is_hovered(window) {
+        return None;
+    }
+    let y = f32::from(pos.y - strip.origin.y);
+    if y < 0.0 {
+        return None;
+    }
+    let ix = (y / pitch).floor() as usize;
+    (ix < total_items).then_some(ix)
+}
+
 impl IntoElement for ChatTimelineRail {
     type Element = Self;
     fn into_element(self) -> Self {
@@ -416,7 +438,7 @@ impl IntoElement for ChatTimelineRail {
 
 impl Element for ChatTimelineRail {
     type RequestLayoutState = (AnyElement, Rc<RefCell<TimelineState>>);
-    type PrepaintState = Vec<Hitbox>;
+    type PrepaintState = (Hitbox, Bounds<Pixels>);
 
     fn id(&self) -> Option<ElementId> {
         Some("chat-timeline-rail".into())
@@ -483,24 +505,20 @@ impl Element for ChatTimelineRail {
             let (rail_t, rail_moving) = st.rail_fade.value(now);
             let (preview_y, py_moving) = st.preview_y(now, self.reduced);
             let mut tick_moving = false;
-            let tick_ts: Vec<f32> = st
-                .tick_fades
-                .iter()
-                .map(|f| {
-                    let (v, m) = f.value(now);
-                    tick_moving |= m;
-                    v
-                })
-                .collect();
-            let active_ts: Vec<f32> = st
-                .active_fades
-                .iter()
-                .map(|f| {
-                    let (v, m) = f.value(now);
-                    active_moving |= m;
-                    v
-                })
-                .collect();
+            let mut tick_ts = std::mem::take(&mut st.scratch_tick_ts);
+            tick_ts.clear();
+            tick_ts.extend(st.tick_fades.iter().map(|f| {
+                let (v, m) = f.value(now);
+                tick_moving |= m;
+                v
+            }));
+            let mut active_ts = std::mem::take(&mut st.scratch_active_ts);
+            active_ts.clear();
+            active_ts.extend(st.active_fades.iter().map(|f| {
+                let (v, m) = f.value(now);
+                active_moving |= m;
+                v
+            }));
             (
                 eff_active_ix,
                 eff_at_bottom,
@@ -597,6 +615,11 @@ impl Element for ChatTimelineRail {
             self.running_since.is_some(),
             latest_pressed,
         );
+        {
+            let mut st = state.borrow_mut();
+            st.scratch_tick_ts = tick_ts;
+            st.scratch_active_ts = active_ts;
+        }
         let on_latest = self.on_jump_latest.clone();
         tick_rows.push(
             div()
@@ -651,17 +674,14 @@ impl Element for ChatTimelineRail {
     ) -> Self::PrepaintState {
         el.prepaint(window, cx);
         let total_items = self.points.len() + 1;
-        let mut hitboxes = Vec::with_capacity(total_items);
-        let mut y = bounds.origin.y + px(self.rail_pad_y);
-        for _ in 0..total_items {
-            let slot = Bounds {
-                origin: point(bounds.origin.x, y),
-                size: size(bounds.size.width, px(self.pitch)),
-            };
-            hitboxes.push(window.insert_hitbox(slot, HitboxBehavior::Normal));
-            y += px(self.pitch);
-        }
-        hitboxes
+        let strip = Bounds {
+            origin: point(bounds.origin.x, bounds.origin.y + px(self.rail_pad_y)),
+            size: size(
+                bounds.size.width,
+                px((total_items as f32 * self.pitch).max(0.0)),
+            ),
+        };
+        (window.insert_hitbox(strip, HitboxBehavior::Normal), strip)
     }
 
     fn paint(
@@ -670,15 +690,24 @@ impl Element for ChatTimelineRail {
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
         (el, state): &mut Self::RequestLayoutState,
-        hitboxes: &mut Self::PrepaintState,
+        (hitbox, strip): &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut gpui::App,
     ) {
         let total_items = self.points.len() + 1;
+        let pitch = self.pitch;
+        let strip = *strip;
         let new_hovered = if self.leaving || cx.has_active_drag() {
             None
         } else {
-            hitboxes.iter().position(|hb| hb.is_hovered(window))
+            timeline_slot_at(
+                hitbox,
+                strip,
+                pitch,
+                total_items,
+                window.mouse_position(),
+                window,
+            )
         };
         let now = Instant::now();
         let (needs_frame, pressed_active) = {
@@ -722,21 +751,23 @@ impl Element for ChatTimelineRail {
             return;
         }
         let view = window.current_view();
-        let hbs = hitboxes.clone();
-        window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+        let hb = hitbox.clone();
+        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if phase == gpui::DispatchPhase::Bubble {
-                let now_hovered = hbs.iter().position(|hb| hb.is_hovered(window));
+                let now_hovered =
+                    timeline_slot_at(&hb, strip, pitch, total_items, e.position, window);
                 if now_hovered != new_hovered {
                     cx.notify(view);
                 }
             }
         });
-        let hbs = hitboxes.clone();
+        let hb = hitbox.clone();
         let st = state.clone();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
             if phase == gpui::DispatchPhase::Bubble
                 && e.button == MouseButton::Left
-                && let Some(ix) = hbs.iter().position(|hb| hb.is_hovered(window))
+                && let Some(ix) =
+                    timeline_slot_at(&hb, strip, pitch, total_items, e.position, window)
             {
                 st.borrow_mut().pressed_ix = Some(ix);
                 cx.notify(view);

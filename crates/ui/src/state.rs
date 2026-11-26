@@ -491,6 +491,33 @@ impl AppState {
         }
     }
 
+    /// Preselect the active chat's folder for the new-chat screen.
+    /// Leave the existing selection alone if there is no usable active chat.
+    pub fn inherit_active_chat_folder(&mut self) -> bool {
+        let Some(chat) = self
+            .active_tab
+            .as_ref()
+            .and_then(|id| self.chats.get(id))
+            .filter(|chat| !chat.tombstoned)
+        else {
+            return false;
+        };
+        if self.is_scratch_chat(chat) {
+            self.new_chat_space = None;
+            self.new_chat_no_project = true;
+            self.clear_branches_for_no_project();
+        } else if let Some(space) = self.spaces.get(&chat.space_id).filter(|s| !s.tombstoned) {
+            self.new_chat_space = Some(space.id.clone());
+            self.new_chat_no_project = false;
+            if self.branch_folder.as_deref() != Some(space.path.as_str()) {
+                self.reset_branch_for_folder();
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// Derive target space for new session.
     ///
     /// Current space filter, or, when the filter is All spaces, the newest real
@@ -781,6 +808,55 @@ mod tests {
 
     fn test_app(dir: &Path, device_id: &str) -> AppState {
         AppState::new(dir.to_path_buf(), device_id.to_string())
+    }
+
+    #[test]
+    fn new_chat_shortcut_uses_the_active_folder_over_the_previous_pick_and_filter() {
+        let mut app = test_app(Path::new("/tmp"), "dev");
+        for (id, path) in [("active", "/work/secondary"), ("other", "/work/other")] {
+            app.spaces
+                .insert(id.into(), SpaceItem::test(id, id, path, "dev"));
+        }
+        app.chats.insert(
+            "chat".into(),
+            ChatItem::test("chat", "active", "Chat", ChatStatus::Idle, 0, 0),
+        );
+        app.active_tab = Some("chat".into());
+        app.new_chat_space = Some("other".into());
+        app.space_filter = Some("other".into());
+        app.branch_folder = Some("/work/other".into());
+        app.selected_branch = Some("other-branch".into());
+
+        assert!(app.inherit_active_chat_folder());
+        assert_eq!(
+            app.target_space_for_new_session().unwrap().path,
+            "/work/secondary"
+        );
+        assert!(app.selected_branch.is_none());
+        assert_eq!(app.space_filter.as_deref(), Some("other"));
+
+        app.active_tab = None;
+        assert!(!app.inherit_active_chat_folder());
+        assert_eq!(app.target_space_for_new_session().unwrap().id, "active");
+    }
+
+    #[test]
+    fn new_chat_shortcut_from_scratch_selects_no_project() {
+        let mut app = test_app(Path::new("/tmp"), "dev");
+        let mut chat = ChatItem::test("chat", "scratch", "Chat", ChatStatus::Idle, 0, 0);
+        chat.cwd = "/tmp/scratch/chat".into();
+        app.chats.insert("chat".into(), chat);
+        app.active_tab = Some("chat".into());
+        app.new_chat_space = Some("other".into());
+        app.spaces.insert(
+            "other".into(),
+            SpaceItem::test("other", "Other", "/work/other", "dev"),
+        );
+
+        assert!(app.inherit_active_chat_folder());
+        assert!(app.new_chat_no_project);
+        assert!(app.target_space_for_new_session().is_none());
+        assert!(!app.branch_pending);
     }
 
     #[test]

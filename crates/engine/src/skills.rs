@@ -104,7 +104,9 @@ pub(crate) fn list_skills_at(
         row.removable = inside(&agent.join("skills"), path)
             || cwd.is_some_and(|cwd| inside(&cwd.join(".pi").join("skills"), path));
     }
-    assign_collections(&mut rows, &read_skill_lock(home));
+    let mut locks = read_skill_lock_file(&home.join(".agents").join(".skill-lock.json"));
+    locks.extend(read_skill_lock_file(&agent.join("skill-lock.json")));
+    assign_collections(&mut rows, &locks);
     Ok(rows)
 }
 
@@ -112,12 +114,22 @@ pub(crate) fn list_skills_at(
 pub struct SkillLockMeta {
     pub source: String,
     pub source_url: String,
+    pub commit: String,
 }
 
-/// `~/.agents/.skill-lock.json` records which repo each installed skill came
-/// from. A missing or unreadable file just means nothing is grouped.
-fn read_skill_lock(home: &Path) -> std::collections::HashMap<String, SkillLockMeta> {
-    let Ok(text) = fs::read_to_string(home.join(".agents").join(".skill-lock.json")) else {
+/// Merge `~/.agents/.skill-lock.json` and Keel's `{agent}/skill-lock.json`.
+pub(crate) fn read_all_skill_locks(
+    agent: &Path,
+) -> std::collections::HashMap<String, SkillLockMeta> {
+    let mut locks = read_skill_lock_file(&home_dir().join(".agents").join(".skill-lock.json"));
+    locks.extend(read_skill_lock_file(&agent.join("skill-lock.json")));
+    locks
+}
+
+/// Read a skill lock file recording which repo each installed skill came from.
+/// A missing or unreadable file just means nothing is grouped.
+fn read_skill_lock_file(path: &Path) -> std::collections::HashMap<String, SkillLockMeta> {
+    let Ok(text) = fs::read_to_string(path) else {
         return std::collections::HashMap::new();
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -139,15 +151,35 @@ fn read_skill_lock(home: &Path) -> std::collections::HashMap<String, SkillLockMe
                 .unwrap_or_default()
                 .trim()
                 .to_string();
+            let commit = meta
+                .get("commit")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             Some((
                 name.clone(),
                 SkillLockMeta {
                     source: source.to_string(),
                     source_url,
+                    commit,
                 },
             ))
         })
         .collect()
+}
+
+pub(crate) fn skill_name_from_file(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let matter = parse_matter(&text);
+    if matter.broken {
+        return None;
+    }
+    matter.name.filter(|n| valid_name(n))
+}
+
+pub(crate) fn copy_skill_tree(source: &Path, dest: &Path) -> std::io::Result<()> {
+    copy_dir(source, dest)
 }
 
 pub fn human_author(source: &str) -> String {
@@ -156,6 +188,12 @@ pub fn human_author(source: &str) -> String {
         return String::new();
     }
     let lower = trimmed.to_lowercase();
+    if lower.starts_with("anthropics") {
+        return "Anthropic".to_string();
+    }
+    if lower.starts_with("cloudflare") {
+        return "Cloudflare".to_string();
+    }
     if lower.starts_with("emilkowalski") {
         return "Emil Kowalski".to_string();
     }

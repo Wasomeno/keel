@@ -33,12 +33,13 @@ pub use view::{
 };
 
 /// Tools the `keel-ui` MCP server advertises. A harness may prefix the name.
-pub const UI_TOOLS: [&str; 14] = [
+pub const UI_TOOLS: [&str; 15] = [
     "show_chart",
     "show_choices",
     "show_stats",
     "show_commands",
     "show_files",
+    "show_images",
     "show_mr",
     "show_steps",
     "task_steps",

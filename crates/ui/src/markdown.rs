@@ -244,6 +244,31 @@ pub struct ToolEntry {
     pub output_tail: String,
 }
 
+fn is_known_image_file(path: &str) -> bool {
+    static KNOWN: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        return false;
+    }
+    let cache = KNOWN.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()));
+    if let Ok(read) = cache.read()
+        && read.contains(path)
+    {
+        return true;
+    }
+    if p.is_file() {
+        if let Ok(mut write) = cache.write() {
+            if write.len() >= 512 {
+                write.clear();
+            }
+            write.insert(path.to_string());
+        }
+        return true;
+    }
+    false
+}
+
 impl ToolEntry {
     /// One `tools` / `parts` entry of a session message view.
     pub fn from_json(t: &serde_json::Value) -> Self {
@@ -260,9 +285,7 @@ impl ToolEntry {
                 items
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .filter(|p| {
-                        std::path::Path::new(p).is_absolute() && std::path::Path::new(p).is_file()
-                    })
+                    .filter(|p| is_known_image_file(p))
                     .map(str::to_string)
                     .collect()
             })
@@ -337,6 +360,12 @@ fn parse_diff(value: Option<&serde_json::Value>) -> Option<ToolDiffView> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptBlock {
+    /// A user message's blocks share one bubble.
+    UserMessage {
+        id: String,
+        text: String,
+        blocks: Vec<TranscriptBlock>,
+    },
     /// Paragraph text with its inline styles and links.
     Paragraph {
         id: String,
@@ -505,7 +534,8 @@ pub enum TranscriptBlock {
 impl TranscriptBlock {
     pub fn id(&self) -> &str {
         match self {
-            Self::Paragraph { id, .. }
+            Self::UserMessage { id, .. }
+            | Self::Paragraph { id, .. }
             | Self::Code { id, .. }
             | Self::Heading { id, .. }
             | Self::Quote { id, .. }
@@ -537,7 +567,8 @@ impl TranscriptBlock {
 
     pub(crate) fn set_id(&mut self, new_id: String) {
         match self {
-            Self::Paragraph { id, .. }
+            Self::UserMessage { id, .. }
+            | Self::Paragraph { id, .. }
             | Self::Code { id, .. }
             | Self::Heading { id, .. }
             | Self::Quote { id, .. }
@@ -569,6 +600,9 @@ impl TranscriptBlock {
 
     pub fn content_len(&self) -> usize {
         match self {
+            Self::UserMessage { blocks, .. } => {
+                blocks.iter().map(|block| block.content_len() + 1).sum()
+            }
             Self::Interim(inner) => inner.content_len() + 1,
             Self::Code { content, run, .. } => content.len() + usize::from(run.is_some()),
             Self::Paragraph { content, spans, .. }
@@ -642,7 +676,11 @@ impl TranscriptBlock {
             Self::Callout { callout, .. } => callout.content_len(),
             Self::Compare { columns, .. } => columns
                 .iter()
-                .map(|c| c.title.len() + c.points.iter().map(|p| p.len() + 1).sum::<usize>())
+                .map(|c| {
+                    c.title.len()
+                        + c.summary.as_deref().map_or(0, str::len)
+                        + c.points.iter().map(|p| p.len() + 1).sum::<usize>()
+                })
                 .sum(),
             Self::PlanCard { plan, .. } => {
                 plan.title.len()
@@ -786,7 +824,12 @@ fn parse_top_level(text: &str) -> Vec<(Range<usize>, TranscriptBlock)> {
                         // Inline (mixed with text) it stays a link to the file.
                         match local_image_path(&dest_url) {
                             Some(path) => {
-                                links.push(format!("file://{}", path.replace(' ', "%20")));
+                                let link = if path.starts_with('/') {
+                                    format!("file://{}", path.replace(' ', "%20"))
+                                } else {
+                                    path.clone()
+                                };
+                                links.push(link);
                                 images.push(path);
                             }
                             None => {
@@ -993,21 +1036,50 @@ fn html_text(html: &str) -> String {
 }
 
 /// The file a markdown image points at, when it is on this device:
-/// an absolute path, a `file://` URL (percent-decoded), or `~/…`.
+/// an absolute path, a `file://` URL (percent-decoded), `~/…`, or a
+/// workspace-relative image path (`docs/screenshots/a.png`).
 pub fn local_image_path(dest: &str) -> Option<String> {
     let dest = dest.trim();
-    let path = if let Some(rest) = dest.strip_prefix("file://") {
-        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-        percent_decode(rest)
-    } else if let Some(rest) = dest.strip_prefix("~/") {
-        let home = std::env::var("HOME").ok()?;
-        format!("{}/{rest}", home.trim_end_matches('/'))
-    } else if dest.starts_with('/') {
-        percent_decode(dest)
-    } else {
+    if dest.is_empty() {
         return None;
-    };
-    path.starts_with('/').then_some(path)
+    }
+    if let Some(rest) = dest.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        let path = percent_decode(rest);
+        return path.starts_with('/').then_some(path);
+    }
+    if let Some(rest) = dest.strip_prefix("~/") {
+        let home = std::env::var("HOME").ok()?;
+        let path = format!("{}/{rest}", home.trim_end_matches('/'));
+        return path.starts_with('/').then_some(path);
+    }
+    if dest.starts_with('/') {
+        let path = percent_decode(dest);
+        return path.starts_with('/').then_some(path);
+    }
+    if dest.contains("://")
+        || dest.starts_with("//")
+        || dest.starts_with('#')
+        || dest.starts_with("data:")
+        || dest.starts_with("mailto:")
+    {
+        return None;
+    }
+    let rel = percent_decode(dest.strip_prefix("./").unwrap_or(dest));
+    has_image_extension(&rel).then_some(rel)
+}
+
+fn has_image_extension(path: &str) -> bool {
+    let clean = path.split(['?', '#']).next().unwrap_or(path);
+    std::path::Path::new(clean)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif"
+            )
+        })
 }
 
 fn percent_decode(s: &str) -> String {
@@ -1292,6 +1364,20 @@ mod tests {
         // Remote images are not local files: a plain paragraph.
         assert!(matches!(&blocks[4], TranscriptBlock::Paragraph { .. }));
         assert_eq!(blocks.len(), 5);
+
+        // Relative image paths also become Shots so workspace screenshots render inline.
+        let rel = parse_markdown_blocks(
+            "m2",
+            "![shot](./docs/screenshots/944/a.png)\n\n![remote](https://example.com/a.png)",
+        );
+        assert_eq!(
+            rel[0],
+            TranscriptBlock::Shots {
+                id: "m2#0".into(),
+                paths: vec!["docs/screenshots/944/a.png".into()]
+            }
+        );
+        assert!(matches!(&rel[1], TranscriptBlock::Paragraph { .. }));
     }
 
     #[test]

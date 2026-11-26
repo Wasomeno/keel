@@ -11,15 +11,34 @@ impl KeelWindow {
     pub(super) fn bind_actions(&mut self, root: Div, cx: &mut Context<Self>) -> Div {
         root.key_context(keys::CONTEXT)
             // Before a focused input's own Cmd-C, which swallows it even when
-            // empty: selected transcript text wins.
-            .capture_action(|_: &gpui_base::input::Copy, window, cx| {
-                let text = gpui_base::TextSelection::selected_text(window, cx);
-                if !text.trim().is_empty() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    cx.stop_propagation();
+            // empty: selected transcript text wins (unless the browser page has focus).
+            .capture_action(cx.listener(
+                |this, _: &gpui_base::input::Copy, window, cx| {
+                    if this.browser_viewport_focused(window) {
+                        return;
+                    }
+                    let text = gpui_base::TextSelection::selected_text(window, cx);
+                    if !text.trim().is_empty() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .on_action(cx.listener(|this, _: &NewChat, _, cx| {
+                if this.state.inherit_active_chat_folder() {
+                    this.projects.picked = this
+                        .state
+                        .active_tab
+                        .as_deref()
+                        .filter(|_| !this.state.new_chat_no_project)
+                        .and_then(|chat| this.projects.chat_project_id(chat));
+                    this.create_error = None;
                 }
-            })
-            .on_action(cx.listener(|this, _: &NewChat, _, cx| this.create_new_session(None, cx)))
+                this.create_new_session(None, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RefreshApp, window, cx| {
+                this.refresh_app(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
                 this.set_zoom(crate::style::zoom_step(crate::style::zoom(), true), cx)
@@ -109,6 +128,14 @@ impl KeelWindow {
                         this.toggle_right_panel_expand(cx);
                     } else if this.settings_open {
                         this.close_settings(cx);
+                    } else if this.right_panel.open
+                        && matches!(
+                            this.right_panel_active_kind(),
+                            Some(super::right_panel::RightTabKind::Subagents)
+                        )
+                        && this.subagent_open.is_some()
+                    {
+                        this.close_subagent_session(cx);
                     } else {
                         cx.propagate();
                     }
@@ -130,10 +157,7 @@ impl KeelWindow {
                 if !this.lightbox_fx.shown() && this.dotify_key(event, window, cx) {
                     cx.stop_propagation();
                 } else if this.settings_open && key == "escape" && !m.modified() {
-                    if this.skills.modal_skill.is_some() {
-                        this.dismiss_skill_modal(cx);
-                        cx.stop_propagation();
-                    } else if this.memory.modal.is_some() {
+                    if this.memory.modal.is_some() {
                         this.dismiss_memory_modal(cx);
                         cx.stop_propagation();
                     } else if this.api_key_edit.is_some() {
@@ -144,8 +168,28 @@ impl KeelWindow {
                         this.cancel_account_confirm(cx);
                         cx.stop_propagation();
                     }
+                } else if this.skills.open && key == "escape" && !m.modified() {
+                    if this.skills.modal_skill.is_some() {
+                        this.dismiss_skill_modal(cx);
+                        cx.stop_propagation();
+                    } else if this.skills.modal_catalog.is_some() {
+                        this.dismiss_catalog_modal(cx);
+                        cx.stop_propagation();
+                    } else {
+                        this.close_pages();
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
                 } else if this.renaming_chat.is_some() && key == "escape" && !m.modified() {
                     this.cancel_chat_title_rename(window, cx);
+                    cx.stop_propagation();
+                } else if let Some(super::Lightbox::Images { .. }) =
+                    this.lightbox.as_ref().filter(|_| this.lightbox_fx.shown())
+                    && !m.modified()
+                    && matches!(key, "left" | "right")
+                {
+                    let delta = if key == "left" { -1 } else { 1 };
+                    this.lightbox_step(delta, cx);
                     cx.stop_propagation();
                 } else if let Some(super::Lightbox::Diagram { source, view, .. }) =
                     this.lightbox.as_ref().filter(|_| this.lightbox_fx.shown())
@@ -211,7 +255,12 @@ impl KeelWindow {
                     this.close_menus(cx)
                 } {
                     cx.stop_propagation();
-                } else if key == "v" && m.secondary(cx) && !m.shift && !m.alt && this.paste_images(cx)
+                } else if key == "v"
+                    && m.secondary(cx)
+                    && !m.shift
+                    && !m.alt
+                    && !this.browser_viewport_focused(window)
+                    && this.paste_images(cx)
                 {
                     // An image paste attaches; text pastes reach the field as usual.
                     cx.stop_propagation();
@@ -269,6 +318,13 @@ impl KeelWindow {
             }
             return true;
         }
+        if self.skills.modal_catalog.is_some() {
+            self.dismiss_catalog_modal(cx);
+            if self.menus_cut {
+                self.skills.modal_catalog_leaving = None;
+            }
+            return true;
+        }
         if self.projects.sheet_open() {
             self.projects.close_sheet();
             cx.notify();
@@ -289,7 +345,6 @@ impl KeelWindow {
             || self.show_effort_picker
             || self.show_effort_menu
             || self.show_permission_menu
-            || self.show_subagent_menu
             || self.show_chat_menu
             || self.show_sound_menu
             || self.state.show_branch_picker
@@ -326,7 +381,6 @@ impl KeelWindow {
         self.show_effort_picker = false;
         self.show_effort_menu = false;
         self.show_permission_menu = false;
-        self.show_subagent_menu = false;
         self.show_chat_menu = false;
         self.show_sound_menu = false;
         self.state.show_branch_picker = false;

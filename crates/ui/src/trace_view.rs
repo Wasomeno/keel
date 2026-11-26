@@ -373,6 +373,8 @@ pub struct LineCtx<'a> {
     /// The row's own `expanded` is the open state: a click sends the plain
     /// row id (thinking, plans) instead of a `{line}=0/1` choice.
     pub row_toggle: bool,
+    /// Optional custom leading visual (e.g. animated subagent creature) replacing the default icon.
+    pub leading_icon: Option<AnyElement>,
 }
 
 impl<'a> LineCtx<'a> {
@@ -386,12 +388,13 @@ impl<'a> LineCtx<'a> {
             command: None,
             title: None,
             row_toggle: false,
+            leading_icon: None,
         }
     }
 }
 
 /// One trace line, and its body when open.
-pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext) -> AnyElement {
+pub fn render_line(step: &TraceStep, mut lc: LineCtx, depth: usize, rc: &RowContext) -> AnyElement {
     let t = rc.tokens;
     let now_ms = rc.now_ms;
     let toggled_ms = rc
@@ -464,30 +467,41 @@ pub fn render_line(step: &TraceStep, lc: LineCtx, depth: usize, rc: &RowContext)
     } else {
         1.
     };
-    let icon = div()
-        .relative()
-        .flex_none()
-        .size(zpx(16.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(c(icon_color))
-        .opacity((0.6 + 0.4 * settle) * breathe)
-        .child(
-            div()
-                .when(was_icon.is_some(), |d| d.opacity(settle))
-                .child(icon_for(step, lc.name).el(zpx(14.))),
-        )
-        .children(was_icon.map(|old| {
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(1. - settle)
-                .child(old.el(zpx(14.)))
-        }));
+    let icon = if let Some(custom) = lc.leading_icon.take() {
+        div()
+            .relative()
+            .flex_none()
+            .size(zpx(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(custom)
+    } else {
+        div()
+            .relative()
+            .flex_none()
+            .size(zpx(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(c(icon_color))
+            .opacity((0.6 + 0.4 * settle) * breathe)
+            .child(
+                div()
+                    .when(was_icon.is_some(), |d| d.opacity(settle))
+                    .child(icon_for(step, lc.name).el(zpx(14.))),
+            )
+            .children(was_icon.map(|old| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(1. - settle)
+                    .child(old.el(zpx(14.)))
+            }))
+    };
 
     let mono = mono_subject(step.kind);
     let shown_subject = |subject: &str| {
@@ -1650,7 +1664,8 @@ fn fading_content(
         .into_any_element()
 }
 
-/// A spawned subagent: "Running the research agent", ↗ opens its session.
+/// A spawned subagent: "Running explore agent", live active step or concise
+/// completion stats, and `↗` to drill into its session.
 pub fn render_subagent(
     item: &TranscriptRowItem,
     subagent_id: &str,
@@ -1677,6 +1692,54 @@ pub fn render_subagent(
     } else {
         format!("{label} agent")
     };
+    let live = rc.subagent_info.get(subagent_id);
+    let compact = |raw: &str, max_chars: usize| -> String {
+        let single = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if single.chars().count() <= max_chars {
+            single
+        } else {
+            let head: String = single.chars().take(max_chars.saturating_sub(1)).collect();
+            format!("{head}…")
+        }
+    };
+    step.description = match status {
+        StepStatus::Running => live
+            .and_then(|info| {
+                if !info.active_tool.trim().is_empty() {
+                    Some(compact(&info.active_tool, 46))
+                } else if !info.description.trim().is_empty() {
+                    Some(compact(&info.description, 46))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| (!summary.trim().is_empty()).then(|| compact(summary, 46))),
+        StepStatus::Done | StepStatus::Cancelled => {
+            let stats = live.and_then(|info| {
+                let mut bits = Vec::new();
+                if info.turns > 0 {
+                    bits.push(if info.turns == 1 {
+                        "1 turn".to_string()
+                    } else {
+                        format!("{} turns", info.turns)
+                    });
+                }
+                if let Some(ms) = info.duration_ms {
+                    bits.push(format_short_duration(ms));
+                }
+                (!bits.is_empty()).then(|| bits.join(" · "))
+            });
+            stats.or_else(|| {
+                live.filter(|i| !i.description.trim().is_empty())
+                    .map(|i| compact(&i.description, 46))
+                    .or_else(|| (!summary.trim().is_empty()).then(|| compact(summary, 46)))
+            })
+        }
+        StepStatus::Error => live
+            .and_then(|i| i.duration_ms.map(format_short_duration))
+            .or_else(|| Some("failed".to_string())),
+        StepStatus::Pending => None,
+    };
     step.body = if status == StepStatus::Error && !summary.is_empty() {
         StepBody::Output {
             tail: summary.to_string(),
@@ -1689,6 +1752,15 @@ pub fn render_subagent(
     let on_action = rc.on_action.clone();
     let mut lc = LineCtx::new(item.row_id().to_string(), "agent");
     lc.shimmer = status == StepStatus::Running;
+    lc.leading_icon = Some(crate::subagent_entity::render_entity(
+        subagent_id,
+        label,
+        crate::subagent_entity::EntityState::from_status(state),
+        22.,
+        rc.clock_epoch,
+        t,
+        rc.reduced,
+    ));
     let line = render_line(&step, lc, 0, rc);
     let group: gpui::SharedString = format!("sub-{id}").into();
     div().w_full().ml(zpx(-INSET)).child(
@@ -1698,6 +1770,7 @@ pub fn render_subagent(
             .group(group.clone())
             .relative()
             .w_full()
+            .pr(zpx(20.))
             .rounded(RADIUS_MD)
             .cursor_pointer()
             .hover_fade(c(t.hover), None)
@@ -1728,13 +1801,28 @@ pub fn render_subagent(
     )
 }
 
+fn format_short_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let secs = ms / 1_000;
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
 /// Does anything in this group move right now (a running line, a fold or an
 /// entry still inside its window)? The view's ticker asks this.
 /// The row has a running step or a transition still settling.
 pub fn row_animating(item: &TranscriptRowItem) -> bool {
+    row_animating_at(item, now_ms())
+}
+
+pub fn row_animating_at(item: &TranscriptRowItem, now_ms: i64) -> bool {
     use crate::markdown::TranscriptBlock;
     match &item.block {
-        TranscriptBlock::ToolGroup { tools, .. } => tools_animating(tools, now_ms()),
+        TranscriptBlock::ToolGroup { tools, .. } => tools_animating(tools, now_ms),
         TranscriptBlock::Plan { live, .. } => *live,
         TranscriptBlock::Subagent { state, .. } => state == "running",
         TranscriptBlock::TurnSummary { live: true, .. } => true,

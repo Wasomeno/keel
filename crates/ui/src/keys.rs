@@ -9,6 +9,7 @@ actions!(
     keel,
     [
         Quit,
+        RefreshApp,
         Reload,
         OpenSettings,
         ZoomIn,
@@ -37,6 +38,7 @@ actions!(
         ToggleFiles,
         FilesSave,
         BrowserCloseTab,
+        BrowserPasteAndMatchStyle,
         TimerStartPause,
         TimerReset,
         ToggleTimer,
@@ -60,6 +62,8 @@ pub const CONTEXT: &str = "KeelWindow";
 pub const RIGHT_PANEL: &str = "RightPanel";
 /// The browser pane's key context, inside `RIGHT_PANEL`.
 pub const BROWSER: &str = "Browser";
+/// The live web viewport inside `BROWSER` (distinct from the address bar).
+pub const BROWSER_VIEWPORT: &str = "BrowserViewport";
 /// The files pane's, inside `RIGHT_PANEL`.
 pub const FILES: &str = "Files";
 
@@ -81,6 +85,7 @@ pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(CONTEXT);
     vec![
         KeyBinding::new(secondary!("q"), Quit, None),
+        KeyBinding::new(secondary!("r"), RefreshApp, ctx),
         KeyBinding::new(secondary!("shift-r"), Reload, None),
         // Copies selected transcript text when no input has focus.
         KeyBinding::new(secondary!("c"), gpui_base::input::Copy, ctx),
@@ -113,6 +118,55 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(secondary!("["), BrowserBack, Some(BROWSER)),
         KeyBinding::new(secondary!("]"), BrowserForward, Some(BROWSER)),
         KeyBinding::new(secondary!("shift-w"), BrowserEndSession, Some(BROWSER)),
+        // Inside the live browser viewport, keep Tab and editing shortcuts
+        // with the web page instead of Root focus traversal or chat actions.
+        KeyBinding::new("tab", gpui::NoAction, Some(BROWSER_VIEWPORT)),
+        KeyBinding::new("shift-tab", gpui::NoAction, Some(BROWSER_VIEWPORT)),
+        KeyBinding::new(
+            secondary!("c"),
+            gpui_base::input::Copy,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("x"),
+            gpui_base::input::Cut,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("v"),
+            gpui_base::input::Paste,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("shift-v"),
+            BrowserPasteAndMatchStyle,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("alt-shift-v"),
+            BrowserPasteAndMatchStyle,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("a"),
+            gpui_base::input::SelectAll,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("z"),
+            gpui_base::input::Undo,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("shift-z"),
+            gpui_base::input::Redo,
+            Some(BROWSER_VIEWPORT),
+        ),
+        KeyBinding::new(
+            secondary!("y"),
+            gpui_base::input::Redo,
+            Some(BROWSER_VIEWPORT),
+        ),
         // Inside the right side panel, ⌘T and ⌘W manage panel tabs, not chats.
         KeyBinding::new(secondary!("t"), BrowserNewTab, Some(RIGHT_PANEL)),
         KeyBinding::new(secondary!("w"), BrowserCloseTab, Some(RIGHT_PANEL)),
@@ -140,8 +194,27 @@ pub fn init(cx: &mut App) {
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
+                MenuItem::action("Refresh", RefreshApp),
                 MenuItem::action("Reload Keel", Reload),
                 MenuItem::action("Quit Keel", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("Undo", gpui_base::input::Undo, gpui::OsAction::Undo),
+                MenuItem::os_action("Redo", gpui_base::input::Redo, gpui::OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", gpui_base::input::Cut, gpui::OsAction::Cut),
+                MenuItem::os_action("Copy", gpui_base::input::Copy, gpui::OsAction::Copy),
+                MenuItem::os_action("Paste", gpui_base::input::Paste, gpui::OsAction::Paste),
+                MenuItem::action("Paste and Match Style", BrowserPasteAndMatchStyle),
+                MenuItem::os_action(
+                    "Select All",
+                    gpui_base::input::SelectAll,
+                    gpui::OsAction::SelectAll,
+                ),
             ],
             disabled: false,
         },
@@ -216,7 +289,7 @@ mod tests {
 
     #[test]
     fn every_binding_parses() {
-        assert_eq!(bindings().len(), 43);
+        assert_eq!(bindings().len(), 55);
     }
 
     #[test]

@@ -591,12 +591,12 @@ impl KeelWindow {
             .flatten();
         let hint = t.text_faint;
         let pill = self.render_suggestion_pill(t, window, cx);
-        let input = div()
-            .id("composer-input")
+        let has_pill = pill.is_some();
+        let text_area = div()
+            .id("composer-text-area")
             .relative()
             .flex_1()
             .min_w_0()
-            .t_reading()
             .map(|d| match suggestion {
                 Some(text) => d
                     // One line, so the box is the empty composer's height.
@@ -607,7 +607,18 @@ impl KeelWindow {
                             .update(cx, |input, cx| input.focus(window, cx));
                     })),
                 None => d.child(self.composer.clone()),
-            })
+            });
+        let input = div()
+            .id("composer-input")
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .t_reading()
+            .flex()
+            .flex_row()
+            .items_start()
+            .when(has_pill, |d| d.gap(zpx(8.)))
+            .child(text_area)
             .children(pill);
         let input = self.ease_input_height(input, hero, window);
         // Hero: the text starts at the top of its area, growing down as it
@@ -742,9 +753,13 @@ impl KeelWindow {
                     .left_0()
                     .size_full(),
                 )
-            })
-            .children(self.render_pending_images(t, hero, cx))
-            .map(|d| {
+            });
+        let pending_images = self.render_pending_images(t, hero, cx);
+        let (todo_tray, todo_expand_h) = (!hero)
+            .then(|| self.render_composer_todo(t, window, cx))
+            .flatten()
+            .map_or((None, 0.), |(el, h)| (Some(el), h));
+        let panel = panel.map(|d| {
                 if hero {
                     // One inset all round: the text, the paperclip's glyph and
                     // the send button's edge sit HERO_INSET in from the sides;
@@ -753,6 +768,7 @@ impl KeelWindow {
                         .pt(zpx(HERO_PAD_Y))
                         .pb(zpx(HERO_PAD_Y))
                         .gap(zpx(HERO_GAP))
+                        .children(pending_images)
                         .child(input)
                         .child(
                             div()
@@ -821,11 +837,16 @@ impl KeelWindow {
                         .child(div().flex_1())
                         .child(cluster);
 
-                    d.px_3().pt_2p5().pb_2().gap_2().child(
+                    d.when_some(todo_tray, |d, tray| d.child(tray)).child(
                         div()
+                            .w_full()
+                            .px_3()
+                            .pt_2p5()
+                            .pb_2()
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .children(pending_images)
                             .child(text_box)
                             .child(div().h(zpx(1.)).w_full().bg(c(t.border)).opacity(0.35))
                             .child(bottom_bar),
@@ -872,7 +893,17 @@ impl KeelWindow {
                     })
                     .into_any_element()
             }
-            None => panel.into_any_element(),
+            None => panel
+                .when(todo_expand_h > 0., |el| {
+                    el.mt(zpx(-todo_expand_h)).shadow(vec![gpui::BoxShadow {
+                        color: c(t.shadow),
+                        offset: gpui::point(zpx(0.), zpx(-6.)),
+                        blur_radius: zpx(20.),
+                        spread_radius: zpx(-2.),
+                        inset: false,
+                    }])
+                })
+                .into_any_element(),
         };
 
         // Docked, the panel spans the reading column's text (the column less
@@ -917,6 +948,9 @@ impl KeelWindow {
         let tab = hero
             .then(|| self.render_hero_targets(open, window, t, cx))
             .or(chat_tab);
+        let subagents_pill = (!hero && !dropping)
+            .then(|| self.render_composer_subagents_pill(todo_expand_h, t, window, cx))
+            .flatten();
         let reserve_tab = hero || tab.is_some() || dropping;
         div()
             .flex_none()
@@ -934,6 +968,7 @@ impl KeelWindow {
                         .when(reserve_tab, |d| d.mt(zpx(TAB_HEIGHT)))
                         .child(panel)
                         .children(tab)
+                        .children(subagents_pill)
                         .children(self.render_create_error(t, cx)),
                 ),
             )
@@ -950,9 +985,343 @@ impl KeelWindow {
             })
     }
 
-    /// The shortcut pill on the suggestion's first line, top-right of the
-    /// text area. Opaque, so a long suggestion runs under it rather than
-    /// reflowing. Rises in when a suggestion arrives; sinks out when the
+    /// Floating active-subagents pill anchored above the top-right edge of
+    /// the docked composer. Displays stacked live 3D creatures for each active
+    /// (running/blocked) subagent with no text label; sleeping/completed
+    /// subagents exit smoothly and never appear.
+    ///
+    /// Motion follows Emil Kowalski's animations.dev principles:
+    /// - Pill enters (`200ms`, `ease_out_strong`) from `scale(0.92), dy +6px, opacity 0`
+    ///   and exits faster (`140ms`, `ease_out`) along the same axis — fully interruptible.
+    /// - Individual 3D creatures enter (`220ms`, `ease_out_strong`) from `scale(0.84), dy +5px`
+    ///   while smoothly opening their slot width, and exit (`150ms`, `ease_out`) collapsing
+    ///   cleanly as each subagent finishes and goes to sleep.
+    fn render_composer_subagents_pill(
+        &mut self,
+        todo_expand_h: f32,
+        t: Tokens,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let active = self.active_subagents();
+        let running = active.len();
+        let now = std::time::Instant::now();
+        let reduced = self.reduced();
+
+        const PILL_IN_S: f32 = 0.20;
+        const PILL_OUT_S: f32 = 0.14;
+        const SLOT_IN_S: f32 = 0.22;
+        const SLOT_OUT_S: f32 = 0.15;
+        const MAX_STACK: usize = 5;
+
+        let eval_slot = |entering: bool, started_at: std::time::Instant, from_p: f32| -> (f32, bool) {
+            let dur = if entering { SLOT_IN_S } else { SLOT_OUT_S };
+            let target = if entering { 1.0 } else { 0.0 };
+            let dist = (target - from_p).abs();
+            if dist <= 0.001 {
+                return (target, false);
+            }
+            let raw = (now.saturating_duration_since(started_at).as_secs_f32() / (dur * dist).max(0.04))
+                .clamp(0.0, 1.0);
+            let eased = if entering {
+                crate::motion::ease_out_strong(raw)
+            } else {
+                crate::motion::ease_out(raw)
+            };
+            let p = from_p + (target - from_p) * eased;
+            (p, raw < 1.0)
+        };
+
+        // 1. Reconcile per-creature slots (interruptible enter/exit for each subagent).
+        if reduced {
+            self.subagent_pill_slots = active
+                .iter()
+                .take(MAX_STACK)
+                .map(|(id, name, status)| (id.clone(), name.clone(), status.clone(), true, now, 1.0))
+                .collect();
+        } else {
+            let active_ids: std::collections::HashSet<&str> =
+                active.iter().map(|(id, _, _)| id.as_str()).collect();
+            // Mark slots that finished / went to sleep as exiting from their current progress.
+            for slot in &mut self.subagent_pill_slots {
+                if !active_ids.contains(slot.0.as_str()) {
+                    if slot.3 {
+                        let (cur_p, _) = eval_slot(slot.3, slot.4, slot.5);
+                        slot.3 = false;
+                        slot.4 = now;
+                        slot.5 = cur_p;
+                    }
+                } else if let Some((_, name, status)) =
+                    active.iter().find(|(id, _, _)| id == &slot.0)
+                {
+                    slot.1 = name.clone();
+                    slot.2 = status.clone();
+                    if !slot.3 {
+                        let (cur_p, _) = eval_slot(slot.3, slot.4, slot.5);
+                        slot.3 = true;
+                        slot.4 = now;
+                        slot.5 = cur_p;
+                    }
+                }
+            }
+            // Append newly spawned active subagents (up to MAX_STACK).
+            for (id, name, status) in &active {
+                if !self.subagent_pill_slots.iter().any(|s| &s.0 == id)
+                    && self.subagent_pill_slots.iter().filter(|s| s.3).count() < MAX_STACK
+                {
+                    self.subagent_pill_slots.push((
+                        id.clone(),
+                        name.clone(),
+                        status.clone(),
+                        true,
+                        now,
+                        0.0,
+                    ));
+                }
+            }
+            // Prune fully exited slots once the pill itself isn't hiding them.
+            if running > 0 {
+                self.subagent_pill_slots.retain(|s| {
+                    let (p, animating) = eval_slot(s.3, s.4, s.5);
+                    s.3 || animating || p > 0.01
+                });
+            }
+        }
+
+        // 2. Interruptible pill presence (0 <-> >0 active subagents).
+        let eval_pill = |entering: bool, started_at: std::time::Instant, from_p: f32| -> (f32, bool) {
+            let dur = if entering { PILL_IN_S } else { PILL_OUT_S };
+            let target = if entering { 1.0 } else { 0.0 };
+            let dist = (target - from_p).abs();
+            if dist <= 0.001 {
+                return (target, false);
+            }
+            let raw = (now.saturating_duration_since(started_at).as_secs_f32() / (dur * dist).max(0.04))
+                .clamp(0.0, 1.0);
+            let eased = if entering {
+                crate::motion::ease_out_strong(raw)
+            } else {
+                crate::motion::ease_out(raw)
+            };
+            let p = from_p + (target - from_p) * eased;
+            (p, raw < 1.0)
+        };
+
+        let (pill_p, pill_animating) = match (running > 0, &mut self.subagent_pill_anim) {
+            (true, slot) => {
+                match slot {
+                    Some((at, true, from_p)) => eval_pill(true, *at, *from_p),
+                    Some((at, false, from_p)) => {
+                        let (cur_p, _) = eval_pill(false, *at, *from_p);
+                        *slot = Some((now, true, cur_p));
+                        eval_pill(true, now, cur_p)
+                    }
+                    None => {
+                        *slot = Some((now, true, 0.0));
+                        eval_pill(true, now, 0.0)
+                    }
+                }
+            }
+            (false, slot) => {
+                let Some((at, entering, from_p)) = slot.as_mut() else {
+                    self.subagent_pill_slots.clear();
+                    return None;
+                };
+                if *entering {
+                    let (cur_p, _) = eval_pill(true, *at, *from_p);
+                    *entering = false;
+                    *at = now;
+                    *from_p = cur_p;
+                }
+                let (p, animating) = eval_pill(false, *at, *from_p);
+                if !animating && p <= 0.001 {
+                    *slot = None;
+                    self.subagent_pill_slots.clear();
+                    return None;
+                }
+                (p, animating)
+            }
+        };
+
+        if self.subagent_pill_slots.is_empty() {
+            return None;
+        }
+
+        let mut any_slot_animating = false;
+        let clock_epoch = self.clock_epoch;
+        let creatures: Vec<AnyElement> = self
+            .subagent_pill_slots
+            .iter()
+            .enumerate()
+            .map(|(ix, (id, name, status, entering, started_at, from_p))| {
+                let (p, anim) = if reduced {
+                    (1.0, false)
+                } else {
+                    eval_slot(*entering, *started_at, *from_p)
+                };
+                if anim {
+                    any_slot_animating = true;
+                }
+                // Never scale from 0: Emil's physicality rule (0.84 -> 1.0 + subtle 5px rise).
+                let c_scale = if reduced { 1.0 } else { 0.84 + 0.16 * p };
+                let c_dy = if reduced { 0.0 } else { 5.0 * (1.0 - p) };
+                // Smoothly open/collapse slot width so siblings glide together cleanly.
+                let slot_w = if reduced { 24.0 } else { 24.0 * p };
+                let overlap = if ix > 0 { -5.0 * p } else { 0.0 };
+                div()
+                    .flex_none()
+                    .w(zpx(slot_w))
+                    .h(zpx(24.))
+                    .when(ix > 0, |d| d.ml(zpx(overlap)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(p)
+                    .child(crate::subagent_entity::render_entity_transformed(
+                        id,
+                        name,
+                        crate::subagent_entity::EntityState::from_status(status),
+                        24.,
+                        c_scale,
+                        c_dy,
+                        clock_epoch,
+                        t,
+                        reduced,
+                    ))
+                    .into_any_element()
+            })
+            .collect();
+
+        if pill_animating || any_slot_animating {
+            window.request_animation_frame();
+        }
+
+        let panel_active = self.right_panel_open()
+            && matches!(
+                self.right_panel_active_kind(),
+                Some(super::right_panel::RightTabKind::Subagents)
+            );
+        let tip_label = if running <= 1 {
+            "1 subagent is working".to_string()
+        } else {
+            format!("{running} subagents are working")
+        };
+
+        // Reduced motion: gentle opacity fade only, no spatial travel or scale.
+        let dy = if reduced { 0.0 } else { 6.0 * (1.0 - pill_p) };
+        let pill_scale = if reduced { 1.0 } else { 0.92 + 0.08 * pill_p };
+
+        let pill = div()
+            .id("composer-subagents-pill")
+            .hover_probe("composer-subagents-pill")
+            .group("composer-subagents-pill")
+            .h(zpx(32. * pill_scale))
+            .px(zpx(6.))
+            .rounded_full()
+            .floating_surface(t)
+            .when(panel_active, |d| d.border_color(c(t.accent).opacity(0.65)))
+            .flex()
+            .flex_row()
+            .items_center()
+            .opacity(pill_p)
+            .when(running > 0, |d| {
+                d.cursor_pointer()
+                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                    .active(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_subagents_panel(window, cx);
+                    }))
+            })
+            .children(creatures);
+
+        // Speech-bubble tooltip anchored directly above the indicator pill so it
+        // never covers the 3D creatures.
+        let bubble = div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .child(
+                div()
+                    .px_2p5()
+                    .py_1()
+                    .rounded(crate::style::RADIUS_MD)
+                    .floating_surface(t)
+                    .t_caption()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(c(t.text))
+                    .whitespace_nowrap()
+                    .child(tip_label),
+            )
+            .child(
+                // Small downward chat-bubble tail pointing at the indicator pill.
+                div()
+                    .mr(zpx(14.))
+                    .mt(zpx(-1.))
+                    .w(zpx(10.))
+                    .h(zpx(6.))
+                    .child(
+                        gpui::canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                let x0 = f32::from(bounds.origin.x);
+                                let y0 = f32::from(bounds.origin.y);
+                                let w = f32::from(bounds.size.width);
+                                let h = f32::from(bounds.size.height);
+                                let mut fill_pb = gpui::PathBuilder::fill();
+                                fill_pb.move_to(gpui::point(px(x0), px(y0)));
+                                fill_pb.line_to(gpui::point(px(x0 + w), px(y0)));
+                                fill_pb.line_to(gpui::point(px(x0 + w * 0.5), px(y0 + h)));
+                                fill_pb.close();
+                                if let Ok(path) = fill_pb.build() {
+                                    window.paint_path(path, c(t.floating));
+                                }
+                                let mut stroke_pb = gpui::PathBuilder::stroke(px(1.));
+                                stroke_pb.move_to(gpui::point(px(x0), px(y0)));
+                                stroke_pb.line_to(gpui::point(px(x0 + w * 0.5), px(y0 + h)));
+                                stroke_pb.line_to(gpui::point(px(x0 + w), px(y0)));
+                                if let Ok(path) = stroke_pb.build() {
+                                    window.paint_path(path, c(t.border));
+                                }
+                            },
+                        )
+                        .size_full(),
+                    ),
+            );
+
+        Some(
+            div()
+                .absolute()
+                .right(zpx(2.))
+                .top(zpx(-38. - todo_expand_h + dy))
+                .when(running > 0, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .bottom(zpx(34.))
+                            .child(
+                                crate::motion::reveal_on_hover_curved(
+                                    "composer-subagents-bubble",
+                                    "composer-subagents-pill",
+                                    0.,
+                                    1.,
+                                    std::time::Duration::from_millis(160),
+                                    std::time::Duration::from_millis(110),
+                                    bubble,
+                                )
+                                .with_offset(0., 4.),
+                            ),
+                    )
+                })
+                .child(pill)
+                .into_any_element(),
+        )
+    }
+
+    /// The shortcut pill on the suggestion's first line, aligned in-flow to the
+    /// right of the text area so neither placeholder nor suggestion text renders
+    /// behind it. Rises in when a suggestion arrives; sinks out when the
     /// suggestion goes away or is taken by a click. Keyboard changes (typing,
     /// the shortcut itself) remove it at once.
     fn render_suggestion_pill(
@@ -1009,9 +1378,7 @@ impl KeelWindow {
             .child(shortcut);
         Some(
             div()
-                .absolute()
-                .top_0()
-                .right_0()
+                .flex_none()
                 .h(zpx(crate::style::READING.line))
                 .flex()
                 .items_center()
@@ -1372,40 +1739,42 @@ impl KeelWindow {
             .map(|(_, p)| p.name.clone())
             .unwrap_or_else(|| "Issue repo".into());
         let divider = || div().w(zpx(1.)).h(zpx(14.)).flex_none().bg(c(t.border));
-        target_tab(t)
-            .child(self.picker_chip(
-                Picker::Folder,
-                "folder-picker-btn",
-                Some(Icon::Folder),
-                space.into_any_element(),
-                180.,
-                open,
-                t,
-                cx,
-            ))
-            .child(divider())
-            .child(self.picker_chip(
-                Picker::Branch,
-                "branch-picker-btn",
-                Some(Icon::Branch),
-                branch_label,
-                BRANCH_LABEL_MAX,
-                open,
-                t,
-                cx,
-            ))
-            .child(divider())
-            .child(self.picker_chip(
-                Picker::Repo,
-                "repo-picker-btn",
-                Some(Icon::GitLab),
-                repo.into_any_element(),
-                180.,
-                open,
-                t,
-                cx,
-            ))
-            .into_any_element()
+        target_tab_slot(
+            target_tab(t)
+                .child(self.picker_chip(
+                    Picker::Folder,
+                    "folder-picker-btn",
+                    Some(Icon::Folder),
+                    space.into_any_element(),
+                    160.,
+                    open,
+                    t,
+                    cx,
+                ))
+                .child(divider())
+                .child(self.picker_chip(
+                    Picker::Branch,
+                    "branch-picker-btn",
+                    Some(Icon::Branch),
+                    branch_label,
+                    BRANCH_LABEL_MAX,
+                    open,
+                    t,
+                    cx,
+                ))
+                .child(divider())
+                .child(self.picker_chip(
+                    Picker::Repo,
+                    "repo-picker-btn",
+                    Some(Icon::GitLab),
+                    repo.into_any_element(),
+                    160.,
+                    open,
+                    t,
+                    cx,
+                )),
+        )
+        .into_any_element()
     }
 
     /// One picked reference as a card: a document icon and `#33 Title` for
@@ -1609,7 +1978,7 @@ impl KeelWindow {
                     .cursor_pointer()
                     .when(exit.is_none(), |d| {
                         d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.open_lightbox(super::Lightbox::Image(path.clone()), cx)
+                            this.open_lightbox(super::Lightbox::single_image(path.clone()), cx)
                         }))
                     })
                     .child(
@@ -1756,22 +2125,31 @@ impl KeelWindow {
                 )
                 .into_any_element()
         };
-        div().relative().children(menu).child(
-            chip(id, t, is_open)
-                .when_some(icon, |d, icon| d.child(icon.el(zpx(13.))))
-                .child(
-                    div()
-                        .max_w(zpx(max_label))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(label),
-                )
-                .child(div().text_color(c(t.text_faint)).child(chevron))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.open_picker_with_search(picker, window, cx)
-                })),
-        )
+        let shrink = if picker == Picker::Branch { 2. } else { 1. };
+        div()
+            .relative()
+            .min_w_0()
+            .flex_shrink(shrink)
+            .children(menu)
+            .child(
+                chip(id, t, is_open)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when_some(icon, |d, icon| d.child(icon.el(zpx(13.)).flex_none()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(zpx(max_label))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                    .child(div().flex_none().text_color(c(t.text_faint)).child(chevron))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_picker_with_search(picker, window, cx)
+                    })),
+            )
     }
 
     /// The input in a box whose height eases to the text's as lines come and
@@ -1877,8 +2255,9 @@ impl KeelWindow {
         // animation: gpui keys an animation's children under its id, so a
         // new width generation, or the wrapper going away when the tween
         // ends, would reset the roll and play it again.
+        let moving = width.animating(now) && !reduced;
         let spacer = div().h(zpx(ROLL_H));
-        let spacer = if width.animating(now) && !reduced {
+        let spacer = if moving {
             let (from, to) = (width.from, width.to);
             spacer
                 .with_animation(
@@ -1899,22 +2278,31 @@ impl KeelWindow {
                 .w(px(w))
                 .flex()
                 .items_center()
-                .whitespace_nowrap()
                 .overflow_hidden()
-                .text_ellipsis()
-                .child(text)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(text),
+                )
         };
+        let now_line = |text: String| line(text, target).when(!moving, |d| d.max_w_full());
         let frame = div()
             .relative()
-            .flex_none()
+            .flex_shrink(1.)
+            .min_w_0()
+            .max_w_full()
             .h(zpx(ROLL_H))
             .overflow_hidden()
             .child(spacer);
         if !rolling {
-            return frame.child(line(label, target)).into_any_element();
+            return frame.child(now_line(label)).into_any_element();
         }
         frame
-            .child(line(label, target).with_animation(
+            .child(now_line(label).with_animation(
                 ("branch-chip-roll", roll * 2 + 1),
                 anim(),
                 |el, d| el.top(zpx(ROLL_TRAVEL * (1. - d))).opacity(d),
@@ -2900,9 +3288,9 @@ fn permission_icon(mode: PermissionMode) -> Icon {
         PermissionMode::FullAccess => Icon::Alert,
     }
 }
-/// The branch chip label's widest: the chip then stays under ~320 px
-/// (padding, icon, gaps and chevron take the rest).
-const BRANCH_LABEL_MAX: f32 = 271.;
+/// The branch chip label's widest before truncating, leaving room for the
+/// sibling folder and issue-repo chips inside the hero composer tab.
+const BRANCH_LABEL_MAX: f32 = 210.;
 
 /// Width of `text` in the chips' small type, at the current zoom.
 fn measure_small_label(window: &gpui::Window, text: &str) -> f32 {
@@ -3391,15 +3779,28 @@ fn chip(id: &'static str, t: Tokens, active: bool) -> gpui::Stateful<gpui::Div> 
         .hover_fade(c(t.hover), None)
 }
 
-/// The tab on the composer panel's top edge, top-left. The hero's pickers
-/// and a chat's read-only targets share it, so the two cannot drift.
-fn target_tab(t: Tokens) -> gpui::Div {
+/// Bounds the hero tab horizontally between the composer panel's top corners
+/// so long folder / branch / repo labels shrink instead of overflowing past
+/// the panel's right edge.
+fn target_tab_slot(tab: gpui::Div) -> gpui::Div {
     div()
         .absolute()
         .bottom(gpui::relative(1.))
         .left(zpx(18.))
+        .right(zpx(18.))
         // One pixel into the panel, over its top border, so they read as one piece.
         .mb(zpx(-1.))
+        .flex()
+        .flex_row()
+        .child(tab)
+}
+
+/// The tab on the composer panel's top edge, top-left. The hero's pickers
+/// and a chat's read-only targets share it, so the two cannot drift.
+fn target_tab(t: Tokens) -> gpui::Div {
+    div()
+        .max_w_full()
+        .min_w_0()
         .h(zpx(TAB_HEIGHT + 1.))
         .px_1()
         .pb(zpx(1.))
