@@ -2102,7 +2102,6 @@ impl KeelWindow {
             .children(filter_bar);
 
         let creator_room = self.render_bot_room(creator, true, t, cx);
-        let quick = (coworkers > 0).then(|| self.render_bot_quick_strip(t, cx));
         let directory = self.render_bots_directory(&hatched, t, cx);
         let hairline = || div().h(px(1.)).ml(zpx(64.)).bg(c(t.border).opacity(0.55));
 
@@ -2139,7 +2138,6 @@ impl KeelWindow {
                             .pt(zpx(12.))
                             .pb(zpx(24.))
                             .child(creator_room)
-                            .children(quick)
                             .when(coworkers > 0, |d| {
                                 d.child(div().pt(zpx(16.)).child(hairline()))
                             })
@@ -2421,65 +2419,6 @@ impl KeelWindow {
             });
 
         row.into_any_element()
-    }
-
-    /// One line of hatch prompts under the pinned lab chat. The row itself stays
-    /// a conversation; these are the occasional actions, not part of the avatar.
-    fn render_bot_quick_strip(&mut self, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
-        let recipes: [(&'static str, &'static str); 3] = [
-            (
-                "Review a PR",
-                "Make me a sharp PR reviewer bot that catches bugs, edge cases, and over-engineering — terse voice, never bikesheds formatting.",
-            ),
-            (
-                "Write a briefing",
-                "Create a morning briefing bot that summarizes my tasks and open threads in 5 tight bullets, zero fluff.",
-            ),
-            (
-                "Audit the fleet",
-                "Audit my current bots and tell me what needs tightening or retiring.",
-            ),
-        ];
-        div()
-            .w_full()
-            .pl(zpx(64.))
-            .pr(zpx(12.))
-            .pt(zpx(2.))
-            .pb(zpx(4.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_wrap()
-            .gap(zpx(8.))
-            .children(
-                recipes
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, (label, prompt))| {
-                        let prompt = prompt.to_string();
-                        div()
-                            .id(ElementId::Name(format!("bots-room-recipe-{ix}").into()))
-                            .h(zpx(28.))
-                            .px(zpx(12.))
-                            .rounded_full()
-                            .bg(c(t.surface))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .cursor_pointer()
-                            .t_caption()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(c(t.text_muted))
-                            .hover(|s| s.text_color(c(t.text)))
-                            .hover_fade(c(t.hover), None)
-                            .active(|s| s.opacity(0.72))
-                            .child(label)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.open_bot_with_prompt(DR_KEELEE_ID, prompt.clone(), window, cx);
-                            }))
-                    }),
-            )
-            .into_any_element()
     }
 
     fn render_bots_directory(
