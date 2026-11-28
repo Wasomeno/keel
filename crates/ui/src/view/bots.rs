@@ -1978,11 +1978,11 @@ impl KeelWindow {
         let search = div()
             .w(zpx(220.))
             .h(zpx(INPUT_H))
-            .px(zpx(9.))
+            .px(zpx(12.))
             .flex()
             .flex_row()
             .items_center()
-            .gap(zpx(6.))
+            .gap(zpx(8.))
             .rounded_full()
             .bg(c(t.input))
             .t_small()
@@ -2002,14 +2002,14 @@ impl KeelWindow {
                 let selected = filter == target;
                 div()
                     .id(id)
-                    .h(zpx(22.))
-                    .px(zpx(8.))
+                    .h(zpx(24.))
+                    .px(zpx(10.))
                     .rounded_full()
                     .when(selected, |d| d.bg(c(t.surface)))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(zpx(5.))
+                    .gap(zpx(6.))
                     .cursor_pointer()
                     .t_caption()
                     .font_weight(if selected {
@@ -2101,10 +2101,10 @@ impl KeelWindow {
             )
             .children(filter_bar);
 
-        let creator_room = self.render_bot_room(creator, true, true, true, t, cx);
+        let creator_room = self.render_bot_room(creator, true, t, cx);
         let quick = (coworkers > 0).then(|| self.render_bot_quick_strip(t, cx));
         let directory = self.render_bots_directory(&hatched, t, cx);
-        let hairline = || div().h(px(1.)).ml(zpx(56.)).bg(c(t.border).opacity(0.55));
+        let hairline = || div().h(px(1.)).ml(zpx(64.)).bg(c(t.border).opacity(0.55));
 
         div()
             .flex_1()
@@ -2136,13 +2136,14 @@ impl KeelWindow {
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .pt(zpx(4.))
-                            .pb(zpx(16.))
+                            .pt(zpx(12.))
+                            .pb(zpx(24.))
                             .child(creator_room)
-                            .child(hairline())
                             .children(quick)
-                            .when(coworkers > 0, |d| d.child(hairline()))
-                            .child(directory),
+                            .when(coworkers > 0, |d| {
+                                d.child(div().pt(zpx(16.)).child(hairline()))
+                            })
+                            .child(div().pt(zpx(8.)).child(directory)),
                     ),
             )
             .into_any_element()
@@ -2153,8 +2154,6 @@ impl KeelWindow {
         &mut self,
         bot: Bot,
         pinned: bool,
-        _is_first: bool,
-        is_last: bool,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2265,9 +2264,9 @@ impl KeelWindow {
             .flex_row()
             .items_center()
             .gap(zpx(12.))
-            .px(zpx(4.))
-            .py(zpx(8.))
-            .min_h(zpx(60.))
+            .px(zpx(12.))
+            .py(zpx(10.))
+            .min_h(zpx(64.))
             .cursor_pointer()
             .rounded(zpx(8.))
             .when(active, |d| d.bg(c(t.selected)))
@@ -2323,7 +2322,7 @@ impl KeelWindow {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(zpx(2.))
+                    .gap(zpx(4.))
                     .child(
                         div()
                             .flex()
@@ -2336,7 +2335,7 @@ impl KeelWindow {
                                     .min_w_0()
                                     .truncate()
                                     .text_size(zpx(14.5))
-                                    .line_height(zpx(18.))
+                                    .line_height(zpx(20.))
                                     .font_weight(if has_unread {
                                         gpui::FontWeight::SEMIBOLD
                                     } else {
@@ -2383,8 +2382,8 @@ impl KeelWindow {
                 d.child(
                     div()
                         .absolute()
-                        .right(zpx(0.))
-                        .bottom(zpx(2.))
+                        .right(zpx(12.))
+                        .bottom(zpx(8.))
                         .child(
                             reveal_on_hover(
                                 ElementId::Name(format!("bot-room-more-{}", bot.id).into()),
@@ -2421,19 +2420,7 @@ impl KeelWindow {
                 )
             });
 
-        if pinned {
-            row.into_any_element()
-        } else {
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(row)
-                .when(!is_last, |d| {
-                    d.child(div().h(px(1.)).ml(zpx(56.)).bg(c(t.border).opacity(0.55)))
-                })
-                .into_any_element()
-        }
+        row.into_any_element()
     }
 
     /// One line of hatch prompts under the pinned lab chat. The row itself stays
@@ -2455,14 +2442,15 @@ impl KeelWindow {
         ];
         div()
             .w_full()
-            .pl(zpx(56.))
-            .pr(zpx(4.))
-            .py(zpx(6.))
+            .pl(zpx(64.))
+            .pr(zpx(12.))
+            .pt(zpx(2.))
+            .pb(zpx(4.))
             .flex()
             .flex_row()
             .items_center()
             .flex_wrap()
-            .gap(zpx(6.))
+            .gap(zpx(8.))
             .children(
                 recipes
                     .into_iter()
@@ -2471,8 +2459,8 @@ impl KeelWindow {
                         let prompt = prompt.to_string();
                         div()
                             .id(ElementId::Name(format!("bots-room-recipe-{ix}").into()))
-                            .h(zpx(26.))
-                            .px(zpx(10.))
+                            .h(zpx(28.))
+                            .px(zpx(12.))
                             .rounded_full()
                             .bg(c(t.surface))
                             .flex()
@@ -2598,17 +2586,9 @@ impl KeelWindow {
                 )
                 .into_any_element()
         } else {
-            let last = rooms.len().saturating_sub(1);
-            let mut list = div().w_full().flex().flex_col();
-            for (ix, (bot, _, _)) in rooms.iter().enumerate() {
-                list = list.child(self.render_bot_room(
-                    bot.clone(),
-                    false,
-                    ix == 0,
-                    ix == last,
-                    t,
-                    cx,
-                ));
+            let mut list = div().w_full().flex().flex_col().gap(zpx(2.));
+            for (bot, _, _) in &rooms {
+                list = list.child(self.render_bot_room(bot.clone(), false, t, cx));
             }
             let filter_gen = self.bots.filter_gen as usize;
             let filter_anim = self.recent_bot_filter_nav();
@@ -2644,12 +2624,12 @@ impl KeelWindow {
                 "Build me a release checklist bot that verifies diffs, migrations, and ship readiness with zero fluff.",
             ),
         ];
-        let last = starters.len() - 1;
 
         div()
             .w_full()
             .flex()
             .flex_col()
+            .gap(zpx(2.))
             .children(
                 starters
                     .into_iter()
@@ -2658,20 +2638,19 @@ impl KeelWindow {
                         let prompt = prompt.to_string();
                         div()
                             .w_full()
-                            .flex()
-                            .flex_col()
                             .child(
                                 div()
                                     .id(ElementId::Name(format!("bots-empty-starter-{ix}").into()))
                                     .w_full()
-                                    .min_h(zpx(60.))
-                                    .px(zpx(4.))
-                                    .py(zpx(8.))
+                                    .min_h(zpx(64.))
+                                    .px(zpx(12.))
+                                    .py(zpx(10.))
                                     .flex()
                                     .flex_row()
                                     .items_center()
                                     .gap(zpx(12.))
                                     .cursor_pointer()
+                                    .rounded(zpx(8.))
                                     .hover_fade(c(t.hover), None)
                                     .child(
                                         div()
@@ -2691,11 +2670,11 @@ impl KeelWindow {
                                             .min_w_0()
                                             .flex()
                                             .flex_col()
-                                            .gap(zpx(2.))
+                                            .gap(zpx(4.))
                                             .child(
                                                 div()
                                                     .text_size(zpx(14.5))
-                                                    .line_height(zpx(18.))
+                                                    .line_height(zpx(20.))
                                                     .font_weight(gpui::FontWeight::MEDIUM)
                                                     .text_color(c(t.text))
                                                     .child(title),
@@ -2719,9 +2698,6 @@ impl KeelWindow {
                                         },
                                     )),
                             )
-                            .when(ix != last, |d| {
-                                d.child(div().h(px(1.)).ml(zpx(56.)).bg(c(t.border).opacity(0.55)))
-                            })
                     }),
             )
             .into_any_element()
