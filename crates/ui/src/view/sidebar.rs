@@ -629,7 +629,6 @@ impl KeelWindow {
             .rounded(zpx(8.))
             .cursor_pointer()
             .hover_fade(c(t.hover), None)
-            .active(|s| s.opacity(0.75))
             .flex()
             .flex_row()
             .items_center()
@@ -736,7 +735,6 @@ impl KeelWindow {
                     .when(!focused, |d| {
                         d.cursor_pointer()
                             .hover_fade(c(t.hover), None)
-                            .active(|s| s.opacity(0.75))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.toggle_section_fold("spaces", cx);
                             }))
@@ -1520,7 +1518,6 @@ impl KeelWindow {
                         .when(!focused, |d| {
                             d.cursor_pointer()
                                 .hover_fade(c(t.hover), None)
-                                .active(|s| s.opacity(0.75))
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.toggle_section_fold("chats", cx);
                                 }))
