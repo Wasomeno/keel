@@ -2120,14 +2120,13 @@ impl KeelWindow {
                     .id(ElementId::Name(group.clone().into()))
                     .hover_probe(group.clone())
                     .group(group.clone())
-                    .h(zpx(28.))
-                    .pl_1()
-                    .pr_1()
+                    .h(zpx(super::sidebar::SECTION_HEADER_HEIGHT))
+                    .px(zpx(8.))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .rounded(RADIUS_MD)
+                    .gap(zpx(8.))
+                    .rounded(zpx(8.))
                     .cursor_pointer()
                     .hover_fade(c(t.hover), Some(c(t.selected)))
                     .active(|s| s.opacity(0.85))
@@ -2167,8 +2166,9 @@ impl KeelWindow {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .t_small()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_size(zpx(13.5))
+                            .line_height(zpx(18.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(c(t.text_muted))
                             .group_hover(group.clone(), |s| s.text_color(c(t.text)))
                             .child(project.name),
@@ -2419,9 +2419,14 @@ impl KeelWindow {
         )
     }
 
-    /// Chat ids linked to any project. They stay out of the folder and loose lists.
+    /// Chat ids linked to any project or owned by a bot. They stay out of the folder and loose lists.
     pub(super) fn linked_chat_ids(&self) -> std::collections::HashSet<String> {
-        self.projects.store.chats.keys().cloned().collect()
+        let mut set: std::collections::HashSet<String> =
+            self.projects.store.chats.keys().cloned().collect();
+        for cid in self.bots.store.chat_ids() {
+            set.insert(cid.to_string());
+        }
+        set
     }
 
     /// Sidebar order: project sessions, then folder sessions, then chats with neither.

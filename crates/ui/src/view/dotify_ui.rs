@@ -1020,11 +1020,20 @@ impl KeelWindow {
                     "Clock in…"
                 })
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(zpx(11.))
-                        .text_color(c(t.text_faint))
-                        .child("⌘⇧T"),
+                .when_some(
+                    crate::keys::display_for_id(
+                        &self.state.ui_settings.shortcuts,
+                        "timer_start_pause",
+                        crate::keys::current_os(),
+                    ),
+                    |d, key| {
+                        d.child(
+                            div()
+                                .text_size(zpx(11.))
+                                .text_color(c(t.text_faint))
+                                .child(key),
+                        )
+                    },
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.timer_ui_close_menu_only();

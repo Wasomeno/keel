@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.3.0-beta.1"
 edition = "2024"
 publish = false
 
@@ -36,6 +36,8 @@ keel-llm-catalog = { path = "../keel-harness/crates/keel-llm-catalog" }
 keel-tools = { path = "../keel-harness/crates/keel-tools" }
 keel-mcp = { path = "../keel-harness/crates/keel-mcp" }
 keel-core = { path = "../keel-harness/crates/keel-core" }
+keel-optmem = { path = "../keel-harness/crates/keel-optmem" }
+keel-bot-harness = { path = "../keel-harness/crates/keel-bot-harness" }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 async-trait = "0.1"

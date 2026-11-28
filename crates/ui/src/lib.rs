@@ -12,6 +12,7 @@ pub mod citations;
 pub mod code_block;
 pub mod compare;
 pub mod composer;
+pub mod creature;
 pub mod dev_control;
 pub mod diagram;
 pub mod dotify;
@@ -136,7 +137,7 @@ pub fn run(
         let app_state = AppState::new(data_dir.clone(), device_id);
 
         gpui_base::init(cx);
-        keys::init(cx);
+        keys::init(cx, &app_state.ui_settings.shortcuts);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         cx.open_window(
@@ -147,7 +148,7 @@ pub fn run(
                 titlebar: Some(TitlebarOptions {
                     title: Some("Keel".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.), px(14.))),
+                    traffic_light_position: Some(point(px(14.), px(21.))),
                 }),
                 window_background: WindowBackgroundAppearance::Opaque,
                 window_min_size: Some(size(px(640.), px(420.))),

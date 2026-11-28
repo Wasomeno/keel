@@ -1352,13 +1352,18 @@ impl KeelWindow {
                     .child(text_button("files-discard", "Discard", t).on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx)),
                     ))
-                    .child(
+                    .child({
+                        let save_key = crate::keys::display_for_id(
+                            &self.state.ui_settings.shortcuts,
+                            "files_save",
+                            crate::keys::current_os(),
+                        );
                         solid_button("files-save", if saving { "Saving…" } else { "Save" }, t)
-                            .child(kbd("⌘S", true, t))
+                            .when_some(save_key, |d, k| d.child(kbd(k, true, t)))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.files_save(false, cx)
-                            })),
-                    )
+                            }))
+                    })
                 })
                 .when(tab == ChangeDetailTab::File && markdown && loaded, |d| {
                     d.child(

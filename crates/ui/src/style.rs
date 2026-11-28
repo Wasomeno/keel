@@ -72,7 +72,7 @@ pub fn r_xl() -> Pixels {
 }
 
 /// Fixed chrome heights.
-pub const HEADER_HEIGHT: Pixels = px(40.);
+pub const HEADER_HEIGHT: Pixels = px(54.);
 /// Space the macOS traffic lights take at the left of the title bar.
 pub const TRAFFIC_LIGHTS_WIDTH: Pixels = px(78.);
 pub const TRANSCRIPT_MAX_WIDTH: Pixels = px(760.);

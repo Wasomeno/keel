@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Keel — Your AI workspace, right on your Mac</title>
+  <meta name="description" content="Connect your AI accounts, see clear visual answers, create custom bots with Dr. Keelee, and browse side by side — all privately on your Mac." />
+  <link rel="icon" href="assets/favicon-small.svg" type="image/svg+xml" />
+  <link rel="alternate icon" href="assets/favicon.ico" />
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('keel-theme');
+        if (saved === 'dark' || saved === 'light') {
+          document.documentElement.setAttribute('data-theme', saved);
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <!-- Scroll Reading Progress Hairline -->
+  <div class="scroll-progress-track" aria-hidden="true">
+    <div class="scroll-progress-bar" id="scrollProgressBar"></div>
+  </div>
+
+  <!-- Minimal Top Bar -->
+  <header class="nav-header" id="top">
+    <div class="container nav-inner">
+      <a href="#top" class="brand" aria-label="Keel home">
+        <img src="assets/favicon-small.svg" alt="" width="28" height="28" class="brand-icon" />
+        <span class="brand-name">Keel</span>
+      </a>
+
+      <button class="icon-btn" id="themeToggle" type="button" aria-label="Switch color theme" title="Toggle light or dark mode">
+        <svg class="icon-sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+        </svg>
+        <svg class="icon-moon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero Section with Subtle Architectural Grid -->
+    <section class="hero">
+      <div class="arch-grid arch-grid-hero" aria-hidden="true"></div>
+      <div class="container hero-stack">
+        <div class="hero-copy hero-enter">
+          <h1 class="hero-title">Your AI workspace,<br /><span class="title-muted">right on your Mac.</span></h1>
+          <p class="hero-sub">Use your AI accounts, see clear visual answers, create custom bots, and browse side by side.</p>
+
+          <div class="hero-ctas">
+            <a href="#install" class="btn btn-primary">
+              <span>Install for Mac</span>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            </a>
+          </div>
+        </div>
+
+        <!-- Single Interactive 1:1 Keel Window — Sticky Scroll Showcase + Direct In-App Navigation -->
+        <div class="hero-scroll-track" id="heroScrollTrack">
+          <div class="hero-scroll-sticky">
+            <div class="hero-stage" id="heroStage" aria-label="Interactive 1:1 preview of the Keel Mac app">
+              <div class="keel-window" id="keelWindow" data-active-scene="chat">
+                <!-- Left Sidebar (1:1 sidebar.rs) -->
+                <aside class="kw-sidebar" aria-label="Keel app sidebar navigation">
+                  <div class="kw-sb-top">
+                    <div class="kw-traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+                    <span class="kw-icon-sq" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/><path d="m15 9-3 3 3 3"/></svg>
+                    </span>
+                  </div>
+
+                  <div class="kw-sb-nav">
+                    <button class="kw-nav-row kw-interactive" type="button" data-kw-trigger="bots" aria-label="Open Bots view">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="4"/><circle cx="9.5" cy="11.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="14.5" cy="11.5" r="1.2" fill="currentColor" stroke="none"/><path d="M9.5 15.2c1.4 1 3.6 1 5 0"/></svg>
+                      <span>Bots</span>
+                    </button>
+                  </div>
+
+                  <div class="kw-sb-section" aria-hidden="true">
+                    <div class="kw-sec-head">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+                      <span>Projects</span>
+                    </div>
+                    <div class="kw-proj-row">
+                      <span class="kw-chev">›</span>
+                      <span class="kw-proj-name">Spring Trip</span>
+                      <span class="kw-count">3</span>
+                    </div>
+                    <div class="kw-proj-row">
+                      <span class="kw-chev">›</span>
+                      <span class="kw-proj-name">Home Budget</span>
+                      <span class="kw-count">2</span>
+                    </div>
+                  </div>
+
+                  <div class="kw-sb-section kw-sb-spaces">
+                    <div class="kw-sec-head" aria-hidden="true">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                      <span>Spaces</span>
+                    </div>
+                    <div class="kw-space-folder" aria-hidden="true">
+                      <span class="kw-chev">⌄</span>
+                      <span>personal</span>
+                    </div>
+
+                    <button class="kw-chat-row kw-interactive is-selected" type="button" data-kw-trigger="chat" aria-label="Open Compare Kyoto vs. Lisbon chat">
+                      <div class="kw-chat-title">Compare Kyoto vs. Lisbon</div>
+                      <div class="kw-chat-sub">Claude Sonnet · main</div>
+                    </button>
+                    <button class="kw-chat-row kw-interactive" type="button" data-kw-trigger="browser" aria-label="Open Check Friday train times with Built-in Browser">
+                      <div class="kw-chat-title">Check Friday train times</div>
+                      <div class="kw-chat-sub">ChatGPT · browser</div>
+                    </button>
+                    <div class="kw-chat-row kw-chat-passive" aria-hidden="true">
+                      <div class="kw-chat-title-wrap">
+                        <div class="kw-chat-title">Monthly expenses review</div>
+                        <span class="kw-unread-dot"></span>
+                      </div>
+                      <div class="kw-chat-sub">Grok · notes</div>
+                    </div>
+                  </div>
+
+                  <div class="kw-sb-foot" aria-hidden="true">
+                    <span class="kw-foot-left">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                      <span>Settings</span>
+                    </span>
+                    <span class="kw-kbd">⌘,</span>
+                  </div>
+                </aside>
+
+                <!-- Main Pane + GPU Overlay Browser Drawer -->
+                <div class="kw-main">
+                  <div class="kw-main-top">
+                    <span class="kw-main-crumb" id="kwMainCrumb">Spaces / personal</span>
+                    <button class="kw-panel-btn" id="kwPanelToggle" type="button" title="Toggle built-in browser panel" aria-label="Toggle built-in browser panel">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M15 3v18"/></svg>
+                    </button>
+                  </div>
+
+                  <div class="kw-content-wrap">
+                    <div class="kw-scene-stack">
+                      <!-- Scene 1: Visual Chat -->
+                      <div class="kw-transcript is-active" data-scene-panel="chat">
+                        <div class="kw-user-msg">Compare Kyoto vs. Lisbon for a 5-day April trip under $1,800.</div>
+
+                        <div class="kw-assistant">
+                          <p class="kw-prose">Both fit your budget. Lisbon stretches your money further, while Kyoto hits peak cherry blossom season with easy flat walking.</p>
+
+                          <div class="kw-compare-2col">
+                            <div class="kw-cmp-col kw-cmp-rec">
+                              <div class="kw-cmp-top">
+                                <strong>Lisbon</strong>
+                                <span class="kw-rec-pill">Recommended</span>
+                              </div>
+                              <div class="kw-cmp-summary">Best overall value · ~$1,320 total</div>
+                              <ul>
+                                <li>Warm 20°C sunny afternoons</li>
+                                <li>Great coastal food &amp; tram rides</li>
+                                <li>Leaves $480 buffer in your budget</li>
+                              </ul>
+                            </div>
+                            <div class="kw-cmp-col">
+                              <div class="kw-cmp-top">
+                                <strong>Kyoto</strong>
+                              </div>
+                              <div class="kw-cmp-summary">Best spring scenery · ~$1,680 total</div>
+                              <ul>
+                                <li>Peak April cherry blossoms</li>
+                                <li>Flat, easy walking routes</li>
+                                <li>Tighter hotel availability in April</li>
+                              </ul>
+                            </div>
+                          </div>
+
+                          <div class="kw-choices-row">
+                            <span class="kw-choice-pill is-picked">Draft a 5-day Lisbon itinerary</span>
+                            <span class="kw-choice-pill">Check Kyoto hotel prices</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Scene 2: Dr. Keelee Bot DM -->
+                      <div class="kw-transcript" data-scene-panel="bots" aria-hidden="true">
+                        <div class="kw-bot-dm-header">
+                          <canvas data-creature="hero-dr" data-creator="true" data-color="mint" data-attire="doctor" data-eyes="specs" data-hair="einstein" data-mustache="einstein" data-scale="0.98" width="76" height="76" class="kw-mini-creature"></canvas>
+                          <div>
+                            <div class="kw-bot-dm-name">Dr. Keelee <span class="kw-bot-tag">Bot Creator</span></div>
+                            <div class="kw-bot-dm-sub">Tell me what job you need done, and I'll create a focused bot for you.</div>
+                          </div>
+                        </div>
+
+                        <div class="kw-user-msg">Create a bot that turns messy meeting notes into 3 clear action items.</div>
+
+                        <div class="kw-assistant">
+                          <p class="kw-prose">Done. Meet <strong>Brief</strong> — pinned to your Bots list with a clear scope and strict boundaries.</p>
+                          <div class="kw-created-bot-card">
+                            <canvas data-creature="hero-brief" data-creator="false" data-color="sky" data-attire="sweater" data-eyes="wide" data-hair="tuft" data-mustache="none" data-scale="0.96" width="66" height="66" class="kw-mini-creature"></canvas>
+                            <div class="kw-cb-info">
+                              <div class="kw-cb-top"><strong>Brief</strong><span>Created &amp; ready</span></div>
+                              <div class="kw-cb-desc">One job: extract 3 clear next steps · Never writes long summaries</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Scene 3: Built-in Browser Split -->
+                      <div class="kw-transcript kw-transcript-narrow" data-scene-panel="browser" aria-hidden="true">
+                        <div class="kw-user-msg">Check Friday morning direct trains from London to Edinburgh under £60.</div>
+                        <div class="kw-assistant">
+                          <p class="kw-prose">I opened the timetable in the browser panel and found two direct morning trains under £60:</p>
+                          <div class="kw-stats-mini">
+                            <div class="kw-stat-tile"><span>Earliest</span><strong>08:00 · £54</strong></div>
+                            <div class="kw-stat-tile kw-stat-good"><span>Lowest fare</span><strong>09:30 · £49</strong></div>
+                          </div>
+                          <p class="kw-prose kw-muted">Click <strong>Take over</strong> in the browser panel anytime to book directly.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Exact 1:1 Floating Composer -->
+                    <div class="kw-composer-area" id="kwComposerArea" aria-hidden="true">
+                      <div class="kw-outline-fab">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/></svg>
+                      </div>
+                      <div class="kw-composer">
+                        <div class="kw-comp-input">Do anything...</div>
+                        <div class="kw-comp-bar">
+                          <div class="kw-comp-left">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                            <span class="kw-perm-chip">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                              <span>Ask first</span>
+                              <span class="kw-caret">⌄</span>
+                            </span>
+                          </div>
+                          <div class="kw-comp-right">
+                            <span class="kw-model-sel" id="kwModelText">Claude Sonnet · High</span>
+                            <span class="kw-send-btn">↑</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 1:1 Keel Right Panel + Browser Pane -->
+                  <aside class="kw-right-panel" id="kwBrowserPane" aria-hidden="true">
+                    <div class="rp-tabstrip">
+                      <div class="rp-tabs">
+                        <span class="rp-tab is-active">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M2 12h20"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>
+                          <span>nationalrail.co.uk</span>
+                          <span class="rp-tab-x">×</span>
+                        </span>
+                        <span class="rp-tab-add" aria-hidden="true">+</span>
+                      </div>
+                      <div class="rp-strip-actions">
+                        <span aria-hidden="true">⤢</span>
+                        <button class="rp-close-btn" id="kwBrowserClose" type="button" aria-label="Close browser panel">×</button>
+                      </div>
+                    </div>
+
+                    <div class="rp-toolbar">
+                      <div class="rp-nav-btns" aria-hidden="true">
+                        <span>←</span><span>→</span><span>↻</span>
+                      </div>
+                      <div class="rp-address">https://nationalrail.co.uk/friday</div>
+                    </div>
+
+                    <div class="rp-viewport-wrap">
+                      <div class="rp-webpage">
+                        <div class="wp-topbar">
+                          <strong>National Rail</strong>
+                          <span>Fri · 1 Adult</span>
+                        </div>
+                        <div class="wp-route">
+                          <div class="wp-route-title">London King's Cross → Edinburgh</div>
+                          <div class="wp-route-sub">Direct departures · Standard</div>
+                        </div>
+                        <div class="wp-list">
+                          <div class="wp-row">
+                            <div><strong>08:00 → 12:22</strong><span>4h 22m · Direct</span></div>
+                            <span class="wp-fare">£54</span>
+                          </div>
+                          <div class="wp-row wp-row-hl">
+                            <div><strong>09:30 → 13:51</strong><span>4h 21m · Direct</span></div>
+                            <span class="wp-fare wp-fare-best">£49</span>
+                          </div>
+                          <div class="wp-row wp-row-dim">
+                            <div><strong>11:00 → 15:24</strong><span>4h 24m · Direct</span></div>
+                            <span class="wp-fare">£78</span>
+                          </div>
+                        </div>
+
+                        <div class="rp-hud" data-hud-state="agent">
+                          <span class="hud-dot"></span>
+                          <span class="hud-text">Keel is browsing</span>
+                          <button class="hud-btn" type="button" data-hud-toggle>Take over</button>
+                        </div>
+                      </div>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Animated Hub-and-Spoke Connection Infographic -->
+    <section class="section section-tinted section-arch" id="connect">
+      <div class="arch-grid arch-grid-soft" aria-hidden="true"></div>
+      <div class="container">
+        <div class="section-header" data-reveal>
+          <div class="section-kicker">One home for all your AI</div>
+          <h2 class="section-title">Bring the AI accounts <span class="title-muted">you already have.</span></h2>
+          <p class="section-sub">Sign in once. Switch anytime without losing your history.</p>
+        </div>
+
+        <div class="hub-diagram" id="hubDiagram" data-reveal data-delay="120">
+          <!-- Left column: Official Provider Logos -->
+          <div class="hub-col hub-col-left">
+            <div class="hub-col-label">Your AI accounts</div>
+
+            <button class="hub-node is-highlighted" type="button" data-node="claude" data-caption="Connect your Claude Pro or Max plan — great for writing and clear thinking.">
+              <span class="provider-badge provider-claude" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>Claude</strong>
+                <span>Writing &amp; deep thinking</span>
+              </span>
+            </button>
+
+            <button class="hub-node" type="button" data-node="chatgpt" data-caption="Use your existing ChatGPT account right inside Keel.">
+              <span class="provider-badge provider-openai" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>ChatGPT</strong>
+                <span>Everyday questions</span>
+              </span>
+            </button>
+
+            <button class="hub-node" type="button" data-node="copilot" data-caption="Connect GitHub Copilot for projects and problem solving.">
+              <span class="provider-badge provider-copilot" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.245 5.364c1.322 1.36 1.877 3.216 2.11 5.817.622 0 1.2.135 1.592.654l.73.964c.21.278.323.61.323.955v2.62c0 .339-.173.669-.453.868C20.239 19.602 16.157 21.5 12 21.5c-4.6 0-9.205-2.583-11.547-4.258-.28-.2-.452-.53-.453-.868v-2.62c0-.345.113-.679.321-.956l.73-.963c.392-.517.974-.654 1.593-.654l.029-.297c.25-2.446.81-4.213 2.082-5.52 2.461-2.54 5.71-2.851 7.146-2.864h.198c1.436.013 4.685.323 7.146 2.864zm-7.244 4.328c-.284 0-.613.016-.962.05-.123.447-.305.85-.57 1.108-1.05 1.023-2.316 1.18-2.994 1.18-.638 0-1.306-.13-1.851-.464-.516.165-1.012.403-1.044.996a65.882 65.882 0 00-.063 2.884l-.002.48c-.002.563-.005 1.126-.013 1.69.002.326.204.63.51.765 2.482 1.102 4.83 1.657 6.99 1.657 2.156 0 4.504-.555 6.985-1.657a.854.854 0 00.51-.766c.03-1.682.006-3.372-.076-5.053-.031-.596-.528-.83-1.046-.996-.546.333-1.212.464-1.85.464-.677 0-1.942-.157-2.993-1.18-.266-.258-.447-.661-.57-1.108-.32-.032-.64-.049-.96-.05zm-2.525 4.013c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zm5 0c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zM7.635 5.087c-1.05.102-1.935.438-2.385.906-.975 1.037-.765 3.668-.21 4.224.405.394 1.17.657 1.995.657h.09c.649-.013 1.785-.176 2.73-1.11.435-.41.705-1.433.675-2.47-.03-.834-.27-1.52-.63-1.813-.39-.336-1.275-.482-2.265-.394zm6.465.394c-.36.292-.6.98-.63 1.813-.03 1.037.24 2.06.675 2.47.968.957 2.136 1.104 2.776 1.11h.044c.825 0 1.59-.263 1.995-.657.555-.556.765-3.187-.21-4.224-.45-.468-1.335-.804-2.385-.906-.99-.088-1.875.058-2.265.394zM12 7.615c-.24 0-.525.015-.84.044.03.16.045.336.06.526l-.001.159a2.94 2.94 0 01-.014.25c.225-.022.425-.027.612-.028h.366c.187 0 .387.006.612.028-.015-.146-.015-.277-.015-.409.015-.19.03-.365.06-.526a9.29 9.29 0 00-.84-.044z"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>GitHub Copilot</strong>
+                <span>Work &amp; projects</span>
+              </span>
+            </button>
+
+            <button class="hub-node" type="button" data-node="grok" data-caption="Switch to Grok whenever you want fast live perspective.">
+              <span class="provider-badge provider-grok" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>Grok</strong>
+                <span>Fast answers on demand</span>
+              </span>
+            </button>
+          </div>
+
+          <!-- Center Animated Wires + Pulsing Keel Hub -->
+          <div class="hub-center">
+            <svg class="hub-wires" viewBox="0 0 360 300" fill="none" aria-hidden="true">
+              <path id="w-claude" class="wire" data-wire="claude" d="M 0 42 C 90 42, 100 150, 146 150" />
+              <path id="w-chatgpt" class="wire" data-wire="chatgpt" d="M 0 114 C 85 114, 100 150, 146 150" />
+              <path id="w-copilot" class="wire" data-wire="copilot" d="M 0 186 C 85 186, 100 150, 146 150" />
+              <path id="w-grok" class="wire" data-wire="grok" d="M 0 258 C 90 258, 100 150, 146 150" />
+
+              <path id="w-cards" class="wire" data-wire="cards" d="M 214 150 C 260 150, 270 42, 360 42" />
+              <path id="w-bots" class="wire" data-wire="bots" d="M 214 150 C 260 150, 275 114, 360 114" />
+              <path id="w-browser" class="wire" data-wire="browser" d="M 214 150 C 260 150, 275 186, 360 186" />
+              <path id="w-projects" class="wire" data-wire="projects" d="M 214 150 C 260 150, 270 258, 360 258" />
+
+              <path class="wire-stream stream-in" data-stream="claude" d="M 0 42 C 90 42, 100 150, 146 150" />
+              <path class="wire-stream stream-in" data-stream="chatgpt" d="M 0 114 C 85 114, 100 150, 146 150" />
+              <path class="wire-stream stream-in" data-stream="copilot" d="M 0 186 C 85 186, 100 150, 146 150" />
+              <path class="wire-stream stream-in" data-stream="grok" d="M 0 258 C 90 258, 100 150, 146 150" />
+
+              <path class="wire-stream stream-out" data-stream="cards" d="M 214 150 C 260 150, 270 42, 360 42" />
+              <path class="wire-stream stream-out" data-stream="bots" d="M 214 150 C 260 150, 275 114, 360 114" />
+              <path class="wire-stream stream-out" data-stream="browser" d="M 214 150 C 260 150, 275 186, 360 186" />
+              <path class="wire-stream stream-out" data-stream="projects" d="M 214 150 C 260 150, 270 258, 360 258" />
+
+              <circle r="3.4" class="wire-bead bead-a"><animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#w-claude"/></animateMotion></circle>
+              <circle r="3.4" class="wire-bead bead-b"><animateMotion dur="2.9s" begin="0.8s" repeatCount="indefinite"><mpath href="#w-chatgpt"/></animateMotion></circle>
+              <circle r="3.4" class="wire-bead bead-c"><animateMotion dur="3.1s" begin="1.5s" repeatCount="indefinite"><mpath href="#w-copilot"/></animateMotion></circle>
+              <circle r="3.4" class="wire-bead bead-d"><animateMotion dur="2.7s" begin="2.1s" repeatCount="indefinite"><mpath href="#w-grok"/></animateMotion></circle>
+
+              <circle r="3.4" class="wire-bead bead-out"><animateMotion dur="2.5s" begin="0.4s" repeatCount="indefinite"><mpath href="#w-cards"/></animateMotion></circle>
+              <circle r="3.4" class="wire-bead bead-out"><animateMotion dur="2.8s" begin="1.2s" repeatCount="indefinite"><mpath href="#w-bots"/></animateMotion></circle>
+              <circle r="3.4" class="wire-bead bead-out"><animateMotion dur="3.0s" begin="1.9s" repeatCount="indefinite"><mpath href="#w-browser"/></animateMotion></circle>
+              <circle r="3.4" class="wire-bead bead-out"><animateMotion dur="2.6s" begin="0.9s" repeatCount="indefinite"><mpath href="#w-projects"/></animateMotion></circle>
+            </svg>
+
+            <div class="hub-core">
+              <div class="hub-pulse-ring" aria-hidden="true"></div>
+              <div class="hub-core-ring">
+                <img src="assets/app-icon.svg" alt="Keel app icon" width="58" height="58" class="hub-icon-light" />
+                <img src="assets/app-icon-alt.svg" alt="Keel app icon" width="58" height="58" class="hub-icon-dark" />
+              </div>
+              <div class="hub-core-label">Keel on Mac</div>
+              <div class="hub-core-sub">One desktop workspace</div>
+            </div>
+          </div>
+
+          <!-- Right column -->
+          <div class="hub-col hub-col-right">
+            <div class="hub-col-label">What you get</div>
+
+            <button class="hub-node" type="button" data-node="cards" data-caption="Answers appear as clean charts, checklists, and side-by-side comparisons.">
+              <span class="node-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="18" height="7" rx="1.5"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>Visual cards</strong>
+                <span>Charts, steps &amp; choices</span>
+              </span>
+            </button>
+
+            <button class="hub-node" type="button" data-node="bots" data-caption="Create custom bots through Dr. Keelee — each with one clear job.">
+              <span class="node-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="14" rx="4"/><circle cx="9.5" cy="11.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="14.5" cy="11.5" r="1.2" fill="currentColor" stroke="none"/><path d="M9.5 15.2c1.4 1 3.6 1 5 0"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>Custom bots</strong>
+                <span>Created by Dr. Keelee</span>
+              </span>
+            </button>
+
+            <button class="hub-node" type="button" data-node="browser" data-caption="Browse websites right beside your chat — and take over in one click.">
+              <span class="node-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>Built-in browser</strong>
+                <span>Browse side by side</span>
+              </span>
+            </button>
+
+            <button class="hub-node" type="button" data-node="projects" data-caption="Keep every project, folder, and chat organized neatly in one place.">
+              <span class="node-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              </span>
+              <span class="node-text">
+                <strong>Projects &amp; Spaces</strong>
+                <span>Organized folders on Mac</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <div class="hub-caption-bar" id="hubCaption">
+          <span class="caption-dot" aria-hidden="true"></span>
+          <span id="hubCaptionText">Connect your Claude Pro or Max plan — great for writing and clear thinking.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Visual Answers (Editorial Left-Aligned Header + Before/After Gallery) -->
+    <section class="section section-bordered" id="visuals">
+      <div class="container">
+        <div class="section-header-split" data-reveal>
+          <div>
+            <div class="section-kicker">Visual answers</div>
+            <h2 class="section-title">Clear visuals.<br /><span class="title-muted">Not walls of text.</span></h2>
+          </div>
+          <p class="section-split-sub">Charts, side-by-side comparisons, live checklists, and quick choices — drawn automatically when plain paragraphs aren't enough.</p>
+        </div>
+
+        <div class="compare-infographic" id="visualsCompare">
+          <div class="wall-card" data-reveal data-delay="0">
+            <div class="panel-top">
+              <span class="panel-label">Typical AI chat</span>
+              <span class="badge badge-muted">420 words · Hard to scan</span>
+            </div>
+            <div class="wall-skeleton" aria-hidden="true">
+              <div class="ws-prompt">Which electric car has the lowest 3-year cost?</div>
+              <div class="ws-para">
+                <span style="width:94%"></span><span style="width:100%"></span><span style="width:88%"></span><span style="width:97%"></span><span style="width:72%"></span>
+              </div>
+              <div class="ws-para">
+                <span style="width:98%"></span><span style="width:91%"></span><span style="width:100%"></span><span style="width:84%"></span><span style="width:95%"></span><span style="width:60%"></span>
+              </div>
+              <div class="ws-para">
+                <span style="width:92%"></span><span style="width:100%"></span><span style="width:87%"></span><span style="width:52%"></span>
+              </div>
+              <div class="wall-fade"></div>
+            </div>
+            <div class="panel-foot">Three paragraphs just to find two numbers.</div>
+          </div>
+
+          <div class="compare-arrow" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </div>
+
+          <div class="keel-cards-demo" data-reveal data-delay="140">
+            <div class="panel-top">
+              <span class="panel-label panel-label-strong">Keel visual cards</span>
+              <div class="card-pill-tabs" role="tablist" aria-label="Keel visual card types">
+                <button class="cp-tab is-active" role="tab" aria-selected="true" data-card="chart" type="button">Chart</button>
+                <button class="cp-tab" role="tab" aria-selected="false" data-card="compare" type="button">Compare</button>
+                <button class="cp-tab" role="tab" aria-selected="false" data-card="steps" type="button">Steps</button>
+                <button class="cp-tab" role="tab" aria-selected="false" data-card="choices" type="button">Choices</button>
+              </div>
+            </div>
+
+            <div class="card-stage">
+              <div class="demo-panel" data-card-panel="chart">
+                <div class="demo-card-title">3-Year Ownership Cost</div>
+                <div class="demo-card-sub">Purchase + charging + maintenance</div>
+                <div class="vbar-chart" id="scrollChart">
+                  <div class="vbar-col">
+                    <span class="vbar-val">$31.4k</span>
+                    <div class="vbar-track"><div class="vbar-fill fill-forest" data-height="62%"></div></div>
+                    <span class="vbar-lbl">Compact EV</span>
+                  </div>
+                  <div class="vbar-col">
+                    <span class="vbar-val">$38.2k</span>
+                    <div class="vbar-track"><div class="vbar-fill fill-stone" data-height="78%"></div></div>
+                    <span class="vbar-lbl">Midsize SUV</span>
+                  </div>
+                  <div class="vbar-col">
+                    <span class="vbar-val">$44.9k</span>
+                    <div class="vbar-track"><div class="vbar-fill fill-stone-light" data-height="94%"></div></div>
+                    <span class="vbar-lbl">Gas Sedan</span>
+                  </div>
+                </div>
+                <div class="demo-insight">
+                  <span class="insight-dot dot-forest"></span>Compact EV saves <strong>$13,500</strong> over 3 years.
+                </div>
+              </div>
+
+              <div class="demo-panel is-hidden" data-card-panel="compare">
+                <div class="demo-card-title">Weekend Retreat Options</div>
+                <div class="demo-compare-grid">
+                  <div class="dc-col dc-col-rec">
+                    <div class="dc-badge">Best fit</div>
+                    <div class="dc-name">Mountain Cabin</div>
+                    <ul class="dc-list">
+                      <li class="dc-pro">2 hr scenic drive</li>
+                      <li class="dc-pro">Quiet fireplace &amp; deck</li>
+                      <li class="dc-con">Limited cell signal</li>
+                    </ul>
+                  </div>
+                  <div class="dc-col">
+                    <div class="dc-badge dc-badge-neutral">Alternative</div>
+                    <div class="dc-name">Coastal Town</div>
+                    <ul class="dc-list">
+                      <li class="dc-pro">Walkable cafes &amp; beach</li>
+                      <li class="dc-pro">Great seafood spots</li>
+                      <li class="dc-con">45% higher nightly rate</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              <div class="demo-panel is-hidden" data-card-panel="steps">
+                <div class="steps-head">
+                  <div>
+                    <div class="demo-card-title">Move-In Day Checklist</div>
+                    <div class="demo-card-sub">Click any step to check it off</div>
+                  </div>
+                  <span class="steps-counter" id="stepsCounter">2 of 4</span>
+                </div>
+                <div class="progress-rail">
+                  <div class="progress-fill" id="stepsProgress" style="width: 50%"></div>
+                </div>
+                <div class="check-list" id="interactiveChecklist">
+                  <label class="check-row is-done"><input type="checkbox" checked /><span class="check-box"></span><span class="check-text">Confirm internet installation window</span></label>
+                  <label class="check-row is-done"><input type="checkbox" checked /><span class="check-box"></span><span class="check-text">Forward mail to new street address</span></label>
+                  <label class="check-row"><input type="checkbox" /><span class="check-box"></span><span class="check-text">Photograph empty rooms before unpacking</span></label>
+                  <label class="check-row"><input type="checkbox" /><span class="check-box"></span><span class="check-text">Set up electricity auto-pay</span></label>
+                </div>
+              </div>
+
+              <div class="demo-panel is-hidden" data-card-panel="choices">
+                <div class="demo-card-title">How should I draft this email?</div>
+                <div class="demo-card-sub">Tap a style — no need to type instructions</div>
+                <div class="choices-grid" id="interactiveChoices">
+                  <button class="choice-card is-selected" type="button" data-reply="Draft ready: 3 friendly sentences, clear ask, zero fluff.">
+                    <strong>Warm &amp; brief</strong><span>3 short sentences</span>
+                  </button>
+                  <button class="choice-card" type="button" data-reply="Draft ready: Polished formal tone suited for clients or leadership.">
+                    <strong>Polished &amp; formal</strong><span>Professional tone</span>
+                  </button>
+                  <button class="choice-card" type="button" data-reply="Draft ready: Clean bullet list with dates and next steps.">
+                    <strong>Bullet summary</strong><span>Action items first</span>
+                  </button>
+                </div>
+                <div class="choice-feedback" id="choiceFeedback">Draft ready: 3 friendly sentences, clear ask, zero fluff.</div>
+              </div>
+            </div>
+
+            <div class="panel-foot">Scannable, interactive, and ready at a glance.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dedicated Built-in Bots Section -->
+    <section class="section section-tinted" id="bots">
+      <div class="container">
+        <div class="section-header" data-reveal>
+          <div class="section-kicker">Keel Bots</div>
+          <h2 class="section-title">Create your own <span class="title-muted">team of bots.</span></h2>
+          <p class="section-sub">Ask Dr. Keelee to build a focused bot, then make it yours.</p>
+        </div>
+
+        <div class="bots-showcase" data-reveal data-delay="120">
+          <div class="bots-flow" aria-label="How creating a bot works">
+            <div class="bflow-step"><span class="bflow-num">1</span><span>Tell Dr. Keelee the job</span></div>
+            <span class="bflow-arrow" aria-hidden="true">→</span>
+            <div class="bflow-step"><span class="bflow-num">2</span><span>Get a focused bot</span></div>
+            <span class="bflow-arrow" aria-hidden="true">→</span>
+            <div class="bflow-step"><span class="bflow-num">3</span><span>Customize its look</span></div>
+          </div>
+
+          <div class="creatures-stage">
+            <div class="creature-tile">
+              <canvas data-creature="dr-keelee" data-creator="true" data-color="mint" data-attire="doctor" data-eyes="specs" data-hair="einstein" data-mustache="einstein" data-scale="0.98" width="144" height="144" class="creature-canvas"></canvas>
+              <div class="creature-name">Dr. Keelee</div>
+              <div class="creature-role">Built-in bot creator</div>
+              <div class="creature-note">Designs new bots with one job &amp; clear rules</div>
+            </div>
+
+            <div class="creature-tile creature-tile-focus">
+              <span class="custom-pill">Customize below ↓</span>
+              <canvas id="studioCreature" data-creature="scout" data-creator="false" data-color="sage" data-attire="hoodie" data-eyes="wide" data-hair="beanie" data-mustache="none" data-scale="1.0" width="152" height="152" class="creature-canvas"></canvas>
+              <div class="creature-name">Scout</div>
+              <div class="creature-role">Research bot</div>
+              <div class="creature-note">Finds answers &amp; checks sources fast</div>
+            </div>
+
+            <div class="creature-tile">
+              <canvas data-creature="editor" data-creator="false" data-color="coral" data-attire="suit" data-eyes="shades" data-hair="spiky" data-mustache="handlebar" data-scale="0.98" width="144" height="144" class="creature-canvas"></canvas>
+              <div class="creature-name">Editor</div>
+              <div class="creature-role">Plain-English bot</div>
+              <div class="creature-note">Rewrites drafts clearly without jargon</div>
+            </div>
+          </div>
+
+          <div class="customizer-bar">
+            <div class="cust-group">
+              <span class="cust-lbl">Color</span>
+              <div class="swatch-picker" id="colorSwatches" aria-label="Choose bot color">
+                <button class="swatch" type="button" data-val="clay" style="background:#D39D7A" title="Clay" aria-label="Clay"></button>
+                <button class="swatch" type="button" data-val="coral" style="background:#CC6044" title="Coral" aria-label="Coral"></button>
+                <button class="swatch" type="button" data-val="amber" style="background:#D29C36" title="Amber" aria-label="Amber"></button>
+                <button class="swatch is-active" type="button" data-val="sage" style="background:#3E9E74" title="Sage" aria-label="Sage"></button>
+                <button class="swatch" type="button" data-val="sky" style="background:#4B6DD4" title="Sky" aria-label="Sky"></button>
+                <button class="swatch" type="button" data-val="plum" style="background:#9262C4" title="Plum" aria-label="Plum"></button>
+              </div>
+            </div>
+
+            <div class="cust-group">
+              <span class="cust-lbl">Outfit</span>
+              <div class="pill-picker" id="attirePicker">
+                <button class="mini-opt is-active" type="button" data-val="hoodie">Hoodie</button>
+                <button class="mini-opt" type="button" data-val="sweater">Sweater</button>
+                <button class="mini-opt" type="button" data-val="cape">Cape</button>
+                <button class="mini-opt" type="button" data-val="overalls">Overalls</button>
+              </div>
+            </div>
+
+            <div class="cust-group">
+              <span class="cust-lbl">Hair</span>
+              <div class="pill-picker" id="hairPicker">
+                <button class="mini-opt is-active" type="button" data-val="beanie">Beanie</button>
+                <button class="mini-opt" type="button" data-val="tuft">Sprout</button>
+                <button class="mini-opt" type="button" data-val="mohawk">Mohawk</button>
+                <button class="mini-opt" type="button" data-val="none">None</button>
+              </div>
+            </div>
+
+            <div class="cust-group">
+              <span class="cust-lbl">Eyes</span>
+              <div class="pill-picker" id="eyesPicker">
+                <button class="mini-opt is-active" type="button" data-val="wide">Curious</button>
+                <button class="mini-opt" type="button" data-val="specs">Specs</button>
+                <button class="mini-opt" type="button" data-val="shades">Shades</button>
+                <button class="mini-opt" type="button" data-val="wink">Wink</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dedicated Built-in Browser (Asymmetric Split Editorial Layout: Copy Left, Live Panel Right) -->
+    <section class="section section-bordered" id="browser">
+      <div class="container">
+        <div class="editorial-split">
+          <div class="es-copy" data-reveal data-delay="0">
+            <div class="section-kicker">Built-in Browser</div>
+            <h2 class="section-title">Browse right <span class="title-muted">beside your chat.</span></h2>
+            <p class="es-sub">Watch Keel check live pages for you — and click <strong>Take over</strong> anytime you want the wheel.</p>
+
+            <div class="es-points">
+              <div class="es-point">
+                <span class="es-point-dot dot-ocean"></span>
+                <div>
+                  <strong>One window, zero tab chaos</strong>
+                  <span>Open links, verify prices, or preview pages without leaving your conversation.</span>
+                </div>
+              </div>
+              <div class="es-point">
+                <span class="es-point-dot dot-forest"></span>
+                <div>
+                  <strong>Shared control in one click</strong>
+                  <span>Let Keel look things up, then hit Take over whenever you want to sign in or buy.</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="es-mini-chat">
+              <div class="bf-step-pill">
+                <span class="status-dot"></span>
+                <span>Checking product page in Browser…</span>
+              </div>
+              <p class="kw-prose">The 60-inch walnut top is <strong>in stock for $699</strong> with a <strong>15-year frame warranty</strong> and free delivery.</p>
+            </div>
+          </div>
+
+          <div class="es-visual" data-reveal data-delay="140">
+            <div class="bf-panel bf-panel-standalone">
+              <div class="rp-tabstrip">
+                <div class="rp-tabs">
+                  <span class="rp-tab is-active">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M2 12h20"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>
+                    <span>studiodesk.co/walnut</span>
+                    <span class="rp-tab-x">×</span>
+                  </span>
+                  <span class="rp-tab-add" aria-hidden="true">+</span>
+                </div>
+                <div class="rp-strip-actions" aria-hidden="true">
+                  <span>⤢</span>
+                  <span>×</span>
+                </div>
+              </div>
+
+              <div class="rp-toolbar">
+                <div class="rp-nav-btns" aria-hidden="true"><span>←</span><span>→</span><span>↻</span></div>
+                <div class="rp-address">https://studiodesk.co/standing-desk-walnut</div>
+              </div>
+
+              <div class="rp-viewport-wrap">
+                <div class="rp-webpage rp-webpage-tall">
+                  <div class="wp-topbar">
+                    <strong>Studio Desk · 60" Walnut</strong>
+                    <span>Free delivery</span>
+                  </div>
+                  <div class="wp-route wp-route-forest">
+                    <div class="wp-route-title">Solid Walnut Standing Desk</div>
+                    <div class="wp-route-sub">Ships in 2 business days · 15-year frame warranty</div>
+                  </div>
+                  <div class="wp-list">
+                    <div class="wp-row wp-row-hl">
+                      <div><strong>60" × 30" Walnut Top</strong><span>In stock · Ships Friday</span></div>
+                      <span class="wp-fare wp-fare-best">$699</span>
+                    </div>
+                    <div class="wp-row">
+                      <div><strong>Frame Warranty</strong><span>Motor &amp; steel legs covered</span></div>
+                      <span class="wp-fare">15 years</span>
+                    </div>
+                    <div class="wp-row wp-row-dim">
+                      <div><strong>Cable Tray Add-on</strong><span>Under-desk organizer</span></div>
+                      <span class="wp-fare">+$49</span>
+                    </div>
+                  </div>
+
+                  <div class="rp-hud" data-hud-state="agent">
+                    <span class="hud-dot"></span>
+                    <span class="hud-text">Keel is browsing</span>
+                    <button class="hud-btn" type="button" data-hud-toggle>Take over</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Lightweight RAM Footprint (Flipped Split Editorial Layout: Infographic Left, Copy + Stat Right) -->
+    <section class="section section-tinted" id="lightweight">
+      <div class="container">
+        <div class="editorial-split editorial-split-flip">
+          <div class="es-visual" id="ramInfographic" data-reveal data-delay="0">
+            <div class="ram-card">
+              <div class="ram-card-head">
+                <span class="ram-title">Memory used on your Mac</span>
+                <span class="ram-unit">Lower is better</span>
+              </div>
+
+              <div class="ram-bars">
+                <div class="ram-row ram-row-keel">
+                  <div class="ram-label">
+                    <img src="assets/favicon-small.svg" alt="" width="18" height="18" />
+                    <strong>Keel</strong>
+                  </div>
+                  <div class="ram-track">
+                    <div class="ram-fill ram-fill-keel" data-scale="0.06"></div>
+                  </div>
+                  <div class="ram-val ram-val-good">~50 MB</div>
+                </div>
+
+                <div class="ram-row">
+                  <div class="ram-label">
+                    <span class="ram-dot ram-dot-amber"></span>
+                    <span>AI in browser tabs</span>
+                  </div>
+                  <div class="ram-track">
+                    <div class="ram-fill ram-fill-mid" data-scale="0.58"></div>
+                  </div>
+                  <div class="ram-val">~650 MB</div>
+                </div>
+
+                <div class="ram-row">
+                  <div class="ram-label">
+                    <span class="ram-dot ram-dot-crimson"></span>
+                    <span>Typical AI desktop apps</span>
+                  </div>
+                  <div class="ram-track">
+                    <div class="ram-fill ram-fill-high" data-scale="1"></div>
+                  </div>
+                  <div class="ram-val ram-val-high">~1.1 GB</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="es-copy" data-reveal data-delay="140">
+            <div class="section-kicker">Light on your Mac</div>
+            <h2 class="section-title">Tiny memory footprint.<br /><span class="title-muted">Zero fan noise.</span></h2>
+            <p class="es-sub">Built natively for Mac, so it stays fast and leaves room for your other apps.</p>
+
+            <div class="big-metric-callout">
+              <div class="bmc-num">~20×</div>
+              <div class="bmc-text">
+                <strong>Lighter than typical AI apps</strong>
+                <span>Opens in a blink and keeps your battery going all day.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Privacy Section -->
+    <section class="section section-bordered" id="privacy">
+      <div class="container">
+        <div class="section-header" data-reveal>
+          <div class="section-kicker">Private by design</div>
+          <h2 class="section-title">No cloud middleman.<br /><span class="title-muted">Everything stays on your Mac.</span></h2>
+          <p class="section-sub">No Keel account. No Keel servers. Your chats, bots, and files stay strictly on your Mac.</p>
+        </div>
+
+        <div class="priv-compare">
+          <div class="priv-card priv-card-other" data-reveal data-delay="0">
+            <div class="priv-card-head">
+              <span class="priv-title">Typical AI apps</span>
+              <span class="priv-pill priv-pill-warn">Cloud stored</span>
+            </div>
+
+            <div class="priv-diagram-box">
+              <div class="pd-device">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>
+                <span>Your Mac</span>
+              </div>
+
+              <div class="pd-pipe pd-pipe-warn">
+                <span class="pd-pipe-line"></span>
+                <span class="pd-pipe-label">Uploads &amp; syncs every chat</span>
+                <span class="pd-pipe-arrow">↓</span>
+              </div>
+
+              <div class="pd-cloud-zone">
+                <div class="pd-zone-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                  <span>Company Cloud Server</span>
+                </div>
+                <div class="pd-chips">
+                  <span>Account required</span>
+                  <span>Chat history saved online</span>
+                </div>
+              </div>
+            </div>
+
+            <p class="priv-caption">You have to sign up, and your conversation history lives on someone else's server.</p>
+          </div>
+
+          <div class="priv-card priv-card-keel" data-reveal data-delay="140">
+            <div class="priv-card-head">
+              <span class="priv-title priv-title-keel">
+                <img src="assets/favicon-small.svg" alt="" width="20" height="20" />
+                <span>Keel</span>
+              </span>
+              <span class="priv-pill priv-pill-ok">100% on your Mac</span>
+            </div>
+
+            <div class="priv-diagram-box">
+              <div class="pd-mac-vault">
+                <div class="pd-vault-head">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  <span>Locked inside your Mac</span>
+                </div>
+                <div class="pd-vault-grid">
+                  <div class="pd-vault-item"><strong>Chats</strong><span>Local only</span></div>
+                  <div class="pd-vault-item"><strong>Bots</strong><span>Local only</span></div>
+                  <div class="pd-vault-item"><strong>Projects</strong><span>Local only</span></div>
+                </div>
+              </div>
+
+              <div class="pd-no-server">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m2 2 20 20"/><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                <span>No Keel cloud server · No Keel account needed</span>
+              </div>
+            </div>
+
+            <p class="priv-caption">Your history never touches a Keel server — your Mac talks straight to the AI provider you chose.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Magazine Two-Column FAQ -->
+    <section class="section section-tinted" id="faq">
+      <div class="container">
+        <div class="faq-layout">
+          <div class="faq-lead" data-reveal>
+            <div class="section-kicker">Common questions</div>
+            <h2 class="section-title">Quick answers.</h2>
+            <p class="es-sub">Everything you might wonder before installing.</p>
+          </div>
+
+          <div class="faq-list" id="faqList" data-reveal data-delay="120">
+            <div class="faq-item is-open">
+              <button class="faq-q" type="button" aria-expanded="true" aria-controls="faq-a-1">
+                <span>Is Keel free to use?</span>
+                <span class="faq-plus" aria-hidden="true"></span>
+              </button>
+              <div class="faq-body" id="faq-a-1" role="region">
+                <div class="faq-body-inner">
+                  <div class="faq-a">Yes. Keel is free and open source. You just connect the AI accounts you already pay for — such as Claude, ChatGPT, GitHub Copilot, or Grok.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="faq-item">
+              <button class="faq-q" type="button" aria-expanded="false" aria-controls="faq-a-2">
+                <span>Do I need to know how to code?</span>
+                <span class="faq-plus" aria-hidden="true"></span>
+              </button>
+              <div class="faq-body" id="faq-a-2" role="region">
+                <div class="faq-body-inner">
+                  <div class="faq-a">Not at all. Keel is built for everyday research, writing, comparing options, planning trips, and organizing projects in plain English.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="faq-item">
+              <button class="faq-q" type="button" aria-expanded="false" aria-controls="faq-a-3">
+                <span>Will Keel store my chats in the cloud?</span>
+                <span class="faq-plus" aria-hidden="true"></span>
+              </button>
+              <div class="faq-body" id="faq-a-3" role="region">
+                <div class="faq-body-inner">
+                  <div class="faq-a">No. Keel has no account system and no cloud database. Every chat, bot, and project stays strictly on your Mac.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="faq-item">
+              <button class="faq-q" type="button" aria-expanded="false" aria-controls="faq-a-4">
+                <span>Why does it install with one Terminal command?</span>
+                <span class="faq-plus" aria-hidden="true"></span>
+              </button>
+              <div class="faq-body" id="faq-a-4" role="region">
+                <div class="faq-body-inner">
+                  <div class="faq-a">It places the latest version straight into Applications without macOS warning popups, and updates itself automatically after that.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Closing CTA: Go try Keel -->
+    <section class="section section-arch section-install" id="install">
+      <div class="arch-grid arch-grid-soft" aria-hidden="true"></div>
+      <div class="container">
+        <div class="install-card" data-reveal>
+          <div class="install-icon-wrap">
+            <img src="assets/app-icon.svg" alt="Keel" width="54" height="54" class="hub-icon-light" />
+            <img src="assets/app-icon-alt.svg" alt="Keel" width="54" height="54" class="hub-icon-dark" />
+          </div>
+
+          <h2 class="section-title">Go try Keel.</h2>
+          <p class="section-sub">Open Terminal on your Mac and paste this line.</p>
+
+          <div class="command-bar">
+            <code id="installCmd">curl -fsSL https://raw.githubusercontent.com/Wasomeno/keel/main/install.sh | sh</code>
+            <button class="copy-btn" id="copyInstallBtn" type="button" aria-label="Copy install command">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="copyInstallText">Copy</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Minimal Cohesive Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-bar">
+        <div class="footer-left">
+          <a href="#top" class="footer-brand-link">
+            <img src="assets/favicon-small.svg" alt="" width="22" height="22" />
+            <span class="footer-brand">Keel</span>
+          </a>
+          <span class="footer-sep" aria-hidden="true">·</span>
+          <span class="footer-note">Native Mac app · Open source</span>
+        </div>
+
+        <nav class="footer-links" aria-label="Footer links">
+          <a href="https://github.com/Wasomeno/keel" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/Wasomeno/keel/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="#top">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <script src="creatures.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

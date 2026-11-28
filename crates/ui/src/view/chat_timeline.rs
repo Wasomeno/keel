@@ -209,6 +209,7 @@ impl KeelWindow {
     /// Syncs non-scroll timeline inputs into [`ChatTimelineView`] only when they change.
     pub(super) fn sync_chat_timeline(&mut self, t: Tokens, cx: &mut Context<Self>) {
         let active_chat = self.current_chat.is_some()
+            && self.active_bot().is_none()
             && !(self.right_panel_expanded() && self.right_panel_open())
             && self.chat_reveal.is_none();
         let points = self.transcript.user_points_rc();

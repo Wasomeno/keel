@@ -25,16 +25,7 @@ impl KeelWindow {
                 },
             ))
             .on_action(cx.listener(|this, _: &NewChat, _, cx| {
-                if this.state.inherit_active_chat_folder() {
-                    this.projects.picked = this
-                        .state
-                        .active_tab
-                        .as_deref()
-                        .filter(|_| !this.state.new_chat_no_project)
-                        .and_then(|chat| this.projects.chat_project_id(chat));
-                    this.create_error = None;
-                }
-                this.create_new_session(None, cx);
+                this.start_new_chat(cx);
             }))
             .on_action(cx.listener(|this, _: &RefreshApp, window, cx| {
                 this.refresh_app(window, cx);
@@ -150,8 +141,16 @@ impl KeelWindow {
             .on_action(cx.listener(|this, _: &JumpTab7, _, cx| this.jump_tab(7, cx)))
             .on_action(cx.listener(|this, _: &JumpTab8, _, cx| this.jump_tab(8, cx)))
             .on_action(cx.listener(|this, _: &JumpTab9, _, cx| this.jump_tab(9, cx)))
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                if this.is_recording_shortcut() {
+                    this.update_shortcut_held_modifiers(event.modifiers, cx);
+                }
+            }))
             // Text fields bind Escape themselves; an open menu gets it first.
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.is_recording_shortcut() {
+                    return;
+                }
                 let key = event.keystroke.key.as_str();
                 let m = event.keystroke.modifiers;
                 if !this.lightbox_fx.shown() && this.dotify_key(event, window, cx) {
@@ -180,6 +179,17 @@ impl KeelWindow {
                         cx.notify();
                         cx.stop_propagation();
                     }
+                } else if this.bots.page_open
+                    && !this.bots.customize_open
+                    && this.bots.info_bot.is_none()
+                    && this.bots.confirming_delete.is_none()
+                    && this.bots.card_menu_bot.is_none()
+                    && key == "escape"
+                    && !m.modified()
+                {
+                    this.close_pages();
+                    cx.notify();
+                    cx.stop_propagation();
                 } else if this.renaming_chat.is_some() && key == "escape" && !m.modified() {
                     this.cancel_chat_title_rename(window, cx);
                     cx.stop_propagation();
@@ -353,12 +363,28 @@ impl KeelWindow {
             || self.select_mode
             || !self.selected_chats.is_empty()
             || self.project_modal_open
+            || self.bots.customize_open
+            || self.bots.info_bot.is_some()
+            || self.bots.confirming_delete.is_some()
+            || self.bots.show_header_menu
+            || self.bots.card_menu_bot.is_some()
             || self.confirming_delete_projects.is_some()
             || self.delete_projects_confirm_leaving.is_some()
             || self.project_select_mode
             || !self.selected_projects.is_empty()
             || self.show_projects_menu;
         // Escape backs out of modals/selection in orderly fashion.
+        if self.bots.customize_open {
+            self.dismiss_bot_customizer(cx);
+        }
+        if self.bots.info_bot.is_some() {
+            self.dismiss_bot_info(cx);
+        }
+        if self.bots.confirming_delete.is_some() {
+            self.dismiss_delete_bot(cx);
+        }
+        self.bots.show_header_menu = false;
+        self.bots.card_menu_bot = None;
         if self.project_modal_open {
             self.dismiss_project_modal(cx);
         }

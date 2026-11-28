@@ -461,6 +461,28 @@ impl AppState {
         self.save_settings();
     }
 
+    /// Whether a top-level sidebar section (`"projects"`, `"spaces"`, `"chats"`) is folded.
+    /// Sections default to collapsed until explicitly unfolded.
+    pub fn is_section_collapsed(&self, section: &str) -> bool {
+        !self
+            .ui_settings
+            .expanded_sections
+            .iter()
+            .any(|s| s == section)
+    }
+
+    /// Fold or unfold a top-level sidebar section; remembered on this device.
+    pub fn toggle_section_collapsed(&mut self, section: &str) {
+        let open = &mut self.ui_settings.expanded_sections;
+        match open.iter().position(|id| id == section) {
+            Some(ix) => {
+                open.remove(ix);
+            }
+            None => open.push(section.to_string()),
+        }
+        self.save_settings();
+    }
+
     /// Clicking a sidebar row opens or focuses a tab.
     pub fn open_or_focus_tab(&mut self, chat_id: &str) {
         if !self.ui_settings.open_tabs.contains(&chat_id.to_string()) {
@@ -1440,6 +1462,30 @@ mod tests {
         assert_eq!(app.target_space_for_new_session().unwrap().id, "real");
         app.new_chat_no_project = true;
         assert!(app.target_space_for_new_session().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn toggle_section_collapsed_persists_per_section() {
+        let temp = std::env::temp_dir().join(format!("keel-ui-sec-{}", uuid::Uuid::new_v4()));
+        let mut app = test_app(&temp, "dev1");
+        assert!(app.is_section_collapsed("projects"));
+        assert!(app.is_section_collapsed("spaces"));
+        assert!(app.is_section_collapsed("chats"));
+
+        app.toggle_section_collapsed("projects");
+        app.toggle_section_collapsed("chats");
+        assert!(!app.is_section_collapsed("projects"));
+        assert!(app.is_section_collapsed("spaces"));
+        assert!(!app.is_section_collapsed("chats"));
+
+        let reloaded = AppState::new(temp.clone(), "dev1".into());
+        assert!(!reloaded.is_section_collapsed("projects"));
+        assert!(reloaded.is_section_collapsed("spaces"));
+        assert!(!reloaded.is_section_collapsed("chats"));
+
+        app.toggle_section_collapsed("projects");
+        assert!(app.is_section_collapsed("projects"));
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

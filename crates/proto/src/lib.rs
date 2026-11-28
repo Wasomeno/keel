@@ -1,5 +1,6 @@
 //! Wire types and the sidebar view rules. No I/O.
 
+pub mod bots;
 pub mod command;
 pub mod dotify;
 pub mod effort;

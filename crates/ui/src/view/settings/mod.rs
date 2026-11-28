@@ -7,6 +7,7 @@ mod general;
 mod integrations;
 mod memory;
 mod notifications;
+mod shortcuts;
 mod skills;
 
 use gpui::{
@@ -37,6 +38,7 @@ pub(super) enum SettingsTab {
     #[default]
     General,
     Notifications,
+    Shortcuts,
     Accounts,
     Memory,
     Integrations,
@@ -48,9 +50,10 @@ impl SettingsTab {
         match self {
             Self::General => 0,
             Self::Notifications => 1,
-            Self::Accounts => 2,
-            Self::Memory => 3,
-            Self::Integrations => 4,
+            Self::Shortcuts => 2,
+            Self::Accounts => 3,
+            Self::Memory => 4,
+            Self::Integrations => 5,
         }
     }
 
@@ -58,6 +61,7 @@ impl SettingsTab {
         match self {
             Self::General => "General",
             Self::Notifications => "Notifications",
+            Self::Shortcuts => "Shortcuts",
             Self::Accounts => "Accounts",
             Self::Memory => "Memory",
             Self::Integrations => "Integrations",
@@ -68,6 +72,7 @@ impl SettingsTab {
         match self {
             Self::General => Icon::Settings,
             Self::Notifications => Icon::Volume2,
+            Self::Shortcuts => Icon::Keyboard,
             Self::Accounts => Icon::Agent,
             Self::Memory => Icon::Brain,
             Self::Integrations => Icon::Globe,
@@ -78,6 +83,7 @@ impl SettingsTab {
         match name.trim().to_ascii_lowercase().as_str() {
             "general" | "appearance" | "updates" | "background" => Some(Self::General),
             "notifications" | "notify" => Some(Self::Notifications),
+            "shortcuts" | "keys" | "keybindings" | "keyboard" => Some(Self::Shortcuts),
             "accounts" | "providers" => Some(Self::Accounts),
             "memory" => Some(Self::Memory),
             "integrations" | "browser" | "connections" => Some(Self::Integrations),
@@ -86,18 +92,28 @@ impl SettingsTab {
     }
 
     /// Vertical offset of this item inside the nav list. Two groups, no labels:
-    /// General and Notifications, then a 12px gap, then the agent items.
+    /// General, Notifications, and Shortcuts, then a 12px gap, then the agent items.
     /// Items are [`NAV_ITEM_H`] tall and 2px apart.
     fn rail_y(self) -> f32 {
         let step = NAV_ITEM_H + ITEM_GAP;
         match self {
             Self::General => 0.,
             Self::Notifications => step,
-            Self::Accounts => step + NAV_ITEM_H + GROUP_GAP,
-            Self::Memory => step + NAV_ITEM_H + GROUP_GAP + step,
-            Self::Integrations => step + NAV_ITEM_H + GROUP_GAP + step * 2.,
+            Self::Shortcuts => step * 2.,
+            Self::Accounts => step * 2. + NAV_ITEM_H + GROUP_GAP,
+            Self::Memory => step * 2. + NAV_ITEM_H + GROUP_GAP + step,
+            Self::Integrations => step * 2. + NAV_ITEM_H + GROUP_GAP + step * 2.,
         }
     }
+}
+
+/// Active inline keystroke capture state in Settings → Shortcuts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ShortcutRecordingState {
+    pub id: &'static str,
+    pub error: Option<String>,
+    pub error_seq: u64,
+    pub held_modifiers: gpui::Modifiers,
 }
 
 /// One agent CLI as `harness_status` reports it.
@@ -591,6 +607,8 @@ impl KeelWindow {
         self.memory.modal_leaving = None;
         self.memory.confirm = None;
         self.show_sound_menu = false;
+        self.shortcut_recording = None;
+        self.shortcut_reset_confirm = None;
         self.menus_open.remove("sound-list");
         self.menus_leaving.remove("sound-list");
         self.mark_current_read(cx);
@@ -621,6 +639,8 @@ impl KeelWindow {
         self.settings_tab_gen = self.settings_tab_gen.wrapping_add(1);
         self.settings_tab_at = Some(std::time::Instant::now());
         self.show_sound_menu = false;
+        self.shortcut_recording = None;
+        self.shortcut_reset_confirm = None;
         self.dotify
             .settings_scroll
             .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
@@ -759,7 +779,8 @@ impl KeelWindow {
                     .flex_col()
                     .gap(zpx(ITEM_GAP))
                     .child(render_item(SettingsTab::General))
-                    .child(render_item(SettingsTab::Notifications)),
+                    .child(render_item(SettingsTab::Notifications))
+                    .child(render_item(SettingsTab::Shortcuts)),
             )
             .child(div().h(zpx(GROUP_GAP)))
             .child(
@@ -799,6 +820,14 @@ impl KeelWindow {
         let animating = self.recent_tab_switch();
         let tab_gen = self.settings_tab_gen;
 
+        let dismiss_tip = crate::keys::display_for_id(
+            &self.state.ui_settings.shortcuts,
+            "dismiss",
+            crate::keys::current_os(),
+        )
+        .map(|k| format!("Close ({k})"))
+        .unwrap_or_else(|| "Close".to_string());
+
         let header = div()
             .w_full()
             .h(zpx(HEADER_H))
@@ -813,7 +842,7 @@ impl KeelWindow {
             .child(
                 icon_button("settings-done-btn", Icon::Close, t)
                     .tooltip(move |_, cx| {
-                        cx.new(|_| crate::view::dotify_ui::Tip::new("Close (Esc)", t))
+                        cx.new(|_| crate::view::dotify_ui::Tip::new(dismiss_tip.clone(), t))
                             .into()
                     })
                     .tooltip_show_delay(crate::view::tooltip::delay())
@@ -825,6 +854,7 @@ impl KeelWindow {
         let tab_body: gpui::Div = match tab {
             SettingsTab::General => self.render_general_tab(t, cx),
             SettingsTab::Notifications => self.render_notifications_tab(t, cx),
+            SettingsTab::Shortcuts => self.render_shortcuts_tab(t, cx),
             SettingsTab::Accounts => self.render_accounts_tab(t, cx),
             SettingsTab::Memory => self.render_memory_tab(t, cx),
             SettingsTab::Integrations => self.render_integrations_tab(t, cx),
@@ -891,6 +921,7 @@ mod tests {
         let tabs = [
             SettingsTab::General,
             SettingsTab::Notifications,
+            SettingsTab::Shortcuts,
             SettingsTab::Accounts,
             SettingsTab::Memory,
             SettingsTab::Integrations,
@@ -902,12 +933,17 @@ mod tests {
         // 30px items, 2px apart, 12px between the two groups, no group labels.
         assert_eq!(SettingsTab::General.rail_y(), 0.);
         assert_eq!(SettingsTab::Notifications.rail_y(), 32.);
-        assert_eq!(SettingsTab::Accounts.rail_y(), 74.);
-        assert_eq!(SettingsTab::Memory.rail_y(), 106.);
-        assert_eq!(SettingsTab::Integrations.rail_y(), 138.);
+        assert_eq!(SettingsTab::Shortcuts.rail_y(), 64.);
+        assert_eq!(SettingsTab::Accounts.rail_y(), 106.);
+        assert_eq!(SettingsTab::Memory.rail_y(), 138.);
+        assert_eq!(SettingsTab::Integrations.rail_y(), 170.);
         assert_eq!(
             SettingsTab::from_name("notifications"),
             Some(SettingsTab::Notifications)
+        );
+        assert_eq!(
+            SettingsTab::from_name("shortcuts"),
+            Some(SettingsTab::Shortcuts)
         );
         assert_eq!(
             SettingsTab::from_name("browser"),

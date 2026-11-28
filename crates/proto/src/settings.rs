@@ -75,6 +75,10 @@ pub struct UiSettings {
     /// Sidebar space sections folded shut on this device, by space id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_spaces: Vec<String>,
+    /// Top-level sidebar sections unfolded open on this device (`"projects"`, `"spaces"`, `"chats"`).
+    /// Sections default to collapsed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expanded_sections: Vec<String>,
     /// Settings → Browser: the only sites agents may use in the browser
     /// pane (`example.com`, `localhost:3000`, …). Empty allows every site.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -94,6 +98,11 @@ pub struct UiSettings {
     /// Minutes before an idle agent process is evicted. Default 15.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_eviction_minutes: Option<u32>,
+    /// Settings → Shortcuts: custom keybindings keyed by stable shortcut id
+    /// (`"new_chat"`, `"toggle_sidebar"`, …). An empty string explicitly
+    /// unbinds a shortcut; absent entries use the built-in default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shortcuts: BTreeMap<String, String>,
 }
 
 /// Strongest background dim the slider offers.
@@ -269,5 +278,18 @@ mod tests {
         assert_eq!(off.auto_update, Some(false));
         let text = serde_json::to_string(&off).unwrap();
         assert_eq!(serde_json::from_str::<UiSettings>(&text).unwrap().auto_update, Some(false));
+    }
+
+    #[test]
+    fn custom_shortcuts_round_trip_and_default_empty() {
+        let old: UiSettings = serde_json::from_str(r#"{"openTabs":[]}"#).unwrap();
+        assert!(old.shortcuts.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("shortcuts"));
+
+        let mut settings = UiSettings::default();
+        settings.shortcuts.insert("new_chat".into(), "cmd-shift-n".into());
+        settings.shortcuts.insert("stop_run".into(), String::new());
+        let text = serde_json::to_string(&settings).unwrap();
+        assert_eq!(serde_json::from_str::<UiSettings>(&text).unwrap(), settings);
     }
 }

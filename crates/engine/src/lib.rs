@@ -2948,6 +2948,22 @@ impl Engine {
         self.inner
             .browser
             .set_root(chat_id, PathBuf::from(&meta.cwd));
+        let bot = self.bots().by_chat_id(chat_id).cloned();
+        let bot_creator = bot.as_ref().is_some_and(|b| b.is_creator());
+        let bot_spec = bot.as_ref().map(|b| keel_harness::BotSessionSpec {
+            id: b.id.clone(),
+            name: b.name.clone(),
+            tagline: b.tagline.clone(),
+            system_prompt: b.system_prompt.clone(),
+            anti_jobs: b.anti_jobs.clone(),
+            memory_dir: data_dir.join("bots").join(&b.id).join("memory"),
+        });
+        let permission = if bot.is_some() {
+            keel_proto::PermissionMode::FullAccess
+        } else {
+            permission
+        };
+        let plan_mode = if bot.is_some() { false } else { plan_mode };
         Ok(Start {
             chat_id: chat_id.to_string(),
             run_id: run_id,
@@ -2986,9 +3002,42 @@ impl Engine {
                 longer_cache,
                 keep_cache_warm,
                 idle_eviction_timeout_secs,
+                bot: bot_spec,
+                bot_creator,
             },
             inbound,
         })
+    }
+
+    /// `{data_dir}/bots.json`, always guaranteeing built-in Dr. Keelee exists.
+    fn bots(&self) -> keel_proto::bots::BotsStore {
+        let path = compute_data_dir(&self.inner.profile).join(keel_proto::bots::FILE);
+        std::fs::read_to_string(&path)
+            .map(|text| keel_proto::bots::BotsStore::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Persist `{data_dir}/bots.json` atomically and broadcast to all registry subscribers.
+    fn save_bots(&self, store: &keel_proto::bots::BotsStore) -> Result<(), String> {
+        let data_dir = compute_data_dir(&self.inner.profile);
+        let _ = std::fs::create_dir_all(&data_dir);
+        let path = data_dir.join(keel_proto::bots::FILE);
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, store.to_json())
+            .and_then(|()| std::fs::rename(&tmp, &path))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("failed to write bots.json: {e}")
+            })?;
+        let state = self.lock();
+        self.push_diff(
+            &state,
+            None,
+            DocKind::Registry,
+            "bots",
+            serde_json::to_value(store).unwrap_or_default(),
+        );
+        Ok(())
     }
 
     /// `{data_dir}/projects.json` as the UI last wrote it.
@@ -4323,6 +4372,8 @@ impl Engine {
                 view,
             );
         }
+        let bots_view = serde_json::to_value(self.bots()).unwrap_or_default();
+        self.push_diff(&state, None, DocKind::Registry, "bots", bots_view);
         success(id, StreamBody { stream })
     }
 
@@ -5060,6 +5111,321 @@ impl Engine {
         memory_reply(id, memory::delete(&scope, slug).map(|()| serde_json::json!({})))
     }
 
+    fn rpc_bots_list(&self, id: &str) -> String {
+        let store = self.bots();
+        success(id, serde_json::to_value(&store).unwrap_or_default())
+    }
+
+    fn rpc_bots_ensure_chat(&self, id: &str, params: &Value) -> String {
+        #[derive(serde::Deserialize)]
+        struct EnsureParams {
+            id: String,
+            #[serde(default)]
+            harness: String,
+            #[serde(default)]
+            model: String,
+            #[serde(default)]
+            reset: bool,
+        }
+        let Ok(params) = serde_json::from_value::<EnsureParams>(params.clone()) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let mut store = self.bots();
+        let Some(bot_idx) = store.bots.iter().position(|b| b.id == params.id) else {
+            return failure(id, RpcErrorCode::BadParams, "unknown bot");
+        };
+        let existing_chat = store.bots[bot_idx].chat_id.clone();
+        if !params.reset
+            && let Some(cid) = existing_chat.as_deref()
+        {
+            let alive = {
+                let state = self.lock();
+                state
+                    .store
+                    .registry()
+                    .view()
+                    .chats
+                    .iter()
+                    .any(|c| c.id == cid && !c.archived)
+            };
+            if alive {
+                let bot = store.bots[bot_idx].clone();
+                return success(
+                    id,
+                    serde_json::json!({ "bot": bot, "chat_id": cid }),
+                );
+            }
+        }
+        if params.reset
+            && let Some(old_cid) = existing_chat
+        {
+            let _ = self.delete_bot_chat_internal(&old_cid);
+        }
+        let harness = if params.harness.trim().is_empty() {
+            self.default_bot_harness()
+        } else {
+            params.harness.clone()
+        };
+        let create = CreateParams {
+            space_id: String::new(),
+            title: store.bots[bot_idx].name.clone(),
+            harness,
+            model: params.model,
+            reasoning: String::new(),
+            permission: "full".to_string(),
+            plan_mode: false,
+            cwd: String::new(),
+            use_worktree: false,
+            branch: None,
+            scratch: true,
+        };
+        let chat_id = match self.create_chat_impl(&create) {
+            Ok((cid, _, _)) => cid,
+            Err(err) => return engine_failure(id, err),
+        };
+        store.bots[bot_idx].chat_id = Some(chat_id.clone());
+        let bot = store.bots[bot_idx].clone();
+        if let Err(err) = self.save_bots(&store) {
+            return failure(id, RpcErrorCode::Internal, &err);
+        }
+        success(id, serde_json::json!({ "bot": bot, "chat_id": chat_id }))
+    }
+
+    fn rpc_bots_create(&self, id: &str, params: &Value) -> String {
+        #[derive(serde::Deserialize)]
+        struct CreateBotParams {
+            name: String,
+            #[serde(default)]
+            tagline: String,
+            #[serde(default)]
+            system_prompt: String,
+            #[serde(default)]
+            anti_jobs: Vec<String>,
+            #[serde(default)]
+            harness: String,
+            #[serde(default)]
+            model: String,
+        }
+        let Ok(params) = serde_json::from_value::<CreateBotParams>(params.clone()) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        let name = params.name.trim();
+        if name.is_empty() {
+            return failure(id, RpcErrorCode::BadParams, "bot name cannot be empty");
+        }
+        let mut store = self.bots();
+        let base_slug: String = name
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+        let base_slug = if base_slug.is_empty() || base_slug == keel_proto::bots::DR_KEELEE_ID {
+            "bot".to_string()
+        } else {
+            base_slug
+        };
+        let mut bot_id = base_slug.clone();
+        let mut suffix = 2usize;
+        while store.by_id(&bot_id).is_some() {
+            bot_id = format!("{base_slug}-{suffix}");
+            suffix += 1;
+        }
+        let harness = if params.harness.trim().is_empty() {
+            self.default_bot_harness()
+        } else {
+            params.harness
+        };
+        let create = CreateParams {
+            space_id: String::new(),
+            title: name.to_string(),
+            harness,
+            model: params.model,
+            reasoning: String::new(),
+            permission: "full".to_string(),
+            plan_mode: false,
+            cwd: String::new(),
+            use_worktree: false,
+            branch: None,
+            scratch: true,
+        };
+        let chat_id = match self.create_chat_impl(&create) {
+            Ok((cid, _, _)) => cid,
+            Err(err) => return engine_failure(id, err),
+        };
+        let bot = keel_proto::bots::Bot {
+            id: bot_id.clone(),
+            builtin: false,
+            name: name.to_string(),
+            tagline: params.tagline.trim().to_string(),
+            system_prompt: params.system_prompt.trim().to_string(),
+            anti_jobs: params
+                .anti_jobs
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            chat_id: Some(chat_id.clone()),
+            appearance: keel_proto::bots::BotAppearance::naked_default(),
+            created_at: self.now().max(0) as u64,
+        };
+        store.bots.push(bot.clone());
+        if let Err(err) = self.save_bots(&store) {
+            return failure(id, RpcErrorCode::Internal, &err);
+        }
+        success(
+            id,
+            serde_json::json!({
+                "ok": true,
+                "bot_id": bot.id,
+                "name": bot.name,
+                "tagline": bot.tagline,
+                "anti_jobs": bot.anti_jobs,
+                "chat_id": chat_id,
+            }),
+        )
+    }
+
+    fn rpc_bots_update(&self, id: &str, params: &Value) -> String {
+        #[derive(serde::Deserialize)]
+        struct UpdateBotParams {
+            id: String,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            tagline: Option<String>,
+            #[serde(default)]
+            system_prompt: Option<String>,
+            #[serde(default)]
+            anti_jobs: Option<Vec<String>>,
+            #[serde(default)]
+            appearance: Option<keel_proto::bots::BotAppearance>,
+        }
+        let Ok(params) = serde_json::from_value::<UpdateBotParams>(params.clone()) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        if params.id == keel_proto::bots::DR_KEELEE_ID
+            && (params.name.is_some() || params.appearance.is_some())
+        {
+            return failure(
+                id,
+                RpcErrorCode::BadParams,
+                "Dr. Keelee is built-in and cannot be customized",
+            );
+        }
+        let mut store = self.bots();
+        let Some(bot) = store.by_id_mut(&params.id) else {
+            return failure(id, RpcErrorCode::BadParams, "unknown bot");
+        };
+        let mut renamed_chat: Option<(String, String)> = None;
+        if let Some(name) = params.name {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                bot.name = trimmed.to_string();
+                if let Some(cid) = &bot.chat_id {
+                    renamed_chat = Some((cid.clone(), bot.name.clone()));
+                }
+            }
+        }
+        if let Some(tagline) = params.tagline {
+            bot.tagline = tagline.trim().to_string();
+        }
+        if let Some(prompt) = params.system_prompt {
+            bot.system_prompt = prompt.trim().to_string();
+        }
+        if let Some(anti) = params.anti_jobs {
+            bot.anti_jobs = anti
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(appearance) = params.appearance {
+            bot.appearance = appearance;
+        }
+        let updated = bot.clone();
+        if let Some((cid, title)) = renamed_chat {
+            let mut state = self.lock();
+            if state.store.registry().rename_chat(&cid, &title).is_ok() {
+                state.dirty = true;
+                let now = self.now();
+                let _ = save(&mut state, now, false, self.inner.compaction_bytes);
+                self.push_registry_chat(&state, &cid);
+            }
+        }
+        if let Err(err) = self.save_bots(&store) {
+            return failure(id, RpcErrorCode::Internal, &err);
+        }
+        success(id, serde_json::json!({ "bot": updated }))
+    }
+
+    fn rpc_bots_delete(&self, id: &str, params: &Value) -> String {
+        #[derive(serde::Deserialize)]
+        struct DeleteBotParams {
+            id: String,
+        }
+        let Ok(params) = serde_json::from_value::<DeleteBotParams>(params.clone()) else {
+            return failure(id, RpcErrorCode::BadParams, "bad params");
+        };
+        if params.id == keel_proto::bots::DR_KEELEE_ID {
+            return failure(
+                id,
+                RpcErrorCode::BadParams,
+                "Dr. Keelee is built-in and cannot be deleted",
+            );
+        }
+        let mut store = self.bots();
+        let Some(pos) = store.bots.iter().position(|b| b.id == params.id) else {
+            return failure(id, RpcErrorCode::BadParams, "unknown bot");
+        };
+        let removed = store.bots.remove(pos);
+        if let Some(cid) = removed.chat_id {
+            let _ = self.delete_bot_chat_internal(&cid);
+        }
+        let bot_dir = compute_data_dir(&self.inner.profile)
+            .join("bots")
+            .join(&removed.id);
+        let _ = std::fs::remove_dir_all(bot_dir);
+        if let Err(err) = self.save_bots(&store) {
+            return failure(id, RpcErrorCode::Internal, &err);
+        }
+        success(id, serde_json::json!({ "deleted": removed.id }))
+    }
+
+    fn delete_bot_chat_internal(&self, chat_id: &str) -> Result<(), String> {
+        let mut state = self.lock();
+        let chat_ids = vec![chat_id.to_string()];
+        let removals = self.worktree_removals(&state, |chat| chat.id == chat_id);
+        let scratch_removals = self.scratch_removals(&state, |chat| chat.id == chat_id);
+        let _ = state.store.registry().delete_chats(&chat_ids);
+        state.dirty = true;
+        let now = self.now();
+        let _ = save(&mut state, now, false, self.inner.compaction_bytes);
+        self.push_diff(
+            &state,
+            None,
+            DocKind::Registry,
+            &format!("chats.{chat_id}"),
+            serde_json::json!({ "id": chat_id, "tombstoned": true }),
+        );
+        drop(state);
+        remove_worktrees(removals);
+        remove_scratch_dirs(scratch_removals);
+        self.evict_chat(chat_id);
+        Ok(())
+    }
+
+    fn default_bot_harness(&self) -> String {
+        self.inner
+            .harnesses
+            .iter()
+            .find(|h| h.id() != HarnessId::Mock && h.installed())
+            .or_else(|| self.inner.harnesses.first())
+            .map(|h| harness_name(h.id()).to_string())
+            .unwrap_or_else(|| "keel".to_string())
+    }
+
     fn memory_scope(&self, params: &Value) -> Result<memory::ScopeDir, memory::MemoryError> {
         let kind = memory::ScopeKind::parse(params.get("scope").and_then(Value::as_str).unwrap_or_default())?;
         let cwd = self.memory_cwd(params).map_err(|m| memory::MemoryError::BadParams(m.to_string()))?;
@@ -5706,6 +6072,11 @@ impl EngineHost for Engine {
             "memory_read" => self.rpc_memory_read(&request.id, &request.params),
             "memory_write" => self.rpc_memory_write(&request.id, &request.params),
             "memory_delete" => self.rpc_memory_delete(&request.id, &request.params),
+            "bots_list" => self.rpc_bots_list(&request.id),
+            "bots_ensure_chat" => self.rpc_bots_ensure_chat(&request.id, &request.params),
+            "bots_create" => self.rpc_bots_create(&request.id, &request.params),
+            "bots_update" => self.rpc_bots_update(&request.id, &request.params),
+            "bots_delete" => self.rpc_bots_delete(&request.id, &request.params),
             "add_skill" => self.rpc_add_skill(&request.id, &request.params),
             "remove_skill" => self.rpc_remove_skill(&request.id, &request.params),
             "browse_skills" => self.rpc_browse_skills(&request.id, &request.params, outbound),

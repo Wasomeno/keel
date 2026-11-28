@@ -398,7 +398,11 @@ impl Render for TranscriptListView {
                                         .flex_col()
                                         .child(render_row(ix, item, prev, &rc))
                                         .children(copy_el)
-                                        .children(loader.map(|loader| loader.render()))
+                                        .children(
+                                            loader.map(|loader| {
+                                                loader.render(rc.bot_theme.as_ref(), rc.clock_epoch)
+                                            }),
+                                        )
                                         .into_any()
                                 }
                             });
@@ -518,6 +522,7 @@ mod tests {
             citations: std::rc::Rc::new(HashMap::new()),
             current_citations: None,
             subagent_info: std::rc::Rc::new(HashMap::new()),
+            bot_theme: None,
         });
 
         let props = super::TranscriptListProps {

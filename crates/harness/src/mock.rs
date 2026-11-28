@@ -390,6 +390,8 @@ mod tests {
             keep_cache_warm: true,
             idle_eviction_timeout_secs: None,
             scratch: false,
+            bot: None,
+            bot_creator: false,
         }
     }
 

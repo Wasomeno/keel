@@ -8,31 +8,39 @@ use gpui::{AnyElement, ClickEvent, Context, ElementId, IntoElement, div, prelude
 use keel_theme::Tokens;
 
 use super::{
-    KeelWindow, drag_region, icon_button, menu_action, menu_hint, menu_separator, sidebar_menu,
-    sidebar_menu_at,
-    status_dot,
+    KeelWindow, drag_region, menu_action, menu_hint, menu_separator, sidebar_menu,
+    sidebar_menu_at, status_dot,
 };
 use crate::icons::Icon;
 use crate::state::{AppState, SPACE_ROW_CAP, SpaceSection};
 use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_MD, RADIUS_SM, c};
 use keel_proto::AttentionChat;
 
-/// Height of one chat row plus the list gap: 6 + 18 + 2 + 14 + 6, + 1.
+/// Height of one chat row plus the list gap: 5 + 1 + 18 + 2 + 15 + 1 + 5, + 1.
 /// Rows never wrap (ellipsis), so the pitch is constant.
-const CHAT_ROW_PITCH: f32 = 47.;
+const CHAT_ROW_PITCH: f32 = 48.;
 pub(super) const SECTION_HEADER_HEIGHT: f32 = 28.;
-/// Air above every major section (Projects, Spaces, Chats).
+/// Air above a major section (Spaces, Chats) when the previous section is open.
 const SECTION_GAP: f32 = 16.;
+/// Breathing room when the previous major section is folded so collapsed
+/// headers stack comfortably without feeling cramped.
+const COLLAPSED_SECTION_GAP: f32 = 8.;
 const MORE_ROW_HEIGHT: f32 = 26.;
 const MORE_ROW_PITCH: f32 = MORE_ROW_HEIGHT + 1.;
 const EMPTY_ROW_HEIGHT: f32 = 28.;
 
-fn section_gap(first: bool, loose: bool) -> f32 {
-    if loose && !first { SECTION_GAP } else { 0. }
+fn major_section_gap(has_prev: bool, prev_collapsed: bool) -> f32 {
+    if !has_prev {
+        0.
+    } else if prev_collapsed {
+        COLLAPSED_SECTION_GAP
+    } else {
+        SECTION_GAP
+    }
 }
 
-fn section_header_pitch(first: bool, loose: bool) -> f32 {
-    SECTION_HEADER_HEIGHT + section_gap(first, loose) + 1.
+fn section_header_pitch(gap: f32) -> f32 {
+    SECTION_HEADER_HEIGHT + gap + 1.
 }
 
 /// One entry of the sidebar list, in draw order.
@@ -41,45 +49,59 @@ enum SidebarItem {
     /// No projects created yet.
     NoProjects,
     ProjectHeader(keel_proto::projects::Project, bool, bool),
-    SpacesHeader(bool),
-    Header(SpaceSection, bool),
+    SpacesHeader(f32),
+    Header(SpaceSection, f32),
     Row(AttentionChat, keel_proto::DisplayStatus, bool),
     /// A space's "Show N more" (0: "Show less").
-    More(String, usize),
+    More(String, usize, bool),
     /// An empty "Chats" section (top-level) or an open project with no chats (nested).
     Empty { id: String, nested: bool },
     /// No folders under "Spaces" yet.
     NoSpaces,
 }
 
-/// Major sidebar section heading ("Projects", "Spaces", "Chats").
-/// 13 px semibold muted with a subtle 13 px icon in a 16 px box so the title
-/// text lands on the shared 24 px left rail (4 px padding + 16 px icon + 4 px gap).
-fn section_title(icon: Icon, label: &'static str, t: Tokens) -> gpui::Div {
+/// Sidebar section heading ("Projects", "Spaces", "Chats") with a collapsible chevron.
+fn section_title(label: &'static str, chevron: AnyElement, t: Tokens) -> gpui::Div {
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap_1()
+        .gap(zpx(6.))
         .t_body()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(c(t.text_muted))
+        .child(label)
         .child(
             div()
-                .size(zpx(16.))
+                .size(zpx(14.))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(c(t.text_faint))
-                .child(icon.el(zpx(13.))),
+                .text_color(c(t.text_faint).opacity(0.85))
+                .child(chevron),
         )
-        .child(label)
+}
+
+fn section_count_pill(count: usize, t: Tokens) -> gpui::Div {
+    div()
+        .flex_none()
+        .h(zpx(18.))
+        .min_w(zpx(20.))
+        .px(zpx(6.))
+        .rounded_full()
+        .bg(c(t.hover).opacity(0.65))
+        .flex()
+        .items_center()
+        .justify_center()
+        .t_caption()
+        .font_family(crate::style::MONO)
+        .text_color(c(t.text_faint))
+        .child(count.to_string())
 }
 
 /// A quiet placeholder under an empty sidebar group ("No projects", "No spaces", "No chats").
-/// Sits on the same left rail as the group's items (24 px top-level, 28 px nested)
-/// without repeating the section header's icon.
+/// Top-level groups align with their section label (8 px); nested folders align with the folder title (32 px).
 fn empty_row(
     id: String,
     label: &'static str,
@@ -88,21 +110,22 @@ fn empty_row(
     t: Tokens,
 ) -> gpui::Stateful<gpui::Div> {
     let group = format!("empty-g-{id}");
-    let indent = if nested { 28. } else { 24. };
+    let left_pad = if nested { 32. } else { 8. };
     div()
         .id(ElementId::Name(id.clone().into()))
         .h(zpx(EMPTY_ROW_HEIGHT))
         .flex_none()
-        .pl(zpx(indent))
-        .pr_1p5()
-        .rounded(RADIUS_MD)
+        .pl(zpx(left_pad))
+        .pr(zpx(8.))
+        .rounded(zpx(8.))
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
         .gap_2()
-        .t_small()
-        .text_color(c(t.text_faint))
+        .text_size(zpx(12.5))
+        .line_height(zpx(16.))
+        .text_color(c(t.text_faint).opacity(0.8))
         .when(actionable, |d| {
             d.hover_probe(group.clone())
                 .group(group.clone())
@@ -231,63 +254,200 @@ impl KeelWindow {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.render_sidebar_skills_nav(t, cx))
+            .child(self.render_sidebar_pages_nav(t, cx))
             .children(self.render_rename_prompt(t, cx))
             .child(self.render_chat_list(t, cx))
             .children(self.render_selection_bar(t, cx))
             .child(self.render_sidebar_footer(t, cx))
     }
 
-    fn render_sidebar_skills_nav(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar_pages_nav(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        let bots_active = (self.bots.page_open || self.active_bot().is_some())
+            && !self.settings_open
+            && !self.projects.home_open()
+            && !self.skills.open;
         let skills_active = self.skills.open && !self.settings_open;
+        let reduced = self.reduced();
+        let (_coworkers, running, awaiting) = self.bots_fleet_counts();
+        let stack_bots: Vec<_> = self.bots.store.bots.iter().take(3).cloned().collect();
+
+        let squad_member = |bot: &keel_proto::bots::Bot, size: f32| {
+            let status = self.bot_display_status(bot);
+            let mood = match status {
+                keel_proto::DisplayStatus::Running => crate::creature::BotMood::Working,
+                keel_proto::DisplayStatus::AwaitingInput => crate::creature::BotMood::Awaiting,
+                _ => crate::creature::BotMood::Idle,
+            };
+            crate::creature::render_creature_avatar(
+                &bot.id,
+                bot.appearance,
+                bot.is_creator(),
+                mood,
+                size,
+                self.clock_epoch,
+                t,
+                reduced,
+            )
+        };
+
+        let avatar_stack: AnyElement = match stack_bots.as_slice() {
+            [] => div().into_any_element(),
+            [b0] => div()
+                .size(zpx(22.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(squad_member(b0, 22.))
+                .into_any_element(),
+            [b0, b1] => div()
+                .relative()
+                .w(zpx(34.))
+                .h(zpx(24.))
+                .flex_none()
+                .child(
+                    div()
+                        .absolute()
+                        .left(zpx(0.))
+                        .top(zpx(0.))
+                        .child(squad_member(b1, 19.)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(zpx(13.))
+                        .top(zpx(2.))
+                        .child(squad_member(b0, 21.)),
+                )
+                .into_any_element(),
+            [b0, b1, b2, ..] => div()
+                .relative()
+                .w(zpx(46.))
+                .h(zpx(24.))
+                .flex_none()
+                // Back flankers paint first; lead creature paints last in front-center.
+                .child(
+                    div()
+                        .absolute()
+                        .left(zpx(0.))
+                        .top(zpx(0.))
+                        .child(squad_member(b1, 19.)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(zpx(26.))
+                        .top(zpx(0.))
+                        .child(squad_member(b2, 19.)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(zpx(12.))
+                        .top(zpx(2.))
+                        .child(squad_member(b0, 22.)),
+                )
+                .into_any_element(),
+        };
+
+        let bots_indicator: Option<AnyElement> = Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(5.))
+                .when(awaiting > 0, |d| {
+                    d.children(status_dot(
+                        keel_proto::DisplayStatus::AwaitingInput,
+                        "sidebar-bots-await",
+                        t,
+                        reduced,
+                    ))
+                })
+                .when(awaiting == 0 && running > 0, |d| {
+                    d.children(status_dot(
+                        keel_proto::DisplayStatus::Running,
+                        "sidebar-bots-run",
+                        t,
+                        reduced,
+                    ))
+                })
+                .child(avatar_stack)
+                .into_any_element(),
+        );
+
+        let nav_row = |id: &'static str, icon: Icon, label: &'static str, active: bool| {
+            div()
+                .id(id)
+                .h(zpx(crate::style::NAV_ITEM_H))
+                .px(zpx(8.))
+                .rounded(zpx(8.))
+                .border_1()
+                .border_color(if active {
+                    c(t.border).opacity(0.65)
+                } else {
+                    gpui::transparent_black()
+                })
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(8.))
+                .cursor_pointer()
+                .text_size(zpx(14.))
+                .line_height(zpx(20.))
+                .font_weight(if active {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                })
+                .text_color(c(if active { t.text } else { t.text_muted }))
+                .when(active, |d| d.bg(c(t.selected)))
+                .when(!active, |d| {
+                    d.hover(|s| s.text_color(c(t.text)))
+                        .hover_fade(c(t.hover), None)
+                })
+                .active(|s| s.opacity(0.75))
+                .child(
+                    div()
+                        .size(zpx(16.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(c(if active { t.text } else { t.text_faint }))
+                        .child(icon.el(zpx(15.))),
+                )
+                .child(div().flex_1().child(label))
+        };
 
         div()
             .flex_none()
-            .px(zpx(14.))
-            .pb(zpx(8.))
-            .mb(zpx(6.))
-            .border_b_1()
-            .border_color(c(t.border))
+            .px(zpx(12.))
+            .pt(zpx(2.))
+            .flex()
+            .flex_col()
+            .gap(zpx(2.))
             .child(
-                div()
-                    .id("sidebar-skills-btn")
-                    .h(zpx(28.))
-                    .pl_1()
-                    .pr_1p5()
-                    .rounded(RADIUS_MD)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .cursor_pointer()
-                    .t_body()
-                    .font_weight(if skills_active {
-                        gpui::FontWeight::SEMIBOLD
-                    } else {
-                        gpui::FontWeight::MEDIUM
-                    })
-                    .text_color(c(if skills_active { t.text } else { t.text_muted }))
-                    .when(skills_active, |d| d.bg(c(t.selected)))
-                    .when(!skills_active, |d| {
-                        d.hover(|s| s.text_color(c(t.text)))
-                            .hover_fade(c(t.hover), None)
-                    })
-                    .active(|s| s.opacity(0.75))
-                    .child(
-                        div()
-                            .size(zpx(16.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(c(if skills_active {
-                                t.text_muted
-                            } else {
-                                t.text_faint
-                            }))
-                            .child(Icon::Puzzle.el(zpx(13.))),
-                    )
-                    .child(div().flex_1().child("Skills"))
+                nav_row("sidebar-new-chat-btn", Icon::Plus, "New Chat", false)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.start_new_chat(cx);
+                        this.composer.update(cx, |s, cx| s.focus(window, cx));
+                    })),
+            )
+            .child(
+                nav_row("sidebar-bots-btn", Icon::Creature, "Bots", bots_active)
+                    .children(bots_indicator)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if this.bots.page_open && !this.settings_open {
+                            this.close_pages();
+                            cx.notify();
+                        } else {
+                            this.open_bots_page(cx);
+                        }
+                    })),
+            )
+            .child(
+                nav_row("sidebar-skills-btn", Icon::Puzzle, "Skills", skills_active)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if this.skills.open && !this.settings_open {
                             this.close_pages();
@@ -297,28 +457,44 @@ impl KeelWindow {
                         }
                     })),
             )
+            .child(
+                div()
+                    .pt(zpx(6.))
+                    .pb(zpx(8.))
+                    .px(zpx(4.))
+                    .child(div().h(zpx(1.)).w_full().bg(c(t.border).opacity(0.55))),
+            )
     }
 
     fn render_sidebar_footer(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_none()
-            .px(zpx(14.))
-            .py_1p5()
-            .border_t_1()
-            .border_color(c(t.border))
+            .px(zpx(12.))
+            .pb(zpx(8.))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .pb(zpx(6.))
+                    .px(zpx(4.))
+                    .child(div().h(zpx(1.)).w_full().bg(c(t.border).opacity(0.55))),
+            )
             .child(
                 div()
                     .id("sidebar-settings-btn")
-                    .h(zpx(28.))
-                    .pl_1()
-                    .pr_1p5()
-                    .rounded(RADIUS_MD)
+                    .h(zpx(crate::style::NAV_ITEM_H))
+                    .px(zpx(8.))
+                    .rounded(zpx(8.))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
+                    .gap(zpx(8.))
                     .cursor_pointer()
-                    .t_small()
+                    .text_size(zpx(14.))
+                    .line_height(zpx(20.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(c(t.text_muted))
                     .hover(|s| s.text_color(c(t.text)))
                     .hover_fade(c(t.hover), None)
@@ -331,19 +507,9 @@ impl KeelWindow {
                             .items_center()
                             .justify_center()
                             .text_color(c(t.text_faint))
-                            .child(Icon::Settings.el(zpx(13.))),
+                            .child(Icon::Settings.el(zpx(15.))),
                     )
                     .child(div().flex_1().child("Settings"))
-                    .child(
-                        div()
-                            .px_1()
-                            .py_0p5()
-                            .rounded(RADIUS_SM)
-                            .bg(c(t.hover))
-                            .t_caption()
-                            .text_color(c(t.text_faint))
-                            .child("⌘,"),
-                    )
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.toggle_settings(cx);
                     })),
@@ -399,42 +565,97 @@ impl KeelWindow {
             )
     }
 
+    fn render_fold_chevron(
+        &self,
+        fold_key: &str,
+        anim_prefix: &str,
+        collapsed: bool,
+        t: Tokens,
+    ) -> AnyElement {
+        let reduced = self.reduced();
+        let turn = |folded: bool| {
+            if folded {
+                -std::f32::consts::FRAC_PI_2
+            } else {
+                0.
+            }
+        };
+        let chevron = Icon::ChevronDown.el(zpx(12.)).text_color(c(t.text_faint));
+        match self.space_fold_gen.get(fold_key) {
+            Some(&generation) if !reduced => {
+                use gpui::AnimationExt as _;
+                let (from, to) = (turn(!collapsed), turn(collapsed));
+                chevron
+                    .with_animation(
+                        ElementId::Name(format!("{anim_prefix}-{generation}").into()),
+                        gpui::Animation::new(crate::motion::FAST)
+                            .with_easing(crate::motion::ease_out),
+                        move |icon, delta| {
+                            icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                from + (to - from) * delta,
+                            )))
+                        },
+                    )
+                    .into_any_element()
+            }
+            _ => chevron
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(turn(collapsed))))
+                .into_any_element(),
+        }
+    }
+
+    fn toggle_section_fold(&mut self, section: &str, cx: &mut Context<Self>) {
+        self.glide_gen += 1;
+        self.space_fold_gen
+            .insert(format!("sec:{section}"), self.glide_gen);
+        self.state.toggle_section_collapsed(section);
+        cx.notify();
+    }
+
     fn render_projects_header(
         &mut self,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let menu_open = self.show_projects_menu;
+        let collapsed = self.state.is_section_collapsed("projects");
+        let chevron = self.render_fold_chevron("sec:projects", "sec-chevron-projects", collapsed, t);
         div()
             .id("projects-header-group")
             .hover_probe("projects-header")
             .group("projects-header")
             .h(zpx(SECTION_HEADER_HEIGHT))
-            .pl_1()
-            .pr_1()
+            .px(zpx(8.))
+            .rounded(zpx(8.))
+            .cursor_pointer()
+            .hover_fade(c(t.hover), None)
+            .active(|s| s.opacity(0.75))
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
-            .child(section_title(Icon::FolderTree, "Projects", t))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.toggle_section_fold("projects", cx);
+            }))
+            .child(section_title("Projects", chevron, t))
             .child(reveal_on_hover("projects-overflow-reveal", "projects-header", if menu_open { 1. } else { 0. }, 1.,
-                div()
-                    .relative()
-                    .child(
-                        icon_button("projects-overflow-btn", Icon::Ellipsis, t)
-                            .text_color(c(t.text_faint))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                if this.menu_just_dismissed("projects-overflow-menu") {
-                                    return;
-                                }
-                                this.show_projects_menu = !this.show_projects_menu;
-                                cx.notify();
-                            })),
-                    )
-                    .children(
-                        self.menu_phase("projects-overflow-menu", self.show_projects_menu, cx)
-                            .map(|leaving| self.render_projects_menu(leaving, t, cx)),
-                    )))
+                        div()
+                            .relative()
+                            .child(
+                                header_button("projects-overflow-btn".into(), Icon::Ellipsis, t)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        if this.menu_just_dismissed("projects-overflow-menu") {
+                                            return;
+                                        }
+                                        this.show_projects_menu = !this.show_projects_menu;
+                                        cx.notify();
+                                    })),
+                            )
+                            .children(
+                                self.menu_phase("projects-overflow-menu", self.show_projects_menu, cx)
+                                    .map(|leaving| self.render_projects_menu(leaving, t, cx)),
+                            )))
     }
 
     fn render_projects_menu(
@@ -493,12 +714,13 @@ impl KeelWindow {
     /// the app's overflow menu on the right.
     fn render_sidebar_header(
         &mut self,
-        has_gap: bool,
+        gap: f32,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let focused = self.state.space_filter.is_some();
-        let gap = if has_gap { SECTION_GAP } else { 0. };
+        let collapsed = !focused && self.state.is_section_collapsed("spaces");
+        let chevron = self.render_fold_chevron("sec:spaces", "sec-chevron-spaces", collapsed, t);
         div()
             .id("spaces-header-wrap")
             .flex_none()
@@ -509,14 +731,22 @@ impl KeelWindow {
                     .hover_probe("spaces-header")
                     .group("spaces-header")
                     .h(zpx(SECTION_HEADER_HEIGHT))
-                    .pl_1()
-                    .pr_1()
+                    .px(zpx(8.))
+                    .rounded(zpx(8.))
+                    .when(!focused, |d| {
+                        d.cursor_pointer()
+                            .hover_fade(c(t.hover), None)
+                            .active(|s| s.opacity(0.75))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.toggle_section_fold("spaces", cx);
+                            }))
+                    })
                     .flex()
                     .flex_row()
                     .items_center()
                     .justify_between()
                     .when(!focused, |d| {
-                        d.child(section_title(Icon::Folder, "Spaces", t))
+                        d.child(section_title("Spaces", chevron, t))
                     })
                     .when(focused, |d| {
                         d.child(
@@ -548,9 +778,9 @@ impl KeelWindow {
                         div()
                             .relative()
                             .child(
-                                icon_button("overflow-btn", Icon::Ellipsis, t)
-                                    .text_color(c(t.text_faint))
+                                header_button("overflow-btn".into(), Icon::Ellipsis, t)
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
                                         if this.menu_just_dismissed("overflow-menu") {
                                             return;
                                         }
@@ -953,47 +1183,50 @@ impl KeelWindow {
         // re-sort can glide everything below from where it was drawn.
         let mut items: Vec<(String, f32, SidebarItem)> = Vec::new();
         let show_projects = !focused;
+        let projects_collapsed = self.state.is_section_collapsed("projects");
         if show_projects {
             items.push((
                 "l:projects".into(),
                 SECTION_HEADER_HEIGHT + 1.,
                 SidebarItem::ProjectsLabel,
             ));
-            if self.projects.store.projects.is_empty() {
-                items.push((
-                    "e:projects".into(),
-                    EMPTY_ROW_HEIGHT + 1.,
-                    SidebarItem::NoProjects,
-                ));
-            } else {
-                for (p_ix, project) in self.projects.store.projects.clone().into_iter().enumerate() {
-                    let p_id = project.id.clone();
-                    let open = self.projects.unfolded.contains(&p_id);
-                    let first = p_ix == 0;
-                    let pitch = SECTION_HEADER_HEIGHT + 1.;
+            if !projects_collapsed {
+                if self.projects.store.projects.is_empty() {
                     items.push((
-                        format!("p:{p_id}"),
-                        pitch,
-                        SidebarItem::ProjectHeader(project, open, first),
+                        "e:projects".into(),
+                        EMPTY_ROW_HEIGHT + 1.,
+                        SidebarItem::NoProjects,
                     ));
-                    if open {
-                        let project_chats = self.visible_project_chats(&p_id);
-                        if project_chats.is_empty() {
-                            items.push((
-                                format!("e:project-{p_id}"),
-                                EMPTY_ROW_HEIGHT + 1.,
-                                SidebarItem::Empty {
-                                    id: p_id.clone(),
-                                    nested: true,
-                                },
-                            ));
-                        } else {
-                            for (chat, status) in project_chats {
+                } else {
+                    for (p_ix, project) in self.projects.store.projects.clone().into_iter().enumerate() {
+                        let p_id = project.id.clone();
+                        let open = self.projects.unfolded.contains(&p_id);
+                        let first = p_ix == 0;
+                        let pitch = SECTION_HEADER_HEIGHT + 1.;
+                        items.push((
+                            format!("p:{p_id}"),
+                            pitch,
+                            SidebarItem::ProjectHeader(project, open, first),
+                        ));
+                        if open {
+                            let project_chats = self.visible_project_chats(&p_id);
+                            if project_chats.is_empty() {
                                 items.push((
-                                    chat.id.clone(),
-                                    CHAT_ROW_PITCH,
-                                    SidebarItem::Row(chat, status, true),
+                                    format!("e:project-{p_id}"),
+                                    EMPTY_ROW_HEIGHT + 1.,
+                                    SidebarItem::Empty {
+                                        id: p_id.clone(),
+                                        nested: true,
+                                    },
                                 ));
+                            } else {
+                                for (chat, status) in project_chats {
+                                    items.push((
+                                        chat.id.clone(),
+                                        CHAT_ROW_PITCH,
+                                        SidebarItem::Row(chat, status, true),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1001,16 +1234,18 @@ impl KeelWindow {
             }
         }
 
-        let spaces_pitch =
-            SECTION_HEADER_HEIGHT + if show_projects { SECTION_GAP } else { 0. } + 1.;
+        let spaces_gap = major_section_gap(show_projects, projects_collapsed);
+        let spaces_pitch = section_header_pitch(spaces_gap);
         items.push((
             "h:spaces-header".into(),
             spaces_pitch,
-            SidebarItem::SpacesHeader(show_projects),
+            SidebarItem::SpacesHeader(spaces_gap),
         ));
+        let spaces_collapsed = !focused && self.state.is_section_collapsed("spaces");
+        let chats_collapsed = !focused && self.state.is_section_collapsed("chats");
         // Under "Spaces", the same placeholder "Chats" gets when it's empty.
         let no_spaces = !focused && sections.iter().all(|s| s.loose);
-        if no_spaces {
+        if no_spaces && !spaces_collapsed {
             items.push((
                 "e:spaces".into(),
                 EMPTY_ROW_HEIGHT + 1.,
@@ -1019,13 +1254,24 @@ impl KeelWindow {
         }
         for (ix, section) in sections.into_iter().enumerate() {
             let space_id = section.space_id.clone();
-            let first = ix == 0 && !no_spaces;
             let nested = !section.loose;
+            if nested && spaces_collapsed {
+                continue;
+            }
+            let gap = if section.loose {
+                major_section_gap(!focused, spaces_collapsed)
+            } else {
+                let _ = ix;
+                0.
+            };
             items.push((
                 format!("h:{space_id}"),
-                section_header_pitch(first, section.loose),
-                SidebarItem::Header(section.clone(), first),
+                section_header_pitch(gap),
+                SidebarItem::Header(section.clone(), gap),
             ));
+            if section.loose && chats_collapsed {
+                continue;
+            }
             for (chat, status) in section.rows {
                 items.push((
                     chat.id.clone(),
@@ -1050,7 +1296,7 @@ impl KeelWindow {
                 items.push((
                     format!("m:{space_id}"),
                     MORE_ROW_PITCH,
-                    SidebarItem::More(space_id, section.hidden),
+                    SidebarItem::More(space_id, section.hidden, nested),
                 ));
             }
         }
@@ -1113,14 +1359,14 @@ impl KeelWindow {
                     SidebarItem::ProjectHeader(project, open, first) => {
                         self.render_project_header(project, open, first, t, cx)
                     }
-                    SidebarItem::SpacesHeader(has_gap) => {
-                        self.render_sidebar_header(has_gap, t, cx)
+                    SidebarItem::SpacesHeader(gap) => {
+                        self.render_sidebar_header(gap, t, cx)
                     }
-                    SidebarItem::Header(section, first) => {
-                        self.render_space_header(section, first, t, cx)
+                    SidebarItem::Header(section, gap) => {
+                        self.render_space_header(section, gap, t, cx)
                     }
-                    SidebarItem::More(space_id, hidden) => {
-                        self.render_more_row(space_id, hidden, t, cx)
+                    SidebarItem::More(space_id, hidden, nested) => {
+                        self.render_more_row(space_id, hidden, nested, t, cx)
                     }
                     SidebarItem::Empty { id, nested } => {
                         let row = empty_row(
@@ -1198,7 +1444,7 @@ impl KeelWindow {
                 this.projects.folder_card = None;
                 cx.notify();
             }))
-            .px(zpx(14.))
+            .px(zpx(12.))
             .pb_2()
             .flex()
             .flex_col()
@@ -1239,7 +1485,7 @@ impl KeelWindow {
     fn render_space_header(
         &mut self,
         section: SpaceSection,
-        first: bool,
+        gap: f32,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1258,74 +1504,60 @@ impl KeelWindow {
         let show_mark = header_shows_status(urgent, rows.iter().map(|(_, status)| *status));
 
         if loose {
+            let chats_collapsed = !focused && self.state.is_section_collapsed("chats");
+            let chats_chevron =
+                self.render_fold_chevron("sec:chats", "sec-chevron-chats", chats_collapsed, t);
             return div()
                 .id(ElementId::Name(format!("space-header-{space_id}").into()))
                 .flex_none()
-                .pt(zpx(section_gap(first, true)))
+                .pt(zpx(gap))
                 .child(
                     div()
                         .id("chats-header-group")
                         .h(zpx(SECTION_HEADER_HEIGHT))
-                        .pl_1()
-                        .pr_1()
+                        .px(zpx(8.))
+                        .rounded(zpx(8.))
+                        .when(!focused, |d| {
+                            d.cursor_pointer()
+                                .hover_fade(c(t.hover), None)
+                                .active(|s| s.opacity(0.75))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.toggle_section_fold("chats", cx);
+                                }))
+                        })
                         .flex()
                         .flex_row()
                         .items_center()
-                        .child(section_title(Icon::Comment, "Chats", t)),
+                        .justify_between()
+                        .child(section_title("Chats", chats_chevron, t)),
                 );
         }
 
         let group = format!("space-h-{space_id}");
         let menu_open = self.state.space_menu.as_deref() == Some(&space_id);
-        // Folded points right. The turn plays only after a toggle, never on load.
-        // Radians: gpui's `percentage` panics outside 0..1.
-        let turn = |folded: bool| {
-            if folded {
-                -std::f32::consts::FRAC_PI_2
-            } else {
-                0.
-            }
-        };
-        let chevron = Icon::ChevronDown.el(zpx(12.));
-        let chevron: AnyElement = match self.space_fold_gen.get(&space_id) {
-            Some(&generation) if !reduced => {
-                use gpui::AnimationExt as _;
-                let (from, to) = (turn(!collapsed), turn(collapsed));
-                chevron
-                    .with_animation(
-                        ElementId::Name(format!("chevron-{space_id}-{generation}").into()),
-                        gpui::Animation::new(crate::motion::FAST)
-                            .with_easing(crate::motion::ease_out),
-                        move |icon, delta| {
-                            icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                from + (to - from) * delta,
-                            )))
-                        },
-                    )
-                    .into_any_element()
-            }
-            _ => chevron
-                .with_transformation(gpui::Transformation::rotate(gpui::radians(turn(collapsed))))
-                .into_any_element(),
-        };
+        let chevron = self.render_fold_chevron(
+            &space_id,
+            &format!("chevron-{space_id}"),
+            collapsed,
+            t,
+        );
         let (toggle_id, new_id, menu_id) = (space_id.clone(), space_id.clone(), space_id.clone());
         div()
             .id(ElementId::Name(format!("space-header-{space_id}").into()))
             .flex_none()
-            .pt(zpx(section_gap(first, false)))
+            .pt(zpx(gap))
             .child(
                 div()
                     .id(ElementId::Name(group.clone().into()))
                     .hover_probe(group.clone())
                     .group(group.clone())
                     .h(zpx(SECTION_HEADER_HEIGHT))
-                    .pl_1()
-                    .pr_1()
+                    .px(zpx(8.))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .rounded(RADIUS_MD)
+                    .gap(zpx(8.))
+                    .rounded(zpx(8.))
                     .when(!focused, |d| d.cursor_pointer().hover_fade(c(t.hover), None))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if this.state.space_filter.is_some() {
@@ -1359,8 +1591,9 @@ impl KeelWindow {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .t_small()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_size(zpx(13.5))
+                            .line_height(zpx(18.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(c(t.text_muted))
                             .group_hover(group.clone(), |s| s.text_color(c(t.text)))
                             .child(name),
@@ -1369,17 +1602,7 @@ impl KeelWindow {
                         d.when(show_mark, |d| {
                             d.children(status_dot(urgent, &format!("space-{space_id}"), t, reduced))
                         })
-                        .when(total > 0, |d| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .px_1()
-                                    .t_caption()
-                                    .font_family(crate::style::MONO)
-                                    .text_color(c(t.text_faint))
-                                    .child(total.to_string()),
-                            )
-                        })
+                        .when(total > 0, |d| d.child(section_count_pill(total, t)))
                     })
                     .child(reveal_on_hover("space-new-reveal", group, if menu_open { 1. } else { 0. }, 1.,
                         div()
@@ -1423,6 +1646,7 @@ impl KeelWindow {
         &mut self,
         space_id: String,
         hidden: usize,
+        nested: bool,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1430,12 +1654,12 @@ impl KeelWindow {
             .id(ElementId::Name(format!("space-more-row-{space_id}").into()))
             .h(zpx(MORE_ROW_HEIGHT))
             .flex_none()
-            // Lines up with the nested chat titles.
-            .pl(zpx(28.))
-            .pr_2()
+            // Lines up with the group's chat titles (8 px top-level, 32 px nested).
+            .pl(zpx(if nested { 32. } else { 8. }))
+            .pr(zpx(8.))
             .flex()
             .items_center()
-            .rounded(RADIUS_MD)
+            .rounded(zpx(8.))
             .cursor_pointer()
             .t_caption()
             .text_color(c(t.text_faint))
@@ -1505,10 +1729,16 @@ impl KeelWindow {
                     this.chat_summary_hover(cid.clone(), mouse_y, *hovered, cx);
                 }))
             })
-            .when(nested, |d| d.pl(zpx(28.)).pr_2())
-            .when(!nested, |d| d.pl(zpx(24.)).pr_2())
-            .py_1p5()
-            .rounded(RADIUS_MD)
+            .pl(zpx(if nested { 32. } else { 8. }))
+            .pr(zpx(8.))
+            .py(zpx(5.))
+            .rounded(zpx(8.))
+            .border_1()
+            .border_color(if active || selected {
+                c(t.border).opacity(0.6)
+            } else {
+                gpui::transparent_black()
+            })
             .flex()
             .flex_row()
             .items_center()
@@ -1601,7 +1831,8 @@ impl KeelWindow {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .t_body()
+                            .text_size(zpx(13.5))
+                            .line_height(zpx(18.))
                             .font_weight(if active {
                                 gpui::FontWeight::MEDIUM
                             } else {
@@ -1650,12 +1881,13 @@ impl KeelWindow {
             .child(
                 div()
                     // Fixed, so the row pitch holds with an empty line.
-                    .h(zpx(14.))
+                    .h(zpx(15.))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .t_caption()
+                    .text_size(zpx(11.5))
+                    .line_height(zpx(15.))
                     .text_color(c(t.text_faint))
                     .children(model.map(|name| {
                         div()
@@ -2121,5 +2353,14 @@ mod tests {
         assert!((s1_offset_down - (-94.0)).abs() < 1e-4);
         let (c3_offset_down, _) = *row_glide.get("c3").unwrap();
         assert!((c3_offset_down - (-94.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn major_section_gap_stays_tight_when_collapsed_and_separates_when_expanded() {
+        assert_eq!(major_section_gap(false, true), 0.0);
+        assert_eq!(major_section_gap(false, false), 0.0);
+        assert_eq!(major_section_gap(true, true), COLLAPSED_SECTION_GAP);
+        assert_eq!(major_section_gap(true, false), SECTION_GAP);
+        assert!(COLLAPSED_SECTION_GAP < SECTION_GAP);
     }
 }

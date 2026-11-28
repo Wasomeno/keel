@@ -624,11 +624,14 @@ fn is_browser(name: &str) -> bool {
     browser_trace::tool_base(name).is_some()
 }
 
-/// `memory_write` (save or archive). Anything else named as memory is a read.
+/// `memory_write`, `bot_note`, or `bot_forget`. Anything else named as memory is a read.
 pub fn memory_writes(name: &str) -> bool {
     let base = name.rsplit("__").next().unwrap_or(name);
     let base = base.rsplit(['/', ':']).next().unwrap_or(base);
-    base.to_ascii_lowercase().replace(['-', ' '], "_") == "memory_write"
+    matches!(
+        base.to_ascii_lowercase().replace(['-', ' '], "_").as_str(),
+        "memory_write" | "bot_note" | "bot_forget"
+    )
 }
 
 /// Same fallback as `keel_harness::kind_from_name`. The UI crate does not
@@ -637,14 +640,20 @@ fn kind_from_name(name: &str) -> Option<&'static str> {
     let base = name.rsplit("__").next().unwrap_or(name);
     let base = base.rsplit(['/', ':']).next().unwrap_or(base);
     let n = base.to_ascii_lowercase().replace(['-', ' '], "_");
-    if n == "memory_read" || n == "memory_write" {
+    if matches!(
+        n.as_str(),
+        "memory_read" | "memory_write" | "bot_note" | "bot_recall" | "bot_zoom" | "bot_forget"
+    ) {
         return Some("memory");
     }
     if is_plan_name(&n) {
         return Some("plan");
     }
-    if n == "bash" || n == "shell" || n.starts_with("exec") {
+    if n == "bash" || n == "shell" || n == "script" || n.starts_with("exec") {
         return Some("execute");
+    }
+    if n == "script_tools" {
+        return Some("search");
     }
     if n.starts_with("read") || n.starts_with("view") || n == "cat" {
         return Some("read");
@@ -1267,6 +1276,8 @@ mod tests {
         );
         assert_eq!(step_kind("list_dir", "other"), StepKind::Search);
         assert_eq!(step_kind("list_dir", ""), StepKind::Search);
+        assert_eq!(step_kind("script", ""), StepKind::Execute);
+        assert_eq!(step_kind("script_tools", ""), StepKind::Search);
         assert_eq!(step_kind("web_search", ""), StepKind::Fetch);
         assert_eq!(step_kind("TodoWrite", ""), StepKind::Plan);
         assert_eq!(step_kind("mcp__srv__str_replace", ""), StepKind::Edit);
@@ -1274,6 +1285,25 @@ mod tests {
         assert_eq!(step_kind("memory_read", ""), StepKind::Memory);
         assert_eq!(step_kind("memory_write", ""), StepKind::Memory);
         assert_eq!(step_kind("mcp__keel__memory_write", ""), StepKind::Memory);
+        for bot_tool in ["bot_note", "bot_forget", "bot_recall", "bot_zoom"] {
+            assert_eq!(step_kind(bot_tool, ""), StepKind::Memory);
+        }
+        assert_eq!(
+            TraceStep::from(&tool("bot_note", "done")).title(),
+            "Wrote memory"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("bot_forget", "done")).title(),
+            "Wrote memory"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("bot_recall", "done")).title(),
+            "Read memory"
+        );
+        assert_eq!(
+            TraceStep::from(&tool("bot_zoom", "done")).title(),
+            "Read memory"
+        );
         let read = TraceStep::from(&tool("memory_read", "done"));
         assert_eq!(read.kind, StepKind::Memory);
         assert_eq!(read.title(), "Read memory");

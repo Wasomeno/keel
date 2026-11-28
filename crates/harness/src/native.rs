@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, stream};
+use keel_bot_harness::{BotEvent, BotHarness, BotHarnessConfig, BotProfile, NapEvent, NapMode};
 use keel_core::store::{SessionLog, SessionMeta, new_id as new_session_id};
 use keel_core::{
     AGENT_TOOL_NAME, Harness as CoreHarness, HookConfig, ProjectInstructions, RunEvent, RunStop,
-    Session, SkillCatalog, SubagentCatalog, SubagentConfig, SubagentEvent,
+    Session, SkillCatalog, SubagentCatalog, SubagentConfig, SubagentEvent, ToolMode,
     build_openai_codex_route, build_route,
 };
 use keel_llm_catalog::{AuthSpec, Catalog, LoadedCatalog, ModelSpec, Provider};
@@ -45,8 +46,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::keel::{KEEL_SYSTEM_PROMPT, KeelProfile, PiProfile};
 use crate::{
-    AuthAccount, ControlMsg, Harness, HarnessError, Model, ModelId, NativeSessionId,
-    ReasoningLevel, RunControls, SessionSpec, SignInEvent,
+    AuthAccount, BotSessionSpec, ControlMsg, Harness, HarnessError, Model, ModelId,
+    NativeSessionId, ReasoningLevel, RunControls, SessionSpec, SignInEvent,
 };
 
 /// Concise one-line description injected into opaque tool schemas. The rule
@@ -64,6 +65,10 @@ pub const MEMORY_PROTO: u32 = 1;
 
 /// Bundled skill for natural Bahasa Indonesia prose, loaded on demand via `skill`.
 pub const INDONESIAN_SKILL: &str = include_str!("../../../prompts/indonesian.md");
+
+/// System prompt for Dr. Keelee, Keel's built-in bot creator & fleet auditor.
+pub const DR_KEELEE_SYSTEM_PROMPT: &str =
+    include_str!("../../../prompts/dr-keelee.md").trim_ascii_end();
 
 const DEFAULT_MAX_TURNS: usize = 48;
 const MEMORY_IPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -421,8 +426,18 @@ async fn run_session(
         dir.join("ipc.token").is_file() && dir.join("keel.sock").exists()
     });
     if let Some(dir) = memory_socket {
-        registry.register(MemoryReadTool::new(dir.to_path_buf(), spec.cwd.clone()));
-        registry.register(MemoryWriteTool::new(dir.to_path_buf(), spec.cwd.clone()));
+        // Regular coding chats use the user/project markdown memory store; bots
+        // use isolated OptMem (`bot_note`/`bot_recall`/`bot_zoom`/`bot_forget`).
+        if spec.bot.is_none() {
+            registry.register(MemoryReadTool::new(dir.to_path_buf(), spec.cwd.clone()));
+            registry.register(MemoryWriteTool::new(dir.to_path_buf(), spec.cwd.clone()));
+        }
+        if spec.bot_creator {
+            registry.register(BotCreateTool::new(dir.to_path_buf()));
+            registry.register(BotListTool::new(dir.to_path_buf()));
+            registry.register(BotUpdateTool::new(dir.to_path_buf()));
+            registry.register(BotDeleteTool::new(dir.to_path_buf()));
+        }
     }
 
     let has_ui_tools = connect_keel_mcps(&mut registry, &spec).await;
@@ -437,6 +452,8 @@ async fn run_session(
         session = session.with_reasoning(effort);
     }
 
+    let env_tool_mode = tool_mode_from_env()?;
+
     let sessions_dir = data_dir
         .map(KeelProfile::sessions_dir)
         .unwrap_or_else(|| std::env::temp_dir().join("keel-sessions"));
@@ -445,6 +462,29 @@ async fn run_session(
     let has_stored_system = resumed_session
         .as_ref()
         .is_some_and(|opened| opened.has_stored_system);
+    let tool_mode = resolve_tool_mode(env_tool_mode, resumed_session.as_ref());
+
+    if let Some(bot_spec) = spec.bot.clone() {
+        return run_bot_session(
+            spec,
+            bot_spec,
+            controls,
+            provider,
+            model_spec,
+            session,
+            registry,
+            skills,
+            has_ui_tools,
+            &sessions_dir,
+            resumed_session,
+            has_stored_system,
+            workspace,
+            max_turns,
+            event_tx,
+        )
+        .await;
+    }
+
     if !has_stored_system {
         let initial_memory = match memory_socket {
             Some(dir) => Some(fetch_memory_prompt(dir, &spec.cwd).await),
@@ -469,9 +509,10 @@ async fn run_session(
                 );
             }
         }
+        let profile_prompt = KeelProfile::default().system_prompt;
         configure_fresh_system_prompt(
             &mut session,
-            KeelProfile::default().system_prompt.as_deref(),
+            profile_prompt.as_deref(),
             has_ui_tools,
             spec.scratch,
             spec.project.as_ref(),
@@ -483,8 +524,14 @@ async fn run_session(
     let (session_log, resumed_from_log, resumed) = match resumed_session.take() {
         Some(opened) => (opened.log, opened.id, true),
         None => {
-            let (log, id) =
-                create_session_log(&sessions_dir, &provider, &model_spec, &spec.cwd, &session)?;
+            let (log, id) = create_session_log(
+                &sessions_dir,
+                &provider,
+                &model_spec,
+                &spec.cwd,
+                &session,
+                tool_mode,
+            )?;
             (log, id, false)
         }
     };
@@ -573,6 +620,13 @@ async fn run_session(
             .with_worktree_dir(KeelProfile::home(dir).join("worktrees").join(&resumed_from_log));
     }
 
+    let ui_native_tools: Vec<String> = registry
+        .names()
+        .into_iter()
+        .filter(|name| keel_proto::is_ui_tool(name))
+        .map(str::to_string)
+        .collect();
+
     let mut harness = CoreHarness::new(session, Arc::new(registry), workspace)
         .with_permissions(gate)
         .with_skills(skills)
@@ -582,7 +636,9 @@ async fn run_session(
         .with_subagents(subagent_config)
         .with_max_turns(max_turns)
         .with_cancellation(cancel.clone())
-        .with_sandbox(env_flag("KEEL_SANDBOX"));
+        .with_sandbox(env_flag("KEEL_SANDBOX"))
+        .with_tool_mode(tool_mode)
+        .with_native_tools(ui_native_tools);
     if let Some(plan_prompt) =
         keel_plan_mode_prompt(has_ui_tools, keel_tools::plan_sandbox_supported())
     {
@@ -644,6 +700,266 @@ async fn run_session(
     router_task.abort();
     if let Some(status) = final_status {
         let _ = event_tx.send(Ok(AgentEvent::Done { status }));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_bot_session(
+    spec: SessionSpec,
+    bot_spec: BotSessionSpec,
+    controls: RunControls,
+    provider: Provider,
+    model_spec: ModelSpec,
+    session: Session,
+    registry: ToolRegistry,
+    skills: SkillCatalog,
+    has_ui_tools: bool,
+    sessions_dir: &Path,
+    mut resumed_session: Option<ResumedSession>,
+    has_stored_system: bool,
+    workspace: Workspace,
+    max_turns: usize,
+    event_tx: mpsc::UnboundedSender<Result<AgentEvent, HarnessError>>,
+) -> Result<(), HarnessError> {
+    let data_dir = spec.data_dir.as_deref();
+    let resumed = resumed_session.is_some();
+    let session_id = resumed_session
+        .as_ref()
+        .map(|opened| opened.id.clone())
+        .unwrap_or_else(new_session_id);
+
+    let mut prompt_text = if spec.bot_creator {
+        let mut p = DR_KEELEE_SYSTEM_PROMPT.to_string();
+        let extra = bot_spec.system_prompt.trim();
+        if !extra.is_empty() {
+            p.push_str("\n\n");
+            p.push_str(extra);
+        }
+        p
+    } else {
+        bot_spec.system_prompt
+    };
+    if !has_stored_system {
+        if has_ui_tools {
+            prompt_text.push_str("\n\n");
+            prompt_text.push_str(crate::UI_CARDS_PROMPT);
+        }
+        if spec.scratch {
+            prompt_text.push_str("\n\n");
+            prompt_text.push_str(crate::SCRATCH_PROMPT);
+        }
+        if let Some(project) = spec.project.as_ref().filter(|p| !p.roots.is_empty()) {
+            let mut roots = project.roots.clone();
+            if roots.len() > 1 {
+                roots[1..].sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            let text = keel_proto::projects::roots_prompt(&project.name, &roots);
+            prompt_text.push_str("\n\n");
+            prompt_text.push_str(text.trim_end());
+        }
+    }
+
+    let profile = BotProfile::new(bot_spec.id, bot_spec.name, bot_spec.memory_dir)
+        .with_tagline(bot_spec.tagline)
+        .with_system_prompt(prompt_text)
+        .with_anti_jobs(bot_spec.anti_jobs);
+
+    let cancel = CancellationToken::new();
+    let steers = Arc::new(Mutex::new(VecDeque::<String>::new()));
+    let (gate, perm_rx) = if spec.permission == PermissionMode::FullAccess && !spec.plan_mode {
+        (PermissionGate::AllowAll, None)
+    } else {
+        let (gate, rx) = PermissionGate::ask();
+        (gate, Some(rx))
+    };
+
+    let scratch_cwd = spec.scratch.then(|| spec.cwd.clone());
+    let router_task = tokio::spawn(control_router(
+        controls.inbound,
+        perm_rx,
+        cancel.clone(),
+        Arc::clone(&steers),
+        event_tx.clone(),
+        spec.permission,
+        spec.plan_mode,
+        scratch_cwd,
+    ));
+
+    let hooks = if env_flag("KEEL_HOOKS") {
+        HookConfig::load(&spec.cwd)
+    } else {
+        HookConfig::empty()
+    };
+    let subagent_catalog = if spec.scratch {
+        SubagentCatalog::builtins()
+    } else {
+        SubagentCatalog::discover(&spec.cwd)
+    };
+    let mut subagent_config = SubagentConfig::new(subagent_catalog)
+        .with_model_catalog(Arc::new(load_catalog().catalog))
+        .with_log_dir(sessions_dir.join(format!("{session_id}.subagents")))
+        .with_allow_worktree(!spec.scratch);
+    if let Some(dir) = data_dir {
+        subagent_config = subagent_config
+            .with_worktree_dir(KeelProfile::home(dir).join("worktrees").join(&session_id));
+    }
+
+    let mut cfg = BotHarnessConfig::new(profile);
+    cfg.nap_mode = NapMode::Background;
+    cfg.include_working_rules = true;
+    cfg.include_workspace_instructions = false;
+    cfg.extra_tools = registry;
+    cfg.permissions = gate;
+    cfg.max_turns = max_turns;
+    cfg.cancel = cancel.clone();
+    cfg.hooks = hooks;
+    cfg.sandbox = env_flag("KEEL_SANDBOX");
+    cfg.skills = skills;
+    cfg.subagents = Some(subagent_config);
+
+    let mut bot_harness = BotHarness::new(session, workspace, cfg).map_err(failed)?;
+    if let Err(err) = bot_harness.prepare_wake().await {
+        tracing::warn!(
+            target: "keel_harness::native",
+            error = %err,
+            "bot OptMem wake preparation failed"
+        );
+    }
+
+    let session_log = match resumed_session.take() {
+        Some(opened) => opened.log,
+        None => {
+            create_session_log_with_id(
+                sessions_dir,
+                &session_id,
+                &provider,
+                &model_spec,
+                &spec.cwd,
+                bot_harness.session(),
+                ToolMode::Direct,
+            )?
+        }
+    };
+    let log_arc = Arc::new(session_log);
+    if let Some(report) = &spec.report_session {
+        report(
+            session_id.clone(),
+            Some(log_arc.path().to_string_lossy().into_owned()),
+        );
+    }
+    bot_harness
+        .session_mut()
+        .set_sink(Arc::clone(&log_arc) as Arc<dyn keel_core::SessionSink>);
+    bot_harness
+        .inner_mut()
+        .set_session_state(Arc::clone(&log_arc) as Arc<dyn keel_tools::SessionState>);
+
+    if resumed && !spec.plan_mode && history_ends_in_plan_mode(&bot_harness.session().history) {
+        bot_harness.session_mut().push_message(Message::user(format!(
+            "[plan mode]\n{}",
+            keel_core::PLAN_MODE_OFF_NOTICE
+        )));
+    }
+
+    let (inline_imgs, unread_imgs) = crate::inline_images(&spec.attachments);
+    if !inline_imgs.is_empty() {
+        let mut msg = Message::new(Role::User);
+        for (file, data) in inline_imgs {
+            msg.parts.push(Part::text(format!("Attached image: {}", file.name)));
+            msg.parts.push(Part::image(file.mime.clone(), data));
+        }
+        bot_harness.session_mut().push_message(msg);
+    }
+
+    let mut initial_prompt = normalize_skill_invocation(&spec.initial_text);
+    initial_prompt.push_str(&crate::attachment_note(&unread_imgs));
+    if initial_prompt.trim().is_empty() && !spec.attachments.is_empty() {
+        initial_prompt = "See the attached image(s).".to_string();
+    }
+
+    let full_model_id = format!("{}/{}", provider.id, model_spec.id);
+    let context_window = model_spec.context_window;
+    let cwd_for_diffs = spec.cwd.clone();
+
+    let mut next_prompt = Some(initial_prompt);
+    let mut final_status: Option<TurnStatus> = None;
+
+    while let Some(prompt) = next_prompt.take() {
+        let mut translator = EventTranslator::new(
+            event_tx.clone(),
+            full_model_id.clone(),
+            context_window,
+            cwd_for_diffs.clone(),
+        );
+        let outcome = bot_harness
+            .run(&prompt, |ev| match ev {
+                BotEvent::Harness(run_ev) => translator.on_event(run_ev),
+                BotEvent::Nap(NapEvent::Finished { usage, .. }) => {
+                    if usage.total() > 0 {
+                        let _ = event_tx.send(Ok(AgentEvent::Usage {
+                            usage: to_proto_usage(&full_model_id, usage, None),
+                        }));
+                    }
+                }
+                BotEvent::Nap(NapEvent::Failed { range, error }) => {
+                    tracing::warn!(
+                        target: "keel_harness::native",
+                        block = %range,
+                        error = %error,
+                        "background optmem nap failed"
+                    );
+                }
+                BotEvent::WakeInjected { .. } | BotEvent::Nap(NapEvent::Started { .. }) => {}
+            })
+            .await;
+        match outcome {
+            Ok(outcome) => match outcome.stop() {
+                RunStop::EndTurn => {
+                    let queued = steers.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+                    if let Some(steer_text) = queued {
+                        next_prompt = Some(normalize_skill_invocation(&steer_text));
+                    } else {
+                        final_status = Some(TurnStatus::Completed {});
+                    }
+                }
+                RunStop::MaxTurns
+                | RunStop::TaskTimeout
+                | RunStop::Stalled(_)
+                | RunStop::PrematureFinish(_) => {
+                    final_status = Some(TurnStatus::Completed {});
+                }
+                RunStop::Cancelled => {
+                    final_status = Some(TurnStatus::Interrupted {});
+                }
+                RunStop::Failed => {
+                    let msg = outcome
+                        .run
+                        .last
+                        .as_ref()
+                        .and_then(|m| m.error.clone())
+                        .or(outcome.run.stop_detail)
+                        .unwrap_or_else(|| "turn failed".to_string());
+                    final_status = Some(TurnStatus::Errored { message: msg });
+                }
+            },
+            Err(err) => {
+                final_status = Some(TurnStatus::Errored {
+                    message: err.to_string(),
+                });
+            }
+        }
+    }
+
+    router_task.abort();
+    if let Some(status) = final_status {
+        let _ = event_tx.send(Ok(AgentEvent::Done { status }));
+    }
+    drop(event_tx);
+    if !cancel.is_cancelled() {
+        tokio::spawn(bot_harness.flush_and_shutdown());
+    } else {
+        bot_harness.shutdown().await;
     }
     Ok(())
 }
@@ -808,6 +1124,10 @@ fn auto_permission(
             | "skill"
             | "memory_read"
             | "memory_write"
+            | "bot_note"
+            | "bot_recall"
+            | "bot_zoom"
+            | "bot_forget"
             | "web_search"
             | "web_fetch"
             | AGENT_TOOL_NAME
@@ -1008,7 +1328,7 @@ impl EventTranslator {
                 call_id,
                 name,
                 is_error,
-                preview: _,
+                preview,
                 output,
                 images,
                 duration_ms,
@@ -1041,9 +1361,14 @@ impl EventTranslator {
                     .map(|img| format!("data:{};base64,{}", img.mime, img.data))
                     .collect();
                 all_images.extend(crate::saved_paths(output));
+                let summary_src = if output.is_empty() && !preview.is_empty() {
+                    preview
+                } else {
+                    output
+                };
                 self.emit(AgentEvent::ToolFinished {
                     tool_id: call_id.to_owned(),
-                    summary: summary_line(output, is_error),
+                    summary: summary_line(summary_src, is_error),
                     output_bytes: output.len() as u64,
                     is_error,
                     images: all_images,
@@ -1875,6 +2200,221 @@ impl Tool for MemoryWriteTool {
     }
 }
 
+struct BotCreateTool {
+    data_dir: PathBuf,
+}
+
+impl BotCreateTool {
+    fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
+
+impl Tool for BotCreateTool {
+    fn name(&self) -> &str {
+        "create_bot"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "create_bot".to_string(),
+            description: "Hatch a new Keel bot with a focused job, voice, system prompt, and anti-jobs. All new bots start as a default naked creature that the user can customize in the UI.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": LABEL_DESC},
+                    "name": {"type": "string", "description": "Short, memorable bot name (e.g. 'Patch', 'Scout', 'Loom')."},
+                    "tagline": {"type": "string", "description": "Crisp 3-6 word summary of the bot's single job and voice."},
+                    "system_prompt": {"type": "string", "description": "Full operating instructions: the bot's one job, voice, workflow, and verification rules."},
+                    "anti_jobs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Explicit hard boundaries the bot must never cross."
+                    }
+                },
+                "required": ["name", "tagline", "system_prompt", "anti_jobs"]
+            }),
+        }
+    }
+
+    fn summarize(&self, arguments: &Value) -> String {
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("bot");
+        format!("Hatching bot {name}")
+    }
+
+    fn execute<'a>(&'a self, mut arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        let data_dir = self.data_dir.clone();
+        Box::pin(async move {
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.remove("label");
+            }
+            match engine_ipc_call(&data_dir, "bots_create", arguments).await {
+                Ok(result) => ToolOutcome::ok(
+                    serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(err) => ToolOutcome::error(format!("Failed to hatch bot: {err}")),
+            }
+        })
+    }
+}
+
+struct BotListTool {
+    data_dir: PathBuf,
+}
+
+impl BotListTool {
+    fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
+
+impl Tool for BotListTool {
+    fn name(&self) -> &str {
+        "list_bots"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "list_bots".to_string(),
+            description: "Inspect every bot currently in the user's Keel roster, including their taglines, prompts, and anti-jobs.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": LABEL_DESC}
+                }
+            }),
+        }
+    }
+
+    fn summarize(&self, _arguments: &Value) -> String {
+        "Checking bot roster".to_string()
+    }
+
+    fn execute<'a>(&'a self, _arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        let data_dir = self.data_dir.clone();
+        Box::pin(async move {
+            match engine_ipc_call(&data_dir, "bots_list", json!({})).await {
+                Ok(result) => ToolOutcome::ok(
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(err) => ToolOutcome::error(format!("Failed to list bots: {err}")),
+            }
+        })
+    }
+}
+
+struct BotUpdateTool {
+    data_dir: PathBuf,
+}
+
+impl BotUpdateTool {
+    fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
+
+impl Tool for BotUpdateTool {
+    fn name(&self) -> &str {
+        "update_bot"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "update_bot".to_string(),
+            description: "Tighten or update an existing bot's name, tagline, system_prompt, or anti_jobs.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": LABEL_DESC},
+                    "id": {"type": "string", "description": "Target bot id from list_bots."},
+                    "name": {"type": "string"},
+                    "tagline": {"type": "string"},
+                    "system_prompt": {"type": "string"},
+                    "anti_jobs": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["id"]
+            }),
+        }
+    }
+
+    fn summarize(&self, arguments: &Value) -> String {
+        let id = arguments.get("id").and_then(Value::as_str).unwrap_or("bot");
+        format!("Updating bot {id}")
+    }
+
+    fn execute<'a>(&'a self, mut arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        let data_dir = self.data_dir.clone();
+        Box::pin(async move {
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.remove("label");
+            }
+            match engine_ipc_call(&data_dir, "bots_update", arguments).await {
+                Ok(result) => ToolOutcome::ok(
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(err) => ToolOutcome::error(format!("Failed to update bot: {err}")),
+            }
+        })
+    }
+}
+
+struct BotDeleteTool {
+    data_dir: PathBuf,
+}
+
+impl BotDeleteTool {
+    fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
+
+impl Tool for BotDeleteTool {
+    fn name(&self) -> &str {
+        "delete_bot"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "delete_bot".to_string(),
+            description: "Retire and delete a non-builtin bot by id. Never deletes dr-keelee.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": LABEL_DESC},
+                    "id": {"type": "string", "description": "Bot id to delete."}
+                },
+                "required": ["id"]
+            }),
+        }
+    }
+
+    fn summarize(&self, arguments: &Value) -> String {
+        let id = arguments.get("id").and_then(Value::as_str).unwrap_or("bot");
+        format!("Retiring bot {id}")
+    }
+
+    fn execute<'a>(&'a self, mut arguments: Value, _context: &'a ToolContext) -> ToolFuture<'a> {
+        let data_dir = self.data_dir.clone();
+        Box::pin(async move {
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.remove("label");
+            }
+            match engine_ipc_call(&data_dir, "bots_delete", arguments).await {
+                Ok(result) => ToolOutcome::ok(
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(err) => ToolOutcome::error(format!("Failed to delete bot: {err}")),
+            }
+        })
+    }
+}
+
 async fn fetch_memory_prompt(data_dir: &Path, cwd: &Path) -> String {
     let fallback = || format!("{MEMORY_PREAMBLE}\n\n{MEMORY_UNAVAILABLE}");
     let params = json!({ "cwd": cwd.to_string_lossy() });
@@ -1971,6 +2511,7 @@ struct ResumedSession {
     log: SessionLog,
     id: String,
     has_stored_system: bool,
+    tool_mode: Option<ToolMode>,
 }
 
 fn configure_fresh_system_prompt(
@@ -2107,6 +2648,7 @@ fn try_resume_session(
             if let Some(wm) = working_memory {
                 session.restore_working_memory(wm);
             }
+            session.restore_script_facts(log.pending_script_facts().clone());
             let has_stored_system = meta.system.is_some();
             if let Some(stored) = meta.system {
                 session.system = Some(stored);
@@ -2115,6 +2657,7 @@ fn try_resume_session(
                 log,
                 id: meta.id,
                 has_stored_system,
+                tool_mode: meta.tool_mode,
             })
         }
         Err(err) => {
@@ -2129,25 +2672,81 @@ fn try_resume_session(
     }
 }
 
+fn parse_tool_mode(value: &str) -> Result<ToolMode, HarnessError> {
+    if value.eq_ignore_ascii_case("code") {
+        Ok(ToolMode::CodeV1)
+    } else if value.eq_ignore_ascii_case("direct") {
+        Ok(ToolMode::Direct)
+    } else {
+        Err(HarnessError::Failed(format!(
+            "KEEL_TOOL_MODE must be `code` or `direct`, got `{value}`"
+        )))
+    }
+}
+
+fn tool_mode_from_env() -> Result<Option<ToolMode>, HarnessError> {
+    match std::env::var("KEEL_TOOL_MODE") {
+        Ok(value) => parse_tool_mode(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(HarnessError::Failed(
+            "KEEL_TOOL_MODE is not valid UTF-8".to_owned(),
+        )),
+    }
+}
+
+fn resolve_tool_mode(env_override: Option<ToolMode>, resumed: Option<&ResumedSession>) -> ToolMode {
+    match env_override {
+        Some(mode) => mode,
+        None => match resumed {
+            // Legacy logs written before `tool_mode` existed resume in Direct
+            // mode so existing tool-call transcripts replay cleanly.
+            Some(opened) => opened.tool_mode.unwrap_or(ToolMode::Direct),
+            None => ToolMode::CodeV1,
+        },
+    }
+}
+
 fn create_session_log(
     sessions_dir: &Path,
     provider: &Provider,
     model_spec: &ModelSpec,
     cwd: &Path,
     session: &Session,
+    tool_mode: ToolMode,
 ) -> Result<(SessionLog, String), HarnessError> {
     let id = new_session_id();
-    let meta = SessionMeta::new(
+    let log = create_session_log_with_id(
+        sessions_dir,
         &id,
+        provider,
+        model_spec,
+        cwd,
+        session,
+        tool_mode,
+    )?;
+    Ok((log, id))
+}
+
+fn create_session_log_with_id(
+    sessions_dir: &Path,
+    id: &str,
+    provider: &Provider,
+    model_spec: &ModelSpec,
+    cwd: &Path,
+    session: &Session,
+    tool_mode: ToolMode,
+) -> Result<SessionLog, HarnessError> {
+    let meta = SessionMeta::new(
+        id,
         &provider.id,
         &model_spec.id,
         model_spec.protocol.as_str(),
     )
     .workspace(cwd.to_string_lossy().into_owned())
     .system(session.system.clone())
-    .cache(Some(session.cache.clone()));
-    let log = SessionLog::create(sessions_dir, &meta).map_err(failed)?;
-    Ok((log, id))
+    .cache(Some(session.cache.clone()))
+    .tool_mode(tool_mode);
+    SessionLog::create(sessions_dir, &meta).map_err(failed)
 }
 
 fn openai_uses_oauth(store: Option<&CredentialStore>) -> bool {
@@ -5262,6 +5861,13 @@ mod tests {
             auto_permission(&req_mem, PermissionMode::Ask, false, None),
             Some(PermissionDecision::Allow)
         );
+        for bot_tool in ["bot_note", "bot_recall", "bot_zoom", "bot_forget"] {
+            let req_bot = make_req(bot_tool, json!({}));
+            assert_eq!(
+                auto_permission(&req_bot, PermissionMode::Ask, false, None),
+                Some(PermissionDecision::Allow)
+            );
+        }
         for web_tool in ["web_search", "web_fetch"] {
             let req_web = make_req(web_tool, json!({}));
             assert_eq!(
@@ -5563,8 +6169,15 @@ mod tests {
             .find("<keel_memory>\nv1 memory\n</keel_memory>")
             .expect("memory included");
         assert!(pos_inst < pos_mem, "instructions should precede memory");
-        let (_log, id) =
-            create_session_log(dir.path(), &provider, &model_spec, dir.path(), &fresh).unwrap();
+        let (_log, id) = create_session_log(
+            dir.path(),
+            &provider,
+            &model_spec,
+            dir.path(),
+            &fresh,
+            ToolMode::CodeV1,
+        )
+        .unwrap();
 
         let mut resumed = Session::new(route, client);
         let opened = try_resume_session(dir.path(), Some(&NativeSessionId(id)), &mut resumed)
@@ -5736,5 +6349,390 @@ mod tests {
             Some(("worker", "sa-002"))
         );
         assert_eq!(parse_subagent_permission_prefix("bash cargo test"), None);
+    }
+
+    #[test]
+    fn tool_mode_resolution_defaults_to_code_and_respects_legacy_and_env() {
+        assert_eq!(parse_tool_mode("code").unwrap(), ToolMode::CodeV1);
+        assert_eq!(parse_tool_mode("CODE").unwrap(), ToolMode::CodeV1);
+        assert_eq!(parse_tool_mode("direct").unwrap(), ToolMode::Direct);
+        assert!(parse_tool_mode("invalid").is_err());
+
+        let dir = TmpDir::new("tool-mode-resume");
+        let catalog = load_catalog().catalog;
+        let (provider, model_spec) =
+            resolve_model(&catalog, &EnvResolver, None, "openai/gpt-4.1").unwrap();
+        let route = build_route(&provider, &model_spec).unwrap();
+        let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+
+        // Fresh native session defaults to CodeV1, unless overridden.
+        assert_eq!(resolve_tool_mode(None, None), ToolMode::CodeV1);
+        assert_eq!(
+            resolve_tool_mode(Some(ToolMode::Direct), None),
+            ToolMode::Direct
+        );
+
+        // Legacy session without `tool_mode` resumes in Direct.
+        let legacy_meta =
+            SessionMeta::new("legacy-id", &provider.id, &model_spec.id, model_spec.protocol.as_str());
+        assert_eq!(legacy_meta.tool_mode, None);
+        SessionLog::create(dir.path(), &legacy_meta).unwrap();
+        let mut legacy_session = Session::new(route.clone(), client.clone());
+        let legacy_opened = try_resume_session(
+            dir.path(),
+            Some(&NativeSessionId("legacy-id".into())),
+            &mut legacy_session,
+        )
+        .unwrap();
+        assert_eq!(legacy_opened.tool_mode, None);
+        assert_eq!(resolve_tool_mode(None, Some(&legacy_opened)), ToolMode::Direct);
+
+        // CodeV1 session persists `tool_mode`, resumes in CodeV1, and restores pending script facts.
+        let mut code_session = Session::new(route.clone(), client.clone());
+        code_session.system = Some("pinned".into());
+        let (code_log, code_id) = create_session_log(
+            dir.path(),
+            &provider,
+            &model_spec,
+            dir.path(),
+            &code_session,
+            ToolMode::CodeV1,
+        )
+        .unwrap();
+        use keel_core::SessionSink;
+        code_log.script_tool(&keel_core::ScriptToolRecord {
+            parent_call_id: "call_s1".into(),
+            call_id: "call_s1/script/1".into(),
+            name: "write".into(),
+            is_error: false,
+            duration_ms: 4,
+            files: vec!["src/main.rs".into()],
+            command: None,
+        });
+        drop(code_log);
+
+        let mut resumed_code = Session::new(route, client);
+        let opened_code = try_resume_session(
+            dir.path(),
+            Some(&NativeSessionId(code_id)),
+            &mut resumed_code,
+        )
+        .unwrap();
+        assert_eq!(opened_code.tool_mode, Some(ToolMode::CodeV1));
+        assert_eq!(resolve_tool_mode(None, Some(&opened_code)), ToolMode::CodeV1);
+        assert_eq!(
+            opened_code.log.pending_script_facts().files,
+            vec!["src/main.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn event_translator_handles_script_labels_child_previews_and_diffs() {
+        let dir = TmpDir::new("tr-script");
+        fs::write(dir.path().join("edit.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("write.txt"), "old content\n").unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tr = EventTranslator::new(
+            tx,
+            "openai/gpt-4.1".into(),
+            128_000,
+            dir.path().to_path_buf(),
+        );
+
+        tr.on_event(RunEvent::ToolStarted {
+            call_id: "call_s1",
+            name: "script",
+            summary: "run a bounded JavaScript tool script",
+            arguments: r#"{"code":"tools.edit(...)","label":"Updating config files"}"#,
+        });
+        tr.on_event(RunEvent::ToolStarted {
+            call_id: "call_s1/script/1",
+            name: "edit",
+            summary: "edit edit.txt",
+            arguments: r#"{"path":"edit.txt","old_string":"before","new_string":"after"}"#,
+        });
+        tr.on_event(RunEvent::ToolFinished {
+            call_id: "call_s1/script/1",
+            name: "edit",
+            is_error: false,
+            preview: "result retained inside script",
+            output: "",
+            images: &[],
+            duration_ms: Some(7),
+        });
+        tr.on_event(RunEvent::ToolStarted {
+            call_id: "call_s1/script/2",
+            name: "write",
+            summary: "write write.txt",
+            arguments: r#"{"path":"write.txt","content":"new content\n"}"#,
+        });
+        fs::write(dir.path().join("write.txt"), "new content\n").unwrap();
+        tr.on_event(RunEvent::ToolFinished {
+            call_id: "call_s1/script/2",
+            name: "write",
+            is_error: false,
+            preview: "result retained inside script",
+            output: "",
+            images: &[],
+            duration_ms: Some(9),
+        });
+        tr.on_event(RunEvent::ToolFinished {
+            call_id: "call_s1",
+            name: "script",
+            is_error: false,
+            preview: "done",
+            output: "updated both",
+            images: &[],
+            duration_ms: Some(25),
+        });
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev.unwrap());
+        }
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolLabel { tool_id, label, .. }
+            if tool_id == "call_s1" && label == "Updating config files"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolStarted { tool_id, name, detail, label, kind, .. }
+            if tool_id == "call_s1"
+                && name == "script"
+                && detail == "script"
+                && label == "Updating config files"
+                && kind.as_deref() == Some("execute")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { tool_id, summary, output_bytes, output_tail, diff: Some(diff), .. }
+            if tool_id == "call_s1/script/1"
+                && summary == "result retained inside script"
+                && *output_bytes == 0
+                && output_tail.is_empty()
+                && diff.path == "edit.txt"
+                && diff.old_text.as_deref() == Some("before")
+                && diff.new_text == "after"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { tool_id, summary, diff: Some(diff), .. }
+            if tool_id == "call_s1/script/2"
+                && summary == "result retained inside script"
+                && diff.path == "write.txt"
+                && diff.old_text.as_deref() == Some("old content\n")
+                && diff.new_text == "new content\n"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { tool_id, summary, output_tail, .. }
+            if tool_id == "call_s1" && summary == "updated both" && output_tail == "updated both"
+        )));
+    }
+
+    async fn spawn_faux_openai(
+        responses: Vec<String>,
+    ) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let rec_clone = Arc::clone(&recorded);
+        let handle = tokio::spawn(async move {
+            for sse_body in responses {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = sock.split();
+                let mut buf = BufReader::new(reader);
+                let mut content_len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    buf.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        content_len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_len];
+                buf.read_exact(&mut body).await.unwrap();
+                let parsed: Value = serde_json::from_slice(&body).unwrap();
+                rec_clone.lock().unwrap().push(parsed);
+
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    sse_body.len()
+                );
+                writer.write_all(head.as_bytes()).await.unwrap();
+                writer.write_all(sse_body.as_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+            }
+        });
+        (format!("http://{addr}/v1/chat/completions"), recorded, handle)
+    }
+
+    #[tokio::test]
+    async fn code_mode_plan_mode_with_native_ui_cards_works_end_to_end() {
+        struct UiPlanStub(&'static str);
+        impl Tool for UiPlanStub {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: self.0.to_string(),
+                    description: "ui card stub".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }
+            }
+            fn summarize(&self, _: &Value) -> String {
+                self.0.to_string()
+            }
+            fn allowed_in_plan_mode(&self) -> bool {
+                true
+            }
+            fn execute<'a>(&'a self, _: Value, _: &'a ToolContext) -> ToolFuture<'a> {
+                let comp = if self.0.ends_with("show_choices") {
+                    "choices"
+                } else {
+                    "plan"
+                };
+                Box::pin(async move {
+                    ToolOutcome::ok(format!(
+                        "Shown to the user as a card.\n{{\"component\":\"{comp}\"}}"
+                    ))
+                })
+            }
+        }
+
+        let dir = TmpDir::new("code-plan-e2e");
+        fs::write(dir.path().join("notes.txt"), "PLAN_TARGET").unwrap();
+
+        let sse_tools = |calls: &[(&str, &str, &str)]| -> String {
+            let deltas: Vec<Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(i, (id, name, args))| {
+                    json!({
+                        "index": i,
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": args }
+                    })
+                })
+                .collect();
+            let c1 = json!({
+                "model": "gpt-4.1",
+                "choices": [{ "index": 0, "delta": { "tool_calls": deltas }, "finish_reason": null }]
+            });
+            let c2 = json!({
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+            });
+            format!("data: {c1}\n\ndata: {c2}\n\ndata: [DONE]\n\n")
+        };
+        let sse_text = |text: &str| -> String {
+            let c1 = json!({
+                "model": "gpt-4.1",
+                "choices": [{ "index": 0, "delta": { "content": text }, "finish_reason": null }]
+            });
+            let c2 = json!({
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+            });
+            format!("data: {c1}\n\ndata: {c2}\n\ndata: [DONE]\n\n")
+        };
+
+        let (endpoint, requests, server) = spawn_faux_openai(vec![
+            sse_tools(&[(
+                "c1",
+                "script",
+                r#"{"code":"const r = tools.read({path:'notes.txt'}); const w = tool('write',{path:'bad.txt',content:'no'}); return r.text + '|' + w.text;","label":"Inspecting notes"}"#,
+            )]),
+            sse_tools(&[
+                ("c2", "keel-ui__show_choices", r#"{"options":["A","B"]}"#),
+                (
+                    "c3",
+                    "keel-ui__show_plan",
+                    r#"{"title":"Plan","summary":"Do it","steps":[{"title":"Step 1","kind":"read"}],"footer":"notes.txt"}"#,
+                ),
+            ]),
+            sse_text("Plan ready."),
+        ])
+        .await;
+
+        let mut registry = build_builtin_registry();
+        registry.register(UiPlanStub("keel-ui__show_choices"));
+        registry.register(UiPlanStub("keel-ui__show_plan"));
+
+        let ui_native_tools: Vec<String> = registry
+            .names()
+            .into_iter()
+            .filter(|name| keel_proto::is_ui_tool(name))
+            .map(str::to_string)
+            .collect();
+
+        let catalog = load_catalog().catalog;
+        let (provider, model_spec) =
+            resolve_model(&catalog, &EnvResolver, None, "openai/gpt-4.1").unwrap();
+        let mut route = build_route(&provider, &model_spec).unwrap();
+        route.endpoint = endpoint;
+        route.auth = keel_llm_route::Auth::None;
+        let client = Client::with_resolver(Arc::new(EnvResolver)).unwrap();
+        let session = Session::new(route, client);
+        let workspace = Workspace::open(dir.path()).unwrap();
+        let mut harness = CoreHarness::new(session, Arc::new(registry), workspace)
+            .with_permissions(PermissionGate::AllowAll)
+            .with_tool_mode(ToolMode::CodeV1)
+            .with_native_tools(ui_native_tools)
+            .with_plan_mode_prompt(keel_plan_mode_prompt(true, false).unwrap())
+            .with_plan_mode(true);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut translator = EventTranslator::new(
+            tx,
+            "openai/gpt-4.1".into(),
+            128_000,
+            dir.path().to_path_buf(),
+        );
+        let outcome = harness
+            .run("Plan this change", |ev| translator.on_event(ev))
+            .await
+            .unwrap();
+        assert_eq!(outcome.stop, RunStop::EndTurn);
+        server.await.unwrap();
+        assert!(!dir.path().join("bad.txt").exists());
+
+        let reqs = requests.lock().unwrap().clone();
+        let advertised: Vec<&str> = reqs[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(advertised.contains(&"script"), "{advertised:?}");
+        assert!(advertised.contains(&"script_tools"), "{advertised:?}");
+        assert!(advertised.contains(&"view_image"), "{advertised:?}");
+        assert!(advertised.contains(&"keel-ui__show_choices"), "{advertised:?}");
+        assert!(advertised.contains(&"keel-ui__show_plan"), "{advertised:?}");
+        assert!(!advertised.contains(&"read"), "{advertised:?}");
+        assert!(!advertised.contains(&"write"), "{advertised:?}");
+
+        let second_req = reqs[1].to_string();
+        assert!(second_req.contains("PLAN_TARGET"), "{second_req}");
+        assert!(second_req.contains("plan mode"), "{second_req}");
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev.unwrap());
+        }
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolFinished { tool_id, output_tail, .. }
+            if tool_id == "c3" && output_tail.contains(r#"{"component":"plan"}"#)
+        )));
     }
 }

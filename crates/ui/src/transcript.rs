@@ -977,6 +977,14 @@ pub enum RowAction {
     OpenSubagent {
         subagent_id: String,
     },
+    /// Open the Bot Customizer modal for a bot (e.g. from a "Bot Hatched" card).
+    CustomizeBot {
+        bot_id: String,
+    },
+    /// Jump straight to a bot's 1:1 DM thread.
+    OpenBot {
+        bot_id: String,
+    },
     Copy {
         row_id: String,
         content: String,
@@ -1159,6 +1167,17 @@ pub struct RowContext {
     /// Live metadata for active/completed subagents in the current chat, used
     /// by inline subagent trace rows without rewriting the parent message doc.
     pub subagent_info: std::rc::Rc<HashMap<String, SubagentInlineInfo>>,
+    /// When set, this transcript is a bot 1:1 DM rendered in messaging-app style.
+    pub bot_theme: Option<BotChatTheme>,
+}
+
+/// Visual identity passed into [`RowContext`] when rendering a bot's messaging-app DM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BotChatTheme {
+    pub id: String,
+    pub name: String,
+    pub appearance: keel_proto::bots::BotAppearance,
+    pub is_creator: bool,
 }
 
 /// Compact per-subagent live metadata surfaced on inline trace rows.
@@ -5476,7 +5495,17 @@ fn block_markdown(block: &TranscriptBlock) -> Option<String> {
         )
     };
     Some(match block {
-        TranscriptBlock::UserMessage { text, .. } if !text.trim().is_empty() => text.clone(),
+        TranscriptBlock::UserMessage { text, blocks, .. } => {
+            if !text.trim().is_empty() {
+                text.clone()
+            } else {
+                blocks
+                    .iter()
+                    .filter_map(block_markdown)
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            }
+        }
         TranscriptBlock::Paragraph { content, .. } => content.clone(),
         TranscriptBlock::Heading { level, content, .. } => {
             format!("{} {content}", "#".repeat(*level as usize))
@@ -6399,8 +6428,25 @@ pub fn render_row(
         current_citations,
         ..rc.clone()
     };
+    let is_hidden_bot_trace = rc.bot_theme.is_some() && is_bot_hidden_trace_block(&item.block);
+    if is_hidden_bot_trace {
+        return div()
+            .id(ElementId::Name(format!("row-{}", item.row_id()).into()))
+            .h(px(0.))
+            .into_any_element();
+    }
     let gap = row_gap(prev, item);
-    let row = render_row_body(item, rc).pt(zpx(gap));
+    let bot_head = prev.is_none_or(|p| {
+        p.message_id != item.message_id
+            || p.role != item.role
+            || matches!(
+                p.block,
+                TranscriptBlock::ToolGroup { .. }
+                    | TranscriptBlock::TurnSummary { .. }
+                    | TranscriptBlock::Reasoning { .. }
+            )
+    });
+    let row = render_row_body_with_head(item, rc, bot_head).pt(zpx(gap));
     // The live header continues the waiting loader's line. Its words already
     // animate via StepSwap; a second row entrance would dim and shift both.
     if matches!(item.block, TranscriptBlock::TurnSummary { live: true, .. }) {
@@ -6535,7 +6581,14 @@ pub fn render_transcript_blocks(
         .enumerate()
         .map(|(ix, item)| {
             let prev = ix.checked_sub(1).and_then(|p| rows.get(p));
-            let gap = row_gap(prev, item);
+            let is_hidden_bot_trace = rc.bot_theme.is_some() && is_bot_hidden_trace_block(&item.block);
+    if is_hidden_bot_trace {
+        return div()
+            .id(ElementId::Name(format!("row-{}", item.row_id()).into()))
+            .h(px(0.))
+            .into_any_element();
+    }
+    let gap = row_gap(prev, item);
             let item_rc = RowContext {
                 order: rc.order.saturating_add((ix as u64) << 12),
                 ..rc.clone()
@@ -6548,13 +6601,22 @@ pub fn render_transcript_blocks(
 }
 
 fn render_row_body(item: &TranscriptRowItem, rc: &RowContext) -> gpui::Stateful<gpui::Div> {
-    render_row_body_inner(item, rc, false)
+    render_row_body_inner(item, rc, false, false)
+}
+
+fn render_row_body_with_head(
+    item: &TranscriptRowItem,
+    rc: &RowContext,
+    bot_head: bool,
+) -> gpui::Stateful<gpui::Div> {
+    render_row_body_inner(item, rc, false, bot_head)
 }
 
 fn render_row_body_inner(
     item: &TranscriptRowItem,
     rc: &RowContext,
     inside_bubble: bool,
+    bot_head: bool,
 ) -> gpui::Stateful<gpui::Div> {
     if let TranscriptBlock::Interim(inner) = &item.block {
         // The same prose, muted: same type and wrap, so moving into the fold
@@ -6567,7 +6629,7 @@ fn render_row_body_inner(
             muted: true,
             ..rc.clone()
         };
-        return render_row_body_inner(&inner, &rc, inside_bubble);
+        return render_row_body_inner(&inner, &rc, inside_bubble, bot_head);
     }
     let (t, syntax) = (rc.tokens, rc.syntax);
     let role_is_user = item.role == "user";
@@ -6665,12 +6727,15 @@ fn render_row_body_inner(
             );
     }
     // Body text a touch dimmer than headings and bold, so they lead.
+    let on_bot_user_bubble = inside_bubble && role_is_user && rc.bot_theme.is_some();
     let prose = |d: gpui::Div| {
         d.w_full()
             .max_w(zpx(rc.prose_max_w))
             .text_size(zpx(READING.size))
             .line_height(TranscriptState::prose_line_height())
-            .text_color(if rc.muted {
+            .text_color(if on_bot_user_bubble {
+                gpui::white()
+            } else if rc.muted {
                 c(t.text_muted)
             } else {
                 c(t.text).opacity(0.88)
@@ -6688,7 +6753,7 @@ fn render_row_body_inner(
                     order: rc.order.saturating_add((ix as u64) << 12),
                     ..rc.clone()
                 };
-                render_row_body_inner(&child, &rc, true)
+                render_row_body_inner(&child, &rc, true, false)
             })),
         TranscriptBlock::Code {
             language,
@@ -6933,9 +6998,14 @@ fn render_row_body_inner(
         }
         TranscriptBlock::ToolGroup {
             tools, overrides, ..
-        } => crate::trace_view::render_tool_group(item, tools, overrides, rc)
-            .relative()
-            .children(rc.probe.as_ref().and_then(|p| p(RowProbe::Tool))),
+        } => {
+            if let Some(card) = render_hatched_bot_card(item, tools, rc) {
+                return card;
+            }
+            crate::trace_view::render_tool_group(item, tools, overrides, rc)
+                .relative()
+                .children(rc.probe.as_ref().and_then(|p| p(RowProbe::Tool)))
+        }
         TranscriptBlock::Subagent {
             subagent_id,
             name,
@@ -7032,6 +7102,80 @@ fn render_row_body_inner(
     if inside_bubble {
         return row.min_w_0().child(content_elem);
     }
+
+    // Messaging-app layout when inside a Bot 1:1 DM.
+    if let Some(bot) = &rc.bot_theme {
+        let accent = c(bot.appearance.color.accent_rgba());
+        if role_is_user {
+            return row
+                .w_full()
+                .px_4()
+                .pb(zpx(2.))
+                .pt_2p5()
+                .flex()
+                .flex_col()
+                .items_end()
+                .child(
+                    div()
+                        .max_w(relative(0.8))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .px_3p5()
+                        .py_2()
+                        .rounded(zpx(16.))
+                        .rounded_br(zpx(4.))
+                        .bg(accent)
+                        .text_color(gpui::white())
+                        .shadow_sm()
+                        .child(content_elem),
+                );
+        }
+        let is_trace_row = matches!(
+            item.block,
+            TranscriptBlock::ToolGroup { .. }
+                | TranscriptBlock::TurnSummary { .. }
+                | TranscriptBlock::Reasoning { .. }
+                | TranscriptBlock::Plan { .. }
+                | TranscriptBlock::Subagent { .. }
+                | TranscriptBlock::Citations { .. }
+                | TranscriptBlock::Files { .. }
+        );
+        if !role_is_error && !is_trace_row {
+            return row
+                .w_full()
+                .px_4()
+                .pb(zpx(2.))
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(
+                    div()
+                        .max_w(relative(0.84))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .px_3p5()
+                        .py_2()
+                        .rounded(zpx(16.))
+                        .rounded_bl(zpx(4.))
+                        .bg(c(t.surface))
+                        .border_1()
+                        .border_color(accent.opacity(0.22))
+                        .child(content_elem),
+                );
+        }
+        if !role_is_error && is_trace_row {
+            // Align hatched cards and any remaining bot-DM attachments flush with bot bubbles.
+            return row
+                .w_full()
+                .px_4()
+                .pb(zpx(2.))
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().w_full().child(content_elem));
+        }
+    }
+
     row
         .w_full()
         .px_4()
@@ -7063,6 +7207,225 @@ fn render_row_body_inner(
                 })
                 .child(content_elem),
         )
+}
+
+/// In Bot DMs, hide coding-agent thinking/tool/trace rows so the chat stays clean like
+/// a messaging app (still keeping completed `create_bot` Hatched cards visible!).
+pub(crate) fn is_bot_hidden_trace_block(block: &TranscriptBlock) -> bool {
+    match block {
+        TranscriptBlock::TurnSummary { .. }
+        | TranscriptBlock::Reasoning { .. }
+        | TranscriptBlock::Plan { .. }
+        | TranscriptBlock::Subagent { .. } => true,
+        TranscriptBlock::ToolGroup { tools, .. } => {
+            !tools.iter().any(|t| {
+                t.name == "create_bot" && t.state == "done" && !t.output_tail.trim().is_empty()
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Interactive "Bot Hatched" card rendered in Dr. Keelee's chat whenever `create_bot` completes.
+fn render_hatched_bot_card(
+    item: &TranscriptRowItem,
+    tools: &[ToolEntry],
+    rc: &RowContext,
+) -> Option<gpui::Stateful<gpui::Div>> {
+    let hatched = tools
+        .iter()
+        .find(|t| t.name == "create_bot" && t.state == "done")?;
+    let output = hatched.output_tail.trim();
+    if output.is_empty() {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
+    let bot_id = parsed["bot_id"].as_str()?.to_string();
+    let name = parsed["name"].as_str().unwrap_or("New Bot").to_string();
+    let tagline = parsed["tagline"].as_str().unwrap_or("").to_string();
+    let anti_jobs: Vec<String> = parsed["anti_jobs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let t = rc.tokens;
+    let naked = keel_proto::bots::BotAppearance::naked_default();
+    let accent = c(naked.color.accent_rgba());
+    let (on_cust, on_open) = (rc.on_action.clone(), rc.on_action.clone());
+    let (id_cust, id_open) = (bot_id.clone(), bot_id.clone());
+
+    Some(
+        div()
+            .id(ElementId::Name(format!("row-{}", item.row_id()).into()))
+            .w_full()
+            .pl(zpx(52.))
+            .pr_4()
+            .py_1()
+            .child(
+                div()
+                    .w(zpx(420.))
+                    .max_w(relative(0.92))
+                    .p_3p5()
+                    .rounded(zpx(16.))
+                    .bg(c(t.floating))
+                    .border_1()
+                    .border_color(accent.opacity(0.36))
+                    .shadow_sm()
+                    .flex()
+                    .flex_col()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(crate::creature::render_creature_avatar(
+                                &bot_id,
+                                naked,
+                                false,
+                                crate::creature::BotMood::Idle,
+                                64.,
+                                rc.clock_epoch,
+                                t,
+                                rc.reduced,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .text_size(zpx(14.))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(c(t.text))
+                                                    .child(name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_1p5()
+                                                    .py(zpx(1.))
+                                                    .rounded_full()
+                                                    .bg(accent.opacity(0.16))
+                                                    .t_caption()
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(accent)
+                                                    .child("Hatched"),
+                                            ),
+                                    )
+                                    .when(!tagline.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .t_small()
+                                                .text_color(c(t.text_muted))
+                                                .child(tagline),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .when(!anti_jobs.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_1()
+                                .children(anti_jobs.into_iter().map(|rule| {
+                                    div()
+                                        .px_2()
+                                        .py(zpx(2.))
+                                        .rounded(RADIUS_SM)
+                                        .bg(c(t.surface))
+                                        .border_1()
+                                        .border_color(c(t.border).opacity(0.65))
+                                        .t_caption()
+                                        .text_color(c(t.text_muted))
+                                        .child(format!("no: {rule}"))
+                                })),
+                        )
+                    })
+                    .child(
+                        div()
+                            .pt_1()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id(ElementId::Name(format!("hatched-cust-{bot_id}").into()))
+                                    .h(zpx(28.))
+                                    .px_3()
+                                    .rounded(RADIUS_MD)
+                                    .bg(accent)
+                                    .text_color(gpui::white())
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .cursor_pointer()
+                                    .t_small()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .hover(|s| s.opacity(0.92))
+                                    .active(|s| s.opacity(0.78))
+                                    .child(Icon::SparkleFilled.el(zpx(12.)))
+                                    .child("Customize look")
+                                    .on_click(move |_, _, cx| {
+                                        on_cust(
+                                            RowAction::CustomizeBot {
+                                                bot_id: id_cust.clone(),
+                                            },
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(ElementId::Name(format!("hatched-open-{bot_id}").into()))
+                                    .h(zpx(28.))
+                                    .px_3()
+                                    .rounded(RADIUS_MD)
+                                    .bg(c(t.surface))
+                                    .border_1()
+                                    .border_color(c(t.border))
+                                    .text_color(c(t.text))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .cursor_pointer()
+                                    .t_small()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .hover_fade(c(t.hover), Some(c(t.selected)))
+                                    .active(|s| s.opacity(0.78))
+                                    .child(Icon::Comment.el(zpx(12.)))
+                                    .child(format!("Message {name}"))
+                                    .on_click(move |_, _, cx| {
+                                        on_open(
+                                            RowAction::OpenBot {
+                                                bot_id: id_open.clone(),
+                                            },
+                                            cx,
+                                        );
+                                    }),
+                            ),
+                    ),
+            ),
+    )
 }
 
 /// Bullets by depth (• ◦ ▪); numbers stay as written.

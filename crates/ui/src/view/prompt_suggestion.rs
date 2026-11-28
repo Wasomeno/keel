@@ -12,6 +12,19 @@ impl KeelWindow {
     }
 
     pub(super) fn sync_prompt_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bot) = self.active_bot().cloned() {
+            if self.suggestion_key.is_some() || self.prompt_suggestion.is_some() {
+                self.invalidate_suggestion();
+            }
+            let placeholder = format!("Message {}…", bot.name);
+            if self.composer_placeholder != placeholder {
+                self.composer_placeholder = placeholder.clone();
+                self.composer.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder, window, cx)
+                });
+            }
+            return;
+        }
         if self.is_plan_pending() {
             if self.suggestion_key.is_some() || self.prompt_suggestion.is_some() {
                 self.invalidate_suggestion();
@@ -83,7 +96,8 @@ impl KeelWindow {
     }
 
     pub(super) fn can_accept_suggestion(&self, cx: &Context<Self>) -> bool {
-        self.prompt_suggestion.is_some()
+        self.active_bot().is_none()
+            && self.prompt_suggestion.is_some()
             && self.current_chat == self.state.active_tab
             && matches!(
                 self.active_status(),

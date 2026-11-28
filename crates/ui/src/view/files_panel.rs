@@ -1823,13 +1823,18 @@ impl KeelWindow {
                     .child(text_button("files-discard", "Discard", t).on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.files_discard(cx)),
                     ))
-                    .child(
+                    .child({
+                        let save_key = crate::keys::display_for_id(
+                            &self.state.ui_settings.shortcuts,
+                            "files_save",
+                            crate::keys::current_os(),
+                        );
                         solid_button("files-save", if saving { "Saving…" } else { "Save" }, t)
-                            .child(kbd("⌘S", true, t))
+                            .when_some(save_key, |d, k| d.child(kbd(k, true, t)))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.files_save(false, cx)
-                            })),
-                    )
+                            }))
+                    })
                 })
                 // The file changed in this chat: its diff, one click away.
                 .when(change.is_some() && !dirty, |d| {
@@ -2290,7 +2295,7 @@ fn text_button(id: &'static str, label: &'static str, t: Tokens) -> gpui::Statef
 }
 
 /// A shortcut as a small key cap. `on_solid`: sits on a solid button.
-fn kbd(keys: &'static str, on_solid: bool, t: Tokens) -> gpui::Div {
+pub(super) fn kbd(keys: impl Into<SharedString>, on_solid: bool, t: Tokens) -> gpui::Div {
     let ink = if on_solid { t.window } else { t.text };
     div()
         .flex_none()
@@ -2303,7 +2308,7 @@ fn kbd(keys: &'static str, on_solid: bool, t: Tokens) -> gpui::Div {
         .text_color(c(ink).opacity(0.75))
         .t_caption()
         .font_family(MONO)
-        .child(keys)
+        .child(keys.into())
 }
 
 /// 1894 → "1,894".

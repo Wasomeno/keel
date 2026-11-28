@@ -51,6 +51,8 @@ async fn keel_harness_answers_a_real_read_only_prompt() {
         keep_cache_warm: true,
         idle_eviction_timeout_secs: None,
         scratch: false,
+        bot: None,
+        bot_creator: false,
     };
     let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut stream = keel

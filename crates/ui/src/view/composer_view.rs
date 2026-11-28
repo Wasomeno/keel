@@ -323,6 +323,282 @@ impl KeelWindow {
     /// The composer. On the new-chat screen (`hero`) the input sits above its
     /// controls, with folder, branch and machine above the panel; in a chat it
     /// is one row: attach, input, model, send.
+    /// Dedicated messaging-app composer for Bot 1:1 DMs:
+    /// no autocomplete suggestions, no permission picker (always FullAccess),
+    /// no `/` skill calls, and no `@` file referencing.
+    pub(super) fn render_bot_composer(
+        &mut self,
+        bot: &keel_proto::bots::Bot,
+        t: Tokens,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.branches_fresh = false;
+        let running = self.active_status() == Some(ChatStatus::Running);
+        let text = self.composer.read(cx).value().to_string();
+        let action = compute_button_action(running, &text);
+        let open = self.open_picker();
+        let accent = c(bot.appearance.color.accent_rgba());
+
+        let attach = icon_chip("bot-attach-btn", Icon::Paperclip, t).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.set_picker(None, cx);
+                this.pick_images(cx);
+            },
+        ));
+
+        let model_effort = {
+            let model_open = open == Some(Picker::Model);
+            let model_menu = self
+                .menu_phase(Picker::Model.menu_id(), model_open, cx)
+                .map(|leaving| self.render_picker_menu(Picker::Model, leaving, true, t, cx));
+            let model_label = self.model_roll_label("bot-model-chip-roll", window, None);
+
+            let has_effort = self.effort_stops().len() > 1;
+            let effort_open = self.show_effort_menu;
+            let effort_menu = has_effort
+                .then(|| {
+                    self.menu_phase(EFFORT_MENU_ID, effort_open, cx)
+                        .map(|leaving| self.render_effort_menu(leaving, t, cx))
+                })
+                .flatten();
+
+            let model_chip_bounds = self.model_chip_bounds.clone();
+            let model_chip = div()
+                .relative()
+                .flex_none()
+                .child(
+                    gpui::canvas(
+                        move |bounds, _, _| {
+                            model_chip_bounds.set(Some(bounds));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .children(model_menu)
+                .child(
+                    div()
+                        .id("bot-model-picker-btn")
+                        .relative()
+                        .flex_none()
+                        .h(zpx(26.))
+                        .px_1p5()
+                        .flex()
+                        .items_center()
+                        .rounded(RADIUS_MD)
+                        .t_small()
+                        .cursor_pointer()
+                        .when(model_open, |s| s.bg(c(t.selected)))
+                        .hover(|s| s.text_color(c(t.text)))
+                        .hover_fade(c(t.hover), None)
+                        .child(
+                            div()
+                                .text_color(c(t.text))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(model_label),
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_picker_with_search(Picker::Model, window, cx);
+                        })),
+                );
+
+            let effort_chip_bounds = self.effort_chip_bounds.clone();
+            let effort_chip = has_effort.then(|| {
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(
+                        gpui::canvas(
+                            move |bounds, _, _| {
+                                effort_chip_bounds.set(Some(bounds));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .children(effort_menu)
+                    .child(
+                        div()
+                            .id("bot-effort-picker-btn")
+                            .relative()
+                            .flex_none()
+                            .h(zpx(26.))
+                            .px_1p5()
+                            .flex()
+                            .items_center()
+                            .rounded(RADIUS_MD)
+                            .t_small()
+                            .cursor_pointer()
+                            .when(effort_open, |s| s.bg(c(t.selected)))
+                            .hover(|s| s.text_color(c(t.text)))
+                            .hover_fade(c(t.hover), None)
+                            .child(
+                                div()
+                                    .w(zpx(EFFORT_CHIP_LABEL_W))
+                                    .text_color(c(t.text_muted))
+                                    .child(self.effort_roll("bot-effort-chip-roll", false)),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.menu_just_dismissed(EFFORT_MENU_ID) {
+                                    return;
+                                }
+                                let open = !this.show_effort_menu;
+                                this.set_picker(None, cx);
+                                this.show_permission_menu = false;
+                                this.show_effort_menu = open;
+                                cx.notify();
+                            })),
+                    )
+            });
+
+            div()
+                .id("bot-model-effort-chip")
+                .relative()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_0p5()
+                .child(model_chip)
+                .when_some(effort_chip, |d, effort| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .px_0p5()
+                            .text_color(c(t.text_faint))
+                            .t_small()
+                            .child("·"),
+                    )
+                    .child(effort)
+                })
+        };
+
+        let primary = {
+            let has_images = !self.pending_images.is_empty();
+            let enabled = self.attaching == 0
+                && (action == PrimaryButtonAction::Stop
+                    || !text.trim().is_empty()
+                    || (has_images && action == PrimaryButtonAction::Send));
+            let icon = if action == PrimaryButtonAction::Stop {
+                Icon::Stop
+            } else {
+                Icon::Send
+            };
+            let bg = if action == PrimaryButtonAction::Stop {
+                c(t.text)
+            } else if enabled {
+                accent
+            } else {
+                c(t.text)
+            };
+            let fg = if action == PrimaryButtonAction::Stop {
+                c(t.text_on_accent)
+            } else if enabled {
+                gpui::white()
+            } else {
+                c(t.text_on_accent)
+            };
+            let opacity = if enabled { 1. } else { SEND_DISABLED };
+            div()
+                .id("bot-composer-primary-btn")
+                .size(zpx(30.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(bg)
+                .text_color(fg)
+                .opacity(opacity)
+                .when(enabled, |s| {
+                    s.cursor_pointer()
+                        .hover(|s| s.opacity(0.88))
+                        .active(|s| s.opacity(0.76))
+                })
+                .child(icon.el(zpx(if icon == Icon::Stop { 10. } else { 15. })))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.handle_primary_button(window, cx)
+                }))
+        };
+
+        let input = div()
+            .id("bot-composer-input")
+            .relative()
+            .w_full()
+            .min_w_0()
+            .t_reading()
+            .child(self.composer.clone());
+        let input = self.ease_input_height(input, false, window);
+        let pending_images = self.render_pending_images(t, false, cx);
+
+        let bottom_bar = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(attach.ml(zpx(-ATTACH_GLYPH_PAD)))
+            .child(div().flex_1().min_w_0())
+            .child(model_effort)
+            .child(primary.ml(zpx(6.)));
+
+        let panel = div()
+            .id("bot-composer-panel")
+            .relative()
+            .w_full()
+            // Keep ⌘V image paste support, without any `/` or `@` mention captures.
+            .capture_action(cx.listener(|this, _: &gpui_base::input::Paste, _, cx| {
+                if this.paste_images(cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .rounded(zpx(18.))
+            .bg(c(t.floating))
+            .border_1()
+            .border_color(c(t.border))
+            .flex()
+            .flex_col()
+            .px_3p5()
+            .pt_2p5()
+            .pb_2()
+            .gap_2()
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+                this.attach_paths(paths.paths().to_vec(), cx);
+            }))
+            .children(pending_images)
+            .child(input)
+            .child(div().h(zpx(1.)).w_full().bg(c(t.border)).opacity(0.35))
+            .child(bottom_bar);
+
+        let cap = f32::from(self.column_max() - crate::style::column_gutter());
+        let viewport = f32::from(window.viewport_size().width);
+        let sidebar = self.state.sidebar_width() * self.sidebar_open_now();
+        let gutters = f32::from(crate::style::column_gutter());
+        let max = px((viewport - sidebar - gutters).min(cap).max(200.));
+        self.composer_max.set(f32::from(max));
+
+        div()
+            .flex_none()
+            .w_full()
+            .px_4()
+            .pb(zpx(16.))
+            .pt(zpx(16.))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(max)
+                    .child(panel)
+                    .children(self.render_create_error(t, cx)),
+            )
+    }
+
     pub(super) fn render_composer(
         &mut self,
         t: Tokens,
@@ -1344,11 +1620,12 @@ impl KeelWindow {
         if self.suggestion_pill.animating() {
             window.request_animation_frame();
         }
-        let shortcut = if cfg!(target_os = "macos") {
-            "⌘⇧Space"
-        } else {
-            "Ctrl+Shift+Space"
-        };
+        let shortcut = crate::keys::display_for_id(
+            &self.state.ui_settings.shortcuts,
+            "accept_prompt_suggestion",
+            crate::keys::current_os(),
+        )
+        .unwrap_or_else(|| "Use".into());
         let pill = div()
             .id("prompt-suggestion-pill")
             .relative()
@@ -3301,7 +3578,7 @@ fn measure_small_label(window: &gpui::Window, text: &str) -> f32 {
 /// as it will be drawn. Summing each glyph's raw advance came out short of
 /// the drawn line (CoreText tracks and kerns the system font at small
 /// sizes), so labels that fitted ended in an ellipsis.
-fn measure_label(window: &gpui::Window, text: &str, weight: gpui::FontWeight) -> f32 {
+pub(super) fn measure_label(window: &gpui::Window, text: &str, weight: gpui::FontWeight) -> f32 {
     if text.is_empty() {
         return 0.;
     }

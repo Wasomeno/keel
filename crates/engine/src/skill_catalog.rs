@@ -15,8 +15,7 @@ use crate::skills;
 
 /// Default remote URL for the curated `skills.json` index.
 /// Override with `KEEL_SKILLS_INDEX_URL` for local testing or custom feeds.
-pub const DEFAULT_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/Wasomeno/keel/main/assets/skills.json";
+pub const DEFAULT_INDEX_URL: &str = "https://keel-skills.arndev.nl/skills.json";
 
 /// Bundled fallback snapshot so Discover works offline and on first launch.
 pub const BUNDLED_INDEX_JSON: &str = include_str!("../../../assets/skills.json");

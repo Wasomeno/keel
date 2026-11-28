@@ -22,11 +22,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp "$BIN" "$APP/Contents/MacOS/.keel.new"
 mv -f "$APP/Contents/MacOS/.keel.new" "$APP/Contents/MacOS/keel"
 
-# The pinned Pi (and its bundled packages) that Keel's agent runs on.
-scripts/fetch-pi.sh "$APP/Contents/Resources"
-# Clean non-runtime assets from bundled packages (demo videos, documentation, banners, source maps)
-find "$APP/Contents/Resources/pi-packages" -type f \( -name "*.mp4" -o -name "*.png" -o -name "*.map" \) -delete 2>/dev/null || true
-rm -rf "$APP/Contents/Resources/pi/examples" "$APP/Contents/Resources/pi/docs" 2>/dev/null || true
+# Keel now runs its in-process Rust harness; remove any legacy bundled Pi from older installs.
+rm -rf "$APP/Contents/Resources/pi" "$APP/Contents/Resources/pi-packages" 2>/dev/null || true
 
 # CEF framework and helpers
 # cd -P resolves a symlinked framework: cp -R would copy the link itself.

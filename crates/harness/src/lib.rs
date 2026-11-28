@@ -210,6 +210,21 @@ pub struct SessionSpec {
     /// True when the chat runs in Keel's isolated per-chat scratch directory
     /// rather than a user project folder.
     pub scratch: bool,
+    /// Persistent bot identity and isolated OptMem directory when this chat is a bot DM.
+    pub bot: Option<BotSessionSpec>,
+    /// True only for Dr. Keelee, exposing `create_bot`, `list_bots`, `update_bot`, and `delete_bot`.
+    pub bot_creator: bool,
+}
+
+/// Identity and isolated OptMem path for a bot DM session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BotSessionSpec {
+    pub id: String,
+    pub name: String,
+    pub tagline: String,
+    pub system_prompt: String,
+    pub anti_jobs: Vec<String>,
+    pub memory_dir: PathBuf,
 }
 
 /// A project's folders as the agent sees them (see [`SessionSpec::project`]).
@@ -404,6 +419,18 @@ pub fn secret_field(selector: &str) -> bool {
 
 /// [`tool_detail`], or [`browser_detail`] for a browser tool.
 pub fn tool_detail_for(name: &str, input: &serde_json::Value) -> String {
+    if name == "script" {
+        return "script".to_string();
+    }
+    if name == "script_tools" {
+        return input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "script tools".to_string());
+    }
     if is_browser_tool(name) {
         let detail = browser_detail(input);
         if !detail.is_empty() {
@@ -584,7 +611,7 @@ mod label_tests {
 /// or URL in its input, on
 /// one line with the home dir as `~`. Empty when there is none.
 pub fn tool_detail(input: &serde_json::Value) -> String {
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 10] = [
         "file_path",
         "path",
         "filePath",
@@ -593,6 +620,8 @@ pub fn tool_detail(input: &serde_json::Value) -> String {
         "cmd",
         "pattern",
         "query",
+        "block_id",
+        "text",
     ];
     let text = |v: &serde_json::Value| -> Option<String> {
         Some(
@@ -629,14 +658,20 @@ pub fn kind_from_name(name: &str) -> Option<&'static str> {
     let base = base.rsplit("__").next().unwrap_or(base);
     let base = base.rsplit(['/', ':']).next().unwrap_or(base);
     let n = base.to_ascii_lowercase().replace(['-', ' '], "_");
-    if n == "memory_read" || n == "memory_write" {
+    if matches!(
+        n.as_str(),
+        "memory_read" | "memory_write" | "bot_note" | "bot_recall" | "bot_zoom" | "bot_forget"
+    ) {
         return Some("memory");
     }
     if is_plan_name(&n) {
         return Some("plan");
     }
-    if n == "bash" || n == "shell" || n.starts_with("exec") {
+    if n == "bash" || n == "shell" || n == "script" || n.starts_with("exec") {
         return Some("execute");
+    }
+    if n == "script_tools" {
+        return Some("search");
     }
     if n.starts_with("read") || n.starts_with("view") || n == "cat" {
         return Some("read");
@@ -1369,6 +1404,18 @@ mod tool_detail_tests {
             super::tool_detail_for("Read", &json!({"file_path": "/x"})),
             "/x"
         );
+        assert_eq!(
+            super::tool_detail_for("script", &json!({"code": "tools.read({path:'a'})"})),
+            "script"
+        );
+        assert_eq!(
+            super::tool_detail_for("script_tools", &json!({})),
+            "script tools"
+        );
+        assert_eq!(
+            super::tool_detail_for("script_tools", &json!({"name": "read"})),
+            "read"
+        );
     }
 
     #[test]
@@ -1377,6 +1424,8 @@ mod tool_detail_tests {
         assert_eq!(kind("bash"), Some("execute"));
         assert_eq!(kind("Bash"), Some("execute"));
         assert_eq!(kind("shell"), Some("execute"));
+        assert_eq!(kind("script"), Some("execute"));
+        assert_eq!(kind("script_tools"), Some("search"));
         assert_eq!(kind("exec_command"), Some("execute"));
         assert_eq!(kind("read_file"), Some("read"));
         assert_eq!(kind("Read"), Some("read"));

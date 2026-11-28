@@ -367,6 +367,21 @@ impl KeelWindow {
                 }
                 "ok"
             }
+            "bots" => {
+                if arg.is_empty() {
+                    self.open_bots_page(cx);
+                } else {
+                    self.open_bot(arg, cx);
+                }
+                "ok"
+            }
+            "bot_info" => {
+                if self.bots.store.by_id(arg).is_none() {
+                    return format!("error: no bot {arg:?}");
+                }
+                self.open_bot_info(arg, cx);
+                "ok"
+            }
             "sidebar" => {
                 self.toggle_sidebar(cx);
                 "ok"
@@ -1101,6 +1116,7 @@ impl KeelWindow {
             "project": self.projects.state_json(),
             "settings_open": self.settings_open,
             "skills_open": self.skills.open,
+            "bots_open": self.bots.page_open,
             "skill_rows": self.skills.rows.as_ref().and_then(|r| r.as_ref().ok()).map(|r| r.len()),
             "skill_open": self.skills.expanded_skill.iter().cloned().collect::<Vec<_>>(),
             "window_active": self.window_active,

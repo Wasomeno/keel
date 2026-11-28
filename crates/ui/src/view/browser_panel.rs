@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Entity, FocusHandle,
-    Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    Focusable as _, FontWeight, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ScrollEvent, Window, div, prelude::*, px, relative,
 };
 use gpui_base::input::InputState;
@@ -27,9 +27,12 @@ use crate::browser::agent::ConsoleLog;
 use crate::browser::{PageState, normalize_address};
 use crate::hover_fade::HoverFadeExt;
 use crate::icons::Icon;
-use crate::motion::{BASE, FAST, SLOW, SPIN, ease_in, ease_out, ease_out_strong};
-use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_LG, RADIUS_MD, c, zpx};
-use agent::AgentTab;
+use crate::motion::{
+    BASE, FAST, RollingLabel, SLOW, SPIN, WidthTween, ease_in, ease_out, ease_out_strong,
+    glide_curve,
+};
+use crate::style::{HEADER_HEIGHT, KeelStyled, RADIUS_LG, RADIUS_MD, SMALL, c, zpx};
+use agent::{AgentTab, BrowserControlState};
 
 /// Default share of the window, and the bounds a drag keeps it in.
 const DEFAULT_SHARE: f32 = 0.34;
@@ -75,12 +78,16 @@ pub(super) struct BrowserPanel {
     viewport: Entity<BrowserViewportView>,
     /// Isolated progress & settle-sweep entity so loading animations don't rebuild `KeelWindow`.
     load_bar: Entity<BrowserLoadBarView>,
+    /// Isolated floating capsule HUD showing agent control and the Take over / Hand back trigger.
+    control_hud: Entity<BrowserControlHudView>,
     /// Cached per-tab spinner entities so rotating tab icons don't rebuild `KeelWindow`.
     pub(super) spinners: std::collections::HashMap<u64, Entity<SpinIconView>>,
-    /// Last state synced to `viewport` (`(page_ptr, cursor)`) to skip no-op updates.
-    last_viewport: Option<(usize, gpui::CursorStyle)>,
+    /// Last state synced to `viewport` (`(page_ptr, cursor, guarded)`) to skip no-op updates.
+    last_viewport: Option<(usize, gpui::CursorStyle, bool)>,
     /// Last state synced to `load_bar` to skip no-op updates.
     last_load_bar: Option<LoadBarSnapshot>,
+    /// Last state synced to `control_hud` to skip no-op updates.
+    last_hud: Option<ControlHudSnapshot>,
 }
 
 /// Snapshot driving [`BrowserLoadBarView`], compared before updating the entity.
@@ -219,20 +226,585 @@ impl gpui::Render for SpinIconView {
     }
 }
 
+/// Duration of the viewport-guard nudge when clicking while the agent is in control.
+const HUD_NUDGE_DUR: Duration = Duration::from_millis(320);
+/// Capsule HUD entry/exit timing: asymmetric (exit ~64% of entry), and under
+/// reduced motion movement is removed while a gentle opacity fade survives.
+const HUD_ENTER: Duration = Duration::from_millis(220);
+const HUD_EXIT: Duration = Duration::from_millis(140);
+const HUD_REDUCED_ENTER: Duration = Duration::from_millis(140);
+const HUD_REDUCED_EXIT: Duration = Duration::from_millis(100);
+const HUD_ENTER_DY: f32 = 14.;
+const HUD_EXIT_DY: f32 = 10.;
+const HUD_MODE_SWAP: Duration = Duration::from_millis(180);
+const HUD_ROLL_TRAVEL: f32 = 5.;
+
+/// Timestamp-driven, interruptible entry/exit state for the browser capsule HUD.
+/// Entry rises smoothly on [`glide_curve`]; exit drops back along the same path
+/// on [`ease_out`]. Reversing mid-flight continues from the live `(opacity, dy)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct HudPresence {
+    shown: bool,
+    from_opacity: f32,
+    from_dy: f32,
+    at: Option<Instant>,
+    duration: Duration,
+    reduced: bool,
+}
+
+impl Default for HudPresence {
+    fn default() -> Self {
+        Self::hidden()
+    }
+}
+
+impl HudPresence {
+    pub(super) fn hidden() -> Self {
+        Self {
+            shown: false,
+            from_opacity: 0.,
+            from_dy: HUD_EXIT_DY,
+            at: None,
+            duration: HUD_EXIT,
+            reduced: false,
+        }
+    }
+
+    pub(super) fn cut(&mut self) {
+        self.shown = false;
+        self.from_opacity = 0.;
+        self.from_dy = if self.reduced { 0. } else { HUD_EXIT_DY };
+        self.at = None;
+    }
+
+    pub(super) fn animating(&self, now: Instant) -> bool {
+        self.at
+            .is_some_and(|at| now.saturating_duration_since(at) < self.duration)
+    }
+
+    pub(super) fn mounted(&self, now: Instant) -> bool {
+        self.shown || self.animating(now)
+    }
+
+    pub(super) fn leaving(&self, now: Instant) -> bool {
+        !self.shown && self.animating(now)
+    }
+
+    /// Returns `(opacity, dy_px)` at `now`. Positive `dy_px` shifts downward
+    /// toward the bottom edge of the page card.
+    pub(super) fn look_at(&self, now: Instant) -> (f32, f32) {
+        let (target_opacity, target_dy) = if self.shown {
+            (1., 0.)
+        } else if self.reduced {
+            (0., 0.)
+        } else {
+            (0., HUD_EXIT_DY)
+        };
+        let Some(at) = self.at else {
+            return (target_opacity, target_dy);
+        };
+        let raw = (now.saturating_duration_since(at).as_secs_f32() / self.duration.as_secs_f32())
+            .clamp(0., 1.);
+        if raw >= 1. {
+            return (target_opacity, target_dy);
+        }
+        if self.reduced {
+            let e = ease_out(raw);
+            return (self.from_opacity + (target_opacity - self.from_opacity) * e, 0.);
+        }
+        if self.shown {
+            let move_e = glide_curve(raw);
+            // Opacity settles over the first ~72% so the capsule reads crisply
+            // before its deceleration tail finishes.
+            let fade_e = ease_out_strong((raw / 0.72).min(1.));
+            (
+                self.from_opacity + (1. - self.from_opacity) * fade_e,
+                self.from_dy * (1. - move_e),
+            )
+        } else {
+            let e = ease_out(raw);
+            (
+                self.from_opacity * (1. - e),
+                self.from_dy + (HUD_EXIT_DY - self.from_dy) * e,
+            )
+        }
+    }
+
+    pub(super) fn set(&mut self, shown: bool, now: Instant, reduced: bool) {
+        self.reduced = reduced;
+        if shown == self.shown {
+            return;
+        }
+        let was_mounted = self.mounted(now);
+        let (cur_opacity, cur_dy) = if was_mounted {
+            self.look_at(now)
+        } else if reduced {
+            (0., 0.)
+        } else {
+            (0., HUD_ENTER_DY)
+        };
+        self.shown = shown;
+        self.from_opacity = cur_opacity;
+        self.from_dy = if reduced { 0. } else { cur_dy };
+        let full = match (shown, reduced) {
+            (true, false) => HUD_ENTER,
+            (false, false) => HUD_EXIT,
+            (true, true) => HUD_REDUCED_ENTER,
+            (false, true) => HUD_REDUCED_EXIT,
+        };
+        let target_opacity = if shown { 1. } else { 0. };
+        let dist = (target_opacity - cur_opacity).abs().clamp(0.05, 1.);
+        self.duration = full.mul_f32(dist).max(Duration::from_millis(1));
+        self.at = Some(now);
+    }
+}
+
+/// Compute `(dy_px, highlight_0_to_1)` for a viewport-guard nudge at `elapsed`.
+/// Reduced motion keeps the highlight and drops the vertical lift.
+pub(super) fn hud_nudge_frame(elapsed: Duration, reduced: bool) -> (f32, f32) {
+    if elapsed >= HUD_NUDGE_DUR {
+        return (0., 0.);
+    }
+    let t = (elapsed.as_secs_f32() / HUD_NUDGE_DUR.as_secs_f32()).clamp(0., 1.);
+    let highlight = (1. - ease_out(t)).clamp(0., 1.);
+    let dy = if reduced {
+        0.
+    } else {
+        -3. * (t * std::f32::consts::PI).sin() * (1. - t)
+    };
+    (dy, highlight)
+}
+
+/// Snapshot driving [`BrowserControlHudView`], compared before updating the entity.
+#[derive(Clone, PartialEq)]
+struct ControlHudSnapshot {
+    tokens: Tokens,
+    reduced: bool,
+    tab_id: u64,
+    mode: BrowserControlState,
+    op_label: Option<&'static str>,
+    show_page: bool,
+}
+
+/// Isolated floating capsule HUD inside `browser-page`: shows when the agent
+/// is driving the page and gives a 1-click "Take over" / "Hand back" trigger.
+pub(super) struct BrowserControlHudView {
+    state: Option<ControlHudSnapshot>,
+    presence: HudPresence,
+    nudge_at: Option<Instant>,
+    label_roll: RollingLabel,
+    label_w: Option<WidthTween>,
+    label_cur_w: f32,
+    label_prev_w: f32,
+    mode_is_agent: Option<bool>,
+    mode_swap_at: Option<Instant>,
+    mode_gen: u64,
+    parent: gpui::WeakEntity<KeelWindow>,
+}
+
+impl BrowserControlHudView {
+    fn new(parent: gpui::WeakEntity<KeelWindow>) -> Self {
+        Self {
+            state: None,
+            presence: HudPresence::hidden(),
+            nudge_at: None,
+            label_roll: RollingLabel::default(),
+            label_w: None,
+            label_cur_w: 0.,
+            label_prev_w: 0.,
+            mode_is_agent: None,
+            mode_swap_at: None,
+            mode_gen: 0,
+            parent,
+        }
+    }
+
+    fn sync(&mut self, next: ControlHudSnapshot, cx: &mut Context<Self>) {
+        if self.state.as_ref() != Some(&next) {
+            let switched_tab = self.state.as_ref().is_some_and(|s| s.tab_id != next.tab_id);
+            if switched_tab {
+                self.nudge_at = None;
+                self.label_roll = RollingLabel::default();
+                self.label_w = None;
+                self.label_cur_w = 0.;
+                self.label_prev_w = 0.;
+                self.mode_is_agent = None;
+                self.mode_swap_at = None;
+            } else if !matches!(next.mode, BrowserControlState::AgentInControl { .. }) {
+                self.nudge_at = None;
+            }
+            self.state = Some(next);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn trigger_nudge(&mut self, cx: &mut Context<Self>) {
+        self.nudge_at = Some(Instant::now());
+        cx.notify();
+    }
+}
+
+impl gpui::Render for BrowserControlHudView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let Some(state) = self.state.clone() else {
+            self.presence.cut();
+            return div().id("browser-control-hud").into_any_element();
+        };
+
+        let want = state.show_page && state.mode != BrowserControlState::None;
+        let was_mounted = self.presence.mounted(now);
+        self.presence.set(want, now, state.reduced);
+
+        let (nudge_dy, nudge_hi) = match self.nudge_at {
+            Some(at) => {
+                let elapsed = now.saturating_duration_since(at);
+                if elapsed >= HUD_NUDGE_DUR {
+                    self.nudge_at = None;
+                    (0., 0.)
+                } else {
+                    hud_nudge_frame(elapsed, state.reduced)
+                }
+            }
+            None => (0., 0.),
+        };
+
+        if !self.presence.mounted(now) {
+            self.label_roll = RollingLabel::default();
+            self.label_w = None;
+            self.label_cur_w = 0.;
+            self.label_prev_w = 0.;
+            self.mode_is_agent = None;
+            self.mode_swap_at = None;
+            return div().id("browser-control-hud").into_any_element();
+        }
+
+        let t = state.tokens;
+        let (look_opacity, look_dy) = self.presence.look_at(now);
+        let leaving = self.presence.leaving(now);
+        let is_agent = matches!(state.mode, BrowserControlState::AgentInControl { .. });
+        let busy = matches!(state.mode, BrowserControlState::AgentInControl { busy: true });
+
+        if want {
+            match self.mode_is_agent {
+                Some(prev) if prev != is_agent => {
+                    self.mode_is_agent = Some(is_agent);
+                    self.mode_gen += 1;
+                    self.mode_swap_at = if was_mounted && !state.reduced {
+                        Some(now)
+                    } else {
+                        None
+                    };
+                }
+                None => {
+                    self.mode_is_agent = Some(is_agent);
+                    self.mode_swap_at = None;
+                }
+                _ => {}
+            }
+        }
+
+        let swap_progress = self.mode_swap_at.and_then(|at| {
+            let elapsed = now.saturating_duration_since(at);
+            if elapsed >= HUD_MODE_SWAP {
+                self.mode_swap_at = None;
+                None
+            } else {
+                Some(ease_out_strong(
+                    (elapsed.as_secs_f32() / HUD_MODE_SWAP.as_secs_f32()).clamp(0., 1.),
+                ))
+            }
+        });
+
+        let status_label: String = if is_agent {
+            if busy {
+                match state.op_label {
+                    Some(op) => format!("Agent · {op}"),
+                    None => "Agent in control".into(),
+                }
+            } else {
+                "Agent in control".into()
+            }
+        } else {
+            "You're in control".into()
+        };
+
+        let target_w = super::composer_view::measure_label(window, &status_label, FontWeight::MEDIUM);
+        let label_changed = !self.label_roll.now.is_empty() && status_label != self.label_roll.now;
+        let animate_inner = was_mounted && !state.reduced && !leaving;
+        match &mut self.label_w {
+            None => self.label_w = Some(WidthTween::settled(target_w)),
+            Some(tween) => {
+                tween.retarget(target_w, now, label_changed && animate_inner);
+            }
+        }
+        if self.label_roll.commit(&status_label, now, animate_inner) {
+            self.label_prev_w = self.label_cur_w;
+        }
+        self.label_cur_w = target_w;
+        let width = self.label_w.expect("set above");
+        let width_moving = width.animating(now) && !state.reduced;
+
+        if self.presence.animating(now)
+            || self.nudge_at.is_some()
+            || swap_progress.is_some()
+            || width_moving
+        {
+            window.request_animation_frame();
+        }
+
+        let dot_color = match swap_progress {
+            Some(p) => {
+                let from = c(if is_agent { t.success } else { t.info });
+                let to = c(if is_agent { t.info } else { t.success });
+                from.blend(to.opacity(p))
+            }
+            None => c(if is_agent { t.info } else { t.success }),
+        };
+
+        let dot_base = div()
+            .flex_none()
+            .size(zpx(7.))
+            .rounded_full()
+            .bg(dot_color);
+        let dot: AnyElement = if busy {
+            crate::motion::pulse(
+                dot_base,
+                ("browser-hud-pulse", state.tab_id as usize),
+                state.reduced,
+            )
+        } else {
+            dot_base
+                .opacity(if is_agent { 0.85 } else { 0.9 })
+                .into_any_element()
+        };
+
+        let roll_h = SMALL.line;
+        let roll_anim = || Animation::new(SLOW).with_easing(ease_out);
+        let spacer = div().h(zpx(roll_h));
+        let spacer = if width_moving {
+            let (from, to) = (width.from, width.to);
+            spacer
+                .with_animation(
+                    ("browser-hud-label-w", width.generation as usize),
+                    roll_anim(),
+                    move |el, d| el.w(px(from + (to - from) * d)),
+                )
+                .into_any_element()
+        } else {
+            spacer.w(px(target_w)).into_any_element()
+        };
+        let label_line = |text: String, w: f32| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .h(zpx(roll_h))
+                .w(px(w))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .t_small()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(c(t.text))
+                .child(text)
+        };
+        let label_frame = div()
+            .relative()
+            .flex_shrink(1.)
+            .min_w_0()
+            .max_w_full()
+            .h(zpx(roll_h))
+            .overflow_hidden()
+            .child(spacer);
+        let roll_n = self.label_roll.roll as usize;
+        let label_el: AnyElement = if roll_n == 0 || state.reduced {
+            label_frame
+                .child(label_line(status_label, target_w).when(!width_moving, |d| d.max_w_full()))
+                .into_any_element()
+        } else {
+            label_frame
+                .child(
+                    label_line(status_label, target_w)
+                        .when(!width_moving, |d| d.max_w_full())
+                        .with_animation(("browser-hud-roll", roll_n * 2 + 1), roll_anim(), |el, d| {
+                            el.top(zpx(HUD_ROLL_TRAVEL * (1. - d))).opacity(d)
+                        }),
+                )
+                .child(
+                    label_line(self.label_roll.prev.clone(), self.label_prev_w).with_animation(
+                        ("browser-hud-roll", roll_n * 2),
+                        roll_anim(),
+                        |el, d| el.top(zpx(-HUD_ROLL_TRAVEL * d)).opacity((1. - d * 1.5).max(0.)),
+                    ),
+                )
+                .into_any_element()
+        };
+
+        let tab_id = state.tab_id;
+        let swap_y = swap_progress.map_or(0., |p| 2. * (1. - p));
+        let swap_op = swap_progress.unwrap_or(1.);
+        let action_btn: AnyElement = if is_agent {
+            let tip_label = "Stop agent and take manual control";
+            div()
+                .id(("browser-takeover-btn", self.mode_gen as usize))
+                .flex_none()
+                .relative()
+                .top(px(nudge_dy + swap_y))
+                .opacity(swap_op)
+                .h(zpx(24.))
+                .px(zpx(10.))
+                .rounded_full()
+                .bg(c(t.accent))
+                .border_1()
+                .border_color(if nudge_hi > 0.01 {
+                    c(t.info).opacity(0.9 * nudge_hi)
+                } else {
+                    gpui::transparent_black()
+                })
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(5.))
+                .t_small()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(c(t.text_on_accent))
+                .when(!leaving, |b| {
+                    b.cursor_pointer()
+                        .hover_fade(c(t.accent_hover), Some(c(t.accent).opacity(0.84)))
+                        .active(|s| s.relative().top(px(0.5)))
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| super::dotify_ui::Tip::new(tip_label, t)).into()
+                        })
+                        .tooltip_show_delay(crate::view::tooltip::delay())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            let _ = this.parent.update(cx, |kw, cx| {
+                                if let Some(ix) = kw.browser.tab_ix(tab_id) {
+                                    kw.take_over_browser_tab(ix, window, cx);
+                                }
+                            });
+                        }))
+                })
+                .child(Icon::PointerClick.el(zpx(11.)))
+                .child("Take over")
+                .into_any_element()
+        } else {
+            let tip_label = "Return browser control to the agent";
+            div()
+                .id(("browser-handback-btn", self.mode_gen as usize))
+                .flex_none()
+                .relative()
+                .top(px(swap_y))
+                .opacity(swap_op)
+                .h(zpx(24.))
+                .px(zpx(10.))
+                .rounded_full()
+                .bg(c(t.surface))
+                .border_1()
+                .border_color(c(t.border))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(zpx(5.))
+                .t_small()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(c(t.text))
+                .when(!leaving, |b| {
+                    b.cursor_pointer()
+                        .hover_fade(c(t.hover), Some(c(t.selected)))
+                        .active(|s| s.relative().top(px(0.5)))
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| super::dotify_ui::Tip::new(tip_label, t)).into()
+                        })
+                        .tooltip_show_delay(crate::view::tooltip::delay())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            let _ = this.parent.update(cx, |kw, cx| {
+                                if let Some(ix) = kw.browser.tab_ix(tab_id) {
+                                    kw.hand_back_browser_tab(ix, window, cx);
+                                }
+                            });
+                        }))
+                })
+                .child(Icon::Agent.el(zpx(11.)))
+                .child("Hand back")
+                .into_any_element()
+        };
+
+        let capsule_border = if nudge_hi > 0.01 {
+            c(t.border).blend(c(t.info).opacity(0.65 * nudge_hi))
+        } else {
+            c(t.border)
+        };
+
+        let capsule = div()
+            .id("browser-control-hud")
+            .max_w_full()
+            .h(zpx(34.))
+            .pl(zpx(12.))
+            .pr(zpx(5.))
+            .floating_surface(t)
+            .rounded_full()
+            .border_color(capsule_border)
+            .opacity(look_opacity)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(zpx(10.))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(7.))
+                    .child(dot)
+                    .child(label_el),
+            )
+            .child(action_btn);
+
+        div()
+            .id("browser-control-hud-anchor")
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(12. - look_dy))
+            .px_3()
+            .flex()
+            .flex_row()
+            .justify_center()
+            .child(capsule)
+            .into_any_element()
+    }
+}
+
 /// Isolated CEF viewport entity so 60fps browser paints and cursor changes don't rebuild `KeelWindow`.
 pub(super) struct BrowserViewportView {
     page: Option<std::rc::Rc<crate::browser::NativePage>>,
     cursor: gpui::CursorStyle,
+    guarded: bool,
     focus: FocusHandle,
+    hud: Entity<BrowserControlHudView>,
     parent: gpui::WeakEntity<KeelWindow>,
 }
 
 impl BrowserViewportView {
-    fn new(focus: FocusHandle, parent: gpui::WeakEntity<KeelWindow>) -> Self {
+    fn new(
+        focus: FocusHandle,
+        hud: Entity<BrowserControlHudView>,
+        parent: gpui::WeakEntity<KeelWindow>,
+    ) -> Self {
         Self {
             page: None,
             cursor: gpui::CursorStyle::Arrow,
+            guarded: false,
             focus,
+            hud,
             parent,
         }
     }
@@ -241,10 +813,12 @@ impl BrowserViewportView {
         &mut self,
         page: Option<std::rc::Rc<crate::browser::NativePage>>,
         cursor: gpui::CursorStyle,
+        guarded: bool,
         cx: &mut Context<Self>,
     ) {
         self.page = page;
         self.cursor = cursor;
+        self.guarded = guarded;
         cx.notify();
     }
 
@@ -252,10 +826,12 @@ impl BrowserViewportView {
         &mut self,
         page: std::rc::Rc<crate::browser::NativePage>,
         cursor: gpui::CursorStyle,
+        guarded: bool,
         cx: &mut Context<Self>,
     ) {
         self.page = Some(page);
         self.cursor = cursor;
+        self.guarded = guarded;
         cx.notify();
     }
 }
@@ -269,16 +845,23 @@ impl gpui::Render for BrowserViewportView {
         let page_paint = std::rc::Rc::downgrade(&native);
         let focus = self.focus.clone();
         let focus_prep = focus.clone();
+        let guarded = self.guarded;
         div()
             .id("browser-viewport")
             .relative()
             .size_full()
-            .cursor(self.cursor)
+            .cursor(if guarded {
+                gpui::CursorStyle::Arrow
+            } else {
+                self.cursor
+            })
             .track_focus(&focus)
             .key_context(crate::keys::BROWSER_VIEWPORT)
             .on_action(cx.listener(
                 |this, _: &gpui_base::input::Copy, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.copy();
                         cx.stop_propagation();
                     }
@@ -286,7 +869,9 @@ impl gpui::Render for BrowserViewportView {
             ))
             .on_action(cx.listener(
                 |this, _: &gpui_base::input::Cut, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.cut();
                         cx.stop_propagation();
                     }
@@ -294,7 +879,9 @@ impl gpui::Render for BrowserViewportView {
             ))
             .on_action(cx.listener(
                 |this, _: &gpui_base::input::Paste, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.paste();
                         cx.stop_propagation();
                     }
@@ -302,7 +889,9 @@ impl gpui::Render for BrowserViewportView {
             ))
             .on_action(cx.listener(
                 |this, _: &crate::keys::BrowserPasteAndMatchStyle, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.paste_and_match_style();
                         cx.stop_propagation();
                     }
@@ -310,7 +899,9 @@ impl gpui::Render for BrowserViewportView {
             ))
             .on_action(cx.listener(
                 |this, _: &gpui_base::input::SelectAll, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.select_all();
                         cx.stop_propagation();
                     }
@@ -318,7 +909,9 @@ impl gpui::Render for BrowserViewportView {
             ))
             .on_action(cx.listener(
                 |this, _: &gpui_base::input::Undo, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.undo();
                         cx.stop_propagation();
                     }
@@ -326,21 +919,25 @@ impl gpui::Render for BrowserViewportView {
             ))
             .on_action(cx.listener(
                 |this, _: &gpui_base::input::Redo, _window, cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.redo();
                         cx.stop_propagation();
                     }
                 },
             ))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if let Some(native) = &this.page
+                if !this.guarded
+                    && let Some(native) = &this.page
                     && native.handle_key_down(event)
                 {
                     cx.stop_propagation();
                 }
             }))
             .capture_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
-                if let Some(native) = &this.page
+                if !this.guarded
+                    && let Some(native) = &this.page
                     && native.handle_key_up(event)
                 {
                     cx.stop_propagation();
@@ -349,6 +946,11 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.guarded {
+                        this.hud.update(cx, |hud, cx| hud.trigger_nudge(cx));
+                        cx.stop_propagation();
+                        return;
+                    }
                     let was_focused = this.focus.is_focused(window);
                     window.focus(&this.focus, cx);
                     if !was_focused {
@@ -368,6 +970,11 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.guarded {
+                        this.hud.update(cx, |hud, cx| hud.trigger_nudge(cx));
+                        cx.stop_propagation();
+                        return;
+                    }
                     let was_focused = this.focus.is_focused(window);
                     window.focus(&this.focus, cx);
                     if !was_focused {
@@ -387,6 +994,11 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.guarded {
+                        this.hud.update(cx, |hud, cx| hud.trigger_nudge(cx));
+                        cx.stop_propagation();
+                        return;
+                    }
                     let was_focused = this.focus.is_focused(window);
                     window.focus(&this.focus, cx);
                     if !was_focused {
@@ -406,6 +1018,10 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_down(
                 MouseButton::Navigate(gpui::NavigationDirection::Back),
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if this.guarded {
+                        cx.stop_propagation();
+                        return;
+                    }
                     window.focus(&this.focus, cx);
                     if let Some(native) = &this.page {
                         native.history(false);
@@ -415,6 +1031,10 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_down(
                 MouseButton::Navigate(gpui::NavigationDirection::Forward),
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if this.guarded {
+                        cx.stop_propagation();
+                        return;
+                    }
                     window.focus(&this.focus, cx);
                     if let Some(native) = &this.page {
                         native.history(true);
@@ -424,7 +1044,9 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.handle_mouse_up(
                             event.position,
                             MouseButton::Left,
@@ -437,7 +1059,9 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.handle_mouse_up_outside(
                             event.position,
                             MouseButton::Left,
@@ -450,7 +1074,9 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.handle_mouse_up(
                             event.position,
                             MouseButton::Right,
@@ -463,7 +1089,9 @@ impl gpui::Render for BrowserViewportView {
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
-                    if let Some(native) = &this.page {
+                    if !this.guarded
+                        && let Some(native) = &this.page
+                    {
                         native.handle_mouse_up(
                             event.position,
                             MouseButton::Middle,
@@ -474,7 +1102,9 @@ impl gpui::Render for BrowserViewportView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, _cx| {
-                if let Some(native) = &this.page {
+                if !this.guarded
+                    && let Some(native) = &this.page
+                {
                     native.handle_mouse_move(
                         event.position,
                         event.modifiers,
@@ -483,13 +1113,17 @@ impl gpui::Render for BrowserViewportView {
                 }
             }))
             .on_hover(cx.listener(|this, hovered: &bool, window, _cx| {
-                if !*hovered
+                if !this.guarded
+                    && !*hovered
                     && let Some(native) = &this.page
                 {
                     native.handle_mouse_leave(window.mouse_position(), window.modifiers());
                 }
             }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, _cx| {
+                if this.guarded {
+                    return;
+                }
                 if let Some(native) = &this.page {
                     native.handle_scroll_wheel(event.position, event.delta, event.modifiers);
                 }
@@ -500,7 +1134,7 @@ impl gpui::Render for BrowserViewportView {
                         if let Some(page) = page_prep.upgrade() {
                             let scale = window.scale_factor();
                             page.set_scale_factor(scale);
-                            page.set_focus(focus_prep.is_focused(window));
+                            page.set_focus(!guarded && focus_prep.is_focused(window));
                             page.sync(bounds, bounds, 1.0, false);
                         }
                     },
@@ -605,6 +1239,19 @@ impl BrowserTab {
         self.agent.is_some()
     }
 
+    fn control_state(&self, now: Instant) -> BrowserControlState {
+        self.agent
+            .as_ref()
+            .map_or(BrowserControlState::None, |a| a.control_state(now))
+    }
+
+    pub(super) fn agent_in_control(&self, now: Instant) -> bool {
+        matches!(
+            self.control_state(now),
+            BrowserControlState::AgentInControl { .. }
+        )
+    }
+
     /// What its tab says: the page title, else the host, else "New Tab".
     pub(super) fn label(&self) -> String {
         if !self.page.title.trim().is_empty() {
@@ -678,6 +1325,7 @@ impl BrowserPanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<KeelWindow>) -> Self {
         let focus = cx.focus_handle();
         let parent = cx.entity().downgrade();
+        let control_hud = cx.new(|_| BrowserControlHudView::new(parent.clone()));
         Self {
             width: None,
             resizing: false,
@@ -685,11 +1333,13 @@ impl BrowserPanel {
             resize_from: None,
             address: cx
                 .new(|cx| InputState::new(window, cx).placeholder("Search or enter address")),
-            viewport: cx.new(|_| BrowserViewportView::new(focus.clone(), parent)),
+            viewport: cx.new(|_| BrowserViewportView::new(focus.clone(), control_hud.clone(), parent)),
             load_bar: cx.new(|_| BrowserLoadBarView::default()),
+            control_hud,
             spinners: std::collections::HashMap::new(),
             last_viewport: None,
             last_load_bar: None,
+            last_hud: None,
             focus,
             tabs: vec![BrowserTab::new(0)],
             active: 0,
@@ -768,6 +1418,7 @@ impl KeelWindow {
     pub(super) fn browser_allowed(&self) -> bool {
         !self.was_hero
             && !self.settings_open
+            && self.active_bot().is_none()
             && self.confirming_delete_chats.is_none()
             && self.state.confirming_delete_space.is_none()
     }
@@ -790,7 +1441,7 @@ impl KeelWindow {
     pub(super) fn browser_in_background(&self) -> Option<bool> {
         let b = &self.browser;
         let alive = b.tabs.iter().any(|tab| {
-            tab.agent.is_some()
+            tab.agent.as_ref().is_some_and(|a| !a.user_takeover)
                 && tab.native.as_ref().is_some_and(|n| n.background())
                 && tab.page.url.is_some()
         });
@@ -978,7 +1629,7 @@ impl KeelWindow {
         }
         let sites = self.state.ui_settings.browser_allowed_sites.clone();
         let tab = &mut self.browser.tabs[ix];
-        let agent = tab.agent.is_some();
+        let agent = tab.agent.as_ref().is_some_and(|a| !a.user_takeover);
         tab.parked = false;
         if let Some(native) = &tab.native {
             native.set_background(agent);
@@ -1099,16 +1750,19 @@ impl KeelWindow {
         self.state.effective_tokens(system_dark)
     }
 
-    /// Push the active tab's `NativePage` & cursor to `viewport` only when they change.
+    /// Push the active tab's `NativePage`, cursor, and guard flag to `viewport` only when they change.
     pub(super) fn sync_browser_viewport(&mut self, cx: &mut Context<Self>) {
-        let native = self.browser.tab().native.clone();
+        let now = Instant::now();
+        let tab = self.browser.tab();
+        let native = tab.native.clone();
+        let guarded = tab.agent_in_control(now);
         let ptr = native
             .as_ref()
             .map_or(0usize, |p| std::rc::Rc::as_ptr(p) as usize);
         let cursor = native
             .as_ref()
             .map_or(gpui::CursorStyle::Arrow, |p| p.cursor_style());
-        let key = (ptr, cursor);
+        let key = (ptr, cursor, guarded);
         if self.browser.last_viewport == Some(key) {
             return;
         }
@@ -1118,7 +1772,29 @@ impl KeelWindow {
         }
         self.browser
             .viewport
-            .update(cx, |v, cx| v.set_state(native, cursor, cx));
+            .update(cx, |v, cx| v.set_state(native, cursor, guarded, cx));
+    }
+
+    /// Push the active tab's agent control / takeover state to `control_hud` only when it changes.
+    fn sync_browser_hud(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let reduced = self.reduced();
+        let tab = self.browser.tab();
+        let snapshot = ControlHudSnapshot {
+            tokens,
+            reduced,
+            tab_id: tab.id,
+            mode: tab.control_state(now),
+            op_label: tab.agent.as_ref().and_then(|a| a.active_op),
+            show_page: tab.error.is_none(),
+        };
+        if self.browser.last_hud.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.browser.last_hud = Some(snapshot.clone());
+        self.browser
+            .control_hud
+            .update(cx, |v, cx| v.sync(snapshot, cx));
     }
 
     /// Push the active tab's progress/settle state to `load_bar` only when it changes.
@@ -1231,7 +1907,10 @@ impl KeelWindow {
         let Some(native) = self.browser.tabs[ix].native.clone() else {
             return;
         };
-        let is_agent = self.browser.tabs[ix].agent.is_some();
+        let is_agent = self.browser.tabs[ix]
+            .agent
+            .as_ref()
+            .is_some_and(|a| !a.user_takeover);
         let shown = ix == self.browser.active;
         // Script results, dialogs, file choosers, console: the agent side.
         let mut event = Some(event);
@@ -1247,10 +1926,11 @@ impl KeelWindow {
                 if shown && native.update_frame() {
                     let ptr = std::rc::Rc::as_ptr(&native) as usize;
                     let cursor = native.cursor_style();
-                    self.browser.last_viewport = Some((ptr, cursor));
+                    let guarded = self.browser.tabs[ix].agent_in_control(Instant::now());
+                    self.browser.last_viewport = Some((ptr, cursor, guarded));
                     self.browser
                         .viewport
-                        .update(cx, |v, cx| v.notify_frame(native, cursor, cx));
+                        .update(cx, |v, cx| v.notify_frame(native, cursor, guarded, cx));
                 }
             }
             NativeEvent::Wake => {
@@ -1326,11 +2006,12 @@ impl KeelWindow {
                 }
                 if shown {
                     let ptr = std::rc::Rc::as_ptr(&native) as usize;
-                    if self.browser.last_viewport != Some((ptr, cursor)) {
-                        self.browser.last_viewport = Some((ptr, cursor));
+                    let guarded = self.browser.tabs[ix].agent_in_control(Instant::now());
+                    if self.browser.last_viewport != Some((ptr, cursor, guarded)) {
+                        self.browser.last_viewport = Some((ptr, cursor, guarded));
                         self.browser
                             .viewport
-                            .update(cx, |v, cx| v.set_state(Some(native), cursor, cx));
+                            .update(cx, |v, cx| v.set_state(Some(native), cursor, guarded, cx));
                     }
                     let t = self.browser_tokens(window);
                     self.sync_browser_load_bar(t, cx);
@@ -1887,21 +2568,31 @@ impl KeelWindow {
 
     /// What each browser toolbar button does, as its tooltip says it (state-aware),
     /// with its shortcut where it has one.
-    pub(super) fn browser_tip_label(&self, id: &str) -> Option<(String, Option<&'static str>)> {
-        use super::tooltip::keys;
+    pub(super) fn browser_tip_label(
+        &self,
+        id: &str,
+    ) -> Option<(String, Option<gpui::SharedString>)> {
+        let key_for = |shortcut_id: &str| {
+            crate::keys::display_for_tooltip(
+                &self.state.ui_settings.shortcuts,
+                shortcut_id,
+                crate::keys::current_os(),
+            )
+            .map(gpui::SharedString::from)
+        };
         let tab = self.browser.tab();
         let (text, key) = match id {
-            "browser-back" => ("Back", keys("⌘[")),
-            "browser-forward" => ("Forward", keys("⌘]")),
-            // The same button and ⌘R stop a load in progress.
-            "browser-reload" if tab.page.loading => ("Stop loading", keys("⌘R")),
-            "browser-reload" => ("Reload", keys("⌘R")),
-            "browser-address-globe" => ("Search or enter address", keys("⌘L")),
+            "browser-back" => ("Back", key_for("browser_back")),
+            "browser-forward" => ("Forward", key_for("browser_forward")),
+            // The same button and Reload shortcut stop a load in progress.
+            "browser-reload" if tab.page.loading => ("Stop loading", key_for("browser_reload")),
+            "browser-reload" => ("Reload", key_for("browser_reload")),
+            "browser-address-globe" => ("Search or enter address", key_for("browser_address")),
             // A previewed file opens in its own app; a page in the default browser.
             "browser-external" if tab.preview.is_some() => ("Open in default app", None),
             "browser-external" => ("Open in browser", None),
             // Closes every browser tab (and the agent's) for a fresh, empty one.
-            "browser-end" => ("Close session", keys("⌘⇧W")),
+            "browser-end" => ("Close session", key_for("browser_end_session")),
             _ => return None,
         };
         Some((text.to_string(), key))
@@ -1909,6 +2600,9 @@ impl KeelWindow {
 
     /// The page card: the live page, or a start screen until there's an address.
     fn render_browser_page(&mut self, t: Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let agent_controlled = self.browser.tab().agent_in_control(now);
+        self.sync_browser_hud(t, cx);
         let card = div()
             .id("browser-page")
             .relative()
@@ -1918,20 +2612,29 @@ impl KeelWindow {
             .mb(px(PAGE_INSET))
             .rounded(RADIUS_LG)
             .border_1()
-            .border_color(c(t.border))
+            .border_color(if agent_controlled {
+                c(t.info).opacity(0.45)
+            } else {
+                c(t.border)
+            })
             .overflow_hidden()
             .bg(c(t.floating));
         if let Some(error) = self.browser.tab().error.clone() {
-            return card.child(self.render_browser_empty(t, Some(error), cx));
+            return card
+                .child(self.render_browser_empty(t, Some(error), cx))
+                .child(self.browser.control_hud.clone());
         }
         if self.browser.tab().page.url.is_none() {
-            return card.child(self.render_browser_empty(t, None, cx));
+            return card
+                .child(self.render_browser_empty(t, None, cx))
+                .child(self.browser.control_hud.clone());
         }
         if self.browser.tab().native.is_some() {
             self.sync_browser_viewport(cx);
             card.child(self.browser.viewport.clone())
+                .child(self.browser.control_hud.clone())
         } else {
-            card
+            card.child(self.browser.control_hud.clone())
         }
     }
 
@@ -2437,5 +3140,55 @@ mod host_tests {
         let p1 = expand_progress(0.4, 0., Duration::from_millis(100), dur);
         let p2 = expand_progress(0.4, 0., Duration::from_millis(200), dur);
         assert!(p1 < 0.4 && p1 > p2 && p2 > 0.);
+    }
+
+    #[test]
+    fn hud_nudge_lifts_smoothly_and_respects_reduced_motion() {
+        assert_eq!(hud_nudge_frame(HUD_NUDGE_DUR, false), (0., 0.));
+
+        let (dy, hi) = hud_nudge_frame(Duration::from_millis(80), false);
+        assert!(dy < 0., "expected upward lift, got {dy}");
+        assert!(hi > 0. && hi < 1., "expected decaying highlight, got {hi}");
+
+        let (reduced_dy, reduced_hi) = hud_nudge_frame(Duration::from_millis(80), true);
+        assert_eq!(reduced_dy, 0.);
+        assert!((reduced_hi - hi).abs() < 1e-5);
+    }
+
+    #[test]
+    fn hud_presence_enters_exits_reverses_and_respects_reduced_motion() {
+        let t0 = Instant::now();
+        let mut p = HudPresence::hidden();
+        assert!(!p.mounted(t0));
+
+        // Entry starts from HUD_ENTER_DY with front-loaded glide and settles to (1, 0).
+        p.set(true, t0, false);
+        assert!(p.mounted(t0));
+        assert_eq!(p.look_at(t0), (0., HUD_ENTER_DY));
+        let mid_in = t0 + Duration::from_millis(90);
+        let (op_mid, dy_mid) = p.look_at(mid_in);
+        assert!(op_mid > 0.6 && op_mid < 1., "expected front-loaded fade, got {op_mid}");
+        assert!(dy_mid > 0. && dy_mid < HUD_ENTER_DY * 0.5, "expected fast settle, got {dy_mid}");
+        assert_eq!(p.look_at(t0 + HUD_ENTER), (1., 0.));
+        assert!(!p.animating(t0 + HUD_ENTER));
+
+        // Interrupting entry mid-flight reverses smoothly from current live (opacity, dy).
+        let mut rev = HudPresence::hidden();
+        rev.set(true, t0, false);
+        let at_rev = t0 + Duration::from_millis(80);
+        let live = rev.look_at(at_rev);
+        rev.set(false, at_rev, false);
+        assert!(rev.leaving(at_rev));
+        assert_eq!(rev.look_at(at_rev), live);
+        assert_eq!(rev.look_at(at_rev + HUD_EXIT), (0., HUD_EXIT_DY));
+
+        // Reduced motion removes all movement (dy == 0) while preserving opacity fades.
+        let mut r = HudPresence::hidden();
+        r.set(true, t0, true);
+        assert_eq!(r.look_at(t0), (0., 0.));
+        let (r_op, r_dy) = r.look_at(t0 + Duration::from_millis(60));
+        assert!(r_op > 0. && r_op < 1.);
+        assert_eq!(r_dy, 0.);
+        assert_eq!(r.look_at(t0 + HUD_REDUCED_ENTER), (1., 0.));
     }
 }

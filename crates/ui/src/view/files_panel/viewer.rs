@@ -645,6 +645,7 @@ impl KeelWindow {
             citations: Default::default(),
             current_citations: None,
             subagent_info: Default::default(),
+            bot_theme: None,
             probe: None,
         });
         let items = md.items.clone();

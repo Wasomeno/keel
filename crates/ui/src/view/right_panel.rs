@@ -1130,7 +1130,7 @@ impl KeelWindow {
                                 (
                                     Some(Icon::Globe),
                                     bt.label().into(),
-                                    bt.is_agent().then_some(t.info),
+                                    bt.agent_in_control(Instant::now()).then_some(t.info),
                                     None,
                                     bt.page.loading,
                                 )
@@ -2024,6 +2024,7 @@ impl KeelWindow {
             citations: Default::default(),
             current_citations: None,
             subagent_info: Default::default(),
+            bot_theme: None,
         };
 
         let mut meta_items: Vec<String> = Vec::new();
@@ -2271,12 +2272,24 @@ impl KeelWindow {
             .into_any_element()
     }
 
-    pub(super) fn right_tip_label(&self, id: &str) -> Option<(String, Option<&'static str>)> {
-        use super::tooltip::keys;
+    pub(super) fn right_tip_label(
+        &self,
+        id: &str,
+    ) -> Option<(String, Option<gpui::SharedString>)> {
+        let key_for = |shortcut_id: &str| {
+            crate::keys::display_for_tooltip(
+                &self.state.ui_settings.shortcuts,
+                shortcut_id,
+                crate::keys::current_os(),
+            )
+            .map(gpui::SharedString::from)
+        };
         let (text, key) = match id {
-            "right-new-tab" => ("New tab", keys("⌘T")),
-            "right-panel-expand" if self.right_panel.expanded => ("Restore", keys("⌘⇧F")),
-            "right-panel-expand" => ("Expand", keys("⌘⇧F")),
+            "right-new-tab" => ("New tab", key_for("browser_new_tab")),
+            "right-panel-expand" if self.right_panel.expanded => {
+                ("Restore", key_for("browser_expand"))
+            }
+            "right-panel-expand" => ("Expand", key_for("browser_expand")),
             _ => return self.browser_tip_label(id),
         };
         Some((text.to_string(), key))

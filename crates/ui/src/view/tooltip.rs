@@ -146,7 +146,7 @@ impl HoverTips {
     /// shortcut), read fresh each frame so a toggle's label follows its state.
     pub(super) fn render(
         &mut self,
-        label: impl Fn(&str) -> Option<(String, Option<&'static str>)>,
+        label: impl Fn(&str) -> Option<(String, Option<gpui::SharedString>)>,
         t: Tokens,
         window: &gpui::Window,
         reduced: bool,
@@ -157,7 +157,7 @@ impl HoverTips {
         }
         let anchor = *self.bounds.borrow().get(id)?;
         let (text, keys) = label(id)?;
-        let w = capsule_width(window, &text, keys);
+        let w = capsule_width(window, &text, keys.as_deref());
         let viewport = f32::from(window.viewport_size().width);
         let margin = f32::from(zpx(8.));
         let center = f32::from(anchor.origin.x) + f32::from(anchor.size.width) / 2.;
@@ -185,7 +185,7 @@ impl HoverTips {
 pub(crate) fn capsule(
     t: Tokens,
     text: impl Into<gpui::SharedString>,
-    keys: Option<&'static str>,
+    keys: Option<gpui::SharedString>,
 ) -> gpui::Div {
     div()
         .relative()
@@ -309,6 +309,7 @@ fn capsule_width(window: &gpui::Window, text: &str, keys: Option<&str>) -> f32 {
 }
 
 /// The shortcut as shown on this platform (only macOS shows keycaps).
+#[allow(dead_code)]
 pub(super) fn keys(mac: &'static str) -> Option<&'static str> {
     cfg!(target_os = "macos").then_some(mac)
 }

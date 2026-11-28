@@ -5,6 +5,7 @@ runner = "scripts/dev-sign.sh"
 [env]
 CXXFLAGS = "-I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
 CEF_PATH = { value = ".cef/cef_macos_aarch64", relative = true }
+KEEL_WEB_SEARCH_PROXY_URL = "https://keel-tavily-proxy.kevinanandapradipta.workers.dev"
 
 # The two builds to use. Cargo picks features per command, so `test -p
 # keel-ui` alone, `check`, or `--workspace` each rebuild gpui and friends

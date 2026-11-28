@@ -48,6 +48,7 @@ pub(super) struct TranscriptSyncKey {
     loader_seed: (std::time::Instant, usize),
     loader_verbs_ptr: usize,
     loader_look: Option<crate::motion::RowLook>,
+    bot_theme: Option<crate::transcript::BotChatTheme>,
 }
 
 use super::{KeelWindow, drag_region, editor_style, icon_button};
@@ -120,6 +121,8 @@ impl Render for KeelWindow {
                 &self.api_key_input,
                 &self.dotify_search,
                 &self.skills_filter,
+                &self.shortcuts_filter,
+                &self.bots_filter,
                 &self.memory_desc,
                 &self.browser.address,
             ] {
@@ -170,8 +173,13 @@ impl Render for KeelWindow {
         // New-chat hero: on entry its animations replay; on exit the composer
         // drops from the middle to its dock while the transcript fills in.
         let skills_open = self.skills.open;
-        let hero =
-            self.hero_visible() && !show_question && !self.projects.home_open() && !skills_open;
+        let bots_open = self.bots.page_open;
+        let hero = self.hero_visible()
+            && !show_question
+            && !self.projects.home_open()
+            && !skills_open
+            && !bots_open
+            && self.active_bot().is_none();
         if hero != self.was_hero {
             self.hero_gen += 1;
             self.hero_exit = (!hero).then(|| (0., std::time::Instant::now()));
@@ -180,13 +188,18 @@ impl Render for KeelWindow {
             self.sync_right_panel_hero_transition(hero);
             self.was_hero = hero;
         }
-        // Page switch (chat ↔ project home ↔ skills): the arriving page glides 16 px in from
-        // its side and fades up; the sidebar holds still. Settings has its
-        // own sheet. Instant under reduced motion.
+        // Page switch (chat ↔ bots directory ↔ project home ↔ skills ↔ bot DM):
+        // the arriving page glides 16 px in from its side and fades up; the sidebar holds still.
+        // Putting Bot DM (5) higher than Bots directory (2) makes Bots → Bot DM glide forward
+        // (from right) and Back → Bots glide backward (from left).
         let page_key = if self.projects.home_open() {
             3
         } else if skills_open {
             4
+        } else if bots_open {
+            2
+        } else if self.active_bot().is_some() {
+            5
         } else {
             0
         };
@@ -337,6 +350,7 @@ impl Render for KeelWindow {
                         hero || exiting
                             || (!self.projects.home_open()
                                 && !skills_open
+                                && !bots_open
                                 && self.current_chat.is_some()
                                 && !self.state.ui_settings.chat_glow_off),
                         |d| {
@@ -357,11 +371,15 @@ impl Render for KeelWindow {
                                 d.opacity(opacity).left(zpx(dx))
                             })
                             .map(|d| {
+                                let active_bot = self.active_bot().cloned();
                                 if self.projects.home_open() {
                                     d.child(self.render_project_home(t, cx))
                                         .child(self.render_header(t, window, true, false, false, cx))
                                 } else if skills_open {
                                     d.child(self.render_skills_page(t, cx))
+                                        .child(self.render_header(t, window, true, false, false, cx))
+                                } else if bots_open {
+                                    d.child(self.render_bots_page(t, cx))
                                         .child(self.render_header(t, window, true, false, false, cx))
                                 } else if hero {
                                     let composer = self
@@ -369,6 +387,34 @@ impl Render for KeelWindow {
                                         .into_any_element();
                                     d.child(self.render_hero_center(composer, hero_gen, reduced))
                                         .child(self.render_header(t, window, true, false, false, cx))
+                                } else if let Some(bot) = active_bot {
+                                    // Wait until the chat subscription + initial snapshot have
+                                    // hydrated (`chat_stream.is_some()`) so switching to a bot
+                                    // with history never flashes `render_bot_welcome`, while a
+                                    // genuinely empty bot (like a newly hatched or cleared bot)
+                                    // immediately shows its welcome stage once hydrated.
+                                    let hydrated = self.chat_stream.is_some()
+                                        && !self.parse_in_flight
+                                        && self.dirty.is_empty();
+                                    let empty_dm = hydrated
+                                        && self.messages.is_empty()
+                                        && self.transcript.items.is_empty()
+                                        && !self.awaiting_first_output
+                                        && self.active_status() != Some(ChatStatus::Running);
+                                    let body = if empty_dm {
+                                        self.render_bot_welcome(bot.clone(), t, cx)
+                                    } else {
+                                        self.render_transcript(t, window, cx).into_any_element()
+                                    };
+                                    d.child(body)
+                                        .children(
+                                            self.transcript
+                                                .items
+                                                .is_empty()
+                                                .then(|| self.render_thinking(t))
+                                                .flatten(),
+                                        )
+                                        .child(self.render_bot_header(bot, t, window, cx))
                                 } else {
                                     d.child(self.render_transcript(t, window, cx).into_any_element())
                                         // The loader rides inline after the newest row; with
@@ -384,7 +430,7 @@ impl Render for KeelWindow {
                                 }
                             })
                             .children(page_timer)
-                            .when(!hero && !self.projects.home_open() && !skills_open, |d| {
+                            .when(!hero && !self.projects.home_open() && !skills_open && !bots_open, |d| {
                                 self.sync_chat_timeline(t, cx);
                                 if show_question {
                                     self.dock_h.set(0.);
@@ -392,9 +438,13 @@ impl Render for KeelWindow {
                                         .child(self.render_question_panel(t, window, cx).into_any_element())
                                         .child(self.timeline_view.clone());
                                 }
-                                let composer = self
-                                    .render_composer(t, window, false, cx)
-                                    .into_any_element();
+                                let composer = if let Some(bot) = self.active_bot().cloned() {
+                                    self.render_bot_composer(&bot, t, window, cx)
+                                        .into_any_element()
+                                } else {
+                                    self.render_composer(t, window, false, cx)
+                                        .into_any_element()
+                                };
                                 let composer = if exiting {
                                     self.render_composer_drop(composer, window, hero_gen, reduced)
                                 } else {
@@ -443,7 +493,10 @@ impl Render for KeelWindow {
             .children(self.render_sidebar_trigger(t, window, cx))
             .children(self.render_right_panel_trigger(
                 t,
-                hero || self.projects.home_open() || skills_open,
+                hero || self.projects.home_open()
+                    || skills_open
+                    || bots_open
+                    || self.active_bot().is_some(),
                 cx,
             ))
             .children(self.render_sidebar_peek(t, cx))
@@ -469,6 +522,9 @@ impl Render for KeelWindow {
             .children(self.render_update_confirm(t, cx))
             .children(self.render_project_modal(t, window, cx))
             .children(self.render_delete_projects_modal(t, cx))
+            .children(self.render_bot_customize_modal(t, window, cx))
+            .children(self.render_bot_info_modal(t, cx))
+            .children(self.render_delete_bot_modal(t, cx))
             .children(self.render_app_refresh_bar(t, window))
             .children(probe_end)
     }
@@ -740,14 +796,20 @@ impl KeelWindow {
         } else {
             1.0
         };
-        let tip_text = if open > 0.5 {
-            "Collapse sidebar (⌘B)"
-        } else {
-            "Expand sidebar (⌘B)"
+        let shortcut = crate::keys::display_for_id(
+            &self.state.ui_settings.shortcuts,
+            "toggle_sidebar",
+            crate::keys::current_os(),
+        );
+        let tip_text = match (open > 0.5, shortcut) {
+            (true, Some(k)) => format!("Collapse sidebar ({k})"),
+            (true, None) => "Collapse sidebar".to_string(),
+            (false, Some(k)) => format!("Expand sidebar ({k})"),
+            (false, None) => "Expand sidebar".to_string(),
         };
         let btn = icon_button("sidebar-toggle-btn", Icon::PanelLeft, t)
             .tooltip(move |_, cx| {
-                cx.new(|_| super::dotify_ui::Tip::new(tip_text, t))
+                cx.new(|_| super::dotify_ui::Tip::new(tip_text.clone(), t))
                     .into()
             })
             .tooltip_show_delay(crate::view::tooltip::delay())
@@ -784,13 +846,21 @@ impl KeelWindow {
         };
         let activity = self.right_panel_activity(t);
         let dot_vis = crate::motion::right_panel_trigger_vis(open_now);
+        let panel_key = crate::keys::display_for_id(
+            &self.state.ui_settings.shortcuts,
+            "toggle_right_panel",
+            crate::keys::current_os(),
+        );
+        let suffix = panel_key
+            .map(|k| format!(" ({k})"))
+            .unwrap_or_default();
         let tip_text = if open {
-            "Hide panel (⌘⌥B)".to_string()
+            format!("Hide panel{suffix}")
         } else {
             activity
                 .as_ref()
-                .map(|(_, _, hint)| format!("Open side panel — {hint} (⌘⌥B)"))
-                .unwrap_or_else(|| "Open side panel (⌘⌥B)".to_string())
+                .map(|(_, _, hint)| format!("Open side panel — {hint}{suffix}"))
+                .unwrap_or_else(|| format!("Open side panel{suffix}"))
         };
         let btn = icon_button("toggle-right-panel-btn", Icon::PanelRight, t)
             .relative()
@@ -1065,14 +1135,25 @@ impl KeelWindow {
                     .font_family(crate::style::MONO)
                     .child(format!("{percent}%")),
             )
-            .when(percent != 100, |d| {
-                d.child(
-                    div()
-                        .t_caption()
-                        .text_color(c(t.text_faint))
-                        .child("⌘0 resets"),
-                )
-            });
+            .when_some(
+                (percent != 100)
+                    .then(|| {
+                        crate::keys::display_for_id(
+                            &self.state.ui_settings.shortcuts,
+                            "zoom_reset",
+                            crate::keys::current_os(),
+                        )
+                    })
+                    .flatten(),
+                |d, key| {
+                    d.child(
+                        div()
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child(format!("{key} resets")),
+                    )
+                },
+            );
         let shown = move |p: f32| -> f32 {
             if p < fade_in && continuing {
                 1.
@@ -1597,21 +1678,40 @@ impl KeelWindow {
                 // Keep the end while rows remasure under the fade.
                 self.transcript.on_own_send();
                 self.transcript.scroll_to_bottom();
-                let t = at.elapsed().as_secs_f32() / crate::motion::FAST.as_secs_f32();
+                let t = at.elapsed().as_secs_f32() / crate::motion::BASE.as_secs_f32();
                 if reduced || t >= 1. {
                     self.chat_reveal = None;
                     1.
                 } else {
                     window.request_animation_frame();
-                    crate::motion::ease_out(t)
+                    crate::motion::ease_out_strong(t)
                 }
             }
             None => 1.,
         };
+        let reveal_dy = if reduced {
+            0.
+        } else {
+            5. * (1. - reveal_opacity)
+        };
         // Inline loader: the last line of the active turn, under the newest row.
-        // The collapsed trace line is the status once a step exists.
-        let trace_status = self.transcript.has_live_turn_summary();
-        let loader_row = (running && self.current_chat.is_some() && !trace_status)
+        // In Bot DMs, trace/thinking/tool rows are hidden; show the 3D creature + `•••`
+        // typing bubble while waiting for the bot to speak, and yield cleanly to the
+        // incoming reply bubble the moment visible assistant text arrives.
+        let is_bot_dm = self.active_bot().is_some();
+        let trace_status = !is_bot_dm && self.transcript.has_live_turn_summary();
+        let bot_waiting_for_reply = is_bot_dm
+            && self.transcript.items.last().is_none_or(|last| {
+                last.role == "user"
+                    || crate::transcript::is_bot_hidden_trace_block(&last.block)
+            });
+        let loader_row = (running
+            && self.current_chat.is_some()
+            && if is_bot_dm {
+                bot_waiting_for_reply
+            } else {
+                !trace_status
+            })
             .then(|| self.transcript.items.len().checked_sub(1))
             .flatten();
         // The loader fades and rises in when a run starts (not when it hops
@@ -1728,9 +1828,10 @@ impl KeelWindow {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .when(self.current_chat.is_some() && self.transcript.items.is_empty(), |d| {
-                d.child(self.render_empty_chat(t))
-            })
+            .when(
+                self.current_chat.is_some() && !is_bot_dm && self.transcript.items.is_empty(),
+                |d| d.child(self.render_empty_chat(t)),
+            )
             .when(self.current_chat.is_some(), |d| {
                 // No scroll from render: the list's Tail follow mode keeps the
                 // latest row in view during layout, only while following.
@@ -1771,6 +1872,12 @@ impl KeelWindow {
                 let column = self.column_max();
                 let open_lines = self.open_lines_rc();
                 let citations = self.transcript.citations_map();
+                let bot_theme = self.active_bot().map(|bot| crate::transcript::BotChatTheme {
+                    id: bot.id.clone(),
+                    name: bot.name.clone(),
+                    appearance: bot.appearance,
+                    is_creator: bot.is_creator(),
+                });
                 let sync_key = TranscriptSyncKey {
                     items_gen,
                     tokens: t,
@@ -1805,6 +1912,7 @@ impl KeelWindow {
                     loader_seed: self.loader_seed,
                     loader_verbs_ptr: self.loader_verbs.as_ptr() as usize,
                     loader_look: look,
+                    bot_theme: bot_theme.clone(),
                 };
                 let frame_now = std::time::Instant::now();
                 let transcript_animating = look.is_some() || loader_row.is_some();
@@ -1874,7 +1982,8 @@ impl KeelWindow {
                                 | RowAction::PlanToggleModeMenu { .. }
                                 | RowAction::PlanSetManual { .. }
                                 | RowAction::PlanSetMode { .. }
-                                | RowAction::OpenSubagent { .. } = &action
+                                | RowAction::OpenSubagent { .. }
+                                | RowAction::CustomizeBot { .. } = &action
                             {
                                 let weak = weak.clone();
                                 cx.defer(move |cx| {
@@ -1886,6 +1995,7 @@ impl KeelWindow {
                                             RowAction::ResumeRetry => view.retry_last_prompt(window, cx),
                                             RowAction::ResumeStartFresh => view.start_fresh_prompt(window, cx),
                                             RowAction::OpenSubagent { subagent_id } => view.open_subagent_in_panel(&subagent_id, window, cx),
+                                            RowAction::CustomizeBot { bot_id } => view.open_bot_customizer(&bot_id, window, cx),
                                             other => view.plan_action(other, window, cx),
                                         })
                                     });
@@ -1936,7 +2046,8 @@ impl KeelWindow {
                                         cx.notify();
                                     }
                                 }
-                                RowAction::OpenSubagent { .. } => {}
+                                RowAction::OpenSubagent { .. } | RowAction::CustomizeBot { .. } => {}
+                                RowAction::OpenBot { bot_id } => view.open_bot(&bot_id, cx),
                                 RowAction::Choose { text } => view.choose(text, cx),
                                 RowAction::OpenUrl { url } => cx.open_url(&url),
                                 RowAction::Merge { row_id, message_id, part_id } => view.merge_mr(row_id, message_id, part_id, cx),
@@ -2014,6 +2125,7 @@ impl KeelWindow {
                                 })
                                 .collect(),
                         ),
+                        bot_theme,
                         probe: self.geo_trace.on.get().then(|| {
                             let tr = self.geo_trace.clone();
                             std::rc::Rc::new(move |which: crate::transcript::RowProbe| match which {
@@ -2041,6 +2153,8 @@ impl KeelWindow {
                     // Full-height list so scrolled rows travel under the overlaid
                     // header; row 0 carries `HEADER_HEIGHT + pt_6` top padding.
                     div()
+                        .relative()
+                        .top(zpx(reveal_dy))
                         .h_full()
                         .w_full()
                         .opacity(reveal_opacity)
@@ -3428,14 +3542,34 @@ impl KeelWindow {
         if self.active_status() != Some(ChatStatus::Running) {
             return None;
         }
-        let (since, seed) = self.loader_seed;
-        let loader = InlineLoader {
-            tokens: t,
-            verbs: self.loader_verbs,
-            since,
-            seed,
-            reduced: self.reduced(),
-            look: None,
+        let body = if let Some(bot) = self.active_bot() {
+            crate::motion::appear(
+                div().w_full().child(crate::creature::render_bot_typing_loader(
+                    &bot.id,
+                    bot.appearance,
+                    bot.is_creator(),
+                    self.clock_epoch,
+                    t,
+                    self.reduced(),
+                    None,
+                )),
+                ("bot-thinking-in", self.chat_gen as usize),
+                crate::motion::BASE,
+                5.,
+                self.reduced(),
+            )
+            .into_any_element()
+        } else {
+            let (since, seed) = self.loader_seed;
+            let loader = InlineLoader {
+                tokens: t,
+                verbs: self.loader_verbs,
+                since,
+                seed,
+                reduced: self.reduced(),
+                look: None,
+            };
+            loader.render(None, self.clock_epoch)
         };
         // Same column as the transcript list; the loader brings the rows' `px_4`.
         // Clear of the floating composer.
@@ -3445,12 +3579,7 @@ impl KeelWindow {
                 .pb(px(self.dock_h.get()))
                 .flex()
                 .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(self.column_max())
-                        .child(loader.render()),
-                ),
+                .child(div().w_full().max_w(self.column_max()).child(body)),
         )
     }
 
@@ -3633,8 +3762,23 @@ pub(super) struct InlineLoader {
 }
 
 impl InlineLoader {
-    pub(super) fn render(self) -> gpui::AnyElement {
+    pub(super) fn render(
+        self,
+        bot: Option<&crate::transcript::BotChatTheme>,
+        clock_epoch: std::time::Instant,
+    ) -> gpui::AnyElement {
         let t = self.tokens;
+        if let Some(bot) = bot {
+            return crate::creature::render_bot_typing_loader(
+                &bot.id,
+                bot.appearance,
+                bot.is_creator,
+                clock_epoch,
+                t,
+                self.reduced,
+                self.look,
+            );
+        }
         // The grid's animation re-renders every frame, so the verb and timer tick on their own.
         let verb = self.verbs[(self.seed + (self.since.elapsed().as_secs() / VERB_SECS) as usize)
             % self.verbs.len()];

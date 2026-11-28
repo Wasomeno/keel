@@ -4032,3 +4032,109 @@ fn provider_credential_rpcs_validate_and_clear_model_cache() {
         ]
     );
 }
+
+#[test]
+fn bots_rpc_lifecycle_and_dr_keelee_protection() {
+    let tmp = Tmp::new("bots-rpc");
+    let clock = Arc::new(ManualClock::new(5_000));
+    let harness = Arc::new(MockHarness::echo());
+    let store = DocsStore::open(tmp.path().join("profile")).expect("store");
+    let engine = Engine::open(EngineConfig {
+        store,
+        device_id: DEVICE.to_string(),
+        scope: "local".to_string(),
+        clock,
+        harnesses: vec![harness],
+        compaction_bytes: COMPACTION_BYTES,
+    });
+    let (outbound, _rx) = Outbound::pair();
+    let call = |method: &str, params: Value| -> Value {
+        let req = RpcRequest {
+            id: "b1".into(),
+            method: method.into(),
+            params,
+        };
+        serde_json::from_str(&engine.handle(&req, &outbound).expect("sync reply")).unwrap()
+    };
+
+    // 1. Default list always has built-in Dr. Keelee with Doctor attire + Einstein hair & mustache.
+    let listed = call("bots_list", json!({}));
+    let bots = listed["result"]["bots"].as_array().expect("bots array");
+    assert_eq!(bots.len(), 1);
+    assert_eq!(bots[0]["id"], json!("dr-keelee"));
+    assert_eq!(bots[0]["name"], json!("Dr. Keelee"));
+    assert_eq!(bots[0]["appearance"]["attire"], json!("doctor"));
+    assert_eq!(bots[0]["appearance"]["hair"], json!("einstein"));
+    assert_eq!(bots[0]["appearance"]["mustache"], json!("einstein"));
+
+    // 2. Dr. Keelee cannot be deleted.
+    let del_dr = call("bots_delete", json!({ "id": "dr-keelee" }));
+    assert_eq!(del_dr["error"]["code"], json!("bad_params"));
+
+    // 3. Newly created bot always starts as the default naked creature + gets a 1:1 DM chat.
+    let created = call(
+        "bots_create",
+        json!({
+            "name": "Scout",
+            "tagline": "Strict PR reviewer",
+            "system_prompt": "Review PRs tersely.",
+            "anti_jobs": ["never bikeshed formatting"]
+        }),
+    );
+    let bot_id = created["result"]["bot_id"].as_str().expect("bot_id").to_string();
+    let chat_id = created["result"]["chat_id"].as_str().expect("chat_id").to_string();
+    assert_eq!(bot_id, "scout");
+    assert!(!chat_id.is_empty());
+
+    let listed = call("bots_list", json!({}));
+    let scout = &listed["result"]["bots"][1];
+    assert_eq!(scout["appearance"]["attire"], json!("naked"));
+    assert_eq!(scout["appearance"]["hair"], json!("none"));
+    assert_eq!(scout["appearance"]["mustache"], json!("none"));
+    assert_eq!(scout["appearance"]["size"], json!("medium"));
+
+    // 4. Customizer updates name + appearance (color, attire, eyes, hair, mustache, size).
+    let updated = call(
+        "bots_update",
+        json!({
+            "id": bot_id,
+            "name": "Captain Scout",
+            "appearance": {
+                "color": "indigo",
+                "attire": "cape",
+                "eyes": "shades",
+                "hair": "mohawk",
+                "mustache": "handlebar",
+                "size": "large"
+            }
+        }),
+    );
+    assert_eq!(updated["result"]["bot"]["name"], json!("Captain Scout"));
+    assert_eq!(updated["result"]["bot"]["appearance"]["color"], json!("indigo"));
+    assert_eq!(updated["result"]["bot"]["appearance"]["attire"], json!("cape"));
+    assert_eq!(updated["result"]["bot"]["appearance"]["size"], json!("large"));
+
+    // 5. Resetting DM creates a fresh 1:1 chat id while preserving per-bot OptMem data.
+    let scout_mem_dir = tmp.path().join("profile").join("bots").join("scout").join("memory");
+    std::fs::create_dir_all(&scout_mem_dir).expect("create bot memory dir");
+    let scout_log = scout_mem_dir.join("LOG.txt");
+    std::fs::write(&scout_log, "entry-1\n").expect("write bot LOG.txt");
+
+    let reset = call("bots_ensure_chat", json!({ "id": "scout", "reset": true }));
+    let new_chat_id = reset["result"]["chat_id"].as_str().expect("new chat_id");
+    assert_ne!(new_chat_id, chat_id);
+    assert!(
+        scout_log.exists(),
+        "resetting a bot DM thread must preserve its persistent memory directory"
+    );
+
+    // 6. Deleting created bot succeeds, cleans up its bots/<id>/ directory, and leaves only Dr. Keelee.
+    let deleted = call("bots_delete", json!({ "id": "scout" }));
+    assert_eq!(deleted["result"]["deleted"], json!("scout"));
+    assert!(
+        !tmp.path().join("profile").join("bots").join("scout").exists(),
+        "deleting a bot must clean up its bots/<id>/ memory directory"
+    );
+    let final_list = call("bots_list", json!({}));
+    assert_eq!(final_list["result"]["bots"].as_array().unwrap().len(), 1);
+}

@@ -1,5 +1,6 @@
 //! The Keel window: state and behavior here, rendering split by region.
 
+mod bots;
 mod browser_panel;
 mod chat_timeline;
 mod composer_todo;
@@ -58,6 +59,60 @@ use crate::markdown::{ImageRef, MessageBlockState, TranscriptBlock};
 use crate::state::{AppState, ChatItem};
 use crate::style::c;
 use crate::transcript::TranscriptState;
+
+/// In Bot 1:1 DMs, group consecutive prose/markdown blocks of an assistant turn
+/// into a single unified bubble (`TranscriptBlock::UserMessage`) instead of wrapping
+/// every paragraph, heading, and list in its own separate bubble. Interactive cards
+/// (Choices, completed `create_bot` Hatched cards, etc.) remain standalone.
+fn group_bot_reply_rows(head: &str, rows: Vec<TranscriptBlock>) -> Vec<TranscriptBlock> {
+    fn is_bubble_prose(block: &TranscriptBlock) -> bool {
+        match block {
+            TranscriptBlock::Paragraph { .. }
+            | TranscriptBlock::Heading { .. }
+            | TranscriptBlock::List { .. }
+            | TranscriptBlock::Quote { .. }
+            | TranscriptBlock::Rule { .. }
+            | TranscriptBlock::Table { .. }
+            | TranscriptBlock::Code { .. } => true,
+            TranscriptBlock::Interim(inner) => is_bubble_prose(inner),
+            _ => false,
+        }
+    }
+
+    let mut out = Vec::with_capacity(rows.len());
+    let mut group: Vec<TranscriptBlock> = Vec::new();
+    let mut group_ix = 0usize;
+
+    let flush = |group: &mut Vec<TranscriptBlock>, out: &mut Vec<TranscriptBlock>, group_ix: &mut usize| {
+        if group.is_empty() {
+            return;
+        }
+        let blocks = std::mem::take(group);
+        out.push(TranscriptBlock::UserMessage {
+            id: format!("{head}#bot-bubble-{}", *group_ix),
+            text: String::new(),
+            blocks,
+        });
+        *group_ix += 1;
+    };
+
+    for row in rows {
+        if is_bubble_prose(&row) {
+            group.push(row);
+        } else {
+            // Hidden bot trace rows (TurnSummary, Reasoning, non-hatched ToolGroup)
+            // are skipped without splitting a single reply into separate bubbles.
+            if crate::transcript::is_bot_hidden_trace_block(&row) {
+                out.push(row);
+            } else {
+                flush(&mut group, &mut out, &mut group_ix);
+                out.push(row);
+            }
+        }
+    }
+    flush(&mut group, &mut out, &mut group_ix);
+    out
+}
 
 /// One message of the active chat: role plus its incremental block parse.
 struct MsgEntry {
@@ -361,6 +416,7 @@ pub struct KeelWindow {
     geo_trace: std::rc::Rc<dev::GeoTrace>,
     /// Named groups of folders (`{data_dir}/projects.json`).
     projects: projects::Projects,
+    bots: bots::BotsUi,
     /// New-chat hero: shown last frame, when it last went away (for the
     /// composer's drop to the bottom), and a counter naming its animations.
     was_hero: bool,
@@ -449,6 +505,10 @@ pub struct KeelWindow {
     /// Settings → Skills, and the filter field on that drill-in.
     skills: settings::SkillsPage,
     skills_filter: Entity<InputState>,
+    shortcuts_filter: Entity<InputState>,
+    shortcut_recording: Option<settings::ShortcutRecordingState>,
+    shortcut_reset_confirm: Option<u64>,
+    bots_filter: Entity<InputState>,
     /// Settings → Memory.
     memory: settings::MemoryPage,
     /// Settings → Updates and the relaunch flow (`updates.rs`).
@@ -765,6 +825,9 @@ impl KeelWindow {
                 .placeholder("Empty allows every site · e.g. github.com, localhost:3000")
         });
         let skills_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name"));
+        let shortcuts_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search shortcuts"));
+        let bots_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search bots"));
         let memory_desc =
             cx.new(|cx| InputState::new(window, cx).placeholder("One line shown in the index"));
         let memory_body = cx.new(|cx| {
@@ -866,6 +929,32 @@ impl KeelWindow {
                 },
             ),
             cx.subscribe_in(
+                &shortcuts_filter,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if let InputEvent::Change = event {
+                        this.shortcut_recording = None;
+                        this.shortcut_reset_confirm = None;
+                        this.dotify
+                            .settings_scroll
+                            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+                    }
+                    cx.notify()
+                },
+            ),
+            cx.subscribe_in(
+                &bots_filter,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if let InputEvent::Change = event {
+                        this.bots
+                            .page_scroll
+                            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+                    }
+                    cx.notify()
+                },
+            ),
+            cx.subscribe_in(
                 &picker_filter,
                 window,
                 |this, _, event: &InputEvent, _, cx| {
@@ -950,19 +1039,28 @@ impl KeelWindow {
             }),
         ];
         // Global keystroke interceptors ahead of all focus, sheets, and inputs:
-        // ⌘, toggles Settings (both opening and closing).
+        // Active shortcut recorder captures the next keystroke before any binding runs.
+        // OpenSettings shortcut (default ⌘,) toggles Settings (both opening and closing).
         // Model menu navigates search/selection while open.
         let weak = cx.entity().downgrade();
         let mut subscriptions = subscriptions;
         subscriptions.push(cx.intercept_keystrokes(move |event, window, cx| {
             let Some(this) = weak.upgrade() else { return };
             let ks = &event.keystroke;
-            if ks.key == ","
-                && ks.modifiers.secondary(cx)
-                && !ks.modifiers.shift
-                && !ks.modifiers.alt
-                && !ks.modifiers.control
-            {
+            if this.read(cx).is_recording_shortcut() {
+                this.update(cx, |this, cx| {
+                    this.handle_shortcut_record_keystroke(ks, cx)
+                });
+                cx.stop_propagation();
+                return;
+            }
+            let os = cx.platform_info().os;
+            if crate::keys::matches_shortcut(
+                &this.read(cx).state.ui_settings.shortcuts,
+                "open_settings",
+                ks,
+                os,
+            ) {
                 this.update(cx, |this, cx| this.toggle_settings(cx));
                 cx.stop_propagation();
                 return;
@@ -1173,6 +1271,7 @@ impl KeelWindow {
         }
         let timer = crate::timer::SessionTimer::load(&state.data_dir);
         let projects = projects::Projects::load(&state.data_dir);
+        let bots = bots::BotsUi::load(&state.data_dir);
         let transcript = TranscriptState::new(reduced);
         let dock_h: std::rc::Rc<std::cell::Cell<f32>> = Default::default();
         let hovered_row: std::rc::Rc<RowHover> = Default::default();
@@ -1388,6 +1487,7 @@ impl KeelWindow {
             frame_now: Default::default(),
             geo_trace: Default::default(),
             projects,
+            bots,
             sidebar_from: 0.,
             right_panel_anim: None,
             right_panel_from: 0.,
@@ -1439,6 +1539,10 @@ impl KeelWindow {
             switch_gen: 0,
             skills: settings::SkillsPage::default(),
             skills_filter,
+            shortcuts_filter,
+            shortcut_recording: None,
+            shortcut_reset_confirm: None,
+            bots_filter,
             memory: settings::MemoryPage::default(),
             updates: updates::UpdateUi::default(),
             memory_desc,
@@ -2217,8 +2321,11 @@ impl KeelWindow {
             .unwrap_or(&[keel_proto::PermissionMode::Ask])
     }
 
-    /// The picked mode if this harness has it, else Ask.
+    /// The picked mode if this harness has it, else Ask. Bot DMs always run with FullAccess.
     fn effective_permission(&self) -> keel_proto::PermissionMode {
+        if self.active_bot().is_some() {
+            return keel_proto::PermissionMode::FullAccess;
+        }
         Some(self.selected_permission)
             .filter(|m| self.permission_modes().contains(m))
             .unwrap_or_default()
@@ -2462,6 +2569,11 @@ impl KeelWindow {
     fn on_stream_item(&mut self, item: RpcStreamItem, cx: &mut Context<Self>) {
         match &item.event {
             SubscribeEvent::MirrorDiff { path, view, .. } => {
+                if path == "bots" {
+                    self.bots.update_from_view(view);
+                    cx.notify();
+                    return;
+                }
                 if let Some(id) = path.strip_prefix("spaces.") {
                     self.state.update_space_from_view(id, view);
                     cx.notify();
@@ -3048,6 +3160,9 @@ impl KeelWindow {
             if file_changes.is_empty() {
                 rows.extend(chips);
             }
+        }
+        if self.active_bot().is_some() {
+            rows = group_bot_reply_rows(&head, rows);
         }
         let later = self.later_messages(&head);
         self.transcript
@@ -3674,7 +3789,12 @@ impl KeelWindow {
     }
 
     /// Open, update or close the `@` menu from the text before the caret.
+    /// Disabled in Bot DMs (no `/` skill calls or `@` file referencing).
     fn update_mention(&mut self, cx: &mut Context<Self>) {
+        if self.active_bot().is_some() {
+            self.mention = None;
+            return;
+        }
         let (text, cursor) = {
             let input = self.composer.read(cx);
             (input.value().to_string(), input.cursor())
@@ -4994,6 +5114,20 @@ impl KeelWindow {
 
     // ── Sessions, spaces, chats ─────────────────────────────────────────
 
+    /// Open the new-chat screen using the active chat's folder when configured.
+    pub(super) fn start_new_chat(&mut self, cx: &mut Context<Self>) {
+        if self.state.inherit_active_chat_folder() {
+            self.projects.picked = self
+                .state
+                .active_tab
+                .as_deref()
+                .filter(|_| !self.state.new_chat_no_project)
+                .and_then(|chat| self.projects.chat_project_id(chat));
+            self.create_error = None;
+        }
+        self.create_new_session(None, cx);
+    }
+
     /// "+" / ⌘N: the new-chat screen. The chat itself is created on the
     /// first send, in the folder picked there (or the filtered / newest
     /// space); with no folder, in an isolated per-chat scratch directory.
@@ -5013,7 +5147,7 @@ impl KeelWindow {
         }
     }
 
-    /// Leave Settings / project home / skills page for the chat area. Settings stays painted
+    /// Leave Settings / project home / skills / bots page for the chat area. Settings stays painted
     /// for one leave so it can exit.
     pub(super) fn close_pages(&mut self) {
         self.begin_settings_exit();
@@ -5024,6 +5158,8 @@ impl KeelWindow {
         self.skills.modal_catalog = None;
         self.skills.creator_menu_open = false;
         self.skills.category_menu_open = false;
+        self.bots.page_open = false;
+        self.bots.card_menu_bot = None;
     }
 
     pub(super) fn begin_settings_exit(&mut self) {

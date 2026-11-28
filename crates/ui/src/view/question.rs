@@ -489,12 +489,21 @@ impl KeelWindow {
                     .border_color(ink(t, 0.4)),
             )
             .child("Stop run")
-            .child(
-                div()
-                    .font_family(MONO)
-                    .text_size(zpx(11.))
-                    .text_color(ink(t, 0.25))
-                    .child("⌘."),
+            .when_some(
+                crate::keys::display_for_id(
+                    &self.state.ui_settings.shortcuts,
+                    "stop_run",
+                    crate::keys::current_os(),
+                ),
+                |d, key| {
+                    d.child(
+                        div()
+                            .font_family(MONO)
+                            .text_size(zpx(11.))
+                            .text_color(ink(t, 0.25))
+                            .child(key),
+                    )
+                },
             )
             .when(live, |d| {
                 d.cursor_pointer()

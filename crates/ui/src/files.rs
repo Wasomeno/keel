@@ -133,6 +133,7 @@ pub fn may_write_files(name: &str, state: &str) -> bool {
             | "todowrite"
             | "todo_write"
             | "todoread"
+            | "script_tools"
             | "ask_user"
             | "question"
     ) || keel_proto::UI_TOOLS

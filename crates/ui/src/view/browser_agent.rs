@@ -33,6 +33,41 @@ const WAIT_MAX: Duration = Duration::from_secs(30);
 const UPLOAD_WAIT: Duration = Duration::from_secs(2);
 /// The fallback (setting files from script) reads at most this much.
 const UPLOAD_MAX_BYTES: u64 = 20 * 1024 * 1024;
+/// Grace window after an agent browser op finishes so consecutive tool calls
+/// don't flicker the control HUD in and out.
+pub(super) const AGENT_SETTLE_GRACE: Duration = Duration::from_secs(3);
+/// Returned to the agent when the user has taken manual control of the tab.
+const TAKEOVER_BLOCKED_MSG: &str = "The user took over control of the browser tab. Wait for the user to hand control back before using browser tools.";
+
+/// Who currently owns the browser tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BrowserControlState {
+    /// Normal user browsing, or an agent tab whose grace window has elapsed.
+    None,
+    /// Agent is actively running/queued on the tab, holding a dialog, or settling.
+    AgentInControl { busy: bool },
+    /// User explicitly took over; agent browser requests are blocked until hand-back.
+    UserTakeover,
+}
+
+pub(super) fn friendly_op_label(op: &str) -> &'static str {
+    match op {
+        "navigate" => "Navigating",
+        "snapshot" => "Inspecting",
+        "click" => "Clicking",
+        "type" => "Typing",
+        "select" => "Selecting",
+        "press" => "Pressing key",
+        "scroll" => "Scrolling",
+        "wait_for" => "Waiting",
+        "handle_dialog" => "Handling dialog",
+        "upload" => "Uploading",
+        "screenshot" => "Capturing",
+        "console" => "Reading console",
+        "open_pane" => "Opening pane",
+        _ => "Working",
+    }
+}
 
 /// A chat's hold on a tab.
 pub(super) struct AgentTab {
@@ -47,6 +82,12 @@ pub(super) struct AgentTab {
     dialog: Option<(DialogInfo, Instant)>,
     /// Last agent use (for unloading idle pages).
     pub(super) used: Instant,
+    /// User took manual control; further agent ops fail until handed back.
+    pub(super) user_takeover: bool,
+    /// Friendly label of the currently running op, if any.
+    pub(super) active_op: Option<&'static str>,
+    /// Settle grace deadline after the last job ended without takeover.
+    pub(super) control_until: Option<Instant>,
 }
 
 impl AgentTab {
@@ -59,11 +100,28 @@ impl AgentTab {
             notes: Vec::new(),
             dialog: None,
             used: Instant::now(),
+            user_takeover: false,
+            active_op: None,
+            control_until: None,
         }
     }
 
     pub(super) fn busy(&self) -> bool {
         self.job.is_some() || !self.queue.is_empty()
+    }
+
+    pub(super) fn control_state(&self, now: Instant) -> BrowserControlState {
+        if self.user_takeover {
+            return BrowserControlState::UserTakeover;
+        }
+        let active = self.busy() || self.dialog.is_some();
+        if active {
+            BrowserControlState::AgentInControl { busy: true }
+        } else if self.control_until.is_some_and(|until| now < until) {
+            BrowserControlState::AgentInControl { busy: false }
+        } else {
+            BrowserControlState::None
+        }
     }
 }
 
@@ -348,15 +406,20 @@ impl KeelWindow {
                     tracing::info!(target: "keel_ui::browser", chat = %a.chat, "browser job cancelled");
                     this.finish_job(ix, Err("cancelled".into()), window, cx);
                 }
+                if let Some(a) = this.browser.tabs[ix].agent.as_mut()
+                    && !a.busy()
+                    && a.dialog.is_none()
+                {
+                    a.active_op = None;
+                    a.control_until = None;
+                }
             }
+            cx.notify();
         });
     }
 
     /// Find or make the chat's tab and queue the request on it.
     fn route_request(&mut self, req: HostRequest, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.agent_at = Some(Instant::now());
-        self.schedule_browser_park(cx);
-        cx.notify();
         if self.browser_off(&req.chat) {
             return Self::reply_browser(
                 req.client,
@@ -365,6 +428,22 @@ impl KeelWindow {
                 cx,
             );
         }
+        if let Some(ix) = self.agent_tab_ix(&req.chat)
+            && self.browser.tabs[ix]
+                .agent
+                .as_ref()
+                .is_some_and(|a| a.user_takeover)
+        {
+            return Self::reply_browser(
+                req.client,
+                req.request_id,
+                Err(TAKEOVER_BLOCKED_MSG.into()),
+                cx,
+            );
+        }
+        self.browser.agent_at = Some(Instant::now());
+        self.schedule_browser_park(cx);
+        cx.notify();
         let ix = match self.agent_tab_ix(&req.chat) {
             Some(ix) => ix,
             None => {
@@ -439,6 +518,21 @@ impl KeelWindow {
     ) {
         self.browser.agent_at = Some(Instant::now());
         let op = req.op.clone();
+        if self
+            .browser
+            .tabs
+            .get(ix)
+            .and_then(|t| t.agent.as_ref())
+            .is_some_and(|a| a.user_takeover)
+        {
+            self.set_job(ix, req, Stage::Settle(Instant::now()));
+            return self.finish_job(ix, Err(TAKEOVER_BLOCKED_MSG.into()), window, cx);
+        }
+        if let Some(a) = self.browser.tabs.get_mut(ix).and_then(|t| t.agent.as_mut()) {
+            a.control_until = None;
+            a.active_op = Some(friendly_op_label(&op));
+        }
+        cx.notify();
         if self.browser_off(&req.chat) {
             self.set_job(ix, req, Stage::Settle(Instant::now()));
             return self.finish_job(
@@ -763,6 +857,7 @@ impl KeelWindow {
         tracing::debug!(target: "keel_ui::browser", op = %job.req.op, ms = job.started.elapsed().as_millis() as u64, ok = result.is_ok(), "browser job done");
         Self::reply_browser(job.req.client, job.req.request_id, result, cx);
         self.pump(ix, window, cx);
+        self.note_agent_idle(ix, cx);
     }
 
     fn pump(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -775,6 +870,115 @@ impl KeelWindow {
         if let Some(next) = next {
             self.start_job(ix, next, window, cx);
         }
+    }
+
+    /// Arm the settle grace window when an agent tab finishes its current queue.
+    fn note_agent_idle(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.browser.tabs.get_mut(ix) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let Some(a) = tab.agent.as_mut() else {
+            return;
+        };
+        if a.busy() || a.user_takeover {
+            return;
+        }
+        a.active_op = None;
+        let until = Instant::now() + AGENT_SETTLE_GRACE;
+        a.control_until = Some(until);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(AGENT_SETTLE_GRACE + Duration::from_millis(25))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(tab_ix) = this.browser.tab_ix(tab_id)
+                    && let Some(a) = this.browser.tabs[tab_ix].agent.as_mut()
+                    && a.control_until == Some(until)
+                {
+                    a.control_until = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// User clicked "Take over": cancel active/queued agent ops, release agent
+    /// restrictions on the page, and lock this tab to manual control.
+    pub(super) fn take_over_browser_tab(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.browser.tabs.get_mut(ix) else {
+            return;
+        };
+        let mut cancelled = Vec::new();
+        let mut had_shot_full = None;
+        let mut had_upload = false;
+        let mut had_dialog = false;
+        if let Some(a) = tab.agent.as_mut() {
+            a.user_takeover = true;
+            a.active_op = None;
+            a.control_until = None;
+            had_dialog = a.dialog.take().is_some();
+            if let Some(job) = a.job.take() {
+                if let Stage::Shot(shot) = &job.stage {
+                    had_shot_full = shot.full;
+                }
+                if matches!(
+                    job.stage,
+                    Stage::Upload { .. } | Stage::Eval(_, EvalKind::UploadTarget)
+                ) {
+                    had_upload = true;
+                }
+                cancelled.push(job.req);
+            }
+            cancelled.extend(a.queue.clear());
+        }
+        if let Some(native) = &tab.native {
+            if let Some(full) = had_shot_full {
+                native.finish_full_page(full.sx, full.sy);
+            }
+            if had_upload {
+                native.set_upload(None);
+            }
+            if had_dialog {
+                native.answer_dialog(false, None);
+            }
+            native.set_background(false);
+            native.set_agent(false, &[]);
+        }
+        for req in cancelled {
+            Self::reply_browser(req.client, req.request_id, Err(TAKEOVER_BLOCKED_MSG.into()), cx);
+        }
+        if ix == self.browser.active {
+            window.focus(&self.browser.focus, cx);
+        }
+        tracing::info!(target: "keel_ui::browser", tab_id = tab.id, "user took over browser tab");
+        cx.notify();
+    }
+
+    /// User clicked "Hand back": unlock the tab so the agent can drive it again.
+    pub(super) fn hand_back_browser_tab(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.browser.tabs.get_mut(ix) else {
+            return;
+        };
+        if let Some(a) = tab.agent.as_mut() {
+            a.user_takeover = false;
+            a.active_op = None;
+            a.control_until = None;
+        }
+        tracing::info!(target: "keel_ui::browser", tab_id = tab.id, "user handed browser tab back to agent");
+        cx.notify();
     }
 
     /// Fail every request a tab holds: it went away.
@@ -1361,6 +1565,7 @@ impl KeelWindow {
             a.job = None;
         }
         self.pump(ix, window, cx);
+        self.note_agent_idle(ix, cx);
     }
 
     /// A screenshot failed: the job replies with the error.
@@ -1476,5 +1681,39 @@ mod tests {
         assert!(!url_matches("https://a.io/cart", "*/orders/*"));
         assert!(url_matches("https://a.io/done", "*done"));
         assert!(!url_matches("https://a.io/done/x", "*done"));
+    }
+
+    #[test]
+    fn agent_tab_control_state_transitions() {
+        let now = Instant::now();
+        let mut tab = AgentTab::new("chat-1".into());
+        assert_eq!(tab.control_state(now), BrowserControlState::None);
+
+        // Settle grace keeps the indicator steady between consecutive tool calls.
+        tab.control_until = Some(now + AGENT_SETTLE_GRACE);
+        assert_eq!(
+            tab.control_state(now),
+            BrowserControlState::AgentInControl { busy: false }
+        );
+        assert_eq!(
+            tab.control_state(now + AGENT_SETTLE_GRACE),
+            BrowserControlState::None
+        );
+
+        // User takeover overrides agent control and persists until handed back.
+        tab.user_takeover = true;
+        assert_eq!(tab.control_state(now), BrowserControlState::UserTakeover);
+
+        tab.user_takeover = false;
+        tab.control_until = None;
+        assert_eq!(tab.control_state(now), BrowserControlState::None);
+    }
+
+    #[test]
+    fn friendly_op_labels_cover_browser_tools() {
+        assert_eq!(friendly_op_label("navigate"), "Navigating");
+        assert_eq!(friendly_op_label("click"), "Clicking");
+        assert_eq!(friendly_op_label("screenshot"), "Capturing");
+        assert_eq!(friendly_op_label("unknown_op"), "Working");
     }
 }

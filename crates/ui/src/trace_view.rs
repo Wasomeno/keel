@@ -154,10 +154,11 @@ pub fn line_fold(
 }
 
 fn has_body(step: &TraceStep) -> bool {
+    if !step.children.is_empty() {
+        return true;
+    }
     match &step.body {
-        StepBody::None | StepBody::Shots(_) | StepBody::Terminal { .. } => {
-            !step.children.is_empty()
-        }
+        StepBody::None | StepBody::Shots(_) | StepBody::Terminal { .. } => false,
         StepBody::Output { tail, .. } => !tail.trim().is_empty(),
         StepBody::Text(text) => !text.trim().is_empty(),
         StepBody::Plan(entries) => !entries.is_empty(),
@@ -782,28 +783,42 @@ fn fold_clip(el: gpui::Div, line_id: &str, est: f32, fold: Fold, rc: &RowContext
 /// The fold's height before its body has been measured.
 fn body_height(step: &TraceStep) -> f32 {
     let pad = 8. + 2.;
-    match &step.body {
-        StepBody::Output { tail, .. } => {
-            (tail.lines().count().max(1) as f32 * 16. + 16. + 2. + 16.)
-                .min(code_block::COMPACT_CAP + 2.)
-                + pad
-        }
+    let children_h = if step.children.is_empty() {
+        0.
+    } else {
+        step.children.len() as f32 * LINE_H
+    };
+    let main_h = match &step.body {
+        StepBody::Output { tail, .. } if !tail.trim().is_empty() => (tail.lines().count().max(1)
+            as f32
+            * 16.
+            + 16.
+            + 2.
+            + 16.)
+            .min(code_block::COMPACT_CAP + 2.),
         StepBody::Diff { new, old, .. } => {
             let n = new.lines().count() + old.as_deref().map_or(0, |o| o.lines().count());
-            (n.max(1) as f32 * 16. + 18.).min(code_block::COMPACT_CAP + 2.) + pad
+            (n.max(1) as f32 * 16. + 18.).min(code_block::COMPACT_CAP + 2.)
         }
         StepBody::Text(text) => {
             text.lines()
                 .map(|l| l.chars().count() / 90 + 1)
                 .sum::<usize>() as f32
                 * 16.
-                + pad
         }
-        StepBody::Plan(entries) => entries.len() as f32 * LINE_H + pad,
-        StepBody::Links(links) => links.len().max(1) as f32 * LINE_H + pad,
-        StepBody::Browser(b) => b.rows.len() as f32 * BROWSER_ROW_H + BROWSER_ROW_H + 4. + pad,
-        _ => step.children.len().max(1) as f32 * LINE_H + pad,
-    }
+        StepBody::Plan(entries) => entries.len() as f32 * LINE_H,
+        StepBody::Links(links) => links.len().max(1) as f32 * LINE_H,
+        StepBody::Browser(b) => b.rows.len() as f32 * BROWSER_ROW_H + BROWSER_ROW_H + 4.,
+        _ => {
+            if children_h > 0. {
+                0.
+            } else {
+                LINE_H
+            }
+        }
+    };
+    let gap = if children_h > 0. && main_h > 0. { 4. } else { 0. };
+    children_h + gap + main_h + pad
 }
 
 fn copy_action(rc: &RowContext, row_id: String) -> code_block::OnCodeAction {
@@ -870,10 +885,42 @@ fn compact(
 }
 
 fn render_body(step: &TraceStep, lc: &LineCtx, depth: usize, rc: &RowContext) -> AnyElement {
+    let main = render_step_body_only(step, lc, rc);
+    if step.children.is_empty() {
+        return main.unwrap_or_else(|| div().into_any_element());
+    }
+    let children_el = div()
+        .flex()
+        .flex_col()
+        .children(step.children.iter().enumerate().map(|(k, child)| {
+            let line_id = format!("{}/{}", lc.line_id, child.id);
+            let over = rc.open_lines.get(&line_id).copied();
+            let mut child_lc = LineCtx::new(line_id, "");
+            child_lc.over = over;
+            child_lc.shimmer = child.status == StepStatus::Running && k < MAX_SHIMMERS;
+            child_lc.burst = k;
+            if child.kind == StepKind::Execute && !child.subject.is_empty() {
+                child_lc.command = Some(child.subject.clone());
+            }
+            render_line(child, child_lc, depth + 1, rc)
+        }));
+    match main {
+        Some(body_el) => div()
+            .flex()
+            .flex_col()
+            .gap(zpx(4.))
+            .child(children_el)
+            .child(body_el)
+            .into_any_element(),
+        None => children_el.into_any_element(),
+    }
+}
+
+fn render_step_body_only(step: &TraceStep, lc: &LineCtx, rc: &RowContext) -> Option<AnyElement> {
     let t = rc.tokens;
     let id = format!("{}-body", lc.line_id);
     match &step.body {
-        StepBody::Output { tail, error } => {
+        StepBody::Output { tail, error } if !tail.trim().is_empty() => {
             let tail = tail.trim_end_matches('\n');
             let (title, content) = match &lc.command {
                 Some(cmd) if !cmd.is_empty() => {
@@ -884,7 +931,7 @@ fn render_body(step: &TraceStep, lc: &LineCtx, depth: usize, rc: &RowContext) ->
                     tail.to_string(),
                 ),
             };
-            compact(rc, &id, content, None, *error, title)
+            Some(compact(rc, &id, content, None, *error, title))
         }
         StepBody::Diff { old, new, .. } => {
             let lines = match old {
@@ -899,59 +946,51 @@ fn render_body(step: &TraceStep, lc: &LineCtx, depth: usize, rc: &RowContext) ->
                     .collect(),
             };
             let (content, variants) = code_block::join_diff(&lines);
-            compact(rc, &id, content, Some(variants), false, None)
+            Some(compact(rc, &id, content, Some(variants), false, None))
         }
-        StepBody::Text(text) => div()
-            .t_small()
-            .text_color(c(t.text_muted))
-            .whitespace_normal()
-            .child(text.clone())
-            .into_any_element(),
-        StepBody::Plan(entries) => plan_entries(entries, &lc.line_id, rc),
-        StepBody::Browser(b) => browser_body(b, &lc.line_id, rc),
+        StepBody::Text(text) if !text.trim().is_empty() => Some(
+            div()
+                .t_small()
+                .text_color(c(t.text_muted))
+                .whitespace_normal()
+                .child(text.clone())
+                .into_any_element(),
+        ),
+        StepBody::Plan(entries) => Some(plan_entries(entries, &lc.line_id, rc)),
+        StepBody::Browser(b) => Some(browser_body(b, &lc.line_id, rc)),
         // Sources a web search or read used: the site, then the address.
-        StepBody::Links(links) => div()
-            .flex()
-            .flex_col()
-            .children(links.iter().map(|link| {
-                div()
-                    .h(zpx(LINE_H))
-                    .flex()
-                    .items_center()
-                    .gap(zpx(8.))
-                    .t_small()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(c(t.text_muted))
-                            .child(link.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(c(t.text_muted).opacity(0.6))
-                            .child(link.url.clone()),
-                    )
-            }))
-            .into_any_element(),
-        _ => div()
-            .flex()
-            .flex_col()
-            .children(step.children.iter().enumerate().map(|(k, child)| {
-                let line_id = format!("{}/{}", lc.line_id, child.id);
-                let over = rc.open_lines.get(&line_id).copied();
-                let mut lc = LineCtx::new(line_id, "");
-                lc.over = over;
-                lc.shimmer = child.status == StepStatus::Running && k < MAX_SHIMMERS;
-                lc.burst = k;
-                render_line(child, lc, depth + 1, rc)
-            }))
-            .into_any_element(),
+        StepBody::Links(links) => Some(
+            div()
+                .flex()
+                .flex_col()
+                .children(links.iter().map(|link| {
+                    div()
+                        .h(zpx(LINE_H))
+                        .flex()
+                        .items_center()
+                        .gap(zpx(8.))
+                        .t_small()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(c(t.text_muted))
+                                .child(link.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_color(c(t.text_muted).opacity(0.6))
+                                .child(link.url.clone()),
+                        )
+                }))
+                .into_any_element(),
+        ),
+        _ => None,
     }
 }
 
@@ -1157,6 +1196,58 @@ fn fold_repeats(steps: Vec<(TraceStep, String)>) -> Vec<(TraceStep, String, usiz
     out
 }
 
+fn build_tool_steps(tools: &[ToolEntry]) -> Vec<(TraceStep, String)> {
+    let script_parents: std::collections::HashSet<&str> = tools
+        .iter()
+        .filter(|t| !t.is_receipt() && t.name == "script")
+        .map(|t| t.tool_id.as_str())
+        .collect();
+    let mut script_children: std::collections::HashMap<&str, Vec<TraceStep>> =
+        std::collections::HashMap::new();
+    let mut top_tools: Vec<&ToolEntry> = Vec::with_capacity(tools.len());
+    for tool in tools.iter().filter(|t| !t.is_receipt()) {
+        if let Some((parent_id, _)) = tool.tool_id.rsplit_once("/script/")
+            && script_parents.contains(parent_id)
+        {
+            script_children
+                .entry(parent_id)
+                .or_default()
+                .push(TraceStep::from(tool));
+            continue;
+        }
+        top_tools.push(tool);
+    }
+    top_tools
+        .into_iter()
+        .map(|tool| {
+            let mut step = TraceStep::from(tool);
+            if tool.name == "script"
+                && let Some(children) = script_children.remove(tool.tool_id.as_str())
+            {
+                let failed = children
+                    .iter()
+                    .filter(|c| c.status == StepStatus::Error)
+                    .count();
+                let count = children.len();
+                let mut parts = vec![if count == 1 {
+                    "1 call".to_string()
+                } else {
+                    format!("{count} calls")
+                }];
+                if failed > 0 {
+                    parts.push(format!("{failed} failed"));
+                }
+                if let Some(dur) = step.description.take() {
+                    parts.push(dur);
+                }
+                step.description = Some(parts.join(" · "));
+                step.children = children;
+            }
+            (step, tool.name.clone())
+        })
+        .collect()
+}
+
 /// A run of tool calls: one line each, reads and searches folded into an
 /// "Explored" line once there are three in a row.
 pub fn render_tool_group(
@@ -1174,11 +1265,7 @@ pub fn render_tool_group(
     };
     let names: std::collections::HashMap<&str, &ToolEntry> =
         tools.iter().map(|t| (t.tool_id.as_str(), t)).collect();
-    let steps: Vec<(TraceStep, String)> = tools
-        .iter()
-        .filter(|t| !t.is_receipt())
-        .map(|t| (TraceStep::from(t), t.name.clone()))
-        .collect();
+    let steps = build_tool_steps(tools);
     let folded = fold_repeats(steps);
     let mut repeat: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut plain: Vec<TraceStep> = Vec::new();
@@ -1212,7 +1299,8 @@ pub fn render_tool_group(
                 let shimmer = running && shimmers < MAX_SHIMMERS;
                 shimmers += usize::from(shimmer);
                 let b = next_burst(step.started_ms);
-                let command = (step.kind == StepKind::Execute)
+                let command = (step.kind == StepKind::Execute
+                    && tool.is_some_and(|t| t.name != "script"))
                     .then(|| tool.map(|t| t.detail.clone()).unwrap_or_default());
                 let mut lc = LineCtx::new(line_id.clone(), tool.map_or("", |t| t.name.as_str()));
                 lc.over = over(&line_id);
@@ -2045,5 +2133,59 @@ mod tests {
             short.ends_with("/transcript.rs") && short.contains('…') && short.chars().count() <= 40,
             "{short}"
         );
+    }
+
+    #[test]
+    fn script_children_nest_under_parent_script_step() {
+        let tools = vec![
+            ToolEntry {
+                tool_id: "call_1".into(),
+                name: "script".into(),
+                state: "done".into(),
+                label: "Reading and updating config".into(),
+                kind: "execute".into(),
+                started_ms: Some(100),
+                ended_ms: Some(250),
+                output_tail: "updated".into(),
+                ..ToolEntry::default()
+            },
+            ToolEntry {
+                tool_id: "call_1/script/1".into(),
+                name: "read".into(),
+                state: "done".into(),
+                detail: "Cargo.toml".into(),
+                summary: "result retained inside script".into(),
+                kind: "read".into(),
+                ..ToolEntry::default()
+            },
+            ToolEntry {
+                tool_id: "call_1/script/2".into(),
+                name: "edit".into(),
+                state: "error".into(),
+                detail: "src/lib.rs".into(),
+                summary: "result retained inside script".into(),
+                kind: "edit".into(),
+                ..ToolEntry::default()
+            },
+            ToolEntry {
+                tool_id: "orphan/script/1".into(),
+                name: "read".into(),
+                state: "done".into(),
+                detail: "README.md".into(),
+                kind: "read".into(),
+                ..ToolEntry::default()
+            },
+        ];
+        let steps = build_tool_steps(&tools);
+        assert_eq!(steps.len(), 2);
+        let (parent, name) = &steps[0];
+        assert_eq!(name, "script");
+        assert_eq!(parent.title(), "Reading and updating config");
+        assert_eq!(parent.children.len(), 2);
+        assert_eq!(parent.children[0].id, "call_1/script/1");
+        assert_eq!(parent.children[1].id, "call_1/script/2");
+        assert_eq!(parent.description.as_deref(), Some("2 calls · 1 failed · 150ms"));
+        assert!(has_body(parent));
+        assert_eq!(steps[1].0.id, "orphan/script/1");
     }
 }
