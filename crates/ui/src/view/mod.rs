@@ -827,7 +827,7 @@ impl KeelWindow {
         let skills_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name"));
         let shortcuts_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search shortcuts"));
-        let bots_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search bots"));
+        let bots_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search coworkers"));
         let memory_desc =
             cx.new(|cx| InputState::new(window, cx).placeholder("One line shown in the index"));
         let memory_body = cx.new(|cx| {

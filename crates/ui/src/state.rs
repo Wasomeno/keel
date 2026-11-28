@@ -48,6 +48,8 @@ pub struct ChatItem {
     pub title: String,
     pub status: ChatStatus,
     pub last_message_at: i64,
+    /// First line of the latest message, from the registry view.
+    pub last_message_preview: String,
     pub last_seen_at: i64,
     pub archived: bool,
     pub tombstoned: bool,
@@ -84,6 +86,7 @@ impl ChatItem {
             title: title.to_string(),
             status,
             last_message_at,
+            last_message_preview: String::new(),
             last_seen_at,
             archived: false,
             tombstoned: false,
@@ -771,6 +774,7 @@ impl AppState {
         merge_str(view, "title", &mut chat.title);
         merge_str(view, "cwd", &mut chat.cwd);
         merge_i64(view, "last_message_at", &mut chat.last_message_at);
+        merge_str(view, "last_message_preview", &mut chat.last_message_preview);
         merge_i64(view, "last_seen_at", &mut chat.last_seen_at);
         merge_bool(view, "archived", &mut chat.archived);
         merge_str(view, "branch", &mut chat.branch);
@@ -898,6 +902,21 @@ mod tests {
         state.update_chat_from_view("c1", &serde_json::json!({ "reasoning": "" }));
         assert!(state.chats.get("c1").unwrap().reasoning_known);
         assert!(state.chats.get("c1").unwrap().reasoning.is_empty());
+    }
+
+    #[test]
+    fn chat_view_merges_the_last_message_preview() {
+        let mut state = test_app(Path::new("/tmp"), "dev");
+        state.update_chat_from_view(
+            "c1",
+            &serde_json::json!({
+                "last_message_at": 42,
+                "last_message_preview": "ship it",
+            }),
+        );
+        let chat = state.chats.get("c1").unwrap();
+        assert_eq!(chat.last_message_at, 42);
+        assert_eq!(chat.last_message_preview, "ship it");
     }
 
     #[test]

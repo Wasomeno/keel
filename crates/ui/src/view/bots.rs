@@ -1,5 +1,6 @@
-//! Keel Bots UI: built-in Dr. Keelee creator, messaging-app DM header & welcome card,
-//! and the split-studio Bot Customizer modal (name, color, attire, eyes, hair, mustache, size).
+//! Keel Bots UI: the pinned lab inbox and coworker room list, the messaging-app DM
+//! header & welcome card, the built-in Dr. Keelee creator, and the split-studio Bot
+//! Customizer modal (name, color, attire, eyes, hair, mustache, size).
 
 use std::path::{Path, PathBuf};
 
@@ -20,11 +21,11 @@ use super::{
     KeelWindow, drag_region, icon_button, menu_action, menu_separator, sidebar_menu_at, status_dot,
 };
 use crate::creature::{BotMood, random_appearance, render_creature_avatar, render_creature_stage};
-use crate::hover_fade::HoverFadeExt;
+use crate::hover_fade::{HoverFadeExt, reveal_on_hover};
 use crate::icons::Icon;
 use crate::style::{
     HEADER_HEIGHT, INPUT_H, KeelStyled, MONO, RADIUS_LG, RADIUS_MD, RADIUS_SM, RADIUS_XL, c, r_lg,
-    r_md, r_xl, zpx,
+    r_md, zpx,
 };
 
 /// Filter tabs on the Bots directory page.
@@ -128,13 +129,15 @@ fn input_value(input: &Entity<InputState>, cx: &Context<KeelWindow>) -> String {
     input.read(cx).value().to_string()
 }
 
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 fn format_bot_created_at(created_at: u64, builtin: bool) -> String {
     if builtin || created_at == 0 {
         return "Built-in".to_string();
     }
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let secs = if created_at > 10_000_000_000 {
         (created_at / 1000) as libc::time_t
     } else {
@@ -145,20 +148,146 @@ fn format_bot_created_at(created_at: u64, builtin: bool) -> String {
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         let res = unsafe { libc::localtime_r(&secs, &mut tm) };
         if !res.is_null() {
-            let month = MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("Jan");
-            let day = tm.tm_mday;
-            let year = 1900 + tm.tm_year;
-            let h24 = tm.tm_hour;
-            let ampm = if h24 >= 12 { "PM" } else { "AM" };
-            let h12 = match h24 % 12 {
-                0 => 12,
-                h => h,
-            };
-            let min = tm.tm_min;
-            return format!("{month} {day}, {year} · {h12}:{min:02} {ampm}");
+            return format!(
+                "{} {}, {} · {}",
+                MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("Jan"),
+                tm.tm_mday,
+                1900 + tm.tm_year,
+                clock_label(&tm)
+            );
         }
     }
     format!("{secs}")
+}
+
+/// Compact messaging-app timestamp: `now`, `12m`, `3h`, `Yesterday`,
+/// `Mon`, or a short date once the message is more than a week old.
+fn format_bot_room_time(last_message_at: i64) -> String {
+    if last_message_at <= 0 {
+        return String::new();
+    }
+    let now_ms = crate::state::AppState::now_ms();
+    let then_ms = if last_message_at > 10_000_000_000 {
+        last_message_at
+    } else {
+        last_message_at.saturating_mul(1000)
+    };
+    let delta = now_ms.saturating_sub(then_ms);
+    if delta < 60_000 {
+        return "now".to_string();
+    }
+    if delta < 3_600_000 {
+        return format!("{}m", delta / 60_000);
+    }
+    if delta < 86_400_000 {
+        return format!("{}h", delta / 3_600_000);
+    }
+    #[cfg(unix)]
+    {
+        let secs = (then_ms / 1000) as libc::time_t;
+        let now_secs = (now_ms / 1000) as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let mut now_tm: libc::tm = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            !libc::localtime_r(&secs, &mut tm).is_null()
+                && !libc::localtime_r(&now_secs, &mut now_tm).is_null()
+        };
+        if ok {
+            let month = MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("Jan");
+            if tm.tm_year == now_tm.tm_year && tm.tm_yday == now_tm.tm_yday {
+                return clock_label(&tm);
+            }
+            let days = now_tm.tm_yday - tm.tm_yday;
+            if tm.tm_year == now_tm.tm_year {
+                if days == 1 {
+                    return "Yesterday".to_string();
+                }
+                if (2..7).contains(&days) {
+                    return WEEKDAYS
+                        .get(tm.tm_wday as usize)
+                        .copied()
+                        .unwrap_or("")
+                        .to_string();
+                }
+                return format!("{month} {}", tm.tm_mday);
+            }
+            return format!("{month} {}, {}", tm.tm_mday, 1900 + tm.tm_year);
+        }
+    }
+    format!("{}d", delta / 86_400_000)
+}
+
+#[cfg(unix)]
+fn clock_label(tm: &libc::tm) -> String {
+    let h24 = tm.tm_hour;
+    let ampm = if h24 >= 12 { "PM" } else { "AM" };
+    let h12 = match h24 % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{h12}:{:02} {ampm}", tm.tm_min)
+}
+
+/// First non-empty line of a message, capped so a pasted wall of text cannot
+/// bloat the room row's text layout.
+fn bot_preview_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let mut out = String::new();
+    let mut chars = 0usize;
+    for ch in line.chars() {
+        if chars >= 120 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        chars += 1;
+    }
+    // The engine clips the registry preview at 80 chars without an ellipsis.
+    if chars >= 80 && !out.ends_with('…') {
+        out.push('…');
+    }
+    out
+}
+
+fn bot_room_rank(status: DisplayStatus) -> u8 {
+    match status {
+        DisplayStatus::AwaitingInput => 0,
+        DisplayStatus::Running => 1,
+        DisplayStatus::Aborted => 2,
+        _ => 3,
+    }
+}
+
+fn bot_status_label(
+    status: DisplayStatus,
+    id: &str,
+    t: Tokens,
+    reduced: bool,
+) -> Option<AnyElement> {
+    let (label, color) = match status {
+        DisplayStatus::Running => ("Working…", t.accent),
+        DisplayStatus::AwaitingInput => ("Needs reply", t.warning),
+        DisplayStatus::Aborted => ("Stopped", t.danger),
+        _ => return None,
+    };
+    Some(
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(zpx(5.))
+            .t_caption()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(c(color))
+            .children(status_dot(status, id, t, reduced))
+            .child(label)
+            .into_any_element(),
+    )
 }
 
 impl KeelWindow {
@@ -180,6 +309,83 @@ impl KeelWindow {
             return DisplayStatus::Idle;
         }
         keel_proto::display_status(chat.status, chat.last_seen_at, crate::state::AppState::now_ms())
+    }
+
+    /// The room row's second line: latest message, else the bot's promise.
+    fn bot_room_preview(&self, bot: &Bot) -> String {
+        if let Some(chat) = bot
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.state.chats.get(id))
+        {
+            let preview = bot_preview_line(&chat.last_message_preview);
+            if !preview.is_empty() {
+                return preview;
+            }
+        }
+        if bot.is_creator() {
+            return "Tell Dr. Keelee what coworker you need — role, voice, and guardrails."
+                .to_string();
+        }
+        if !bot.tagline.trim().is_empty() {
+            return bot.tagline.clone();
+        }
+        "No messages yet — say hello.".to_string()
+    }
+
+    /// Compact timestamp for the room's right rail.
+    fn bot_room_time(&self, bot: &Bot) -> String {
+        let at = bot
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.state.chats.get(id))
+            .map(|chat| chat.last_message_at)
+            .unwrap_or(0);
+        if at > 0 {
+            format_bot_room_time(at)
+        } else if bot.is_creator() {
+            "Pinned".to_string()
+        } else {
+            "New".to_string()
+        }
+    }
+
+    /// Unread alerts for the bot's DM, matching the sidebar's badge setting.
+    fn bot_unread_mark(&self, bot: &Bot, t: Tokens) -> Option<AnyElement> {
+        use crate::notify::{NotifyEvent, RowBadge};
+        let cid = bot.chat_id.as_deref()?;
+        let badge = self
+            .unread
+            .row_badge(cid, self.state.ui_settings.notifications.badge)?;
+        let color = match self.unread.latest(cid) {
+            Some(NotifyEvent::NeedsInput) => t.warning,
+            Some(NotifyEvent::Error) => t.danger,
+            _ => t.accent,
+        };
+        Some(match badge {
+            RowBadge::Dot => div()
+                .size(zpx(7.))
+                .flex_none()
+                .rounded_full()
+                .bg(c(color))
+                .into_any_element(),
+            RowBadge::Count(n) => div()
+                .min_w(zpx(17.))
+                .h(zpx(17.))
+                .px(zpx(4.))
+                .flex_none()
+                .rounded_full()
+                .bg(c(color))
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(MONO)
+                .text_size(zpx(10.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(c(t.text_on_accent))
+                .child(n.to_string())
+                .into_any_element(),
+        })
     }
 
     /// Open the full-pane Bots directory page.
@@ -1783,56 +1989,126 @@ impl KeelWindow {
             .cloned()
             .collect();
 
-        let summary_text = if active_total > 0 {
+        let summary_text = if coworkers == 0 {
+            "Lab ready".to_string()
+        } else if active_total > 0 {
             format!(
                 "{coworkers} {} · {active_total} active",
-                if coworkers == 1 { "coworker" } else { "coworkers" }
-            )
-        } else if coworkers > 0 {
-            format!(
-                "{coworkers} {}",
-                if coworkers == 1 { "coworker" } else { "coworkers" }
+                if coworkers == 1 {
+                    "coworker"
+                } else {
+                    "coworkers"
+                }
             )
         } else {
-            "Lab ready".to_string()
+            format!(
+                "{coworkers} {}",
+                if coworkers == 1 {
+                    "coworker"
+                } else {
+                    "coworkers"
+                }
+            )
         };
 
-        let top_bar = div()
+        let search = div()
+            .w(zpx(232.))
+            .h(zpx(INPUT_H))
+            .px(zpx(9.))
             .flex()
-            .flex_col()
-            .gap(zpx(3.))
+            .flex_row()
+            .items_center()
+            .gap(zpx(6.))
+            .rounded(r_md())
+            .bg(c(t.input))
+            .border_1()
+            .border_color(c(t.border))
+            .t_small()
+            .text_color(c(t.text_muted))
+            .child(Icon::Search.el(zpx(13.)).text_color(c(t.text_faint)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.bots_filter.clone().into_any_element()),
+            );
+
+        let top_bar = div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_end()
+            .justify_between()
+            .flex_wrap()
+            .gap(zpx(14.))
             .child(
                 div()
                     .flex()
+                    .flex_col()
+                    .gap(zpx(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap(zpx(10.))
+                            .child(
+                                div()
+                                    .text_size(zpx(22.))
+                                    .line_height(zpx(26.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                                    .child("Bots"),
+                            )
+                            .child(
+                                div()
+                                    .font_family(MONO)
+                                    .t_caption()
+                                    .text_color(c(t.text_faint))
+                                    .child(summary_text),
+                            ),
+                    )
+                    .child(div().t_small().text_color(c(t.text_muted)).child(
+                        "Specialized AI coworkers — created and tuned in Dr. Keelee's lab.",
+                    )),
+            )
+            .child(search);
+
+        let creator_room = self.render_bot_room(creator, true, true, true, t, cx);
+        let lab = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(zpx(8.))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
                     .flex_row()
-                    .items_baseline()
+                    .items_center()
                     .gap(zpx(10.))
                     .child(
                         div()
-                            .text_size(zpx(22.))
-                            .line_height(zpx(26.))
+                            .flex_none()
+                            .font_family(MONO)
+                            .text_size(zpx(10.5))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                            .child("Bots"),
+                            .text_color(c(t.text_faint))
+                            .child("LAB"),
                     )
+                    .child(div().flex_1().h(zpx(1.)).bg(c(t.border)))
                     .child(
                         div()
+                            .flex_none()
                             .font_family(MONO)
-                            .t_caption()
+                            .text_size(zpx(10.5))
                             .text_color(c(t.text_faint))
-                            .child(summary_text),
+                            .child("PINNED"),
                     ),
             )
-            .child(
-                div()
-                    .t_small()
-                    .text_color(c(t.text_muted))
-                    .child("Specialized AI coworkers — created and tuned in Dr. Keelee's lab."),
-            );
+            .child(creator_room);
 
-        let hero_card = self.render_bots_creator_hero(creator, t, cx);
-
-        let directory_body = self.render_bots_directory(&hatched, t, cx);
+        let directory = self.render_bots_directory(&hatched, t, cx);
 
         div()
             .flex_1()
@@ -1845,7 +2121,7 @@ impl KeelWindow {
             .child(
                 div()
                     .w_full()
-                    .max_w(zpx(960.))
+                    .max_w(zpx(880.))
                     .flex_1()
                     .min_h_0()
                     .px(zpx(32.))
@@ -1853,7 +2129,7 @@ impl KeelWindow {
                     .pb(zpx(24.))
                     .flex()
                     .flex_col()
-                    .gap(zpx(18.))
+                    .gap(zpx(22.))
                     .child(top_bar)
                     .child(
                         div()
@@ -1866,496 +2142,46 @@ impl KeelWindow {
                             .pr(zpx(4.))
                             .flex()
                             .flex_col()
-                            .gap(zpx(22.))
+                            .gap(zpx(24.))
                             .pb(zpx(20.))
-                            .child(hero_card)
-                            .child(directory_body),
+                            .child(lab)
+                            .child(directory),
                     ),
             )
             .into_any_element()
     }
 
-    fn render_bots_creator_hero(
+    /// One conversation row. `pinned` is Dr. Keelee's lab conversation; it
+    /// carries its own card surface and quick-create prompts.
+    fn render_bot_room(
         &mut self,
-        creator: Bot,
+        bot: Bot,
+        pinned: bool,
+        is_first: bool,
+        is_last: bool,
         t: Tokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let reduced = self.reduced();
-        let status = self.bot_display_status(&creator);
-        let working = status == DisplayStatus::Running;
-        let awaiting = status == DisplayStatus::AwaitingInput;
-        let accent = c(creator.appearance.color.accent_rgba());
-
-        let creator_status_pill: Option<AnyElement> = if working {
-            Some(
-                div()
-                    .px(zpx(7.))
-                    .py(zpx(2.))
-                    .rounded_full()
-                    .bg(accent.opacity(0.14))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(5.))
-                    .t_caption()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(accent)
-                    .children(status_dot(status, "bots-hero-creator", t, reduced))
-                    .child("Working…")
-                    .into_any_element(),
-            )
-        } else if awaiting {
-            Some(
-                div()
-                    .px(zpx(7.))
-                    .py(zpx(2.))
-                    .rounded_full()
-                    .bg(c(t.warning).opacity(0.14))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(5.))
-                    .t_caption()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(c(t.warning))
-                    .children(status_dot(status, "bots-hero-creator", t, reduced))
-                    .child("Needs reply")
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-
-        let quick_recipes: [(&'static str, &'static str); 3] = [
-            (
-                "PR Reviewer",
-                "Make me a sharp PR reviewer bot that catches bugs, edge cases, and over-engineering — terse voice, never bikesheds formatting.",
-            ),
-            (
-                "Morning Briefing",
-                "Create a morning briefing bot that summarizes my tasks and open threads in 5 tight bullets, zero fluff.",
-            ),
-            (
-                "Audit Fleet",
-                "Audit my current bots and tell me what needs tightening or retiring.",
-            ),
-        ];
-
-        div()
-            .id("bots-creator-hero")
-            .w_full()
-            .p(zpx(18.))
-            .rounded(r_xl())
-            .bg(c(t.surface))
-            .border_1()
-            .border_color(accent.opacity(if working { 0.48 } else { 0.28 }))
-            .hover_fade(c(t.hover), None)
-            .active(|s| s.opacity(0.88))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.open_bot(DR_KEELEE_ID, cx);
-            }))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(zpx(18.))
-            .child(
-                div()
-                    .id("bots-hero-stage")
-                    .size(zpx(116.))
-                    .flex_none()
-                    .rounded(r_lg())
-                    .bg(accent.opacity(0.10))
-                    .border_1()
-                    .border_color(accent.opacity(0.22))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(render_creature_stage(
-                        &creator.id,
-                        creator.appearance,
-                        true,
-                        if working {
-                            BotMood::Working
-                        } else if awaiting {
-                            BotMood::Awaiting
-                        } else {
-                            BotMood::Idle
-                        },
-                        108.,
-                        self.clock_epoch,
-                        None,
-                        t,
-                        reduced,
-                    )),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(zpx(8.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(zpx(3.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .flex_wrap()
-                                    .gap(zpx(8.))
-                                    .child(
-                                        div()
-                                            .text_size(zpx(17.))
-                                            .line_height(zpx(21.))
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(c(t.text))
-                                            .child(creator.name.clone()),
-                                    )
-                                    .children(creator_status_pill),
-                            )
-                            .child(
-                                div()
-                                    .t_small()
-                                    .text_color(c(t.text_muted))
-                                    .child("Tell Dr. Keelee what coworker you need — role, voice, and guardrails. All new bots are created in his lab."),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pt(zpx(2.))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .flex_wrap()
-                            .gap(zpx(6.))
-                            .child(
-                                div()
-                                    .t_caption()
-                                    .text_color(c(t.text_faint))
-                                    .pr(zpx(2.))
-                                    .child("Quick create:"),
-                            )
-                            .children(quick_recipes.into_iter().enumerate().map(|(ix, (label, prompt))| {
-                                let prompt = prompt.to_string();
-                                div()
-                                    .id(ElementId::Name(format!("bots-hero-recipe-{ix}").into()))
-                                    .h(zpx(24.))
-                                    .px(zpx(9.))
-                                    .rounded_full()
-                                    .bg(c(t.window))
-                                    .border_1()
-                                    .border_color(c(t.border))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(zpx(4.))
-                                    .cursor_pointer()
-                                    .t_caption()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(c(t.text_muted))
-                                    .hover(|s| s.text_color(c(t.text)).border_color(accent.opacity(0.45)))
-                                    .hover_fade(c(t.hover), None)
-                                    .active(|s| s.opacity(0.78))
-                                    .child(label)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                        cx.stop_propagation();
-                                        this.open_bot_with_prompt(
-                                            DR_KEELEE_ID,
-                                            prompt.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    }))
-                            })),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_bots_directory(
-        &mut self,
-        hatched: &[Bot],
-        t: Tokens,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if hatched.is_empty() {
-            return self.render_bots_empty(t, cx);
-        }
-
-        let query = self.bots_filter.read(cx).value().to_string();
-        let needle = query.trim().to_lowercase();
-        let filter = self.bots.filter;
-        let active_count = hatched
-            .iter()
-            .filter(|b| {
-                matches!(
-                    self.bot_display_status(b),
-                    DisplayStatus::Running | DisplayStatus::AwaitingInput
-                )
-            })
-            .count();
-        let ready_count = hatched.len().saturating_sub(active_count);
-
-        let matched: Vec<Bot> = hatched
-            .iter()
-            .filter(|bot| {
-                let status = self.bot_display_status(bot);
-                let is_active =
-                    matches!(status, DisplayStatus::Running | DisplayStatus::AwaitingInput);
-                match filter {
-                    BotStatusFilter::All => {}
-                    BotStatusFilter::Active if !is_active => return false,
-                    BotStatusFilter::Ready if is_active => return false,
-                    _ => {}
-                }
-                if !needle.is_empty() {
-                    let in_name = bot.name.to_lowercase().contains(&needle);
-                    let in_tag = bot.tagline.to_lowercase().contains(&needle);
-                    let in_rules = bot
-                        .anti_jobs
-                        .iter()
-                        .any(|r| r.to_lowercase().contains(&needle));
-                    if !in_name && !in_tag && !in_rules {
-                        return false;
-                    }
-                }
-                true
-            })
-            .cloned()
-            .collect();
-
-        let make_filter_pill = |id: &'static str,
-                                label: &'static str,
-                                count: usize,
-                                target: BotStatusFilter| {
-            let selected = filter == target;
-            div()
-                .id(id)
-                .h(zpx(26.))
-                .px(zpx(10.))
-                .rounded_full()
-                .border_1()
-                .border_color(if selected { c(t.accent) } else { c(t.border) })
-                .bg(if selected {
-                    c(t.selected)
-                } else {
-                    c(t.surface)
-                })
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(zpx(5.))
-                .cursor_pointer()
-                .t_caption()
-                .font_weight(if selected {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::MEDIUM
-                })
-                .text_color(c(if selected { t.text } else { t.text_muted }))
-                .when(!selected, |d| {
-                    d.hover(|s| s.text_color(c(t.text)))
-                        .hover_fade(c(t.hover), None)
-                })
-                .active(|s| s.opacity(0.78))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_bot_filter(target, cx);
-                }))
-                .child(label)
-                .child(
-                    div()
-                        .font_family(MONO)
-                        .t_caption()
-                        .text_color(c(if selected { t.text_muted } else { t.text_faint }))
-                        .child(count.to_string()),
-                )
-        };
-
-        let controls = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .flex_wrap()
-            .gap(zpx(10.))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(8.))
-                    .child(
-                        div()
-                            .t_body()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(c(t.text))
-                            .child("Created Coworkers"),
-                    )
-                    .child(
-                        div()
-                            .font_family(MONO)
-                            .t_caption()
-                            .text_color(c(t.text_faint))
-                            .child(hatched.len().to_string()),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(8.))
-                    .when(active_count > 0, |d| {
-                        d.child(make_filter_pill(
-                            "bots-filter-all",
-                            "All",
-                            hatched.len(),
-                            BotStatusFilter::All,
-                        ))
-                        .child(make_filter_pill(
-                            "bots-filter-active",
-                            "Active",
-                            active_count,
-                            BotStatusFilter::Active,
-                        ))
-                        .child(make_filter_pill(
-                            "bots-filter-ready",
-                            "Ready",
-                            ready_count,
-                            BotStatusFilter::Ready,
-                        ))
-                    })
-                    .child(
-                        div()
-                            .w(zpx(210.))
-                            .h(zpx(INPUT_H))
-                            .px(zpx(8.))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.))
-                            .rounded(r_md())
-                            .bg(c(t.surface))
-                            .border_1()
-                            .border_color(c(t.border))
-                            .t_small()
-                            .text_color(c(t.text_muted))
-                            .child(Icon::Search.el(zpx(13.)).text_color(c(t.text_faint)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.bots_filter.clone().into_any_element()),
-                            ),
-                    ),
-            );
-
-        let content: AnyElement = if matched.is_empty() {
-            div()
-                .w_full()
-                .py(zpx(36.))
-                .rounded(r_lg())
-                .border_1()
-                .border_color(c(t.border).opacity(0.7))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(zpx(10.))
-                .child(Icon::Search.el(zpx(22.)).text_color(c(t.text_faint)))
-                .child(
-                    div()
-                        .t_body()
-                        .text_color(c(t.text_muted))
-                        .child("No coworkers match your search or filter."),
-                )
-                .child(
-                    div()
-                        .id("bots-reset-filter-btn")
-                        .h(zpx(28.))
-                        .px(zpx(12.))
-                        .rounded(r_md())
-                        .border_1()
-                        .border_color(c(t.border))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .t_small()
-                        .text_color(c(t.text))
-                        .hover_fade(c(t.hover), None)
-                        .active(|s| s.opacity(0.78))
-                        .child("Reset filters")
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.bots.filter = BotStatusFilter::All;
-                            this.bots_filter.update(cx, |s, cx| s.set_value("", window, cx));
-                            this.bots.filter_gen = this.bots.filter_gen.wrapping_add(1);
-                            this.bots.filter_at = Some(std::time::Instant::now());
-                            cx.notify();
-                        })),
-                )
-                .into_any_element()
-        } else {
-            let mut grid = div().w_full().flex().flex_col().gap(zpx(12.));
-            for pair in matched.chunks(2) {
-                let mut row_el = div().w_full().flex().flex_row().gap(zpx(12.));
-                for bot in pair {
-                    row_el = row_el.child(self.render_bot_card(bot.clone(), t, cx));
-                }
-                if pair.len() == 1 {
-                    row_el = row_el.child(div().flex_1().min_w_0());
-                }
-                grid = grid.child(row_el);
-            }
-            let filter_gen = self.bots.filter_gen as usize;
-            let filter_anim = self.recent_bot_filter_nav();
-            grid.with_animation(
-                ("bots-grid-filter", filter_gen),
-                gpui::Animation::new(std::time::Duration::from_millis(160))
-                    .with_easing(crate::motion::ease_out_strong),
-                move |el, delta| {
-                    if filter_anim {
-                        el.relative().top(zpx(6.0 * (1.0 - delta))).opacity(delta)
-                    } else {
-                        el
-                    }
-                },
-            )
-            .into_any_element()
-        };
-
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(zpx(12.))
-            .child(controls)
-            .child(content)
-            .into_any_element()
-    }
-
-    fn render_bot_card(&mut self, bot: Bot, t: Tokens, cx: &mut Context<Self>) -> AnyElement {
         let reduced = self.reduced();
         let status = self.bot_display_status(&bot);
         let working = status == DisplayStatus::Running;
         let awaiting = status == DisplayStatus::AwaitingInput;
+        let aborted = status == DisplayStatus::Aborted;
         let accent = c(bot.appearance.color.accent_rgba());
-        let is_naked = bot.appearance == BotAppearance::naked_default();
         let has_thread = bot.chat_id.is_some();
+        let active = has_thread && bot.chat_id.as_deref() == self.current_chat.as_deref();
+        let preview = self.bot_room_preview(&bot);
+        let time = self.bot_room_time(&bot);
+        let unread = self.bot_unread_mark(&bot, t);
 
-        let bot_id = bot.id.clone();
         let open_id = bot.id.clone();
         let menu_toggle_id = bot.id.clone();
 
         let menu_is_open = self.bots.card_menu_bot.as_deref() == Some(bot.id.as_str());
         let is_menu_owner = self.bots.card_menu_owner.as_deref() == Some(bot.id.as_str());
-        let card_menu = if menu_is_open || is_menu_owner {
+        let card_menu = if pinned {
+            None
+        } else if menu_is_open || is_menu_owner {
             self.menu_phase("bot-card-menu", menu_is_open, cx)
                 .map(|leaving| {
                     let id_info = bot.id.clone();
@@ -2363,61 +2189,41 @@ impl KeelWindow {
                     let id_reset = bot.id.clone();
                     let id_del = bot.id.clone();
                     let mut items: Vec<AnyElement> = vec![
-                        menu_action(
-                            "bot-card-menu-info",
-                            Icon::Info.el(zpx(14.)),
-                            false,
-                            t,
-                        )
-                        .child("Info")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.bots.card_menu_bot = None;
-                            this.open_bot_info(&id_info, cx);
-                        }))
-                        .into_any_element(),
-                        menu_action(
-                            "bot-card-menu-cust",
-                            Icon::PenLine.el(zpx(14.)),
-                            false,
-                            t,
-                        )
-                        .child("Customize")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.bots.card_menu_bot = None;
-                            this.open_bot_customizer(&id_cust, window, cx);
-                        }))
-                        .into_any_element(),
+                        menu_action("bot-card-menu-info", Icon::Info.el(zpx(14.)), false, t)
+                            .child("Info")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.bots.card_menu_bot = None;
+                                this.open_bot_info(&id_info, cx);
+                            }))
+                            .into_any_element(),
+                        menu_action("bot-card-menu-cust", Icon::PenLine.el(zpx(14.)), false, t)
+                            .child("Customize")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.bots.card_menu_bot = None;
+                                this.open_bot_customizer(&id_cust, window, cx);
+                            }))
+                            .into_any_element(),
                     ];
                     if has_thread {
                         items.push(
-                            menu_action(
-                                "bot-card-menu-reset",
-                                Icon::Reset.el(zpx(14.)),
-                                false,
-                                t,
-                            )
-                            .child("Clear conversation")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.bots.card_menu_bot = None;
-                                this.reset_bot_chat(&id_reset, cx);
-                            }))
-                            .into_any_element(),
+                            menu_action("bot-card-menu-reset", Icon::Reset.el(zpx(14.)), false, t)
+                                .child("Clear conversation")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.bots.card_menu_bot = None;
+                                    this.reset_bot_chat(&id_reset, cx);
+                                }))
+                                .into_any_element(),
                         );
                     }
                     items.push(menu_separator(t).into_any_element());
                     items.push(
-                        menu_action(
-                            "bot-card-menu-retire",
-                            Icon::Trash.el(zpx(14.)),
-                            true,
-                            t,
-                        )
-                        .child("Retire bot")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.bots.card_menu_bot = None;
-                            this.ask_delete_bot(id_del.clone(), cx);
-                        }))
-                        .into_any_element(),
+                        menu_action("bot-card-menu-retire", Icon::Trash.el(zpx(14.)), true, t)
+                            .child("Retire bot")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.bots.card_menu_bot = None;
+                                this.ask_delete_bot(id_del.clone(), cx);
+                            }))
+                            .into_any_element(),
                     );
                     let dismiss = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
                         this.note_menu_dismissed("bot-card-menu");
@@ -2440,198 +2246,568 @@ impl KeelWindow {
             None
         };
 
-        let status_pill: Option<AnyElement> = if working {
-            Some(
-                div()
-                    .px(zpx(7.))
-                    .py(zpx(2.))
-                    .rounded_full()
-                    .bg(accent.opacity(0.14))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(5.))
-                    .t_caption()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(accent)
-                    .children(status_dot(
-                        status,
-                        &format!("bot-card-dot-{}", bot.id),
-                        t,
-                        reduced,
-                    ))
-                    .child("Working…")
-                    .into_any_element(),
-            )
+        let avatar_size = if pinned { 64. } else { 48. };
+        let creature_size = avatar_size - 8.;
+        let group = format!("bot-room-{}", bot.id);
+        let room_id = format!("bot-room-row-{}", bot.id);
+        let status_id = format!("bot-room-dot-{}", bot.id);
+        let status_label = bot_status_label(status, &status_id, t, reduced);
+        let presence_color = if working {
+            t.accent
         } else if awaiting {
-            Some(
-                div()
-                    .px(zpx(7.))
-                    .py(zpx(2.))
-                    .rounded_full()
-                    .bg(c(t.warning).opacity(0.14))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(5.))
-                    .t_caption()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(c(t.warning))
-                    .children(status_dot(
-                        status,
-                        &format!("bot-card-dot-{}", bot.id),
-                        t,
-                        reduced,
-                    ))
-                    .child("Needs reply")
-                    .into_any_element(),
-            )
-        } else if is_naked {
-            Some(
-                div()
-                    .px(zpx(7.))
-                    .py(zpx(2.))
-                    .rounded_full()
-                    .bg(accent.opacity(0.12))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(zpx(4.))
-                    .t_caption()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(accent)
-                    .child(Icon::SparkleFilled.el(zpx(10.)))
-                    .child("Freshly created")
-                    .into_any_element(),
-            )
+            t.warning
         } else {
-            None
+            t.danger
         };
+        let show_presence = working || awaiting || aborted;
+        let naked = bot.appearance == BotAppearance::naked_default();
+        let fresh = !pinned && naked && !has_thread;
 
-        div()
-            .id(ElementId::Name(format!("bot-dir-card-{bot_id}").into()))
-            .flex_1()
-            .min_w_0()
-            .p(zpx(16.))
-            .rounded(r_lg())
-            .bg(c(t.surface))
-            .border_1()
-            .border_color(if working {
-                accent.opacity(0.45)
-            } else if awaiting {
-                c(t.warning).opacity(0.45)
-            } else {
-                c(t.border)
+        let quick_chips: Option<AnyElement> = pinned.then(|| {
+            let recipes: [(&'static str, &'static str); 3] = [
+                (
+                    "PR Reviewer",
+                    "Make me a sharp PR reviewer bot that catches bugs, edge cases, and over-engineering — terse voice, never bikesheds formatting.",
+                ),
+                (
+                    "Morning Briefing",
+                    "Create a morning briefing bot that summarizes my tasks and open threads in 5 tight bullets, zero fluff.",
+                ),
+                (
+                    "Audit Fleet",
+                    "Audit my current bots and tell me what needs tightening or retiring.",
+                ),
+            ];
+            div()
+                .pt(zpx(7.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_wrap()
+                .gap(zpx(6.))
+                .child(
+                    div()
+                        .t_caption()
+                        .text_color(c(t.text_faint))
+                        .pr(zpx(2.))
+                        .child("Quick create"),
+                )
+                .children(recipes.into_iter().enumerate().map(|(ix, (label, prompt))| {
+                    let prompt = prompt.to_string();
+                    div()
+                        .id(ElementId::Name(format!("bots-room-recipe-{ix}").into()))
+                        .h(zpx(22.))
+                        .px(zpx(8.))
+                        .rounded_full()
+                        .bg(c(t.window))
+                        .border_1()
+                        .border_color(c(t.border))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .cursor_pointer()
+                        .t_caption()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(c(t.text_muted))
+                        .hover(|s| {
+                            s.text_color(c(t.text)).border_color(accent.opacity(0.45))
+                        })
+                        .hover_fade(c(t.hover), None)
+                        .active(|s| s.opacity(0.78))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_bot_with_prompt(DR_KEELEE_ID, prompt.clone(), window, cx);
+                        }))
+                }))
+                .into_any_element()
+        });
+
+        let row = div()
+            .id(ElementId::Name(room_id.into()))
+            .group(group.clone())
+            .hover_probe(group.clone())
+            .relative()
+            .w_full()
+            .when(pinned, |d| {
+                d.rounded(r_lg())
+                    .border_1()
+                    .border_color(accent.opacity(0.24))
+                    .bg(accent.opacity(0.055))
+                    .overflow_hidden()
             })
-            .hover_fade(c(t.hover), None)
-            .active(|s| s.opacity(0.88))
-            .cursor_pointer()
+            .when(!pinned && is_first && is_last, |d| d.rounded(r_lg()))
+            .when(!pinned && is_first && !is_last, |d| d.rounded_t(r_lg()))
+            .when(!pinned && !is_first && is_last, |d| d.rounded_b(r_lg()))
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_center()
+            .gap(zpx(14.))
+            .px(zpx(16.))
+            .py(if pinned { zpx(14.) } else { zpx(12.) })
+            .min_h(zpx(if pinned { 96. } else { 72. }))
+            .cursor_pointer()
+            .when(active, |d| d.bg(c(t.selected)))
+            .hover_fade(c(t.hover), None)
+            .active(|s| s.opacity(0.9))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.open_bot(&open_id, cx);
             }))
-            .child(
-                // Creature studio pad + Identity + "..." menu
+            .children(active.then(|| {
                 div()
+                    .absolute()
+                    .left(zpx(1.))
+                    .top(zpx(10.))
+                    .bottom(zpx(10.))
+                    .w(zpx(2.))
+                    .rounded_full()
+                    .bg(c(t.accent))
+            }))
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .size(zpx(avatar_size))
+                    .rounded(r_md())
+                    .bg(accent.opacity(0.10))
+                    .border_1()
+                    .border_color(accent.opacity(0.22))
                     .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(zpx(12.))
+                    .items_center()
+                    .justify_center()
+                    .child(render_creature_avatar(
+                        &bot.id,
+                        bot.appearance,
+                        bot.is_creator(),
+                        if working {
+                            BotMood::Working
+                        } else if awaiting {
+                            BotMood::Awaiting
+                        } else {
+                            BotMood::Idle
+                        },
+                        creature_size,
+                        self.clock_epoch,
+                        t,
+                        reduced,
+                    ))
+                    .when(show_presence, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .bottom(zpx(0.))
+                                .right(zpx(0.))
+                                .size(zpx(12.))
+                                .rounded_full()
+                                .bg(c(t.window))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(div().size(zpx(7.)).rounded_full().bg(c(presence_color))),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(zpx(3.))
                     .child(
                         div()
-                            .size(zpx(64.))
-                            .flex_none()
-                            .rounded(r_md())
-                            .bg(accent.opacity(0.10))
-                            .border_1()
-                            .border_color(accent.opacity(0.22))
                             .flex()
+                            .flex_row()
                             .items_center()
-                            .justify_center()
-                            .child(render_creature_avatar(
-                                &bot.id,
-                                bot.appearance,
-                                false,
-                                if working {
-                                    BotMood::Working
-                                } else if awaiting {
-                                    BotMood::Awaiting
-                                } else {
-                                    BotMood::Idle
-                                },
-                                56.,
-                                self.clock_epoch,
-                                t,
-                                reduced,
-                            )),
+                            .gap(zpx(8.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(zpx(if pinned { 15. } else { 14.5 }))
+                                    .line_height(zpx(19.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                                    .child(bot.name.clone()),
+                            )
+                            .children(status_label)
+                            .when(fresh, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(zpx(3.))
+                                        .t_caption()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(accent)
+                                        .child(Icon::SparkleFilled.el(zpx(10.)))
+                                        .child("New"),
+                                )
+                            }),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(zpx(4.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .flex_wrap()
-                                    .gap(zpx(6.))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(zpx(15.))
-                                            .line_height(zpx(19.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(c(t.text))
-                                            .child(bot.name.clone()),
-                                    )
-                                    .children(status_pill),
-                            )
-                            .child(
-                                div()
-                                    .t_small()
-                                    .text_color(c(t.text_muted))
-                                    .child(if !bot.tagline.is_empty() {
-                                        bot.tagline.clone()
-                                    } else {
-                                        "Specialized Keel coworker".to_string()
-                                    }),
-                            ),
+                            .t_small()
+                            .text_color(c(if has_thread {
+                                t.text_muted
+                            } else {
+                                t.text_faint
+                            }))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(preview),
+                    )
+                    .children(quick_chips),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .h(zpx(44.))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .text_size(zpx(10.5))
+                            .text_color(c(t.text_faint))
+                            .child(time),
                     )
                     .child(
                         div()
                             .relative()
-                            .flex_none()
-                            .child(
-                                super::settings::icon_button(
-                                    format!("bot-card-more-{}", bot.id),
-                                    Icon::Ellipsis,
-                                    t,
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(6.))
+                            .children(unread)
+                            .when(pinned, |d| {
+                                d.child(Icon::Forward.el(zpx(13.)).text_color(c(t.text_faint)))
+                            })
+                            .when(!pinned, |d| {
+                                d.child(
+                                    reveal_on_hover(
+                                        ElementId::Name(format!("bot-room-more-{}", bot.id).into()),
+                                        group.clone(),
+                                        0.,
+                                        1.,
+                                        super::settings::icon_button(
+                                            format!("bot-room-more-btn-{}", bot.id),
+                                            Icon::Ellipsis,
+                                            t,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                if this.menu_just_dismissed("bot-card-menu") {
+                                                    return;
+                                                }
+                                                if this.bots.card_menu_bot.as_deref()
+                                                    == Some(menu_toggle_id.as_str())
+                                                {
+                                                    this.bots.card_menu_bot = None;
+                                                } else {
+                                                    this.bots.card_menu_owner =
+                                                        Some(menu_toggle_id.clone());
+                                                    this.bots.card_menu_bot =
+                                                        Some(menu_toggle_id.clone());
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .with_offset(4., 0.),
                                 )
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    if this.menu_just_dismissed("bot-card-menu") {
-                                        return;
-                                    }
-                                    if this.bots.card_menu_bot.as_deref()
-                                        == Some(menu_toggle_id.as_str())
-                                    {
-                                        this.bots.card_menu_bot = None;
-                                    } else {
-                                        this.bots.card_menu_owner = Some(menu_toggle_id.clone());
-                                        this.bots.card_menu_bot = Some(menu_toggle_id.clone());
-                                    }
-                                    cx.notify();
-                                })),
-                            )
+                            })
                             .children(card_menu),
                     ),
+            );
+
+        if pinned {
+            row.into_any_element()
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(row)
+                .when(!is_last, |d| {
+                    d.child(div().h(zpx(1.)).ml(zpx(78.)).mr(zpx(16.)).bg(c(t.border)))
+                })
+                .into_any_element()
+        }
+    }
+
+    fn render_bots_directory(
+        &mut self,
+        hatched: &[Bot],
+        t: Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let query = self.bots_filter.read(cx).value().to_string();
+        let needle = query.trim().to_lowercase();
+        let filter = self.bots.filter;
+        let active_count = hatched
+            .iter()
+            .filter(|b| {
+                matches!(
+                    self.bot_display_status(b),
+                    DisplayStatus::Running | DisplayStatus::AwaitingInput
+                )
+            })
+            .count();
+        let ready_count = hatched.len().saturating_sub(active_count);
+
+        let mut rooms: Vec<(Bot, DisplayStatus, i64)> = hatched
+            .iter()
+            .filter(|bot| {
+                let status = self.bot_display_status(bot);
+                let is_active = matches!(
+                    status,
+                    DisplayStatus::Running | DisplayStatus::AwaitingInput
+                );
+                match filter {
+                    BotStatusFilter::All => {}
+                    BotStatusFilter::Active if !is_active => return false,
+                    BotStatusFilter::Ready if is_active => return false,
+                    _ => {}
+                }
+                if needle.is_empty() {
+                    return true;
+                }
+                let in_name = bot.name.to_lowercase().contains(&needle);
+                let in_tag = bot.tagline.to_lowercase().contains(&needle);
+                let in_rules = bot
+                    .anti_jobs
+                    .iter()
+                    .any(|r| r.to_lowercase().contains(&needle));
+                let in_preview = bot
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| self.state.chats.get(id))
+                    .is_some_and(|chat| chat.last_message_preview.to_lowercase().contains(&needle));
+                in_name || in_tag || in_rules || in_preview
+            })
+            .map(|bot| {
+                let status = self.bot_display_status(bot);
+                let at = bot
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| self.state.chats.get(id))
+                    .map(|chat| chat.last_message_at)
+                    .unwrap_or(0);
+                (bot.clone(), status, at)
+            })
+            .collect();
+
+        rooms.sort_by(|a, b| {
+            bot_room_rank(a.1)
+                .cmp(&bot_room_rank(b.1))
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase()))
+        });
+
+        let make_filter =
+            |id: &'static str, label: &'static str, count: usize, target: BotStatusFilter| {
+                let selected = filter == target;
+                div()
+                    .id(id)
+                    .h(zpx(24.))
+                    .px(zpx(8.))
+                    .rounded(RADIUS_SM)
+                    .when(selected, |d| d.bg(c(t.surface)))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(5.))
+                    .cursor_pointer()
+                    .t_caption()
+                    .font_weight(if selected {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(c(if selected { t.text } else { t.text_muted }))
+                    .when(!selected, |d| d.hover(|s| s.text_color(c(t.text))))
+                    .active(|s| s.opacity(0.78))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_bot_filter(target, cx);
+                    }))
+                    .child(label)
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .t_caption()
+                            .text_color(c(if selected { t.text_muted } else { t.text_faint }))
+                            .child(count.to_string()),
+                    )
+            };
+
+        let header = div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .flex_wrap()
+            .gap(zpx(10.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(8.))
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .text_size(zpx(10.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(t.text_faint))
+                            .child("COWORKERS"),
+                    )
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child(hatched.len().to_string()),
+                    ),
             )
+            .child(div().flex().flex_row().items_center().gap(zpx(8.)).when(
+                active_count > 0,
+                |d| {
+                    d.child(
+                        div()
+                            .p(zpx(2.))
+                            .rounded(r_md())
+                            .bg(c(t.input))
+                            .border_1()
+                            .border_color(c(t.border))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(2.))
+                            .child(make_filter(
+                                "bots-filter-all",
+                                "All",
+                                hatched.len(),
+                                BotStatusFilter::All,
+                            ))
+                            .child(make_filter(
+                                "bots-filter-active",
+                                "Active",
+                                active_count,
+                                BotStatusFilter::Active,
+                            ))
+                            .child(make_filter(
+                                "bots-filter-ready",
+                                "Ready",
+                                ready_count,
+                                BotStatusFilter::Ready,
+                            )),
+                    )
+                },
+            ));
+
+        let content: AnyElement = if hatched.is_empty() {
+            self.render_bots_empty(t, cx)
+        } else if rooms.is_empty() {
+            div()
+                .w_full()
+                .py(zpx(40.))
+                .rounded(r_lg())
+                .bg(c(t.surface))
+                .border_1()
+                .border_color(c(t.border))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(zpx(10.))
+                .child(Icon::Search.el(zpx(22.)).text_color(c(t.text_faint)))
+                .child(
+                    div()
+                        .t_body()
+                        .text_color(c(t.text_muted))
+                        .child("No coworkers match your search or filter."),
+                )
+                .child(
+                    div()
+                        .id("bots-reset-filter-btn")
+                        .h(zpx(28.))
+                        .px(zpx(12.))
+                        .rounded(r_md())
+                        .border_1()
+                        .border_color(c(t.border))
+                        .bg(c(t.window))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .t_small()
+                        .text_color(c(t.text))
+                        .hover_fade(c(t.hover), None)
+                        .active(|s| s.opacity(0.78))
+                        .child("Reset filters")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.bots.filter = BotStatusFilter::All;
+                            this.bots_filter
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            this.bots.filter_gen = this.bots.filter_gen.wrapping_add(1);
+                            this.bots.filter_at = Some(std::time::Instant::now());
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else {
+            let last = rooms.len().saturating_sub(1);
+            let mut list = div()
+                .w_full()
+                .rounded(r_lg())
+                .bg(c(t.surface))
+                .border_1()
+                .border_color(c(t.border))
+                .p(zpx(1.))
+                .flex()
+                .flex_col();
+            for (ix, (bot, _, _)) in rooms.iter().enumerate() {
+                list = list.child(self.render_bot_room(
+                    bot.clone(),
+                    false,
+                    ix == 0,
+                    ix == last,
+                    t,
+                    cx,
+                ));
+            }
+            let filter_gen = self.bots.filter_gen as usize;
+            let filter_anim = self.recent_bot_filter_nav();
+            list.with_animation(
+                ("bots-grid-filter", filter_gen),
+                gpui::Animation::new(std::time::Duration::from_millis(160))
+                    .with_easing(crate::motion::ease_out_strong),
+                move |el, delta| {
+                    if filter_anim {
+                        el.relative().top(zpx(6.0 * (1.0 - delta))).opacity(delta)
+                    } else {
+                        el
+                    }
+                },
+            )
+            .into_any_element()
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(zpx(8.))
+            .child(header)
+            .child(content)
             .into_any_element()
     }
 
@@ -2656,106 +2832,115 @@ impl KeelWindow {
 
         div()
             .w_full()
-            .p(zpx(24.))
-            .rounded(r_xl())
+            .rounded(r_lg())
             .bg(c(t.surface))
             .border_1()
             .border_color(c(t.border))
             .flex()
             .flex_col()
-            .items_center()
-            .gap(zpx(14.))
             .child(
                 div()
-                    .size(zpx(40.))
-                    .rounded_full()
-                    .bg(c(t.window))
-                    .border_1()
-                    .border_color(c(t.border))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(c(t.text_muted))
-                    .child(Icon::Creature.el(zpx(18.))),
-            )
-            .child(
-                div()
+                    .w_full()
+                    .p(zpx(26.))
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(zpx(4.))
+                    .gap(zpx(10.))
+                    .child(
+                        div()
+                            .size(zpx(38.))
+                            .rounded_full()
+                            .bg(c(t.window))
+                            .border_1()
+                            .border_color(c(t.border))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(c(t.text_muted))
+                            .child(Icon::Creature.el(zpx(17.))),
+                    )
                     .child(
                         div()
                             .t_body()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(c(t.text))
-                            .child("No created coworkers yet"),
+                            .child("No coworkers yet"),
                     )
                     .child(
                         div()
                             .t_small()
                             .text_color(c(t.text_muted))
                             .text_center()
-                            .child("Pick a blueprint below or open Dr. Keelee's Lab DM to create your first specialized bot."),
+                            .child("Tell Dr. Keelee the job, voice, and guardrails. He hatches the rest."),
+                    )
+                    .child(
+                        div()
+                            .pt(zpx(4.))
+                            .t_caption()
+                            .text_color(c(t.text_faint))
+                            .child("START WITH A BLUEPRINT"),
                     ),
             )
-            .child(
+            .children(starters.into_iter().enumerate().map(|(ix, (title, desc, prompt))| {
+                let prompt = prompt.to_string();
                 div()
+                    .id(ElementId::Name(format!("bots-empty-starter-{ix}").into()))
                     .w_full()
-                    .pt(zpx(4.))
+                    .h(zpx(58.))
+                    .px(zpx(16.))
+                    .border_t_1()
+                    .border_color(c(t.border))
                     .flex()
                     .flex_row()
-                    .gap(zpx(10.))
-                    .children(starters.into_iter().enumerate().map(|(ix, (title, desc, prompt))| {
-                        let prompt = prompt.to_string();
+                    .items_center()
+                    .gap(zpx(12.))
+                    .cursor_pointer()
+                    .hover_fade(c(t.hover), None)
+                    .active(|s| s.opacity(0.84))
+                    .child(
                         div()
-                            .id(ElementId::Name(format!("bots-empty-starter-{ix}").into()))
-                            .flex_1()
-                            .min_w_0()
-                            .p(zpx(12.))
-                            .rounded(r_lg())
+                            .size(zpx(28.))
+                            .flex_none()
+                            .rounded_full()
                             .bg(c(t.window))
                             .border_1()
                             .border_color(c(t.border))
-                            .cursor_pointer()
-                            .hover_fade(c(t.hover), None)
-                            .active(|s| s.opacity(0.84))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(c(t.text_faint))
+                            .child(Icon::Plus.el(zpx(13.))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap(zpx(4.))
+                            .gap(zpx(1.))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .t_small()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(c(t.text))
-                                            .child(title),
-                                    )
-                                    .child(Icon::Forward.el(zpx(12.)).text_color(c(t.text_faint))),
+                                    .t_small()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(t.text))
+                                    .child(title),
                             )
                             .child(
                                 div()
                                     .t_caption()
                                     .text_color(c(t.text_muted))
+                                    .truncate()
                                     .child(desc),
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.open_bot_with_prompt(
-                                    DR_KEELEE_ID,
-                                    prompt.clone(),
-                                    window,
-                                    cx,
-                                );
-                            }))
-                    })),
-            )
+                            ),
+                    )
+                    .child(Icon::Forward.el(zpx(13.)).text_color(c(t.text_faint)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_bot_with_prompt(DR_KEELEE_ID, prompt.clone(), window, cx);
+                    }))
+            }))
             .into_any_element()
     }
+
 
     /// Open the Bot Info modal showing created timestamp, system prompt, and guardrails.
     pub(super) fn open_bot_info(&mut self, bot_id: &str, cx: &mut Context<Self>) {
@@ -3233,5 +3418,26 @@ impl KeelWindow {
                 )
                 .into_any_element()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_takes_the_first_line_and_marks_engine_clipping() {
+        assert_eq!(bot_preview_line("\n  hello\nworld"), "hello");
+        assert_eq!(bot_preview_line("short"), "short");
+        let clipped = "x".repeat(80);
+        assert_eq!(bot_preview_line(&clipped), format!("{clipped}…"));
+    }
+
+    #[test]
+    fn room_rank_floats_waiting_then_running() {
+        assert!(
+            bot_room_rank(DisplayStatus::AwaitingInput) < bot_room_rank(DisplayStatus::Running)
+        );
+        assert!(bot_room_rank(DisplayStatus::Running) < bot_room_rank(DisplayStatus::Idle));
     }
 }
