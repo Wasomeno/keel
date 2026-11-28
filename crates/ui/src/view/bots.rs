@@ -2269,6 +2269,7 @@ impl KeelWindow {
             .py(zpx(8.))
             .min_h(zpx(60.))
             .cursor_pointer()
+            .rounded(zpx(8.))
             .when(active, |d| d.bg(c(t.selected)))
             .hover_fade(c(t.hover), None)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
